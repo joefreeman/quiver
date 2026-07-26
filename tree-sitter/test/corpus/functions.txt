@@ -7,7 +7,7 @@ area = #'shape { | =Circle[radius: r] => math.mul [r, r] | =Rectangle[width: w, 
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       binding: (identifier)
       (function
@@ -15,14 +15,14 @@ area = #'shape { | =Circle[radius: r] => math.mul [r, r] | =Rectangle[width: w, 
           name: (type_name))
         (block
           (branch
-            condition: (expression
+            condition: (sequence
               (chain
                 (bind_match
                   (pattern_tuple
                     name: (tuple_name)
                     name: (identifier)
                     (identifier)))))
-            consequence: (expression
+            consequence: (sequence
               (chain
                 (application
                   function: (access
@@ -36,7 +36,7 @@ area = #'shape { | =Circle[radius: r] => math.mul [r, r] | =Rectangle[width: w, 
                       (access
                         source: (identifier))))))))
           (branch
-            condition: (expression
+            condition: (sequence
               (chain
                 (bind_match
                   (pattern_tuple
@@ -45,7 +45,7 @@ area = #'shape { | =Circle[radius: r] => math.mul [r, r] | =Rectangle[width: w, 
                     (identifier)
                     name: (identifier)
                     (identifier)))))
-            consequence: (expression
+            consequence: (sequence
               (chain
                 (application
                   function: (access
@@ -68,7 +68,7 @@ f = #'int
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       binding: (identifier)
       (function
@@ -84,7 +84,7 @@ fact = #'int { ^f [~, 1] }
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       binding: (identifier)
       (function
@@ -92,7 +92,7 @@ fact = #'int { ^f [~, 1] }
           name: (type_name))
         (block
           (branch
-            (expression
+            (sequence
               (chain
                 (application
                   function: (tail_call
@@ -113,13 +113,13 @@ g = #{ 10 }; f = #'int { &g ~> ^~ 5 }
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       binding: (identifier)
       (function
         (block
           (branch
-            (expression
+            (sequence
               (chain
                 (integer)))))))
     (chain
@@ -129,7 +129,7 @@ g = #{ 10 }; f = #'int { &g ~> ^~ 5 }
           name: (type_name))
         (block
           (branch
-            (expression
+            (sequence
               (chain
                 (reference
                   (access
@@ -149,7 +149,7 @@ g = #'int { 1 ~> =&$$k }
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       binding: (identifier)
       (function
@@ -157,7 +157,7 @@ g = #'int { 1 ~> =&$$k }
           name: (type_name))
         (block
           (branch
-            (expression
+            (sequence
               (chain
                 (tuple
                   (chain
@@ -177,7 +177,7 @@ g = #'int { 1 ~> =&$$k }
           name: (type_name))
         (block
           (branch
-            (expression
+            (sequence
               (chain
                 (integer)
                 (bind_match
@@ -198,7 +198,7 @@ $ 0
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       binding: (identifier)
       (function
@@ -209,7 +209,7 @@ $ 0
             name: (type_name)))
         (block
           (branch
-            (expression
+            (sequence
               (chain
                 (application
                   function: (access
@@ -234,7 +234,7 @@ $ 0
               name: (type_name))))
         (block
           (branch
-            (expression
+            (sequence
               (chain
                 (access
                   source: (parameter
@@ -245,7 +245,7 @@ $ 0
         parameter: (self_default_type)
         (block
           (branch
-            (expression
+            (sequence
               (chain
                 (application
                   function: (access
@@ -268,3 +268,47 @@ $ 0
         function: (access
           source: (parameter))
         argument: (integer)))))
+
+==================
+parameter field defaults
+==================
+
+open = #[(path): '%str, mode: (R | W | A) = R, buffer: 'int = 1024] { $path }
+
+---
+
+(source_file
+  (sequence
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (tuple_type
+          name: (identifier)
+          (module_type
+            module: (import
+              (identifier)))
+          name: (identifier)
+          (union_type
+            (tuple_type
+              name: (tuple_name))
+            (tuple_type
+              name: (tuple_name))
+            (tuple_type
+              name: (tuple_name)))
+          (field_default
+            (chain
+              (tuple
+                name: (tuple_name))))
+          name: (identifier)
+          (type_identifier
+            name: (type_name))
+          (field_default
+            (chain
+              (integer))))
+        (block
+          (branch
+            (sequence
+              (chain
+                (access
+                  source: (parameter
+                    field: (identifier)))))))))))

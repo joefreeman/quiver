@@ -1,4 +1,4 @@
-//! An AST pretty-printer that renders a parsed [`Program`] back to canonical Quiver source.
+//! An AST pretty-printer that renders a parsed [`Sequence`] back to canonical Quiver source.
 //!
 //! The AST is rendered to a [`crate::pretty`] document and laid out against a fixed target
 //![`WIDTH`]: a construct stays on one line if it fits, otherwise it breaks using its own
@@ -33,7 +33,7 @@ const SHORT_BLOCK_WIDTH: usize = 40;
 
 /// Render a program to canonical source. `source` is the program's original text, from which
 /// comments and blank lines (trivia) are recovered and re-attached, since the parser discards them.
-pub fn format_program(program: &Program, source: &str) -> String {
+pub fn format_program(program: &Sequence, source: &str) -> String {
     let trivia = Trivia::collect(program, source);
     // Drop redundant blocks for readability, keeping any that carry comments/blank lines so their
     // trivia is not lost. Trivia is collected first, from the original AST, so its source offsets
@@ -50,12 +50,16 @@ pub fn format_program(program: &Program, source: &str) -> String {
             group_consequences: true,
         },
     );
-    let mut docs: Vec<Doc> = program
-        .statements
-        .iter()
-        .map(|statement| statement_doc(&trivia, statement))
-        .collect();
-    // Comments after the last statement have nowhere to attach, so emit them at the end.
+    // The program is one sequence, rendered exactly as a block body's is.
+    let mut docs = vec![sequence_doc(
+        &trivia,
+        &Sequence {
+            steps: program.steps,
+        },
+        false,
+        0,
+    )];
+    // Comments after the last step have nowhere to attach, so emit them at the end.
     if !trivia.dangling.is_empty() {
         docs.push(trivia_doc(&trivia.dangling));
     }
@@ -63,36 +67,28 @@ pub fn format_program(program: &Program, source: &str) -> String {
     collapse_blanks(&pretty::print(&doc, WIDTH))
 }
 
-fn statement_doc(trivia: &Trivia, statement: &Statement) -> Doc {
-    match statement {
-        Statement::TypeAlias {
-            name,
-            name_span,
-            type_parameters,
-            type_definition,
-        } => {
-            let mut lhs = String::from("'");
-            if let Some(name) = name {
-                lhs.push_str(name);
-            }
-            lhs.push_str(&render_type_parameters(type_parameters));
-            lhs.push_str(" =");
-            // A union right-hand side breaks with a leading `|` per member; everything else stays
-            // inline (its `=` already carries the trailing space the union form omits).
-            let body = match type_definition {
-                Type::Union(union_type) => {
-                    pretty::concat(vec![pretty::text(lhs), union_alias_doc(union_type)])
-                }
-                other => pretty::text(format!("{} {}", lhs, render_type(other))),
-            };
-            pretty::concat(vec![
-                trivia.leading_doc(*name_span),
-                body,
-                trivia.trailing_doc(*name_span),
-            ])
-        }
-        Statement::Expression(sequence) => sequence_doc(trivia, sequence, false, 0),
+/// A type-alias declaration step. `break_parent` keeps a sequence that declares a type broken —
+/// an alias reads as its own line, never run together with the steps around it.
+fn type_alias_doc(
+    name: &Option<String>,
+    type_parameters: &[String],
+    type_definition: &Type,
+) -> Doc {
+    let mut lhs = String::from("'");
+    if let Some(name) = name {
+        lhs.push_str(name);
     }
+    lhs.push_str(&render_type_parameters(type_parameters));
+    lhs.push_str(" =");
+    // A union right-hand side breaks with a leading `|` per member; everything else stays
+    // inline (its `=` already carries the trailing space the union form omits).
+    let body = match type_definition {
+        Type::Union(union_type) => {
+            pretty::concat(vec![pretty::text(lhs), union_alias_doc(union_type)])
+        }
+        other => pretty::text(format!("{} {}", lhs, render_type(other))),
+    };
+    pretty::concat(vec![body, pretty::break_parent()])
 }
 
 /// The right-hand side of a union type alias: `= A | B | C` flat, or each member on its own line
@@ -159,15 +155,30 @@ fn sequence_doc(
     let mut first = pretty::nil();
     let mut rest = Vec::new();
     let mut prev_tall = false;
-    for (index, chain) in sequence.chains.iter().enumerate() {
+    for (index, step) in sequence.steps.iter().enumerate() {
+        let span = step.span();
         let leading = if index == 0 && skip_first_leading {
             pretty::nil()
         } else {
-            trivia.leading_doc(chain.span)
+            trivia.leading_doc(span)
         };
-        let body = chain_doc(trivia, chain);
-        let tall = is_tall_step(chain, &body);
-        let item = pretty::concat(vec![leading, body, trivia.trailing_doc(chain.span)]);
+        let (body, tall) = match step {
+            Step::Chain(chain) => {
+                let body = chain_doc(trivia, chain);
+                let tall = is_tall_step(chain, &body);
+                (body, tall)
+            }
+            Step::TypeAlias {
+                name,
+                type_parameters,
+                type_definition,
+                ..
+            } => (
+                type_alias_doc(name, type_parameters, type_definition),
+                false,
+            ),
+        };
+        let item = pretty::concat(vec![leading, body, trivia.trailing_doc(span)]);
         if index == 0 {
             first = item;
         } else {
@@ -201,18 +212,18 @@ fn is_tall_step(chain: &Chain, body: &Doc) -> bool {
         return false;
     }
     let pipeline = terms[..terms.len() - 1].iter().any(is_call_ender);
-    (pipeline || chain.match_pattern.is_some()) && pretty::forces_break(body)
+    (pipeline || chain.binding.is_some()) && pretty::forces_break(body)
 }
 
 /// A braced expression `{ … }`. A single branch lays its body out directly; multiple branches each
 /// get a leading `|` when broken. The body indents two spaces from the line carrying the `{`.
-fn block_doc(trivia: &Trivia, expression: &Expression) -> Doc {
-    let branches = &expression.branches;
-    // The annotation prefix (`:key value` steps). With a body following, each annotation ends
+fn block_doc(trivia: &Trivia, block: &Block) -> Doc {
+    let branches = &block.branches;
+    // The annotation prefix (`:key value` entries). With a body following, each annotation ends
     // in a hardline — the semicolon/newline separator is what ends an annotation's value chain, so
     // a flat space-joined rendering would re-parse differently. An annotation-only block may
     // stay flat (`{ :error X }`).
-    let annotation_parts: Vec<Doc> = expression
+    let annotation_parts: Vec<Doc> = block
         .annotations
         .iter()
         .enumerate()
@@ -261,9 +272,9 @@ fn block_doc(trivia: &Trivia, expression: &Expression) -> Doc {
             // re-parse as a trailing comment of the bar), so they are hoisted out of `branch_doc`.
             let leading = branch
                 .condition
-                .chains
+                .steps
                 .first()
-                .map_or_else(pretty::nil, |chain| trivia.leading_doc(chain.span));
+                .map_or_else(pretty::nil, |step| trivia.leading_doc(step.span()));
             parts.push(pretty::line());
             parts.push(leading);
             parts.push(leading_bar(index == 0));
@@ -309,7 +320,7 @@ fn branch_doc(trivia: &Trivia, branch: &Branch, multi_branch: bool) -> Doc {
                 // `cond => consequence` is nested together, keeping the consequence aligned with the
                 // line it opens on. A multi-chain guard already indents its steps via
                 // `continuation_nest`, so it is left as-is.
-                if branch.condition.chains.len() == 1 {
+                if branch.condition.single_chain().is_some() {
                     pretty::nest(2, content)
                 } else {
                     content
@@ -331,8 +342,12 @@ fn branch_doc(trivia: &Trivia, branch: &Branch, multi_branch: bool) -> Doc {
 /// a frame-free single chain, which both the compiler and the formatter's own strip pass remove —
 /// so this render-time wrap is bytecode-neutral and idempotent. `body` is the already-rendered doc.
 fn wrap_breaking_body(sequence: &Sequence, body: Doc, multi_branch: bool) -> Doc {
-    let breaking_pipeline = matches!(sequence.chains.as_slice(), [chain]
-        if chain.terms.last().is_some_and(|term| !is_breakable_container(term)));
+    let breaking_pipeline = sequence.single_chain().is_some_and(|chain| {
+        chain
+            .terms
+            .last()
+            .is_some_and(|term| !is_breakable_container(term))
+    });
     if multi_branch && breaking_pipeline && pretty::forces_break(&body) {
         pretty::concat(vec![
             pretty::text("{"),
@@ -350,7 +365,7 @@ fn wrap_breaking_body(sequence: &Sequence, body: Doc, multi_branch: bool) -> Doc
 /// block, tuple, or function) is kept attached to the preceding terms and allowed to break
 /// internally, rather than forcing the whole chain onto `~>` lines.
 fn chain_doc(trivia: &Trivia, chain: &Chain) -> Doc {
-    let prefix = match &chain.match_pattern {
+    let prefix = match &chain.binding {
         Some(pattern) => pretty::text(format!("{} = ", render_match(pattern))),
         None => pretty::nil(),
     };
@@ -383,7 +398,7 @@ fn chain_doc(trivia: &Trivia, chain: &Chain) -> Doc {
     // pipeline, so the continuations sit under the value rather than dangling at the binding's own
     // indent. A single-term value, or one ending in a self-breaking container (`x = head { … }`),
     // stays on the `=` line.
-    if let Some(pattern) = &chain.match_pattern
+    if let Some(pattern) = &chain.binding
         && terms.len() > 1
         && !is_breakable_container(&terms[terms.len() - 1])
     {
@@ -456,7 +471,7 @@ fn term_doc(trivia: &Trivia, term: &Term) -> Doc {
     match term {
         Term::Tuple(tuple) => tuple_doc(trivia, tuple),
         Term::String(style, segments) => string_term_doc(trivia, *style, segments),
-        Term::Block(expression) => block_doc(trivia, expression),
+        Term::Block(block) => block_doc(trivia, block),
         Term::Function(function) => function_doc(trivia, function),
         Term::Spawn(inner, argument, _) => spawn_doc(trivia, inner, argument.as_deref()),
         Term::Select(sources, _) => select_doc(trivia, sources),
@@ -530,8 +545,8 @@ fn single_line_string_doc(trivia: &Trivia, segments: &[StrSegment]) -> Doc {
             }
             // A hole parses like a block body. Render its branches flat (single-line strings stay
             // on one line) and wrap them tightly in braces — `{name}`, not `{ name }`.
-            StrSegment::Hole(expression) => {
-                let body = expression
+            StrSegment::Hole(block) => {
+                let body = block
                     .branches
                     .iter()
                     .map(|branch| pretty::flatten(&branch_doc(trivia, branch, false)))
@@ -635,8 +650,8 @@ fn multiline_string_doc(trivia: &Trivia, segments: &[StrSegment]) -> Doc {
                     lines.push(escape_multiline_text(part));
                 }
             }
-            StrSegment::Hole(expression) => {
-                let body = expression
+            StrSegment::Hole(block) => {
+                let body = block
                     .branches
                     .iter()
                     .map(|branch| pretty::flatten(&branch_doc(trivia, branch, false)))
@@ -840,7 +855,7 @@ fn select_doc(trivia: &Trivia, sources: &Option<Vec<Chain>>) -> Doc {
     // A single receive function *with* a body — a filter — keeps the tight shorthand too,
     // its body rendering as an ordinary block: `!'int { =42 => Ok }`.
     if let [chain] = chains.as_slice()
-        && chain.match_pattern.is_none()
+        && chain.binding.is_none()
         && let [Term::Function(function)] = chain.terms.as_slice()
         && function.type_parameters.is_empty()
         && function.return_type.is_none()
@@ -885,7 +900,7 @@ fn render_select_head(parameter_type: &Type) -> String {
 /// a filter (a receive function *with* a body, which only the general `![…]` form can express).
 fn select_shorthand(chains: &[Chain]) -> Option<String> {
     let [chain] = chains else { return None };
-    if chain.match_pattern.is_some() {
+    if chain.binding.is_some() {
         return None;
     }
     let [term] = chain.terms.as_slice() else {
@@ -940,7 +955,7 @@ struct Anchor {
 }
 
 /// Comments and blank lines recovered from the source. `leading` and `trailing` are keyed by the
-/// start offset of the AST node (type-alias statement, chain, or tuple field) they attach to;
+/// start offset of the AST node (type-alias step, chain, or tuple field) they attach to;
 /// `dangling` holds anything after the last node.
 #[derive(Default)]
 struct Trivia {
@@ -952,7 +967,7 @@ struct Trivia {
 impl Trivia {
     /// Recover trivia from `source` and attach each item to an AST node: a leading comment/blank to
     /// the nearest following node, a trailing comment to the node whose text it follows.
-    fn collect(program: &Program, source: &str) -> Trivia {
+    fn collect(program: &Sequence, source: &str) -> Trivia {
         let mut collected = Collected::default();
         collect_anchors(program, &mut collected);
         let Collected {
@@ -1149,17 +1164,12 @@ struct Collected {
     dialect_content: Vec<(usize, usize)>,
 }
 
-/// Collect every node trivia can attach to: type-alias statements, the chains of a sequence, and
-/// tuple fields. Mirrors where [`sequence_doc`]/[`field_doc`]/[`statement_doc`] emit trivia, so
-/// every attached item has exactly one emission site. Also records each dialect term's content
-/// range along the way.
-fn collect_anchors(program: &Program, out: &mut Collected) {
-    for statement in &program.statements {
-        match statement {
-            Statement::TypeAlias { name_span, .. } => push_anchor(*name_span, out),
-            Statement::Expression(sequence) => visit_sequence(sequence, out),
-        }
-    }
+/// Collect every node trivia can attach to: the steps of a sequence (chains and type-alias
+/// declarations alike) and tuple fields. Mirrors where [`sequence_doc`]/[`field_doc`] emit
+/// trivia, so every attached item has exactly one emission site. Also records each dialect term's
+/// content range along the way.
+fn collect_anchors(program: &Sequence, out: &mut Collected) {
+    visit_steps(&program.steps, out);
 }
 
 fn push_anchor(span: Spanned, out: &mut Collected) {
@@ -1172,9 +1182,15 @@ fn push_anchor(span: Spanned, out: &mut Collected) {
 }
 
 fn visit_sequence(sequence: &Sequence, out: &mut Collected) {
-    for chain in &sequence.chains {
-        push_anchor(chain.span, out);
-        visit_chain(chain, out);
+    visit_steps(&sequence.steps, out);
+}
+
+fn visit_steps(steps: &[Step], out: &mut Collected) {
+    for step in steps {
+        push_anchor(step.span(), out);
+        if let Step::Chain(chain) = step {
+            visit_chain(chain, out);
+        }
     }
 }
 
@@ -1196,10 +1212,10 @@ fn visit_term(term: &Term, out: &mut Collected) {
                 }
             }
         }
-        Term::Block(expression) => visit_expression(expression, out),
+        Term::Block(block) => visit_block(block, out),
         Term::Function(function) => {
             if let Some(body) = &function.body {
-                visit_expression(body, out);
+                visit_block(body, out);
             }
         }
         Term::Spawn(inner, argument, _) => {
@@ -1224,12 +1240,12 @@ fn visit_term(term: &Term, out: &mut Collected) {
     }
 }
 
-fn visit_expression(expression: &Expression, out: &mut Collected) {
-    for annotation in &expression.annotations {
+fn visit_block(block: &Block, out: &mut Collected) {
+    for annotation in &block.annotations {
         push_anchor(annotation.span, out);
         visit_chain(&annotation.value, out);
     }
-    for branch in &expression.branches {
+    for branch in &block.branches {
         visit_sequence(&branch.condition, out);
         if let Some(consequence) = &branch.consequence {
             visit_sequence(consequence, out);
@@ -1693,7 +1709,7 @@ mod tests {
     /// Reduce a program to the compiler's canonical, block-free form: every no-op block stripped or
     /// lifted (`Compiler::compile` does the same before codegen). Two programs equal here compile
     /// identically.
-    fn canonical(program: Program) -> Program {
+    fn canonical(program: Sequence) -> Sequence {
         crate::simplify::normalize_blocks(
             program,
             &crate::simplify::Options {
@@ -1768,7 +1784,7 @@ mod tests {
         let source = "x = %json{ [1,\n  2] // not a comment\n}\nx";
         assert_formats(source, "x = %json{ [1,\n  2] // not a comment\n}\nx\n");
         assert_idempotent(source, "dialect comment");
-        // A blank line inside the content doesn't leak a leading blank onto the next statement.
+        // A blank line inside the content doesn't leak a leading blank onto the next step.
         let source = "x = %json{ [1,\n\n  2] }\nx";
         assert_formats(source, "x = %json{ [1,\n\n  2] }\nx\n");
         assert_idempotent(source, "dialect blank line");

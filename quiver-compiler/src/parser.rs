@@ -230,7 +230,7 @@ fn detect_error_kind(source: &str, _span: Option<&SourceSpan>) -> ErrorKind {
     }
 }
 
-pub fn parse(source: &str) -> Result<Program, Error> {
+pub fn parse(source: &str) -> Result<Sequence, Error> {
     let span = Span::new(source);
     match program(span) {
         Ok((remaining, prog)) => {
@@ -406,7 +406,7 @@ fn ws1(input: Span) -> IResult<Span, ()> {
 
 /// Horizontal whitespace (spaces/tabs only, no newline) - used as the gap in a
 /// function application like `f [1, 2]` or `f x`, so it doesn't swallow the
-/// newline that separates statements.
+/// newline that separates steps.
 fn hspace1(input: Span) -> IResult<Span, ()> {
     nom_value((), space1)(input)
 }
@@ -607,8 +607,8 @@ fn string_segments<'a>(open: Span<'a>, input: Span<'a>) -> IResult<Span<'a>, Vec
                 if !text.is_empty() {
                     segments.push(StrSegment::Text(std::mem::take(&mut text)));
                 }
-                let (after, expression) = block(input.slice(pos..))?;
-                segments.push(StrSegment::Hole(expression));
+                let (after, hole) = block(input.slice(pos..))?;
+                segments.push(StrSegment::Hole(hole));
                 pos = after.location_offset() - input.location_offset();
             }
             '\\' => {
@@ -656,8 +656,8 @@ fn rational_field(value: BigInt) -> TupleField {
         name_span: Spanned::default(),
         span: Spanned::default(),
         value: FieldValue::Chain(Chain {
-            match_pattern: None,
-            bind_span: Spanned::default(),
+            binding: None,
+            binding_span: Spanned::default(),
             span: Spanned::default(),
             terms: vec![Term::Literal(Literal::Integer(value))],
         }),
@@ -1027,8 +1027,8 @@ fn process_multiline_segments(raw: &str) -> Option<Vec<StrSegment>> {
                 if !result.is_empty() {
                     segments.push(StrSegment::Text(std::mem::take(&mut result).into_bytes()));
                 }
-                let (after, expression) = block(LocatedSpan::new(rest)).ok()?;
-                segments.push(StrSegment::Hole(expression));
+                let (after, hole) = block(LocatedSpan::new(rest)).ok()?;
+                segments.push(StrSegment::Hole(hole));
                 pos += after.location_offset();
             }
             '\\' => {
@@ -1882,8 +1882,8 @@ fn spread_update(input: Span) -> IResult<Span, Term> {
 // Helper to wrap a term in a single-element source chain
 fn make_source_chain(term: Term) -> Chain {
     Chain {
-        match_pattern: None,
-        bind_span: Spanned::default(),
+        binding: None,
+        binding_span: Spanned::default(),
         span: Spanned::default(),
         terms: vec![term],
     }
@@ -1908,7 +1908,7 @@ fn single_source(term: Term) -> Term {
 }
 
 // Create a receive function from a type and optional body
-fn make_receive(param_type: Type, body: Option<Expression>) -> Term {
+fn make_receive(param_type: Type, body: Option<Block>) -> Term {
     let func = Function {
         type_parameters: vec![],
         parameter_type: Some(param_type),
@@ -2178,15 +2178,15 @@ fn branch(input: Span) -> IResult<Span, Branch> {
     )(input)
 }
 
-/// An expression: `|`-separated branches (with an optional leading `|`). This is the shared
-/// grammar for statement bodies, function bodies, and block contents.
-fn expression(input: Span) -> IResult<Span, Expression> {
+/// The contents of a block: `|`-separated branches, with an optional leading `|`. Every braced
+/// form shares it — a block term, a function body, and a string interpolation hole.
+fn block_body(input: Span) -> IResult<Span, Block> {
     map(
         preceded(
             opt(pair(char('|'), wsc)),
             separated_list1(tuple((wsc, char('|'), wsc)), branch),
         ),
-        |branches| Expression {
+        |branches| Block {
             annotations: vec![],
             branches,
         },
@@ -2211,9 +2211,9 @@ fn annotation(input: Span) -> IResult<Span, Annotation> {
 }
 
 /// A block `{ … }`: a braced expression that introduces a new scope. May begin with an
-/// annotation prefix (`:key value` steps); the annotations attach to the value the braces
+/// annotation prefix (`:key value` entries); the annotations attach to the value the braces
 /// denote. A block with annotations and no body is identity-plus-attach.
-fn block(input: Span) -> IResult<Span, Expression> {
+fn block(input: Span) -> IResult<Span, Block> {
     delimited(
         pair(char('{'), wsc),
         alt((
@@ -2227,14 +2227,14 @@ fn block(input: Span) -> IResult<Span, Expression> {
                         // step-level mistake the cut reports).
                         alt((nom_value((), seq_sep), sequence_boundary_cut)),
                     ),
-                    opt(expression),
+                    opt(block_body),
                 ),
-                |(annotations, body)| Expression {
+                |(annotations, body)| Block {
                     annotations,
                     branches: body.map(|e| e.branches).unwrap_or_default(),
                 },
             ),
-            expression,
+            block_body,
         )),
         pair(wsc, char('}')),
     )(input)
@@ -2346,7 +2346,7 @@ fn builtin_name(input: Span) -> IResult<Span, String> {
 
 // Build a spawn of an inline function (the `@{ … }` / `@'type { … }` sugar forms). The init
 // argument, if any, comes from the chained value (`x ~> @{ … }`).
-fn spawn_of_function(parameter_type: Option<Type>, body: Expression) -> Term {
+fn spawn_of_function(parameter_type: Option<Type>, body: Block) -> Term {
     Term::Spawn(
         Box::new(Term::Function(Function {
             type_parameters: vec![],
@@ -2692,17 +2692,17 @@ fn chain(input: Span) -> IResult<Span, Chain> {
                 terminated(spanned(match_pattern), tuple((ws1, char('='), ws1))),
                 chain_inner,
             ),
-            |((bind_span, match_pattern), terms)| Chain {
-                match_pattern: Some(match_pattern),
-                bind_span: Spanned(Some(bind_span)),
+            |((binding_span, binding), terms)| Chain {
+                binding: Some(binding),
+                binding_span: Spanned(Some(binding_span)),
                 span: Spanned::default(),
                 terms,
             },
         ),
         // Plain chain
         map(chain_inner, |terms| Chain {
-            match_pattern: None,
-            bind_span: Spanned::default(),
+            binding: None,
+            binding_span: Spanned::default(),
             span: Spanned::default(),
             terms,
         }),
@@ -2823,15 +2823,23 @@ fn sequence_boundary_cut(input: Span) -> IResult<Span, ()> {
     Ok((input, ()))
 }
 
-fn sequence(input: Span) -> IResult<Span, Sequence> {
-    let (rest, chains) = terminated(separated_list1(seq_sep, chain), opt(seq_sep))(input)?;
-    let (rest, _) = sequence_boundary_cut(rest)?;
-    Ok((rest, Sequence { chains }))
+/// One step of a sequence: a type-alias declaration or a chain.
+///
+/// The alias alternative is tried first because an alias whose right-hand side is a function type
+/// also parses as a chain (`'q<'t> = #['int] -> ('t | [])` reads as a binding of an identity
+/// literal with a declared return type). No chain term can begin with `'`, so a leading `'` at
+/// step position is unambiguously an alias.
+fn step(input: Span) -> IResult<Span, Step> {
+    alt((type_alias, map(chain, Step::Chain)))(input)
 }
 
-// Statement parsers
+fn sequence(input: Span) -> IResult<Span, Sequence> {
+    let (rest, steps) = terminated(separated_list1(seq_sep, step), opt(seq_sep))(input)?;
+    let (rest, _) = sequence_boundary_cut(rest)?;
+    Ok((rest, Sequence { steps }))
+}
 
-fn type_alias(input: Span) -> IResult<Span, Statement> {
+fn type_alias(input: Span) -> IResult<Span, Step> {
     map(
         tuple((
             // `'name` for a named alias, or a bare `'` for the module's nameless
@@ -2844,7 +2852,7 @@ fn type_alias(input: Span) -> IResult<Span, Statement> {
             )),
             preceded(tuple((ws0, char('='), ws0)), type_definition),
         )),
-        |((name_span, name), type_parameters, type_definition)| Statement::TypeAlias {
+        |((name_span, name), type_parameters, type_definition)| Step::TypeAlias {
             name,
             name_span: Spanned(Some(name_span)),
             type_parameters: type_parameters.unwrap_or_default(),
@@ -2853,44 +2861,24 @@ fn type_alias(input: Span) -> IResult<Span, Statement> {
     )(input)
 }
 
-/// A top-level item: a type alias or a value-producing sequence. A statement-level
-/// expression is a branchless sequence (branches `|`/`=>` require a block).
-///
-/// The sequence variant must NOT consume a trailing separator (unlike [`sequence`],
-/// whose trailing `opt(seq_sep)` suits block/branch bodies): the program's own
-/// separator handling needs to see the separator between an expression statement and
-/// a following type alias, or interspersed aliases fail to parse.
-fn top_level_item(input: Span) -> IResult<Span, Statement> {
-    alt((
-        type_alias,
-        map(
-            // A chain must not swallow an interspersed type alias: an alias whose RHS is
-            // a function type also parses as a chain (`'q<'t> = #['int] -> ('t | [])`
-            // reads as a binding of an identity literal with a declared return type), so
-            // the sequence would consume it and the alias's parameters would never bind.
-            // The boundary cut (which consumes nothing) gives top-level step mistakes the
-            // same pointed errors as block bodies.
-            terminated(
-                separated_list1(seq_sep, preceded(not(peek(type_alias)), chain)),
-                sequence_boundary_cut,
-            ),
-            |chains| Statement::Expression(Sequence { chains }),
-        ),
-    ))(input)
-}
-
-/// A program is a single threaded sequence of chains with type-alias declarations interspersed —
-/// all separated by the sequence separator (semicolon or newline, which are synonyms). The chains
+/// A program is a single sequence: chain steps with type-alias declarations interspersed, all
+/// separated by the sequence separator (semicolon or newline, which are synonyms). The chains
 /// thread and short-circuit as one sequence; type aliases are transparent to that flow. (There is
-/// no separate statement separator; `,` appears only inside brackets.)
-fn program(input: Span) -> IResult<Span, Program> {
+/// no separator other than the step separator; `,` appears only inside brackets.)
+///
+/// This uses [`step`] directly rather than [`sequence`] so an empty program parses (a module may
+/// declare only types), and so the boundary cut runs against end-of-input.
+fn program(input: Span) -> IResult<Span, Sequence> {
     map(
         delimited(
             ws_with_comments,
-            terminated(separated_list0(seq_sep, top_level_item), opt(seq_sep)),
+            terminated(
+                terminated(separated_list0(seq_sep, step), opt(seq_sep)),
+                sequence_boundary_cut,
+            ),
             pair(ws_with_comments, nom::combinator::eof),
         ),
-        |statements| Program { statements },
+        |steps| Sequence { steps },
     )(input)
 }
 
@@ -2962,10 +2950,7 @@ mod tests {
     fn parse_populates_access_spans() {
         let source = "point ~> double";
         let program = parse(source).unwrap();
-        let Statement::Expression(expr) = &program.statements[0] else {
-            panic!("expected expression statement");
-        };
-        let terms = &expr.chains[0].terms;
+        let terms = &program.steps[0].as_chain().expect("chain step").terms;
         let Term::Access(a0) = &terms[0] else {
             panic!("expected access term");
         };
@@ -2982,10 +2967,8 @@ mod tests {
         // juxtaposed argument stays a separate application argument.
         let source = "map<'int, Str['bin]> [xs, f]";
         let program = parse(source).unwrap();
-        let Statement::Expression(expr) = &program.statements[0] else {
-            panic!("expected expression statement");
-        };
-        let Term::Apply(access, _) = &expr.chains[0].terms[0] else {
+        let Term::Apply(access, _) = &program.steps[0].as_chain().expect("chain step").terms[0]
+        else {
             panic!("expected apply term");
         };
         assert_eq!(access.type_arguments.len(), 2);
@@ -2993,10 +2976,8 @@ mod tests {
 
         // Reference and import-member heads take the suffix too.
         let program = parse("&%iter.fold<'int>").unwrap();
-        let Statement::Expression(expr) = &program.statements[0] else {
-            panic!("expected expression statement");
-        };
-        let Term::Reference(access) = &expr.chains[0].terms[0] else {
+        let Term::Reference(access) = &program.steps[0].as_chain().expect("chain step").terms[0]
+        else {
             panic!("expected reference term");
         };
         assert_eq!(access.type_arguments.len(), 1);
@@ -3006,10 +2987,12 @@ mod tests {
     fn parse_populates_binding_span() {
         let source = "total = 5";
         let program = parse(source).unwrap();
-        let Statement::Expression(expr) = &program.statements[0] else {
-            panic!("expected expression statement");
-        };
-        let span = expr.chains[0].bind_span.get().unwrap();
+        let span = program.steps[0]
+            .as_chain()
+            .expect("chain step")
+            .binding_span
+            .get()
+            .unwrap();
         assert_eq!(slice(source, span), "total");
     }
 
@@ -3017,8 +3000,8 @@ mod tests {
     fn parse_populates_type_alias_name_span() {
         let source = "'point = Point[x: 'int, y: 'int]";
         let program = parse(source).unwrap();
-        let Statement::TypeAlias { name_span, .. } = &program.statements[0] else {
-            panic!("expected type alias statement");
+        let Step::TypeAlias { name_span, .. } = &program.steps[0] else {
+            panic!("expected type alias step");
         };
         assert_eq!(slice(source, name_span.get().unwrap()), "'point");
     }

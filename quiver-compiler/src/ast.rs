@@ -23,28 +23,7 @@ impl PartialEq for Spanned {
 
 impl Eq for Spanned {}
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Program {
-    pub statements: Vec<Statement>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Statement {
-    TypeAlias {
-        /// The alias name (`point` in `'point = ...`), or `None` for the module's
-        /// nameless default-type marker (`' = ...` / `'<'t> = ...`).
-        name: Option<String>,
-        /// Span of the alias name (`'point` in `'point = ...`), for symbols/go-to-definition.
-        name_span: Spanned,
-        type_parameters: Vec<String>,
-        type_definition: Type,
-    },
-    /// A value-producing statement: a single branchless [`Sequence`]. Branches (`|`) and `=>`
-    /// require a block, so they cannot appear at the statement level.
-    Expression(Sequence),
-}
-
-/// One annotation in a block prefix (`:doc "..."`): a declared key name and the chain
+/// One entry of a block's annotation prefix (`:doc "..."`): a declared key name and the chain
 /// producing its value. Annotations attach to the value the enclosing braces denote — the
 /// closure for a function literal's body, the block's result for a chain block.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,14 +36,14 @@ pub struct Annotation {
     pub value: Chain,
 }
 
-/// An expression: one or more `|`-separated [`Branch`]es. A branchless expression is just a
-/// single branch with no consequence. This is the grammar shared by statement bodies, function
-/// bodies, and block contents; a [`Term::Block`] is simply a braced expression that adds a scope.
+/// The contents of a braced `{ … }`: an optional annotation prefix, then one or more
+/// `|`-separated [`Branch`]es (a branchless block is a single branch with no consequence).
+/// Every braced form is one — a [`Term::Block`], a [`Function`] body, and a string
+/// interpolation hole ([`StrSegment::Hole`]) — and each introduces a scope.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Expression {
-    /// Annotation prefix (`:key value` steps before the first branch). Only populated for
-    /// braced forms (blocks and function bodies); an annotation-only block has annotations
-    /// and no branches, and acts as identity-plus-attach.
+pub struct Block {
+    /// The annotation prefix (`:key value` before the first branch), attaching to the value the
+    /// braces denote. An annotation-only block has no branches, and is identity-plus-attach.
     pub annotations: Vec<Annotation>,
     pub branches: Vec<Branch>,
 }
@@ -75,19 +54,97 @@ pub struct Branch {
     pub consequence: Option<Sequence>,
 }
 
-/// A sequence of `,`-separated [`Chain`]s (the body of a [`Branch`]). Chains run left to right
-/// and the sequence short-circuits to nil if any chain evaluates to nil.
+/// A sequence of [`Step`]s separated by the step separator (semicolon or newline, which are
+/// synonyms) — the body of a [`Branch`], and a whole program (which is one sequence, and so is
+/// branchless: branches require a block). Chain steps run left to right and the sequence
+/// short-circuits to nil if any evaluates to nil; type-alias steps are transparent to that flow,
+/// and scoped to the sequence's enclosing scope.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sequence {
-    pub chains: Vec<Chain>,
+    pub steps: Vec<Step>,
+}
+
+impl Sequence {
+    /// The value-producing steps, skipping the (flow-transparent) type aliases.
+    pub fn chains(&self) -> impl Iterator<Item = &Chain> {
+        self.steps.iter().filter_map(Step::as_chain)
+    }
+
+    /// The value-producing steps, mutably.
+    pub fn chains_mut(&mut self) -> impl Iterator<Item = &mut Chain> {
+        self.steps.iter_mut().filter_map(Step::as_chain_mut)
+    }
+
+    /// The sole chain of a sequence whose *only* step is that chain. `None` when the sequence
+    /// has several steps or declares a type alias — callers use this to decide whether a
+    /// one-step shape applies, and an alias step means it does not.
+    pub fn single_chain(&self) -> Option<&Chain> {
+        match self.steps.as_slice() {
+            [Step::Chain(chain)] => Some(chain),
+            _ => None,
+        }
+    }
+
+    /// A sequence of chain steps, with no type aliases.
+    pub fn from_chains(chains: impl IntoIterator<Item = Chain>) -> Self {
+        Sequence {
+            steps: chains.into_iter().map(Step::Chain).collect(),
+        }
+    }
+}
+
+/// One step of a [`Sequence`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Step {
+    /// A type-alias declaration. Transparent to the value flow, and scoped to the sequence's
+    /// enclosing scope — so a top-level alias is module-wide (and part of the module's exported
+    /// type surface), while one inside a block or function body is local to it.
+    TypeAlias {
+        /// The alias name (`point` in `'point = ...`), or `None` for the module's
+        /// nameless default-type marker (`' = ...` / `'<'t> = ...`).
+        name: Option<String>,
+        /// Span of the alias name (`'point` in `'point = ...`), for symbols/go-to-definition.
+        name_span: Spanned,
+        type_parameters: Vec<String>,
+        type_definition: Type,
+    },
+    /// A value-producing step.
+    Chain(Chain),
+}
+
+impl Step {
+    pub fn as_chain(&self) -> Option<&Chain> {
+        match self {
+            Step::Chain(chain) => Some(chain),
+            Step::TypeAlias { .. } => None,
+        }
+    }
+
+    pub fn as_chain_mut(&mut self) -> Option<&mut Chain> {
+        match self {
+            Step::Chain(chain) => Some(chain),
+            Step::TypeAlias { .. } => None,
+        }
+    }
+
+    /// The span leading trivia (comments, blank lines) attaches to.
+    pub fn span(&self) -> Spanned {
+        match self {
+            Step::Chain(chain) => chain.span,
+            Step::TypeAlias { name_span, .. } => *name_span,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chain {
-    pub match_pattern: Option<Match>,
+    /// A leading binding (`x = ...`): a pattern matched against the chain's *result*, exactly
+    /// where a chain-final `=x` term sits — the two compile identically, and the field records
+    /// which spelling was written so the formatter can render it back.
+    pub binding: Option<Match>,
     /// Span of the binding pattern (the `x` in `x = ...`), for go-to-definition and symbols.
     /// `None` when the chain has no binding.
-    pub bind_span: Spanned,
+    pub binding_span: Spanned,
     /// Span starting at the chain's first character, for attaching leading comments/blank lines
     /// (trivia) to the chain during formatting. `None` for synthetic chains built by the parser.
     pub span: Spanned,
@@ -106,7 +163,7 @@ pub enum Term {
     String(StringStyle, Vec<StrSegment>),
     Match(Match),
     /// A braced expression `{ … }`: a new scope whose branches each start from the flowing value.
-    Block(Expression),
+    Block(Block),
     Function(Function),
     Access(Access),
     /// A juxtaposition application `f x` / `f [args]`: the access head applied to a single
@@ -193,7 +250,7 @@ pub enum StrSegment {
     /// Literal text, with escapes already decoded (UTF-8 bytes).
     Text(Vec<u8>),
     /// An interpolation hole `{ … }`, parsed like a block body. Must evaluate to a `Str`.
-    Hole(Expression),
+    Hole(Block),
 }
 
 /// Which delimiter style a string literal was written with. Preserved so the formatter renders it
@@ -256,7 +313,7 @@ pub struct Function {
     pub type_parameters: Vec<String>,
     pub parameter_type: Option<Type>,
     pub return_type: Option<Type>,
-    pub body: Option<Expression>,
+    pub body: Option<Block>,
     /// Span of the `#`, for hover (shows the inferred function type).
     pub span: Spanned,
 }

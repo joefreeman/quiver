@@ -229,15 +229,15 @@ pub enum Error {
 /// Whether an expression's chains read the enclosing function's parameter (`$`, `$x`, `$0`) —
 /// without descending into nested function literals, whose `$` is their own. Used to decide
 /// whether a failed fallback-nil `#{…}` literal deserves the Apply-site-inference note.
-fn expression_references_parameter(expression: &ast::Expression) -> bool {
+fn block_references_parameter(block: &ast::Block) -> bool {
     let chain = |chain: &ast::Chain| chain.terms.iter().any(term_references_parameter);
-    expression.annotations.iter().any(|a| chain(&a.value))
-        || expression.branches.iter().any(|branch| {
-            branch.condition.chains.iter().any(chain)
+    block.annotations.iter().any(|a| chain(&a.value))
+        || block.branches.iter().any(|branch| {
+            branch.condition.chains().any(chain)
                 || branch
                     .consequence
                     .as_ref()
-                    .is_some_and(|c| c.chains.iter().any(chain))
+                    .is_some_and(|c| c.chains().any(chain))
         })
 }
 
@@ -267,10 +267,10 @@ fn term_references_parameter(term: &ast::Term) -> bool {
             }),
         }),
         ast::Term::String(_, segments) => segments.iter().any(|segment| match segment {
-            ast::StrSegment::Hole(expression) => expression_references_parameter(expression),
+            ast::StrSegment::Hole(block) => block_references_parameter(block),
             ast::StrSegment::Text(_) => false,
         }),
-        ast::Term::Block(expression) => expression_references_parameter(expression),
+        ast::Term::Block(block) => block_references_parameter(block),
         // A nested function literal's `$` is its own parameter.
         ast::Term::Function(_) => false,
         ast::Term::Apply(access, argument) => {
@@ -585,13 +585,14 @@ struct DispatchCollection {
 /// Whether a branch's condition is a pure pattern match against the flowing parameter — i.e.
 /// the set of parameter values that take it is captured exactly by type narrowing (no
 /// computation that could fail for non-type reasons, and no extra chains). Such branches can
-/// contribute to a function's call-site dispatch table.
+/// contribute to a function's call-site dispatch table. A condition declaring a type alias is
+/// not one: the alias has no runtime effect, but `single_chain` is deliberately conservative —
+/// dispatch is an optimisation, so a rarer shape is better skipped than reasoned about.
 fn branch_is_parameter_dispatch(branch: &ast::Branch) -> bool {
-    branch.condition.chains.len() == 1
-        && branch.condition.chains[0]
-            .terms
-            .iter()
-            .all(|t| matches!(t, ast::Term::Match(_)))
+    branch
+        .condition
+        .single_chain()
+        .is_some_and(|chain| chain.terms.iter().all(|t| matches!(t, ast::Term::Match(_))))
 }
 
 /// Whether falling through this branch PROVES its pattern didn't match — the soundness
@@ -603,7 +604,7 @@ fn branch_is_parameter_dispatch(branch: &ast::Branch) -> bool {
 /// about the pattern, so no complement may be recorded. A `~>`-joined term after a
 /// match (`=P ~> G`) likewise makes the condition's verdict G's, not the pattern's.
 fn condition_complement_faithful(condition: &ast::Sequence) -> bool {
-    let [chain] = condition.chains.as_slice() else {
+    let Some(chain) = condition.single_chain() else {
         return false;
     };
     let match_terms = chain
@@ -611,7 +612,7 @@ fn condition_complement_faithful(condition: &ast::Sequence) -> bool {
         .iter()
         .filter(|t| matches!(t, ast::Term::Match(_)))
         .count();
-    if chain.match_pattern.is_some() {
+    if chain.binding.is_some() {
         match_terms == 0
     } else {
         match_terms == 0
@@ -629,11 +630,11 @@ fn value_fn_index(value: &Value) -> Option<usize> {
     }
 }
 
-/// The leading pattern of a branch condition (its binding `match_pattern`, or a first
+/// The leading pattern of a branch condition (its binding `binding`, or a first
 /// `=pattern` term), through which the branch dispatches on the parameter.
 fn leading_match(branch: &ast::Branch) -> Option<&ast::Match> {
-    let chain = branch.condition.chains.first()?;
-    if let Some(m) = &chain.match_pattern {
+    let chain = branch.condition.chains().next()?;
+    if let Some(m) = &chain.binding {
         return Some(m);
     }
     match chain.terms.first() {
@@ -847,7 +848,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn compile(
-        ast_program: ast::Program,
+        ast_program: ast::Sequence,
         existing_bindings: &Bindings,
         module_cache: &'a mut ModuleCache,
         resolver: &'a dyn ModuleResolver,
@@ -914,14 +915,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             },
         );
 
-        // Only allocate parameter slot if we have expressions
-        // (CType definitions and imports don't need parameters)
-        let has_expressions = ast_program
-            .statements
-            .iter()
-            .any(|s| matches!(s, ast::Statement::Expression(_)));
+        // Only allocate a parameter slot if there are chain steps; a program of nothing but
+        // type aliases produces no value and needs no parameter.
+        let has_chains = ast_program.chains().next().is_some();
 
-        let scope_parameter = if has_expressions {
+        let scope_parameter = if has_chains {
             let param_local = compiler.local_count;
             compiler.local_count += 1;
 
@@ -952,17 +950,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             });
         }
 
-        // Extract receive type from statements (like we do for function bodies)
+        // Extract receive type from the program's steps (like we do for function bodies)
         // This seeds the receive type from explicit selects in the code.
         // Additional receive types may be adopted during compilation when calling
         // functions that have receive types.
         compiler.current_receive_type_id =
-            compiler.extract_receive_type_from_statements(&ast_program.statements)?;
+            compiler.extract_receive_type_from_steps(&ast_program.steps)?;
 
         // The recorder is caller-owned, so whatever it gathered before an error (and the program it
         // indexes) is still available to the caller for hover/go-to-definition on the parts that
         // compiled.
-        let result_type_id = match compiler.compile_top_level(ast_program.statements) {
+        let result_type_id = match compiler.compile_top_level(ast_program.steps) {
             Ok(ty) => ty,
             Err(error) => {
                 return Err(LocatedError {
@@ -1062,49 +1060,29 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    /// Compile a program/module body: a single threaded sequence of expression chains with
-    /// type-alias declarations interspersed. Expressions thread (each one starts from the previous
-    /// one's result) and short-circuit on nil, just like the chains within a sequence; type aliases
-    /// are transparent to that flow. Bindings persist across the whole body. Leaves the final value
-    /// on the stack and returns its type (nil if there are no expressions).
-    fn compile_top_level(&mut self, statements: Vec<ast::Statement>) -> Result<usize, Error> {
-        let last_expr_index = statements
-            .iter()
-            .rposition(|s| matches!(s, ast::Statement::Expression(_)));
-        let mut result_type_id = self.program.register_type(Type::nil());
-        let mut threaded: Option<usize> = None;
-        let mut end_jumps = Vec::new();
-        for (i, statement) in statements.into_iter().enumerate() {
-            match statement {
-                ast::Statement::TypeAlias {
+    /// Compile a program/module body. The top level *is* a sequence — chain steps threading and
+    /// short-circuiting on nil, with type-alias declarations interspersed and transparent to that
+    /// flow — so this is [`Self::compile_sequence`] over the whole body. Bindings persist across
+    /// it. Leaves the final value on the stack and returns its type (nil if there are no chains).
+    fn compile_top_level(&mut self, steps: Vec<ast::Step>) -> Result<usize, Error> {
+        if !steps.iter().any(|s| matches!(s, ast::Step::Chain(_))) {
+            // A body of only type aliases produces no value: register the aliases and answer nil.
+            for step in steps {
+                let ast::Step::TypeAlias {
                     name,
                     type_parameters,
                     type_definition,
                     ..
-                } => {
-                    // Transparent to the value flow: registers the alias, no stack effect.
-                    self.compile_type_alias(name.as_deref(), type_parameters, type_definition)?;
-                }
-                ast::Statement::Expression(sequence) => {
-                    // Thread from the previous expression's result (left on the stack), nil-stripped
-                    // since a nil result short-circuits to the end.
-                    let input = threaded.map(|t| self.without_nil(t));
-                    let (ty, _prov) = self.compile_sequence(sequence, None, input, None)?;
-                    result_type_id = ty;
-                    // Keep the value on the stack for the next expression and short-circuit on nil,
-                    // unless this is the final expression (its result is the module value).
-                    if Some(i) != last_expr_index {
-                        end_jumps.push(self.codegen.emit_duplicate_jump_if_nil());
-                    }
-                    threaded = Some(ty);
-                }
+                } = step
+                else {
+                    unreachable!("checked for chain steps above")
+                };
+                self.compile_type_alias(name.as_deref(), type_parameters, type_definition)?;
             }
+            return Ok(self.program.register_type(Type::nil()));
         }
-        let end_addr = self.codegen.instructions.len();
-        for jump in end_jumps {
-            self.codegen.patch_jump_to_addr(jump, end_addr);
-        }
-        Ok(result_type_id)
+        let (ty, _prov) = self.compile_sequence(ast::Sequence { steps }, None, None, None)?;
+        Ok(ty)
     }
 
     /// Compile a type alias. `name` is `None` for the module's nameless default-type
@@ -1835,8 +1813,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             name_span: ast::Spanned::default(),
             span: ast::Spanned::default(),
             value: ast::FieldValue::Chain(ast::Chain {
-                match_pattern: None,
-                bind_span: ast::Spanned::default(),
+                binding: None,
+                binding_span: ast::Spanned::default(),
                 span: ast::Spanned::default(),
                 terms: vec![ast::Term::Access(source)],
             }),
@@ -2000,7 +1978,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.program.register_type(Type::Union(unique_types))
     }
 
-    fn extract_receive_type(&mut self, body: Option<&ast::Expression>) -> Result<usize, Error> {
+    fn extract_receive_type(&mut self, body: Option<&ast::Block>) -> Result<usize, Error> {
         let mut receive_types = Vec::new();
         if let Some(body) = body {
             self.collect_receive_types(body, &mut receive_types)?;
@@ -2030,15 +2008,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    fn extract_receive_type_from_statements(
-        &mut self,
-        statements: &[ast::Statement],
-    ) -> Result<usize, Error> {
+    fn extract_receive_type_from_steps(&mut self, steps: &[ast::Step]) -> Result<usize, Error> {
         let mut receive_types = Vec::new();
-        for statement in statements {
-            if let ast::Statement::Expression(sequence) = statement {
-                self.collect_receive_types_from_sequence(sequence, &mut receive_types)?;
-            }
+        for chain in steps.iter().filter_map(ast::Step::as_chain) {
+            self.collect_receive_types_from_chain(chain, &mut receive_types)?;
         }
 
         Ok(self.unify_receive_types(receive_types))
@@ -2046,10 +2019,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     fn collect_receive_types(
         &mut self,
-        expression: &ast::Expression,
+        block: &ast::Block,
         receive_types: &mut Vec<usize>,
     ) -> Result<(), Error> {
-        for branch in &expression.branches {
+        for branch in &block.branches {
             self.collect_receive_types_from_sequence(&branch.condition, receive_types)?;
             if let Some(consequence) = &branch.consequence {
                 self.collect_receive_types_from_sequence(consequence, receive_types)?;
@@ -2063,7 +2036,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         sequence: &ast::Sequence,
         receive_types: &mut Vec<usize>,
     ) -> Result<(), Error> {
-        for chain in &sequence.chains {
+        for chain in sequence.chains() {
             self.collect_receive_types_from_chain(chain, receive_types)?;
         }
         Ok(())
@@ -2161,8 +2134,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             ast::Term::String(_, segments) => {
                 // A hole is a block-like expression that may contain a select.
                 for segment in segments {
-                    if let ast::StrSegment::Hole(expression) = segment {
-                        self.collect_receive_types(expression, receive_types)?;
+                    if let ast::StrSegment::Hole(block) = segment {
+                        self.collect_receive_types(block, receive_types)?;
                     }
                 }
                 Ok(None)
@@ -2320,8 +2293,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             name_span: ast::Spanned::default(),
             span: ast::Spanned::default(),
             value: ast::Chain {
-                match_pattern: None,
-                bind_span: ast::Spanned::default(),
+                binding: None,
+                binding_span: ast::Spanned::default(),
                 span: ast::Spanned::default(),
                 terms: vec![ast::Term::Tuple(ast::Tuple {
                     name: ast::TupleName::Anonymous,
@@ -2346,7 +2319,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if self.function_depth == 0
             && let Some(body) = &mut function.body
         {
-            self.expand_dialects_in_expression(body)?;
+            self.expand_dialects_in_block(body)?;
         }
 
         // `name: type = value` in the parameter spelling is sugar for a `:defaults` entry
@@ -2653,7 +2626,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Some(body) => {
                 // Function parameters have Provenance::Parameter since they come from callers
                 self.function_depth += 1;
-                let body_type = self.compile_scoped_expression(
+                let body_type = self.compile_scoped_block(
                     body,
                     parameter_type,
                     Provenance::Parameter,
@@ -3142,12 +3115,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(final_type)
     }
 
-    /// Compile an expression in its own scope: store the incoming value as the scope parameter,
-    /// then evaluate each `|` branch (re-loading the parameter) until one yields non-nil. Used for
-    /// braced blocks, function bodies, and multi-branch statement expressions.
-    fn compile_scoped_expression(
+    /// Compile a block in its own scope: store the incoming value as the scope parameter, then
+    /// evaluate each `|` branch (re-loading the parameter) until one yields non-nil. Used for
+    /// every braced form — block terms, function bodies, and interpolation holes.
+    fn compile_scoped_block(
         &mut self,
-        mut expression: ast::Expression,
+        mut block: ast::Block,
         parameter_type: usize,
         parameter_provenance: Provenance,
         on_no_match: Option<usize>,
@@ -3157,14 +3130,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // A block's annotation prefix attaches to the block's *result*; it is compiled at the
         // convergence point below. (A function body's annotations attach to the closure and
         // are extracted by `compile_function` before it gets here.)
-        let block_annotations = std::mem::take(&mut expression.annotations);
+        let block_annotations = std::mem::take(&mut block.annotations);
 
         // Debug builds: the site a block-exhaustion stamp points at — the first branch's
         // start, standing in for the block itself (blocks carry no span of their own).
-        let block_site_span = expression
+        let block_site_span = block
             .branches
             .first()
-            .and_then(|branch| branch.condition.chains.first())
+            .and_then(|branch| branch.condition.chains().next())
             .and_then(|chain| chain.span.get());
 
         // Take ownership of the dispatch collection for the duration of this (outermost
@@ -3226,8 +3199,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Assume not exhaustive until proven otherwise by complement narrowing.
         let mut is_exhaustive = false;
 
-        for (i, branch) in expression.branches.iter().enumerate() {
-            let is_last_branch = i == expression.branches.len() - 1;
+        for (i, branch) in block.branches.iter().enumerate() {
+            let is_last_branch = i == block.branches.len() - 1;
 
             // A branch contributes to the dispatch table only if it is a pure parameter
             // dispatch; any other branch shape invalidates the whole table.
@@ -3477,7 +3450,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // An annotation-only block (`{ :error X }`) has no branches: it is identity — yield
         // the parameter unchanged — plus the attach compiled at the convergence below.
-        if expression.branches.is_empty() {
+        if block.branches.is_empty() {
             self.codegen.add_instruction(Instruction::Load(param_local));
             branch_types.push(parameter_type);
             is_exhaustive = true;
@@ -3827,8 +3800,64 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut threaded: Option<(usize, Provenance)> =
             input_type.map(|t| (t, Provenance::Unknown));
         let mut end_jumps = Vec::new();
+        // Type aliases are transparent to the flow, so threading is indexed by *chain* step: the
+        // last chain keeps its result (the sequence's value) rather than short-circuiting, and a
+        // trailing alias must not make the chain before it look non-final.
+        let last_chain_index = sequence
+            .steps
+            .iter()
+            .rposition(|step| matches!(step, ast::Step::Chain(_)));
+        let mut chain_ordinal = 0usize;
 
-        for (i, chain) in sequence.chains.iter().enumerate() {
+        if last_chain_index.is_none() {
+            // Only type aliases: nothing produces a value, so the sequence is nil — the same
+            // answer a sequence gives when it runs out of steps. The aliases still register (a
+            // block may exist purely to scope one over an annotation), and nil must be pushed
+            // because the caller expects the sequence to leave its result on the stack.
+            for step in &sequence.steps {
+                let ast::Step::TypeAlias {
+                    name,
+                    type_parameters,
+                    type_definition,
+                    ..
+                } = step
+                else {
+                    unreachable!("no chain steps")
+                };
+                self.compile_type_alias(
+                    name.as_deref(),
+                    type_parameters.clone(),
+                    type_definition.clone(),
+                )?;
+            }
+            self.codegen.add_instruction(Instruction::Tuple(NIL));
+            return Ok((self.program.register_type(Type::nil()), Provenance::Unknown));
+        }
+
+        for (step_index, step) in sequence.steps.iter().enumerate() {
+            let chain = match step {
+                ast::Step::Chain(chain) => chain,
+                ast::Step::TypeAlias {
+                    name,
+                    type_parameters,
+                    type_definition,
+                    ..
+                } => {
+                    // Registers the alias in the current scope — no stack effect, and it does not
+                    // participate in threading. Scoped to the enclosing scope, so an alias in a
+                    // block or function body is local to it (and cleared between branches, like
+                    // any other binding).
+                    self.compile_type_alias(
+                        name.as_deref(),
+                        type_parameters.clone(),
+                        type_definition.clone(),
+                    )?;
+                    continue;
+                }
+            };
+            let is_first_chain = chain_ordinal == 0;
+            let is_last_chain = Some(step_index) == last_chain_index;
+            chain_ordinal += 1;
             // A chain after the first threads from the previous chain's result (on the stack). That
             // value is non-nil — a nil result short-circuits to the end — so strip nil from its
             // type. The first chain has no threaded value and loads the block parameter instead.
@@ -3849,7 +3878,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // provenance (a no-op for non-nil results and already-stamped nils). Steps
             // whose type excludes nil skip the instruction entirely.
             if self.debug && self.contains_nil(chain_type) {
-                let kind = if chain.match_pattern.is_some()
+                let kind = if chain.binding.is_some()
                     || chain.terms.iter().any(|t| matches!(t, ast::Term::Match(_)))
                 {
                     quiver_core::bytecode::SiteKind::NoMatch
@@ -3863,7 +3892,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // that nil — the *same* value, so its typed nil members (annotation rows
             // preserved) carry over rather than a fresh bare nil.
             let should_propagate_nil =
-                i > 0 && last_type.as_ref().is_some_and(|&t| self.contains_nil(t));
+                !is_first_chain && last_type.as_ref().is_some_and(|&t| self.contains_nil(t));
             last_type = Some(if should_propagate_nil {
                 let mut members = annotations::nil_members(
                     self.program,
@@ -3889,7 +3918,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 break;
             }
 
-            if i < sequence.chains.len() - 1 {
+            if !is_last_chain {
                 // Keep the result on the stack for the next chain (threading); short-circuit to the
                 // end of the sequence if it is nil.
                 let end_jump = self.codegen.emit_duplicate_jump_if_nil();
@@ -3906,7 +3935,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // (a stale leftover from the pre-`=PAT` semantics, where a failing
                 // chain-match itself short-circuited). To bind-and-guarantee non-nil in
                 // one step, ascribe: `e =('int)x`.
-                let result_is_tracked_value = chain.match_pattern.is_none()
+                let result_is_tracked_value = chain.binding.is_none()
                     && !chain
                         .terms
                         .iter()
@@ -4123,7 +4152,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // If there's a match pattern, apply it. Binding definitions for go-to-definition
         // and hover are recorded inside `compile_match`, which sees every binding site
         // (top-level `name = ...`, destructuring, mid-chain `=x`, and block branches).
-        if let Some(pattern) = chain.match_pattern {
+        if let Some(pattern) = chain.binding {
             // Index destructured imports (`(double) = %util`) as references to the module's
             // members, before the pattern's own bindings are recorded.
             if let [term] = terms.as_slice() {
@@ -4189,7 +4218,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// resolution stays hermetic.
     fn precompile_imports(
         &mut self,
-        parsed: &ast::Program,
+        parsed: &ast::Sequence,
         package: &crate::resolver::PackageId,
     ) -> Result<(), Error> {
         for (path, span) in modules::collect_value_imports(parsed) {
@@ -4458,13 +4487,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Reset to clean state for module compilation
         self.local_count = 0;
 
-        // Check if module has expressions (needs a parameter scope for implicit continuation)
-        let has_expressions = parsed
-            .statements
-            .iter()
-            .any(|s| matches!(s, ast::Statement::Expression(_)));
+        // A module with chain steps needs a parameter scope for the implicit continuation.
+        let has_chains = parsed.chains().next().is_some();
 
-        let scope_parameter = if has_expressions {
+        let scope_parameter = if has_chains {
             let param_local = self.local_count;
             self.local_count += 1;
             self.codegen.add_instruction(Instruction::Store);
@@ -4492,7 +4518,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // against the failed module's scope chain (cascading `VariableUndefined`s), and a zeroed
         // `function_depth` panics with a usize underflow in the enclosing `compile_function`,
         // masking the real error.
-        let result_type_id = match self.compile_top_level(parsed.statements) {
+        let result_type_id = match self.compile_top_level(parsed.steps) {
             Ok(t) => t,
             Err(e) => {
                 self.codegen.instructions = saved_instructions;
@@ -4846,14 +4872,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// Recursively expand every dialect invocation in an expression, in place. Run on a
     /// function body before its captures are collected; elsewhere dialects expand lazily
     /// in [`Self::compile_term`].
-    fn expand_dialects_in_expression(
-        &mut self,
-        expression: &mut ast::Expression,
-    ) -> Result<(), Error> {
-        for annotation in &mut expression.annotations {
+    fn expand_dialects_in_block(&mut self, block: &mut ast::Block) -> Result<(), Error> {
+        for annotation in &mut block.annotations {
             self.expand_dialects_in_chain(&mut annotation.value)?;
         }
-        for branch in &mut expression.branches {
+        for branch in &mut block.branches {
             self.expand_dialects_in_sequence(&mut branch.condition)?;
             if let Some(consequence) = &mut branch.consequence {
                 self.expand_dialects_in_sequence(consequence)?;
@@ -4863,7 +4886,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     }
 
     fn expand_dialects_in_sequence(&mut self, sequence: &mut ast::Sequence) -> Result<(), Error> {
-        for chain in &mut sequence.chains {
+        for chain in sequence.chains_mut() {
             self.expand_dialects_in_chain(chain)?;
         }
         Ok(())
@@ -4894,15 +4917,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             ast::Term::String(_, segments) => {
                 for segment in segments {
-                    if let ast::StrSegment::Hole(expression) = segment {
-                        self.expand_dialects_in_expression(expression)?;
+                    if let ast::StrSegment::Hole(block) = segment {
+                        self.expand_dialects_in_block(block)?;
                     }
                 }
             }
-            ast::Term::Block(expression) => self.expand_dialects_in_expression(expression)?,
+            ast::Term::Block(block) => self.expand_dialects_in_block(block)?,
             ast::Term::Function(function) => {
                 if let Some(body) = &mut function.body {
-                    self.expand_dialects_in_expression(body)?;
+                    self.expand_dialects_in_block(body)?;
                 }
             }
             ast::Term::Spawn(inner, arg, _) => {
@@ -6177,7 +6200,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     let index = self.program.register_constant(Constant::Binary(bytes));
                     self.codegen.add_instruction(Instruction::Constant(index));
                 }
-                ast::StrSegment::Hole(expression) => {
+                ast::StrSegment::Hole(block) => {
                     let (param_type, param_provenance) = match value_type {
                         // Duplicate the flowing value as the hole's input. It sits beneath the
                         // accumulated binary — nothing before the first segment, one value after —
@@ -6192,8 +6215,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             (self.program.register_type(Type::nil()), Provenance::Unknown)
                         }
                     };
-                    let hole_type = self.compile_scoped_expression(
-                        expression,
+                    let hole_type = self.compile_scoped_block(
+                        block,
                         param_type,
                         param_provenance,
                         None,
@@ -6307,7 +6330,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Blocks without a value need NIL on stack
                     self.codegen.add_instruction(Instruction::Tuple(NIL));
                 }
-                let ty = self.compile_scoped_expression(
+                let ty = self.compile_scoped_block(
                     block,
                     block_parameter,
                     block_provenance,
@@ -6347,10 +6370,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // problem is almost always the missed inference: point at where it works.
                 let inference_fell_back = func.parameter_type.is_none()
                     && expected_parameter.is_none()
-                    && func
-                        .body
-                        .as_ref()
-                        .is_some_and(expression_references_parameter);
+                    && func.body.as_ref().is_some_and(block_references_parameter);
                 let function_type =
                     self.compile_function(func, expected_parameter)
                         .map_err(|e| {

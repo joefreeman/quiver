@@ -1510,3 +1510,223 @@ fn test_nested_union_member_cycle_flattening() {
         )
         .expect("\"A\"");
 }
+
+// --- scoped type aliases -------------------------------------------------------------
+// A type alias is a step of any sequence, not just the program's, and is scoped to the
+// sequence's enclosing scope.
+
+#[test]
+fn test_type_alias_in_function_body() {
+    quiver()
+        .evaluate(
+            r#"
+            main = #{
+              'p = [x: 'int]
+              g = #'p { $x }
+              g [x: 5]
+            }
+            main
+            "#,
+        )
+        .expect("5");
+}
+
+#[test]
+fn test_type_alias_in_block() {
+    quiver()
+        .evaluate(
+            r#"
+            main = #{
+              {
+                'p = [x: 'int]
+                g = #'p { $x }
+                g [x: 7]
+              }
+            }
+            main
+            "#,
+        )
+        .expect("7");
+}
+
+#[test]
+fn test_type_alias_scoped_to_its_block() {
+    // The alias does not escape the block that declares it.
+    quiver()
+        .evaluate(
+            r#"
+            main = #{
+              { 'p = [x: 'int]; 1 }
+              g = #'p { $x }
+              g [x: 5]
+            }
+            main
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeAliasMissing(
+            "p".to_string(),
+        ));
+}
+
+#[test]
+fn test_type_alias_shadows_outer() {
+    // An inner alias shadows an outer one of the same name, and the outer is unaffected
+    // after the block ends.
+    quiver()
+        .evaluate(
+            r#"
+            'p = 'int
+            outer = #'p { $ }
+            main = #{
+              inner = { 'p = 'bin; f = #'p { $ }; f 0x0a }
+              [inner, 3 ~> outer]
+            }
+            main
+            "#,
+        )
+        .expect("[0x0a, 3]");
+}
+
+#[test]
+fn test_type_alias_is_branch_local() {
+    // Bindings are cleared between a block's branches, and an alias is a binding like any
+    // other: one declared in an earlier branch is not visible in a later one.
+    quiver()
+        .evaluate(
+            r#"
+            main = #{
+              { | [] => { 'p = 'int; 1 } | g = #'p { $ }; g 2 }
+            }
+            main
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeAliasMissing(
+            "p".to_string(),
+        ));
+}
+
+#[test]
+fn test_type_alias_over_function_type_parameter() {
+    // A body-scoped alias may name a type in terms of the enclosing function's type
+    // parameters — which a top-level alias cannot see.
+    quiver()
+        .evaluate(
+            r#"
+            h = #<'t>'t {
+              'pair = ['t, 't]
+              [$, $] ~> =('pair)p
+              p
+            }
+            h 1
+            "#,
+        )
+        .expect("[1, 1]");
+}
+
+#[test]
+fn test_type_alias_step_is_transparent_to_the_flow() {
+    // An alias step neither consumes nor produces a value: the chain before it threads
+    // into the chain after it.
+    quiver()
+        .evaluate(
+            r#"
+            main = #{
+              5 ~> __integer_add__ [~, 1]
+              'p = 'int
+              __integer_add__ [~, 2]
+            }
+            main
+            "#,
+        )
+        .expect("8");
+}
+
+#[test]
+fn test_type_alias_step_does_not_stop_nil_short_circuit() {
+    quiver()
+        .evaluate(
+            r#"
+            main = #{
+              []
+              'p = 'int
+              7
+            }
+            main
+            "#,
+        )
+        .expect("[]");
+}
+
+#[test]
+fn test_alias_only_block_is_nil() {
+    // No step produces a value, so the block is nil — the answer a sequence gives when it
+    // has nothing to evaluate.
+    quiver()
+        .evaluate(
+            r#"
+            main = #{ [{ 'p = 'int }, 5] }
+            main
+            "#,
+        )
+        .expect("[[], 5]");
+}
+
+#[test]
+fn test_type_alias_forward_reference_in_block_fails() {
+    // Aliases are positional inside a block exactly as they are at the top level.
+    quiver()
+        .evaluate(
+            r#"
+            main = #{
+              g = #'p { $ }
+              'p = 'int
+              g 2
+            }
+            main
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeAliasMissing(
+            "p".to_string(),
+        ));
+}
+
+#[test]
+fn test_nested_type_alias_is_module_private() {
+    // Only top-level aliases form a module's type namespace, so an alias declared inside a
+    // function body is not reachable as `'%mod.name`.
+    let mut modules = std::collections::HashMap::new();
+    modules.insert(
+        vec!["helper".to_string()],
+        r#"
+        make = #'int {
+          'private = Secret['int]
+          Secret[$] ~> =('private)s
+          s
+        }
+        [make: &make]
+        "#
+        .to_string(),
+    );
+
+    quiver()
+        .with_modules(modules)
+        .evaluate("f = #'%helper.private { Ok }; 1 ~> %helper.make ~> f")
+        .expect_error_containing("private");
+}
+
+#[test]
+fn test_nested_type_alias_may_name_a_module_type() {
+    // A module referenced only from a nested alias is still linked.
+    quiver()
+        .evaluate(
+            r#"
+            main = #{
+              'ints = '%list<'int>
+              %list.new ~> %list.prepend [~, 4] ~> =('ints)xs
+              xs
+            }
+            main
+            "#,
+        )
+        .expect("Cons[4, Nil]");
+}

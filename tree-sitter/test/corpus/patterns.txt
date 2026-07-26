@@ -7,7 +7,7 @@ Point[x, y] = Point[10, 20]
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       binding: (pattern_tuple
         name: (tuple_name)
@@ -29,7 +29,7 @@ partial binding
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       binding: (pattern_partial
         name: (identifier)
@@ -47,7 +47,7 @@ star binding
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       binding: (star)
       (tuple
@@ -66,7 +66,7 @@ Point[x, &y] = Point[1, 2]
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       binding: (pattern_tuple
         name: (tuple_name)
@@ -91,7 +91,7 @@ $y ~> =&$x.q
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (integer)
       (bind_match
@@ -123,7 +123,7 @@ x ~> =([[], _] | [_, []])
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (access
         source: (identifier))
@@ -145,7 +145,7 @@ x ~> ='
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (access
         source: (identifier))
@@ -161,7 +161,7 @@ f ~> =('int)n
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (access
         source: (identifier))
@@ -180,7 +180,7 @@ p ~> =Rational[_, ('int)d]
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (access
         source: (identifier))
@@ -202,7 +202,7 @@ x ~> =('int | 'bin)v
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (access
         source: (identifier))
@@ -224,7 +224,7 @@ y ~> =('int) ~> x
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (access
         source: (identifier))
@@ -244,7 +244,7 @@ statement-level ascribed binding
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       binding: (pattern_ascription
         (type_identifier

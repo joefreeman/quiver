@@ -7,7 +7,7 @@ add [3, 4]
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (application
         function: (access
@@ -27,7 +27,7 @@ chain with pipe operator
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (integer)
       (access
@@ -44,7 +44,7 @@ Point[x: 1, y: 2]
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (tuple
         name: (tuple_name)
@@ -66,7 +66,7 @@ string with escape
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (string
         (escape_sequence)))))
@@ -80,7 +80,7 @@ string with escaped brace
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (string
         (escape_sequence)))))
@@ -94,7 +94,7 @@ binary and integer
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (tuple
         (chain
@@ -111,7 +111,7 @@ a[..., y: 3]
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (spread_update
         source: (identifier)
@@ -132,7 +132,7 @@ B[...$c.q, y: 3]
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (spread_update
         source: (parameter
@@ -172,7 +172,7 @@ ripple
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (integer)
       (tuple
@@ -191,7 +191,7 @@ math.add [1, 2] ~> __integer_multiply__ [~, 3]
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (application
         function: (access
@@ -222,7 +222,7 @@ multi-line string
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (multiline_string))))
 
@@ -238,7 +238,7 @@ multi-line string with line continuation
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (multiline_string))))
 
@@ -254,7 +254,7 @@ multi-line string with escaped triple quote
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (multiline_string))))
 
@@ -267,13 +267,13 @@ string with interpolation hole
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (string
         (escape_sequence)
         (interpolation
           (branch
-            (expression
+            (sequence
               (chain
                 (access
                   source: (identifier))))))))))
@@ -287,12 +287,12 @@ string hole containing a nested string
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (string
         (interpolation
           (branch
-            (expression
+            (sequence
               (chain
                 (string)
                 (access
@@ -309,12 +309,12 @@ multi-line string with interpolation hole
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (multiline_string
         (interpolation
           (branch
-            (expression
+            (sequence
               (chain
                 (access
                   source: (identifier))))))))))
@@ -328,7 +328,7 @@ ripple application
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (application
         function: (access
@@ -348,7 +348,7 @@ __integer_add__ [3, 4]
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (application
         function: (builtin)
@@ -367,7 +367,7 @@ map [xs, &double]
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (application
         function: (access
@@ -390,7 +390,7 @@ double 5 ~> add [~, 1]
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (application
         function: (access
@@ -437,7 +437,7 @@ id<'int> 42
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (application
         function: (access
@@ -457,7 +457,7 @@ explicit type application on an import member and a reference
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (application
         function: (access

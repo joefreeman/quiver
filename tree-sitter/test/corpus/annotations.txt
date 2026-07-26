@@ -7,7 +7,7 @@ annotation-only block
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (tuple)
       (block
@@ -29,7 +29,7 @@ block with annotation prefix and body
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (function
         parameter: (type_identifier
@@ -40,7 +40,7 @@ block with annotation prefix and body
             (chain
               (string)))
           (branch
-            (expression
+            (sequence
               (chain
                 (tuple
                   (chain
@@ -60,7 +60,7 @@ f:doc
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (access
         source: (identifier)
@@ -75,7 +75,7 @@ annotation retrieval in a chain
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (tuple
         (chain
@@ -96,7 +96,7 @@ spaced colon is still a field label
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (tuple
         (named_field
@@ -114,7 +114,7 @@ r:('perr)error
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (access
         source: (identifier)
@@ -132,7 +132,7 @@ x:((line: 'int))origin
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (access
         source: (identifier)

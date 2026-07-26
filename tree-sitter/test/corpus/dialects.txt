@@ -7,7 +7,7 @@ simple dialect
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (dialect
         module: (import
@@ -23,7 +23,7 @@ dialect with namespaced module path
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (dialect
         module: (import
@@ -40,7 +40,7 @@ dialect with empty content
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (dialect
         module: (import
@@ -55,7 +55,7 @@ dialect with nested braces
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (dialect
         module: (import
@@ -71,7 +71,7 @@ dialect string content with brace
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (dialect
         module: (import
@@ -87,7 +87,7 @@ dialect with escaped braces
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (dialect
         module: (import
@@ -103,7 +103,7 @@ dialect with lone backslash before escaped brace
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (dialect
         module: (import
@@ -123,7 +123,7 @@ multi-line dialect content
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (dialect
         module: (import
@@ -139,7 +139,7 @@ spaced brace is not a dialect
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (application
         function: (access
@@ -147,7 +147,7 @@ spaced brace is not a dialect
             (identifier)))
         argument: (block
           (branch
-            (expression
+            (sequence
               (chain
                 (access
                   field: (identifier))))))))))
@@ -161,7 +161,7 @@ dialect in a chain
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (dialect
         module: (import
@@ -179,7 +179,7 @@ escaped quote in dialect content
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       (dialect
         module: (import

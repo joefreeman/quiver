@@ -37,7 +37,7 @@ pub struct Capture {
 /// Collect free variables (captures) from a function body.
 /// Returns captures in deterministic order (order of first occurrence in AST traversal).
 pub fn collect_free_variables(
-    body: Option<&ast::Expression>,
+    body: Option<&ast::Block>,
     function_parameters: &HashSet<String>,
     defined_variables: &dyn Fn(&str, &[ast::AccessPath]) -> bool,
 ) -> Vec<Capture> {
@@ -52,7 +52,7 @@ pub fn collect_free_variables(
         captures: Vec::new(),
         function_depth: 0,
     };
-    collector.visit_expression(body);
+    collector.visit_block(body);
     collector.captures
 }
 
@@ -68,8 +68,8 @@ struct FreeVariableCollector<'a> {
 }
 
 impl<'a> FreeVariableCollector<'a> {
-    fn visit_expression(&mut self, expression: &ast::Expression) {
-        for branch in &expression.branches {
+    fn visit_block(&mut self, block: &ast::Block) {
+        for branch in &block.branches {
             self.visit_sequence(&branch.condition);
             if let Some(ref consequence) = branch.consequence {
                 self.visit_sequence(consequence);
@@ -78,7 +78,7 @@ impl<'a> FreeVariableCollector<'a> {
     }
 
     fn visit_sequence(&mut self, sequence: &ast::Sequence) {
-        for chain in &sequence.chains {
+        for chain in sequence.chains() {
             self.visit_chain(chain);
         }
     }
@@ -108,8 +108,8 @@ impl<'a> FreeVariableCollector<'a> {
             ast::Term::String(_, segments) => {
                 // Each hole is an expression that may reference (and so must capture) variables.
                 for segment in segments {
-                    if let ast::StrSegment::Hole(expression) = segment {
-                        self.visit_expression(expression);
+                    if let ast::StrSegment::Hole(block) = segment {
+                        self.visit_block(block);
                     }
                 }
             }
@@ -119,7 +119,7 @@ impl<'a> FreeVariableCollector<'a> {
                 self.visit_match(pattern);
             }
             ast::Term::Block(block) => {
-                self.visit_expression(block);
+                self.visit_block(block);
             }
             ast::Term::Function(func) => {
                 // The nested literal's body is one function level deeper: its own `$` is not
@@ -127,7 +127,7 @@ impl<'a> FreeVariableCollector<'a> {
                 // here, captured by the literal itself), so only deeper runs are free.
                 if let Some(body) = &func.body {
                     self.function_depth += 1;
-                    self.visit_expression(body);
+                    self.visit_block(body);
                     self.function_depth -= 1;
                 }
             }

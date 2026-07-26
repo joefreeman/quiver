@@ -24,7 +24,7 @@ pub struct Analysis {
     pub diagnostics: Vec<Diagnostic>,
     pub semantics: Option<Recorder>,
     pub program: Option<Program>,
-    pub ast: Option<quiver_compiler::ast::Program>,
+    pub ast: Option<quiver_compiler::ast::Sequence>,
     pub symbols: Vec<DocumentSymbol>,
 }
 

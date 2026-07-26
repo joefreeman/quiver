@@ -103,7 +103,7 @@ module.exports = grammar({
     [$.function],
     // After a chain, a separator (semicolon/newline) may continue the current sequence
     // (another chain) or end it so the surrounding construct can take a trailing separator.
-    [$.expression],
+    [$.sequence],
     // After a term, a newline may continue the chain (next line starts with `~>`) or end
     // the chain.
     [$.chain],
@@ -120,7 +120,7 @@ module.exports = grammar({
     [$._pattern, $._partial_field],
     // In a tuple type, `(name` may open an omittable label (`(foo): 'int`) or a
     // partial-type field type (`(foo: 'int)`); the `)` versus `:` decides, via GLR.
-    [$._partial_field, $._field_type],
+    [$._partial_field, $._field_type_base],
     // A parenthesised group of `|`-separated atoms can be read as an or-pattern (of tuple/type
     // patterns) or as a parenthesised type union; both are accepted for editor purposes.
     [$.pattern_tuple, $.tuple_type],
@@ -138,19 +138,20 @@ module.exports = grammar({
   ],
 
   rules: {
-    // The program is a single sequence of chains with type-alias declarations
-    // interspersed, all separated by the sequence separator (semicolon or newline, which
-    // are synonyms). Consecutive chains group into an `expression`; type aliases break a run.
+    // The program is a single `sequence` — the very node a block's branch body is, since a
+    // program is one sequence of steps and nothing more. Optional, so a file of only
+    // separators (or an empty one) still parses.
     source_file: $ => seq(
       optional($._sep),
       optional(seq(
-        $._top_level_item,
-        repeat(seq($._sep, $._top_level_item)),
+        $.sequence,
         optional($._sep),
       )),
     ),
 
-    _top_level_item: $ => choice($.type_alias, $.expression),
+    // One step of a sequence: a type-alias declaration or a chain. An alias is scoped to the
+    // sequence's enclosing scope, so one written in a block or function body is local to it.
+    _step: $ => choice($.type_alias, $.chain),
 
     // The sequence separator: one or more semicolons/newlines (they are synonyms),
     // collapsing runs. This is where the flow short-circuits on nil and binding scope
@@ -189,13 +190,13 @@ module.exports = grammar({
 
     type_parameters: $ => immBracketed($, '<', $.type_name, '>'),
 
-    // ----------------------------------------------------------------- expressions
+    // ------------------------------------------------------------------- sequences
 
-    // A sequence of chains separated by the sequence separator (semicolon or newline). Used
-    // at the top level (grouping a run of chains) and as block/branch bodies.
-    expression: $ => seq(
-      $.chain,
-      repeat(seq($._sep, $.chain)),
+    // A sequence of steps separated by the sequence separator (semicolon or newline). Used
+    // as block/branch bodies; the top level (`source_file`) is one sequence too.
+    sequence: $ => seq(
+      $._step,
+      repeat(seq($._sep, $._step)),
     ),
 
     // A chain is a sequence of `term`s joined by a **mandatory** `~>`; the value flows
@@ -541,16 +542,16 @@ module.exports = grammar({
       repeat(seq(optional($._nl), '|', optional($._nl), $.branch)),
     ),
 
-    // A branch is either condition-consequence (`… => …`) or a plain expression; the
+    // A branch is either condition-consequence (`… => …`) or a plain sequence; the
     // `condition`/`consequence` fields exist only on the former — a bare branch's body
     // is not a condition.
     branch: $ => choice(
       seq(
-        field('condition', $.expression),
+        field('condition', $.sequence),
         optional($._nl), '=>', optional($._nl),
-        field('consequence', $.expression),
+        field('consequence', $.sequence),
       ),
-      $.expression,
+      $.sequence,
     ),
 
     // ----------------------------------------------------------------------- tuples
@@ -735,14 +736,26 @@ module.exports = grammar({
       seq(field('name', $.identifier), ':', optional($._nl), $._type),
     ),
 
+    // A field of a tuple type. Every non-spread form may carry a default (a spread names no
+    // field, so it takes none).
     _field_type: $ => choice(
       $.type_spread,
+      seq($._field_type_base, optional($.field_default)),
+    ),
+
+    _field_type_base: $ => choice(
       // Omittable label `(name): 'type` — a literal checked against the type may
       // state the label or leave the field positional. Tuple types only.
       seq('(', field('name', $.identifier), ')', ':', optional($._nl), $._type),
       seq(field('name', $.identifier), ':', optional($._nl), $._type),
       $._type,
     ),
+
+    // A field's default value: `= <chain>`, spaced like a binding. A call argument may omit a
+    // field that declares one. Only meaningful in a function literal's parameter spelling;
+    // the grammar accepts it on any field type and leaves the placement rule to the compiler,
+    // which reports it better than a positional grammar could.
+    field_default: $ => seq('=', optional($._nl), $.chain),
 
     type_spread: $ => seq('...', optional(seq($.type_name, optional($.type_arguments)))),
 

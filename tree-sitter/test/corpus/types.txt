@@ -7,22 +7,23 @@ type alias union
 ---
 
 (source_file
-  (type_alias
-    name: (type_name)
-    definition: (union_type
-      (tuple_type
-        name: (tuple_name)
-        name: (identifier)
-        (type_identifier
-          name: (type_name)))
-      (tuple_type
-        name: (tuple_name)
-        name: (identifier)
-        (type_identifier
-          name: (type_name))
-        name: (identifier)
-        (type_identifier
-          name: (type_name))))))
+  (sequence
+    (type_alias
+      name: (type_name)
+      definition: (union_type
+        (tuple_type
+          name: (tuple_name)
+          name: (identifier)
+          (type_identifier
+            name: (type_name)))
+        (tuple_type
+          name: (tuple_name)
+          name: (identifier)
+          (type_identifier
+            name: (type_name))
+          name: (identifier)
+          (type_identifier
+            name: (type_name)))))))
 
 ==================
 recursive type
@@ -33,18 +34,19 @@ recursive type
 ---
 
 (source_file
-  (type_alias
-    name: (type_name)
-    (type_parameters
-      (type_name))
-    definition: (union_type
-      (tuple_type
-        name: (tuple_name))
-      (tuple_type
-        name: (tuple_name)
-        (type_identifier
-          name: (type_name))
-        (cycle_type)))))
+  (sequence
+    (type_alias
+      name: (type_name)
+      (type_parameters
+        (type_name))
+      definition: (union_type
+        (tuple_type
+          name: (tuple_name))
+        (tuple_type
+          name: (tuple_name)
+          (type_identifier
+            name: (type_name))
+          (cycle_type))))))
 
 ==================
 named module type alias
@@ -55,12 +57,13 @@ named module type alias
 ---
 
 (source_file
-  (type_alias
-    name: (type_name)
-    definition: (module_type
-      module: (import
-        (identifier))
-      member: (identifier))))
+  (sequence
+    (type_alias
+      name: (type_name)
+      definition: (module_type
+        module: (import
+          (identifier))
+        member: (identifier)))))
 
 ==================
 default module type alias
@@ -71,11 +74,12 @@ default module type alias
 ---
 
 (source_file
-  (type_alias
-    name: (type_name)
-    definition: (module_type
-      module: (import
-        (identifier)))))
+  (sequence
+    (type_alias
+      name: (type_name)
+      definition: (module_type
+        module: (import
+          (identifier))))))
 
 ==================
 module type with arguments
@@ -86,15 +90,16 @@ module type with arguments
 ---
 
 (source_file
-  (type_alias
-    name: (type_name)
-    definition: (module_type
-      module: (import
-        (identifier))
-      member: (identifier)
-      (type_arguments
-        (type_identifier
-          name: (type_name))))))
+  (sequence
+    (type_alias
+      name: (type_name)
+      definition: (module_type
+        module: (import
+          (identifier))
+        member: (identifier)
+        (type_arguments
+          (type_identifier
+            name: (type_name)))))))
 
 ==================
 default type marker
@@ -105,12 +110,13 @@ default type marker
 ---
 
 (source_file
-  (type_alias
-    name: (default_type_name)
-    definition: (tuple_type
-      name: (tuple_name)
-      (type_identifier
-        name: (type_name)))))
+  (sequence
+    (type_alias
+      name: (default_type_name)
+      definition: (tuple_type
+        name: (tuple_name)
+        (type_identifier
+          name: (type_name))))))
 
 ==================
 parameterised default type marker
@@ -121,18 +127,19 @@ parameterised default type marker
 ---
 
 (source_file
-  (type_alias
-    name: (default_type_name)
-    (type_parameters
-      (type_name))
-    definition: (union_type
-      (tuple_type
-        name: (tuple_name))
-      (tuple_type
-        name: (tuple_name)
-        (type_identifier
-          name: (type_name))
-        (cycle_type)))))
+  (sequence
+    (type_alias
+      name: (default_type_name)
+      (type_parameters
+        (type_name))
+      definition: (union_type
+        (tuple_type
+          name: (tuple_name))
+        (tuple_type
+          name: (tuple_name)
+          (type_identifier
+            name: (type_name))
+          (cycle_type))))))
 
 ==================
 self default type reference
@@ -144,7 +151,7 @@ g = #' { 0 }
 ---
 
 (source_file
-  (expression
+  (sequence
     (chain
       binding: (identifier)
       (function
@@ -154,7 +161,7 @@ g = #' { 0 }
               name: (type_name))))
         (block
           (branch
-            (expression
+            (sequence
               (chain
                 (integer)))))))
     (chain
@@ -163,7 +170,7 @@ g = #' { 0 }
         parameter: (self_default_type)
         (block
           (branch
-            (expression
+            (sequence
               (chain
                 (integer)))))))))
 
@@ -176,13 +183,14 @@ function type alias
 ---
 
 (source_file
-  (type_alias
-    name: (type_name)
-    definition: (function_type
-      input: (type_identifier
-        name: (type_name))
-      output: (type_identifier
-        name: (type_name)))))
+  (sequence
+    (type_alias
+      name: (type_name)
+      definition: (function_type
+        input: (type_identifier
+          name: (type_name))
+        output: (type_identifier
+          name: (type_name))))))
 
 ==================
 omittable field labels
@@ -193,12 +201,13 @@ omittable field labels
 ---
 
 (source_file
-  (type_alias
-    name: (type_name)
-    definition: (tuple_type
-      name: (identifier)
-      (type_identifier
-        name: (type_name))
-      name: (identifier)
-      (type_identifier
-        name: (type_name)))))
+  (sequence
+    (type_alias
+      name: (type_name)
+      definition: (tuple_type
+        name: (identifier)
+        (type_identifier
+          name: (type_name))
+        name: (identifier)
+        (type_identifier
+          name: (type_name))))))

@@ -336,7 +336,7 @@
         "required": false,
         "types": [
           {
-            "type": "expression",
+            "type": "sequence",
             "named": true
           }
         ]
@@ -346,7 +346,7 @@
         "required": false,
         "types": [
           {
-            "type": "expression",
+            "type": "sequence",
             "named": true
           }
         ]
@@ -357,7 +357,7 @@
       "required": false,
       "types": [
         {
-          "type": "expression",
+          "type": "sequence",
           "named": true
         }
       ]
@@ -636,11 +636,11 @@
     "fields": {}
   },
   {
-    "type": "expression",
+    "type": "field_default",
     "named": true,
     "fields": {},
     "children": {
-      "multiple": true,
+      "multiple": false,
       "required": true,
       "types": [
         {
@@ -2070,20 +2070,35 @@
     }
   },
   {
+    "type": "sequence",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "chain",
+          "named": true
+        },
+        {
+          "type": "type_alias",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "source_file",
     "named": true,
     "root": true,
     "fields": {},
     "children": {
-      "multiple": true,
+      "multiple": false,
       "required": false,
       "types": [
         {
-          "type": "expression",
-          "named": true
-        },
-        {
-          "type": "type_alias",
+          "type": "sequence",
           "named": true
         }
       ]
@@ -2417,6 +2432,10 @@
       "types": [
         {
           "type": "cycle_type",
+          "named": true
+        },
+        {
+          "type": "field_default",
           "named": true
         },
         {

@@ -48,7 +48,7 @@ pub struct RecordingFrame {
 
 #[derive(Clone)]
 pub struct ModuleCache {
-    pub ast_cache: HashMap<ModuleId, ast::Program>,
+    pub ast_cache: HashMap<ModuleId, ast::Sequence>,
     pub import_stack: Vec<ModuleId>,
     /// Cache for module values with their types and extracted binary data.
     /// With capture-by-value, function indices can be reused, making this cache valid.
@@ -176,7 +176,7 @@ impl ModuleCache {
         &mut self,
         id: &ModuleId,
         source: &str,
-    ) -> Result<ast::Program, Error> {
+    ) -> Result<ast::Sequence, Error> {
         if let Some(cached_ast) = self.ast_cache.get(id).cloned() {
             return Ok(cached_ast);
         }
@@ -292,7 +292,7 @@ pub fn module_type_namespace(
 /// Resolve every type alias declared in a module into a `ModuleTypeNamespace`. Aliases are
 /// resolved in order so that later definitions can reference earlier ones.
 fn build_type_namespace(
-    parsed: &ast::Program,
+    parsed: &ast::Sequence,
     package: &PackageId,
     resolver: &dyn ModuleResolver,
     module_cache: &mut ModuleCache,
@@ -308,13 +308,15 @@ fn build_type_namespace(
     let mut default: Option<TypeAliasDef> = None;
     let mut named: HashMap<String, TypeAliasDef> = HashMap::new();
 
-    for statement in &parsed.statements {
-        let ast::Statement::TypeAlias {
+    // Only *top-level* aliases form the module's type namespace: one declared inside a block or
+    // function body is scoped to it, and so is module-private.
+    for step in &parsed.steps {
+        let ast::Step::TypeAlias {
             name,
             type_parameters,
             type_definition,
             ..
-        } = statement
+        } = step
         else {
             continue;
         };
@@ -372,7 +374,7 @@ fn build_type_namespace(
 /// the compiler fully compiles these modules before the unit's own body, so a
 /// module's registrations form a contiguous run in the program rather than
 /// interleaving with its importers'.
-pub fn collect_value_imports(program: &ast::Program) -> Vec<(Vec<String>, ast::Spanned)> {
+pub fn collect_value_imports(program: &ast::Sequence) -> Vec<(Vec<String>, ast::Spanned)> {
     collect(program, false)
 }
 
@@ -381,23 +383,16 @@ pub fn collect_value_imports(program: &ast::Program) -> Vec<(Vec<String>, ast::S
 /// wherever a type can be written. This is the dependency set an artifact key hashes:
 /// a module's compiled form depends on its type-referenced modules' definitions just
 /// as on its value imports', so both must invalidate it.
-pub fn collect_module_references(program: &ast::Program) -> Vec<(Vec<String>, ast::Spanned)> {
+pub fn collect_module_references(program: &ast::Sequence) -> Vec<(Vec<String>, ast::Spanned)> {
     collect(program, true)
 }
 
-fn collect(program: &ast::Program, types: bool) -> Vec<(Vec<String>, ast::Spanned)> {
+fn collect(program: &ast::Sequence, types: bool) -> Vec<(Vec<String>, ast::Spanned)> {
     let mut collector = Collector {
         found: Vec::new(),
         types,
     };
-    for statement in &program.statements {
-        match statement {
-            ast::Statement::Expression(sequence) => collector.sequence(sequence),
-            ast::Statement::TypeAlias {
-                type_definition, ..
-            } => collector.type_def(type_definition),
-        }
-    }
+    collector.steps(&program.steps);
     let mut seen = std::collections::HashSet::new();
     collector
         .found
@@ -413,11 +408,11 @@ struct Collector {
 }
 
 impl Collector {
-    fn expression(&mut self, expression: &ast::Expression) {
-        for annotation in &expression.annotations {
+    fn block(&mut self, block: &ast::Block) {
+        for annotation in &block.annotations {
             self.chain(&annotation.value);
         }
-        for branch in &expression.branches {
+        for branch in &block.branches {
             self.sequence(&branch.condition);
             if let Some(consequence) = &branch.consequence {
                 self.sequence(consequence);
@@ -426,13 +421,24 @@ impl Collector {
     }
 
     fn sequence(&mut self, sequence: &ast::Sequence) {
-        for chain in &sequence.chains {
-            self.chain(chain);
+        self.steps(&sequence.steps);
+    }
+
+    /// A type alias anywhere — top level or nested in a block — may name a module type, so
+    /// its definition is walked for references just like a chain's terms.
+    fn steps(&mut self, steps: &[ast::Step]) {
+        for step in steps {
+            match step {
+                ast::Step::Chain(chain) => self.chain(chain),
+                ast::Step::TypeAlias {
+                    type_definition, ..
+                } => self.type_def(type_definition),
+            }
         }
     }
 
     fn chain(&mut self, chain: &ast::Chain) {
-        if let Some(pattern) = &chain.match_pattern {
+        if let Some(pattern) = &chain.binding {
             self.pattern(pattern);
         }
         for term in &chain.terms {
@@ -457,12 +463,12 @@ impl Collector {
             }
             ast::Term::String(_, segments) => {
                 for segment in segments {
-                    if let ast::StrSegment::Hole(expression) = segment {
-                        self.expression(expression);
+                    if let ast::StrSegment::Hole(block) = segment {
+                        self.block(block);
                     }
                 }
             }
-            ast::Term::Block(expression) => self.expression(expression),
+            ast::Term::Block(block) => self.block(block),
             ast::Term::Function(function) => {
                 if self.types {
                     if let Some(parameter) = &function.parameter_type {
@@ -473,7 +479,7 @@ impl Collector {
                     }
                 }
                 if let Some(body) = &function.body {
-                    self.expression(body);
+                    self.block(body);
                 }
             }
             ast::Term::Access(access)

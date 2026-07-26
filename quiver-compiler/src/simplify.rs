@@ -30,52 +30,44 @@ pub struct Options<'a> {
     pub group_consequences: bool,
 }
 
-/// Normalize the blocks throughout `program`: remove the presentational ones (splice a single-chain
-/// redundant block's terms into its chain, and with `options.lift` lift a multi-step no-binding
-/// block's chains into its sequence) and, with `options.group_consequences`, add grouping braces
-/// around compound branch consequences.
-pub fn normalize_blocks(program: Program, options: &Options) -> Program {
-    Program {
-        statements: program
-            .statements
-            .into_iter()
-            .map(|statement| match statement {
-                Statement::Expression(sequence) => {
-                    Statement::Expression(strip_sequence(sequence, options))
-                }
-                // A type alias has no value terms to simplify.
-                type_alias => type_alias,
-            })
-            .collect(),
-    }
-}
-
-fn strip_sequence(sequence: Sequence, options: &Options) -> Sequence {
-    let mut chains = Vec::with_capacity(sequence.chains.len());
-    for chain in sequence.chains {
+/// Normalize the blocks throughout `sequence` — a whole program, or any nested branch body:
+/// remove the presentational ones (splice a single-chain redundant block's terms into its chain,
+/// and with `options.lift` lift a multi-step no-binding block's chains into its sequence) and,
+/// with `options.group_consequences`, add grouping braces around compound branch consequences.
+pub fn normalize_blocks(sequence: Sequence, options: &Options) -> Sequence {
+    let mut steps = Vec::with_capacity(sequence.steps.len());
+    for step in sequence.steps {
+        // A type alias has no value terms to simplify.
+        let chain = match step {
+            Step::Chain(chain) => chain,
+            type_alias => {
+                steps.push(type_alias);
+                continue;
+            }
+        };
         let chain = strip_chain(chain, options);
         // Lift a multi-step no-binding block that is a sequence step's sole term, splicing its
-        // (already-simplified) chains into this sequence so the compiler emits no frame for it. A
+        // (already-simplified) steps into this sequence so the compiler emits no frame for it. A
         // single-step such block was already spliced into the chain by `strip_chain`.
         if options.lift
-            && chain.match_pattern.is_none()
+            && chain.binding.is_none()
             && matches!(chain.terms.as_slice(), [term] if is_liftable_block(term))
         {
-            let Some(Term::Block(mut expression)) = chain.terms.into_iter().next() else {
+            let Some(Term::Block(mut block)) = chain.terms.into_iter().next() else {
                 unreachable!("matched a sole block term")
             };
-            chains.extend(expression.branches.remove(0).condition.chains);
+            steps.extend(block.branches.remove(0).condition.steps);
         } else {
-            chains.push(chain);
+            steps.push(Step::Chain(chain));
         }
     }
-    Sequence { chains }
+    Sequence { steps }
 }
 
 fn strip_chain(chain: Chain, options: &Options) -> Chain {
     let Chain {
-        match_pattern,
-        bind_span,
+        binding,
+        binding_span,
         span,
         terms,
     } = chain;
@@ -86,28 +78,34 @@ fn strip_chain(chain: Chain, options: &Options) -> Chain {
         // is tested; then splice a redundant block's body terms in place of the block.
         let term = strip_term(term, options);
         let strip = is_redundant_block(&term) && {
-            let Term::Block(expression) = &term else {
+            let Term::Block(block) = &term else {
                 unreachable!("redundant implies a block")
             };
-            let body = &expression.branches[0].condition.chains[0];
+            let body = block.branches[0]
+                .condition
+                .single_chain()
+                .expect("redundant implies a single chain step");
             // A body ending in a tail call may only be spliced when the block is the chain's last
             // term, so the `^` stays final rather than gaining dead code after it.
             let ends_in_tail_call = body.terms.last().is_some_and(is_tail_call);
             !(options.keep)(body) && (!ends_in_tail_call || index == last_index)
         };
         if strip {
-            let Term::Block(mut expression) = term else {
+            let Term::Block(mut block) = term else {
                 unreachable!("redundant implies a block")
             };
-            let mut condition = expression.branches.remove(0).condition;
-            simplified.extend(condition.chains.remove(0).terms);
+            let mut condition = block.branches.remove(0).condition;
+            let Step::Chain(body) = condition.steps.remove(0) else {
+                unreachable!("redundant implies a single chain step")
+            };
+            simplified.extend(body.terms);
         } else {
             simplified.push(term);
         }
     }
     Chain {
-        match_pattern,
-        bind_span,
+        binding,
+        binding_span,
         span,
         terms: simplified,
     }
@@ -128,21 +126,19 @@ fn strip_term(term: Term, options: &Options) -> Term {
                 .collect();
             Term::Tuple(tuple)
         }
-        Term::Block(expression) => Term::Block(strip_expression(expression, options)),
+        Term::Block(block) => Term::Block(strip_block(block, options)),
         Term::String(style, segments) => Term::String(
             style,
             segments
                 .into_iter()
                 .map(|segment| match segment {
-                    StrSegment::Hole(expression) => {
-                        StrSegment::Hole(strip_expression(expression, options))
-                    }
+                    StrSegment::Hole(block) => StrSegment::Hole(strip_block(block, options)),
                     text => text,
                 })
                 .collect(),
         ),
         Term::Function(mut function) => {
-            function.body = function.body.map(|body| strip_expression(body, options));
+            function.body = function.body.map(|body| strip_block(body, options));
             Term::Function(function)
         }
         Term::Spawn(inner, arg, span) => Term::Spawn(
@@ -164,9 +160,9 @@ fn strip_term(term: Term, options: &Options) -> Term {
     }
 }
 
-fn strip_expression(expression: Expression, options: &Options) -> Expression {
-    Expression {
-        annotations: expression
+fn strip_block(block: Block, options: &Options) -> Block {
+    Block {
+        annotations: block
             .annotations
             .into_iter()
             .map(|annotation| Annotation {
@@ -174,13 +170,13 @@ fn strip_expression(expression: Expression, options: &Options) -> Expression {
                 ..annotation
             })
             .collect(),
-        branches: expression
+        branches: block
             .branches
             .into_iter()
             .map(|branch| Branch {
-                condition: strip_sequence(branch.condition, options),
+                condition: normalize_blocks(branch.condition, options),
                 consequence: branch.consequence.map(|consequence| {
-                    let consequence = strip_sequence(consequence, options);
+                    let consequence = normalize_blocks(consequence, options);
                     if options.group_consequences {
                         group_consequence(consequence)
                     } else {
@@ -196,22 +192,24 @@ fn strip_expression(expression: Expression, options: &Options) -> Expression {
 /// step (or a consequence that already wraps the steps in a block) is one chain and left untouched;
 /// a binding/matching consequence is not frame-free and keeps its own markers.
 fn group_consequence(consequence: Sequence) -> Sequence {
-    if consequence.chains.len() > 1 && consequence.chains.iter().all(is_frame_free_chain) {
-        let block = Term::Block(Expression {
+    let all_chains = consequence
+        .steps
+        .iter()
+        .all(|step| step.as_chain().is_some_and(is_frame_free_chain));
+    if consequence.steps.len() > 1 && all_chains {
+        let block = Term::Block(Block {
             annotations: vec![],
             branches: vec![Branch {
                 condition: consequence,
                 consequence: None,
             }],
         });
-        Sequence {
-            chains: vec![Chain {
-                match_pattern: None,
-                bind_span: Spanned::default(),
-                span: Spanned::default(),
-                terms: vec![block],
-            }],
-        }
+        Sequence::from_chains([Chain {
+            binding: None,
+            binding_span: Spanned::default(),
+            span: Spanned::default(),
+            terms: vec![block],
+        }])
     } else {
         consequence
     }
@@ -220,13 +218,16 @@ fn group_consequence(consequence: Sequence) -> Sequence {
 /// Whether `term` is a redundant block whose braces can be dropped: one branch, no `=>`, and a
 /// single non-empty chain that is safe to inline (see [`is_inlinable_chain`]). Whether it is *also*
 /// safe given its surrounding position (tail call as the last term) is checked by `strip_chain`.
+///
+/// `single_chain` also excludes a block that declares a type alias: dropping those braces would
+/// widen the alias's scope to the enclosing one, where it could shadow an outer alias of the same
+/// name.
 pub fn is_redundant_block(term: &Term) -> bool {
-    matches!(term, Term::Block(expression)
-    if expression.annotations.is_empty()
-        && expression.branches.len() == 1
-        && expression.branches[0].consequence.is_none()
-        && expression.branches[0].condition.chains.len() == 1
-        && is_inlinable_chain(&expression.branches[0].condition.chains[0]))
+    matches!(term, Term::Block(block)
+    if block.annotations.is_empty()
+        && block.branches.len() == 1
+        && block.branches[0].consequence.is_none()
+        && block.branches[0].condition.single_chain().is_some_and(is_inlinable_chain))
 }
 
 /// A chain whose terms can be spliced out of a redundant block: non-empty, frame-free, and with no
@@ -239,21 +240,26 @@ fn is_inlinable_chain(chain: &Chain) -> bool {
 /// match is excluded because a block disables complement narrowing (see `compiler.rs`), so a block
 /// wrapping a match can be a deliberate narrowing barrier; keeping it avoids changing type-checking.
 fn is_frame_free_chain(chain: &Chain) -> bool {
-    chain.match_pattern.is_none() && !chain.terms.iter().any(contains_match)
+    chain.binding.is_none() && !chain.terms.iter().any(contains_match)
 }
 
-/// Whether `term` is a multi-step block whose runtime frame is unnecessary, so its chains may be
+/// Whether `term` is a multi-step block whose runtime frame is unnecessary, so its steps may be
 /// lifted into the enclosing sequence: no annotations (they attach to the block's result, so the
-/// braces are load-bearing), one branch, no `=>`, and every chain frame-free. (A single branch
-/// with no bindings needs no frame regardless of step count; a tail call is fine, since lifting
-/// into a sequence keeps it in tail position rather than mid-chain.)
+/// braces are load-bearing), one branch, no `=>`, and every step a frame-free chain. (A single
+/// branch with no bindings needs no frame regardless of step count; a tail call is fine, since
+/// lifting into a sequence keeps it in tail position rather than mid-chain.) Requiring *chain*
+/// steps also keeps a type alias in the scope that declares it — lifting would widen it.
 fn is_liftable_block(term: &Term) -> bool {
-    matches!(term, Term::Block(expression)
-        if expression.annotations.is_empty()
-            && expression.branches.len() == 1
-            && expression.branches[0].consequence.is_none()
-            && !expression.branches[0].condition.chains.is_empty()
-            && expression.branches[0].condition.chains.iter().all(is_frame_free_chain))
+    matches!(term, Term::Block(block)
+        if block.annotations.is_empty()
+            && block.branches.len() == 1
+            && block.branches[0].consequence.is_none()
+            && !block.branches[0].condition.steps.is_empty()
+            && block.branches[0]
+                .condition
+                .steps
+                .iter()
+                .all(|step| step.as_chain().is_some_and(is_frame_free_chain)))
 }
 
 /// Whether a term contains an in-chain match or binding in its own (enclosing) scope. Recurses
@@ -264,13 +270,13 @@ fn contains_match(term: &Term) -> bool {
         Term::Match(_) => true,
         Term::Tuple(tuple) => tuple.fields.iter().any(|field| match &field.value {
             FieldValue::Chain(chain) => {
-                chain.match_pattern.is_some() || chain.terms.iter().any(contains_match)
+                chain.binding.is_some() || chain.terms.iter().any(contains_match)
             }
             FieldValue::Spread(_) => false,
         }),
         Term::Select(Some(chains), _) => chains
             .iter()
-            .any(|chain| chain.match_pattern.is_some() || chain.terms.iter().any(contains_match)),
+            .any(|chain| chain.binding.is_some() || chain.terms.iter().any(contains_match)),
         _ => false,
     }
 }

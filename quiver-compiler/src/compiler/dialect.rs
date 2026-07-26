@@ -129,8 +129,8 @@ pub struct Hole {
 /// block's type or short-circuiting.)
 pub fn wrap_expansion(mut holes: Vec<Hole>, expansion: ast::Chain) -> ast::Term {
     let binder = ast::Chain {
-        match_pattern: None,
-        bind_span: ast::Spanned::default(),
+        binding: None,
+        binding_span: ast::Spanned::default(),
         span: ast::Spanned::default(),
         terms: vec![ast::Term::Match(ast::Match::Identifier(
             RIPPLE_BINDING.to_string(),
@@ -140,16 +140,16 @@ pub fn wrap_expansion(mut holes: Vec<Hole>, expansion: ast::Chain) -> ast::Term 
     let mut chains = vec![binder];
     holes.sort_by_key(|hole| hole.key);
     chains.extend(holes.into_iter().map(|hole| ast::Chain {
-        match_pattern: None,
-        bind_span: ast::Spanned::default(),
+        binding: None,
+        binding_span: ast::Spanned::default(),
         span: ast::Spanned::default(),
         terms: hole.terms,
     }));
     chains.push(expansion);
-    ast::Term::Block(ast::Expression {
+    ast::Term::Block(ast::Block {
         annotations: vec![],
         branches: vec![ast::Branch {
-            condition: ast::Sequence { chains },
+            condition: ast::Sequence::from_chains(chains),
             consequence: None,
         }],
     })
@@ -277,13 +277,13 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 .map(|(line, column)| format!(" (at {}:{line}:{column})", self.current_module))
                 .unwrap_or_default();
             self.error(&format!(
-                "returned an Unquote span that is not a single expression: {}{position}",
+                "returned an Unquote span that is not a single block: {}{position}",
                 parse_error.kind
             ))
         })?;
         self.remap_chain_spans(&mut chain, offset);
 
-        if chain.match_pattern.is_none() && chain.terms.len() == 1 {
+        if chain.binding.is_none() && chain.terms.len() == 1 {
             let term = &chain.terms[0];
             if term.is_bare_ripple() {
                 return Ok(term_chain(self.reference(RIPPLE_BINDING.to_string())));
@@ -305,12 +305,10 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 // bindings it makes stay local to it.
                 let terms = vec![
                     self.reference(RIPPLE_BINDING.to_string()),
-                    ast::Term::Block(ast::Expression {
+                    ast::Term::Block(ast::Block {
                         annotations: vec![],
                         branches: vec![ast::Branch {
-                            condition: ast::Sequence {
-                                chains: vec![chain],
-                            },
+                            condition: ast::Sequence::from_chains([chain]),
                             consequence: None,
                         }],
                     }),
@@ -539,8 +537,8 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
 
 fn term_chain(term: ast::Term) -> ast::Chain {
     ast::Chain {
-        match_pattern: None,
-        bind_span: ast::Spanned::default(),
+        binding: None,
+        binding_span: ast::Spanned::default(),
         span: ast::Spanned::default(),
         terms: vec![term],
     }
@@ -630,9 +628,9 @@ fn prefix_callback<E: Effect>(
 /// span fields can't be missed silently ([`ast::Type`] carries no spans, so type
 /// positions stop at the type boundary).
 fn walk_chain_spans(chain: &mut ast::Chain, f: &mut impl FnMut(&mut ast::Spanned)) {
-    f(&mut chain.bind_span);
+    f(&mut chain.binding_span);
     f(&mut chain.span);
-    if let Some(pattern) = &mut chain.match_pattern {
+    if let Some(pattern) = &mut chain.binding {
         walk_match_spans(pattern, f);
     }
     for term in &mut chain.terms {
@@ -647,7 +645,7 @@ fn walk_term_spans(term: &mut ast::Term, f: &mut impl FnMut(&mut ast::Spanned)) 
             for segment in segments {
                 match segment {
                     ast::StrSegment::Text(_) => {}
-                    ast::StrSegment::Hole(expression) => walk_expression_spans(expression, f),
+                    ast::StrSegment::Hole(block) => walk_block_spans(block, f),
                 }
             }
         }
@@ -664,11 +662,11 @@ fn walk_term_spans(term: &mut ast::Term, f: &mut impl FnMut(&mut ast::Spanned)) 
             }
         }
         ast::Term::Match(pattern) => walk_match_spans(pattern, f),
-        ast::Term::Block(expression) => walk_expression_spans(expression, f),
+        ast::Term::Block(block) => walk_block_spans(block, f),
         ast::Term::Function(function) => {
             f(&mut function.span);
             if let Some(body) = &mut function.body {
-                walk_expression_spans(body, f);
+                walk_block_spans(body, f);
             }
         }
         ast::Term::Access(access) | ast::Term::Reference(access) => walk_access_spans(access, f),
@@ -702,18 +700,18 @@ fn walk_term_spans(term: &mut ast::Term, f: &mut impl FnMut(&mut ast::Spanned)) 
     }
 }
 
-fn walk_expression_spans(expression: &mut ast::Expression, f: &mut impl FnMut(&mut ast::Spanned)) {
-    for annotation in &mut expression.annotations {
+fn walk_block_spans(block: &mut ast::Block, f: &mut impl FnMut(&mut ast::Spanned)) {
+    for annotation in &mut block.annotations {
         f(&mut annotation.name_span);
         f(&mut annotation.span);
         walk_chain_spans(&mut annotation.value, f);
     }
-    for branch in &mut expression.branches {
-        for chain in &mut branch.condition.chains {
+    for branch in &mut block.branches {
+        for chain in branch.condition.chains_mut() {
             walk_chain_spans(chain, f);
         }
         if let Some(consequence) = &mut branch.consequence {
-            for chain in &mut consequence.chains {
+            for chain in consequence.chains_mut() {
                 walk_chain_spans(chain, f);
             }
         }
