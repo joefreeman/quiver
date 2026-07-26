@@ -24,6 +24,39 @@
 'attr_val = '%str | Ok | []
 'statics = '%html.statics
 
+// === Client event metadata ==============================================================
+// What the browser knows about an event that its payload cannot carry: a click's
+// coordinates, a submit's form fields, an input's current value. A payload is rendered
+// on the server, so it has no room for a value only the client has — the two halves
+// travel side by side on the wire and are joined *after* the payload decodes, as the
+// `:event` annotation on the decoded event. Like every runtime-attached annotation the
+// entry is invisible to the rows, so an `update` that ignores it pays nothing, and one
+// that wants it reads it back with a checked retrieval:
+//
+//   update = #[(state): 'state, (event): 'ev] {
+//     $event:('%html/live.event)event ~> =Submit(fields: f)
+//     ...
+//   }
+//
+// *When* a binding fires is the client's business, not the event type's: `debounce` and
+// `throttle` (ms) and `keys` are bare attributes on the element carrying the binding, and
+// never reach `update`. `<input on:input={Filter} debounce="300">` sends one event when
+// typing stops rather than one per keystroke, and `<input on:keydown={Commit}
+// keys="Enter">` sends nothing at all for the other keys.
+'mods = [alt?: (Ok | []), ctrl?: (Ok | []), shift?: (Ok | []), meta?: (Ok | [])]
+
+// What a form control reports about itself. `checked?` is nil for anything that isn't a
+// checkbox or radio, and `value` is the control's own value — for a checkbox that is its
+// `value` attribute (or "on"), so `checked?` is what says whether it is ticked.
+'field = [value: '%str, checked?: (Ok | [])]
+
+'event =
+  | Click[x: 'int, y: 'int, button: 'int, mods: 'mods]
+  | Submit[fields: '%http.pairs]
+  | Input[...'field]
+  | Change[...'field]
+  | KeyDown[key: '%str, mods: 'mods]
+
 // === Session messages ===================================================================
 // Declared up front: boundary frames carry a view-spawning thunk typed against them.
 
@@ -33,7 +66,7 @@
 // wakeups its renders subscribe it to. `Park` stops rendering (wakeups are absorbed —
 // the app's buffer, not the view, is what keeps late frames correct); `Wake` drains and
 // re-renders once against the held frame, so a warm attach diffs to silence.
-'view_msg = Event['%str, '%http.pairs] | Nav['%http] | Park | Wake | '%sup.down | '%proc.changed
+'view_msg = Event['%str, 'event] | Nav['%http] | Park | Wake | '%sup.down | '%proc.changed
 
 // What the app receives: the socket from a successful claim, encoded frame messages
 // from its views, and route (dis)registrations as views spawn and kill children.
@@ -456,9 +489,10 @@ diff = #[(prev): 'frame, (next): 'frame] {
 // `path`), and `["r-", path, i]` (remove row i). `value` is a string, `true` (bare), or
 // `null` (removed). Path segments are plain indices: the client tells row steps from
 // slot steps by which markers it finds in the range (`r` vs `q:`) — the two never mix
-// at one level. Upstream, a client event is the envelope `[vid, payload, [[name,
-// value], …]]` — the vid of the nearest enclosing view boundary (0 until boundaries
-// land), the event payload, and the form's fields (empty for clicks).
+// at one level. Upstream, a client event is the envelope `[vid, payload, metadata]` —
+// the vid of the nearest enclosing view boundary (0 until boundaries land), the event
+// payload, and the browser metadata for the event that fired (a tagged array, one shape
+// per event name; see `'event`).
 
 'jsons = '%list<'%json>
 
@@ -501,7 +535,7 @@ encode = #[(vid): '%str, (ps): 'patches] {
 // A live session is an **app** process and (until boundaries land, exactly one)
 // **view** process. The app owns the connection-facing half: the socket, the parking
 // token, the buffer of frames that arrive while parked, and the wire — it forwards
-// `[vid, payload, pairs]` envelopes to the view and the view's frame messages to the
+// `[vid, payload, event]` envelopes to the view and the view's frame messages to the
 // socket, and it renders and decodes nothing. The view owns the component half:
 // mount/decode/update/view run in it, its tracked renders subscribe it to the stores
 // the view samples, and its spawns (fetchers) are its owned children. Events land on
@@ -510,26 +544,27 @@ encode = #[(vid): '%str, (ps): 'patches] {
 
 // A view definition. `'i` is the mount init: the root view mounts from the HTTP
 // request; a child view mounts from whatever its parent's `child [comp, init, key]`
-// passes. Two event types: `'w` is the **wire** union — the `on:*` payloads the view's
-// markup carries (and the client echoes back) — and `'e` the **decoded** union `update`
-// folds. They usually coincide; they split when `decode` maps wire markers to richer
-// events (a form's `Submit` becoming `Add[text]` from the form pairs). `decode`
-// receives the wire payload — %data notation in the `Ev` envelope, exactly as `on:*`
-// holes encode it, so the common form is one line,
-// `decode: #['%str, '%http.pairs] { %data.decode<Ev['ev]> $0 }` — and the form
-// pairs (empty for clicks; a submit's named fields, in the shape `%http`'s form helpers
-// read). `nav` re-derives state from a new URL without remounting — the root view's
-// live-navigation hook, receiving the raw request the app synthesized for the target; a
-// component that doesn't navigate omits it (the `_base` record) and gets an identity
-// `nav`.
-'component<'i, 's, 'e, 'w> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html<'w>, decode: #['%str, '%http.pairs] -> (Ev['e] | []), nav: #['s, '%http] -> 's]
-'component_base<'i, 's, 'e, 'w> = [mount: #'i -> 's, update: #['s, 'e] -> 's, view: #'s -> '%html<'w>, decode: #['%str, '%http.pairs] -> (Ev['e] | [])]
+// passes. `'e` is the event union — the `on:*` payloads the view's markup carries, which
+// the client echoes back and `update` folds. `decode` turns that echo back into a typed
+// event: the payload arrives as %data notation in the `Ev` envelope, exactly as `on:*`
+// holes encode it, so the field is the instantiated codec itself,
+// `decode: &%data.decode<Ev['ev]>`. Every member of `'e` must be a tuple — it is what
+// the browser metadata is stamped onto, and named payloads (`Inc`, `Del[id]`) are the
+// natural spelling anyway. It stays a field (rather than moving inside) because
+// `%data.decode` is type-consuming — it needs the concrete event type, which only the
+// component's own site knows — and it is the session's trust boundary: the payload is
+// client-supplied text, and nothing that fails to decode ever reaches `update`. `nav`
+// re-derives state from a new URL without remounting — the root view's live-navigation
+// hook, receiving the raw request the app synthesized for the target; a component that
+// doesn't navigate omits it (the `_base` record) and gets an identity `nav`.
+'component<'i, 's, 'e> = [mount: #'i -> 's, update: #[(state): 's, (event): 'e] -> 's, view: #'s -> '%html<'e>, decode: #'%str -> (Ev['e] | []), nav: #[(state): 's, (request): '%http] -> 's]
+'component_base<'i, 's, 'e> = [mount: #'i -> 's, update: #[(state): 's, (event): 'e] -> 's, view: #'s -> '%html<'e>, decode: #'%str -> (Ev['e] | [])]
 
 // Fill in a default (identity) `nav` when the record omits it, so most components —
 // which never navigate — stay four fields. Both the `component` constructor and the
 // `sim` harness normalize through this, so a `_base` record is accepted everywhere a
 // full one is.
-with_nav = #<'i, 's, 'e, 'w>('component_base<'i, 's, 'e, 'w> | 'component<'i, 's, 'e, 'w>) {
+with_nav = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
   c = $
   {
     | c
@@ -542,14 +577,20 @@ with_nav = #<'i, 's, 'e, 'w>('component_base<'i, 's, 'e, 'w> | 'component<'i, 's
       ]
     | {
       c ~> =(mount: m, update: u, view: v, decode: d)
-      [mount: &m, update: &u, view: &v, decode: &d, nav: #<'s>['s, '%http] { $0 }]
+      [
+        mount: &m,
+        update: &u,
+        view: &v,
+        decode: &d,
+        nav: #<'s>[(state): 's, (request): '%http] { $state },
+      ]
     }
   }
 }
 
 // Render inside a tracked region: the process re-subscribes to exactly the stores the
 // view sampled, and their next state change delivers a `Changed` wakeup.
-render_view = #<'i, 's, 'e, 'w>[(state): 's, (comp): 'component<'i, 's, 'e, 'w>] {
+render_view = #<'i, 's, 'e>[(state): 's, (comp): 'component<'i, 's, 'e>] {
   %proc.track #{ $$state ~> $$comp.view } ~> frame
 }
 
@@ -572,10 +613,69 @@ pairs_of = #'jsons {
   ] ~> %list.reverse
 }
 
-// A wire event is the envelope `[vid, payload, [[name, value], …]]` — the target
-// view's id, then the payload (a JSON *string* carrying the echoed attribute's %data
-// notation; a click sends an empty pair list, a submit its form's fields). Answers
-// `[vid, payload, pairs]`, or nil for anything malformed.
+// A JSON boolean as Quiver's truthiness convention; anything else reads false.
+flag_of = #'%json { =True => Ok | [] }
+
+// A modifier-key quartet from its wire form, `[alt, ctrl, shift, meta]`; a malformed
+// one reads as no modifiers held rather than failing the whole event.
+mods_of = #'%json {
+  | =Array[Cons[a, Cons[c, Cons[s, Cons[m, Nil]]]]] => [
+    alt?: a ~> jval ~> flag_of,
+    ctrl?: c ~> jval ~> flag_of,
+    shift?: s ~> jval ~> flag_of,
+    meta?: m ~> jval ~> flag_of,
+  ]
+  | [alt?: [], ctrl?: [], shift?: [], meta?: []]
+}
+
+// Each metadata shape, from the arguments following its tag. Nil for a malformed one,
+// which drops the whole event.
+click_of = #'jsons {
+  =Cons[xj, Cons[yj, Cons[bj, Cons[mj, Nil]]]]
+  xj ~> jval ~> =('int)x
+  yj ~> jval ~> =('int)y
+  bj ~> jval ~> =('int)b
+  Click[x: x, y: y, button: b, mods: mj ~> jval ~> mods_of]
+}
+
+submit_of = #'jsons { =Cons[fj, Nil]; fj ~> jval ~> =Array[fs]; Submit[fields: pairs_of fs] }
+
+// `input` and `change` report the same thing — the control's value and, for a checkbox or
+// radio, whether it is ticked — so they share a reader and differ only in their tag.
+field_of = #'jsons {
+  =Cons[vj, Cons[cj, Nil]]
+  vj ~> jval ~> =Str[vb]
+  [value: Str[vb], checked?: cj ~> jval ~> flag_of]
+}
+
+keydown_of = #'jsons {
+  =Cons[kj, Cons[mj, Nil]]
+  kj ~> jval ~> =Str[kb]
+  KeyDown[key: Str[kb], mods: mj ~> jval ~> mods_of]
+}
+
+// The browser metadata beside a payload, from its wire form — a tagged JSON array, one
+// shape per event name: `["click", x, y, button, [alt, ctrl, shift, meta]]`,
+// `["submit", [[name, value], …]]`, `["input", value, checked]`, `["change", value,
+// checked]`, `["keydown", key, [alt, ctrl, shift, meta]]`. Answers nil for anything else,
+// which drops the whole envelope: metadata the server cannot read is an event it cannot
+// faithfully fold.
+event_of = #'%json {
+  =Array[Cons[tagj, rest]]
+  tagj ~> jval ~> =Str[tb]
+  Str[tb] ~> {
+    | ="click" => click_of rest
+    | ="submit" => submit_of rest
+    | ="input" => field_of rest ~> Input[...]
+    | ="change" => field_of rest ~> Change[...]
+    | ="keydown" => keydown_of rest
+  }
+}
+
+// A wire event is the envelope `[vid, payload, metadata]` — the target view's id, the
+// payload (a JSON *string* carrying the echoed attribute's %data notation), and the
+// browser metadata for the event that fired. Answers `[vid, payload, event]`, or nil
+// for anything malformed.
 env_of = #'%str {
   %json.parse $ ~> =('%json)env
   env ~> =Array[es]
@@ -583,9 +683,9 @@ env_of = #'%str {
   vidj ~> jval ~> =Str[vb]
   r1 ~> =Cons[payloadj, r2]
   payloadj ~> jval ~> =Str[pb]
-  r2 ~> =Cons[formj, Nil]
-  formj ~> jval ~> =Array[fs]
-  [Str[vb], Str[pb], pairs_of fs]
+  r2 ~> =Cons[evj, Nil]
+  evj ~> jval ~> event_of ~> =('event)ev
+  [Str[vb], Str[pb], ev]
 }
 
 // A live-navigation message is `["nav", "/path?query"]` — the two-element shape the
@@ -603,20 +703,24 @@ nav_of = #'%str {
 
 // Decode and fold one client event through `update`: a decode answering nil drops
 // the event (stale or forged — `update` never sees it) and answers the state
-// unchanged.
-fold_event = #<'i, 's, 'e, 'w>[(state): 's, (comp): 'component<'i, 's, 'e, 'w>, (payload): '%str, (pairs): '%http.pairs] {
-  | $comp.decode [$payload, $pairs] ~> =Ev[ev] => $comp.update [$state, ev]
+// unchanged. The browser metadata joins the decoded event here, as the `:event`
+// annotation — the last point where both halves are in hand, and the only one that
+// works for every component, since the event's type is a variable to this code.
+fold_event = #<'i, 's, 'e>[(state): 's, (comp): 'component<'i, 's, 'e>, (payload): '%str, (event): 'event] {
+  | $comp.decode $payload ~> =Ev[ev] => $comp.update [state: $state, event: ev ~> { :event $event }]
   | $state
 }
 
-// The wire frame for a URL sync: `[2, "/path"]` (the client `pushState`s to it). An
-// `update` marks the state it returns with a `:redirect "/path"` annotation to ask for
-// one — server-initiated navigation. The mark is invisible to the data plane (the
-// state's value is unchanged), and the view reads it off the update result (below).
-// The mark is attached inline where the state's concrete (tuple) type is known —
-// `new_state ~> \{ :redirect "/posts/123" }` — since a generic helper can't prove an
-// arbitrary state is an annotatable carrier. Set the page for that URL in the same
-// `update`, so the view is patched and the address bar synced with no page reload.
+// Server-initiated navigation: `update` marks the state it returns, and the view emits
+// the URL-sync frame below. The mark is invisible to the data plane — the state's value,
+// matching, and equality are all unchanged — so `redirect` is an identity function that
+// happens to leave a note for the loop.
+redirect = #<'s>[(state): 's, (to): '%str] {
+  :doc "Marks the state an `update` is returning to ask the client to move its address bar to `to` — server-initiated navigation, patched and synced with no page reload. Set the page for that URL in the same `update`, so view and address bar move together. The mark rides the state's value invisibly (it survives being returned through `update`'s declared type, and matching and equality ignore it), and is emitted once per change: re-asserting the same path after an unmarked state redirects again, but an update that merely answers a still-marked state unchanged does not."
+  $state ~> { :redirect $to }
+}
+
+// The wire frame for a URL sync: `[2, "/path"]` (the client `pushState`s to it).
 url_sync = #'%str { "[2," ~> %str.concat [~, %json.stringify $] ~> %str.concat [~, "]"] }
 
 // Emit the URL-sync frame for a step's `redirect` mark, deduplicated: annotations ride
@@ -855,7 +959,7 @@ as_frame = #'frame
 // One render step of a view: render, assign boundary vids, diff against the frame
 // the client holds, send the delta (an empty diff sends nothing), then execute the
 // reconcile. Answers [the new frame, the new kids, the next child ordinal].
-step_view = #<'i, 's, 'e, 'w>[(state): 's, (prev): 'frame, (comp): 'component<'i, 's, 'e, 'w>, (vid): '%str, (app): @'app_msg, (me): @'view_msg, (kids): 'kids, (n): 'int] {
+step_view = #<'i, 's, 'e>[(state): 's, (prev): 'frame, (comp): 'component<'i, 's, 'e>, (vid): '%str, (app): @'app_msg, (me): @'view_msg, (kids): 'kids, (n): 'int] {
   // The pids are taken by reference (a bare access would send), so bind them locally.
   app = &$app
   me = &$me
@@ -880,13 +984,13 @@ step_view = #<'i, 's, 'e, 'w>[(state): 's, (prev): 'frame, (comp): 'component<'i
 // corpse so reconcile won't quietly respawn a repeat offender. (A deliberate
 // kill's Down finds no tracked vid — the entry is removed before the kill — and
 // is dropped.)
-vlife = #<'i, 's, 'e, 'w>[(mode): 'vmode, (state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e, 'w>, (vid): '%str, (app): @'app_msg, (kids): 'kids, (n): 'int, (synced): ('%str | [])] {
+vlife = #<'i, 's, 'e>[(mode): 'vmode, (state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e>, (vid): '%str, (app): @'app_msg, (kids): 'kids, (n): 'int, (synced): ('%str | [])] {
   // The pid is taken by reference (a bare access would send), so bind it locally.
   app = &$app
   me = &.
   !'view_msg ~> {
-    | =Event[payload, pairs] => {
-      s2 = fold_event [$state, $comp, payload, pairs]
+    | =Event[payload, ev] => {
+      s2 = fold_event [$state, $comp, payload, ev]
       // A `redirect` mark on the update result moves the client's address bar to match
       // the page this same update set — server-initiated navigation.
       sy2 = sync_redirect [s2, $synced, &app]
@@ -897,7 +1001,7 @@ vlife = #<'i, 's, 'e, 'w>[(mode): 'vmode, (state): 's, (f): 'frame, (comp): 'com
     // survives), then re-render and patch like any other step. A `nav` may itself mark
     // its result with `:redirect` (URL canonicalization) — synced like an update's.
     | =Nav[req] => {
-      s2 = $comp.nav [$state, req]
+      s2 = $comp.nav [state: $state, request: req]
       sy2 = sync_redirect [s2, $synced, &app]
       r = step_view [s2, $f, $comp, $vid, &app, &me, $kids, $n]
       ^ [$mode, s2, r.0, $comp, $vid, &app, r.1, r.2, sy2]
@@ -932,7 +1036,7 @@ vlife = #<'i, 's, 'e, 'w>[(mode): 'vmode, (state): 's, (f): 'frame, (comp): 'com
 // Settle: drain `Changed` in quiet-window steps, re-rendering after each burst,
 // until a window passes silently (or the deadline lapses). Answers the settled
 // frame. `left` is the remaining deadline budget.
-settle = #<'i, 's, 'e, 'w>[(state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e, 'w>, (left): 'int] {
+settle = #<'i, 's, 'e>[(state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e>, (left): 'int] {
   {
     | %num.lt? [0, $left] => ![#'%proc.changed, settle_quiet] ~> {
       | ='%proc.changed => {
@@ -951,7 +1055,7 @@ settle = #<'i, 's, 'e, 'w>[(state): 's, (f): 'frame, (comp): 'component<'i, 's, 
 // for a child. Children spawn strictly after the announcement, so their first
 // frames arrive behind the markup that holds their markers (or, at a dead render,
 // splice into it at the app).
-view_run = #<'i, 's, 'e, 'w>['i, 'component<'i, 's, 'e, 'w>, '%str, @'app_msg, 'vboot] {
+view_run = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>, '%str, @'app_msg, 'vboot] {
   =[init, comp, vid, app, boot]
   // `&.` before any receiving call: taken later, its inferred send would be the
   // partially-widened receive (just the settle drain's `Changed`), which no longer
@@ -988,8 +1092,8 @@ view_run = #<'i, 's, 'e, 'w>['i, 'component<'i, 's, 'e, 'w>, '%str, @'app_msg, '
 // runs it against the HTTP request instead of placing it. (The inner literal
 // re-declares `<'i>`: a nested signature reaches the enclosing type parameters by
 // re-declaration — suffix inheritance makes it the same variable.)
-component = #<'w, 'i, 's, 'e>('component_base<'i, 's, 'e, 'w> | 'component<'i, 's, 'e, 'w>) {
-  :doc "Defines a component from its `[mount, update, view, decode]` record — `decode` receives the `on:*` payload as %data notation in the `Ev` envelope, so the common form is `decode: #['%str, '%http.pairs] \{ %data.decode<Ev['ev]> $0 }` (add a `nav: #['s, '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. Pin the wire-event type — `component<'ev> [...]` — to compile-check the view's `on:*` payloads against it (unpinned, a stray payload widens the inferred union and is only dropped at decode); pin the union `decode` reads when it maps wire markers to richer events. The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
+component = #<'e, 'i, 's>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
+  :doc "Defines a component from its `[mount, update, view, decode]` record — `decode` reads the `on:*` payload the client echoes back, %data notation in the `Ev` envelope, so the field is the instantiated codec itself, `decode: &%data.decode<Ev['ev]>` (add a `nav: #[(state): 's, (request): '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. Pin the event type — `component<'ev> [...]` — to compile-check the view's `on:*` payloads against it (unpinned, a stray payload widens the inferred union and is only dropped at decode). What the browser knows and the payload cannot carry — a click's coordinates, a submit's fields, an input's value — rides the event as the `:event` annotation, read in `update` with a checked retrieval (`e:(Submit(fields: '%http.pairs))event`). The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
   comp = with_nav $
   #<'i>'place<'i> {
     i = $init
@@ -1157,8 +1261,8 @@ route_events = #[(req): '%http, (messages): '%http/websocket.messages, (routes):
       {
         // The three-element event envelope first — events dominate, so the common path
         // parses once (a two-element nav message can't match it).
-        | env_of t ~> =[v, payload, pairs]; route_of [$routes, v] ~> =RFound[p] => {
-          Event[payload, pairs] ~> p; Ok
+        | env_of t ~> =[v, payload, ev]; route_of [$routes, v] ~> =RFound[p] => {
+          Event[payload, ev] ~> p; Ok
         }
         // A live-navigation message re-derives the root: build the request for the new
         // target (keeping the initial request's method/headers/cookies) and hand it to
@@ -1166,7 +1270,7 @@ route_events = #[(req): '%http, (messages): '%http/websocket.messages, (routes):
         | nav_of t ~> =Str[tb]; route_of [$routes, "0"] ~> =RFound[p] => {
           %http.split_target Str[tb] ~> =[path, query]
           Nav[
-            ~[...req, target: Str[tb], path: path, query: query],
+            req[..., target: Str[tb], path: path, query: query],
           ] ~> p
           Ok
         }
@@ -1506,21 +1610,21 @@ join = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (registry)
 // process, so after stepping a store a test receives the wakeup itself
 // (`!'%proc.changed`) and then applies `sim_changed`, mirroring the view's select.
 
-'sim<'i, 's, 'e, 'w> = Sim[comp: 'component<'i, 's, 'e, 'w>, state: 's, frame: 'frame]
+'sim<'i, 's, 'e> = Sim[comp: 'component<'i, 's, 'e>, state: 's, frame: 'frame]
 
-sim = #<'w, 'i, 's, 'e>[(init): 'i, (cfg): ('component_base<'i, 's, 'e, 'w> | 'component<'i, 's, 'e, 'w>)] {
+sim = #<'e, 'i, 's>[(init): 'i, (cfg): ('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>)] {
   :doc "Mounts a component with no socket, for tests: answers a sim holding the mounted state and frame 0. Step it with `sim_text` / `sim_event` / `sim_changed`; read its region HTML with `sim_html`. Pin the wire-event type — `sim<'ev> [...]` — to compile-check the view's `on:*` payloads."
   comp = with_nav $cfg
   state = comp.mount $init
   Sim[comp: comp, state: state, frame: render_view [state, comp]]
 }
 
-sim_text = #<'i, 's, 'e, 'w>[(s): 'sim<'i, 's, 'e, 'w>, (text): '%str] {
-  :doc "Feeds a sim one wire envelope — the JSON a socket Text frame carries, `[vid, payload, [[name, value], …]]` — through the session's own parse → decode → update seam. Answers `[sim2, patches]`; a malformed envelope drops silently (the sim unchanged, `Nil` patches) and a decode answering nil leaves the state untouched, exactly as the live path drops them."
+sim_text = #<'i, 's, 'e>[(s): 'sim<'i, 's, 'e>, (text): '%str] {
+  :doc "Feeds a sim one wire envelope — the JSON a socket Text frame carries, `[vid, payload, metadata]` — through the session's own parse → decode → update seam. Answers `[sim2, patches]`; a malformed envelope drops silently (the sim unchanged, `Nil` patches) and a decode answering nil leaves the state untouched, exactly as the live path drops them."
   $s ~> =Sim(comp: comp, state: state, frame: prev)
   {
-    | env_of $text ~> =[_, payload, pairs] => {
-      s2 = fold_event [state, comp, payload, pairs]
+    | env_of $text ~> =[_, payload, ev] => {
+      s2 = fold_event [state, comp, payload, ev]
       f2 = render_view [s2, comp]
       [Sim[comp: comp, state: s2, frame: f2], diff [prev, f2]]
     }
@@ -1528,22 +1632,22 @@ sim_text = #<'i, 's, 'e, 'w>[(s): 'sim<'i, 's, 'e, 'w>, (text): '%str] {
   }
 }
 
-sim_event = #<'i, 's, 'e, 'w>[(s): 'sim<'i, 's, 'e, 'w>, (ev): 'e] {
+sim_event = #<'i, 's, 'e>[(s): 'sim<'i, 's, 'e>, (ev): 'e] {
   :doc "Feeds a sim one already-decoded event, straight to `update` — the app-level step, for asserting `update`/`view` behavior without wire shapes. Answers `[sim2, patches]` (`Nil` when the render's diff is empty — the empty-frame suppression seam)."
   $s ~> =Sim(comp: comp, state: state, frame: prev)
-  s2 = comp.update [state, $ev]
+  s2 = comp.update [state: state, event: $ev]
   f2 = render_view [s2, comp]
   [Sim[comp: comp, state: s2, frame: f2], diff [prev, f2]]
 }
 
-sim_changed = #<'i, 's, 'e, 'w>'sim<'i, 's, 'e, 'w> {
+sim_changed = #<'i, 's, 'e>'sim<'i, 's, 'e> {
   :doc "The wakeup path: re-render and diff against the sim's frame, as the loop does after a `'%proc.changed` wakeup from a sampled store. Answers `[sim2, patches]`. The wakeup itself is the caller's to receive (`!'%proc.changed`) — the sim's tracked renders subscribed the calling process."
   =Sim(comp: comp, state: state, frame: prev)
   f2 = render_view [state, comp]
   [Sim[comp: comp, state: state, frame: f2], diff [prev, f2]]
 }
 
-sim_html = #<'i, 's, 'e, 'w>'sim<'i, 's, 'e, 'w> {
+sim_html = #<'i, 's, 'e>'sim<'i, 's, 'e> {
   :doc "The sim's current region HTML (instrumented, as a live client's DOM shows it)."
   =Sim(frame: f); render f
 }
@@ -1749,10 +1853,10 @@ client_js = """
   addEventListener('pageshow', (e) => \{
     if (e.persisted) connect();
   });
+  // The live element for an event, or null.
   const live = (e, attr) => \{
-    const el = e.target.closest('[' + attr + ']');
+    const el = e.target.closest && e.target.closest('[' + attr + ']');
     if (!el || !root.contains(el)) return null;
-    e.preventDefault();
     return ws && ws.readyState === 1 ? el : null;
   };
   // The event's view: the nearest enclosing v: boundary, or the root (\"0\").
@@ -1771,21 +1875,88 @@ client_js = """
     });
     return found;
   };
-  // The payload is the attribute text echoed verbatim — %data notation, not JSON — so
-  // it rides the envelope as a JSON string.
-  document.addEventListener('click', (e) => \{
-    const el = live(e, 'data-q-click');
-    if (el) ws.send('[' + JSON.stringify(vidOf(el)) + ',' + JSON.stringify(el.getAttribute('data-q-click')) + ',[]]');
-  });
-  document.addEventListener('submit', (e) => \{
-    const el = live(e, 'data-q-submit');
-    if (!el) return;
+  // One event envelope: the view id, the payload (the attribute text echoed verbatim —
+  // %data notation, not JSON, so it rides as a JSON string), and this event's metadata,
+  // a tagged array the server reads as its `'event` union. The payload is what the
+  // server rendered; the metadata is everything only the browser knows. Built at event
+  // time, so a rate-limited send still carries what the DOM held when it fired.
+  const envelope = (el, attr, meta) =>
+    '[' + JSON.stringify(vidOf(el)) + ',' + JSON.stringify(el.getAttribute(attr)) + ',' + JSON.stringify(meta) + ']';
+  const mods = (e) => [!!e.altKey, !!e.ctrlKey, !!e.shiftKey, !!e.metaKey];
+  // Read from the control that actually changed, not the bound element — a binding on a
+  // <form> reports the field the user touched.
+  const fieldOf = (t) => [
+    String(t.value == null ? '' : t.value),
+    !!(t.type === 'checkbox' || t.type === 'radio') && !!t.checked,
+  ];
+  const formPairs = (el) => \{
     const pairs = [];
     new FormData(el).forEach((v, k) => \{
       if (typeof v === 'string') pairs.push([k, v]);
     });
-    ws.send('[' + JSON.stringify(vidOf(el)) + ',' + JSON.stringify(el.getAttribute('data-q-submit')) + ',' + JSON.stringify(pairs) + ']');
-    el.reset();
+    return pairs;
+  };
+  // The event table: DOM event name, whether to suppress the browser's default, and this
+  // event's metadata. `cancel` is the policy question each entry answers — a navigation
+  // or form submission is ours to take over, while typing, selecting and key presses are
+  // the user's own and must go through untouched.
+  const EVENTS = [
+    ['click', true, (e, el) => ['click', e.clientX | 0, e.clientY | 0, e.button | 0, mods(e)]],
+    ['submit', true, (e, el) => ['submit', formPairs(el)]],
+    ['input', false, (e, el) => ['input'].concat(fieldOf(e.target))],
+    ['change', false, (e, el) => ['change'].concat(fieldOf(e.target))],
+    ['keydown', false, (e, el) => ['keydown', String(e.key == null ? '' : e.key), mods(e)]],
+  ];
+  // Per-element, per-event rate-limit state. Keyed weakly: a patch that replaces the
+  // element drops its pending timer with it, which is what we want — a debounce for a
+  // node that no longer exists has nothing to report.
+  const limits = new WeakMap();
+  const limitState = (el, name) => \{
+    let m = limits.get(el);
+    if (!m) \{
+      m = \{};
+      limits.set(el, m);
+    }
+    if (!m[name]) m[name] = \{ timer: 0, last: 0 };
+    return m[name];
+  };
+  // Deliver, or not, per the element's `debounce`/`throttle` attributes (ms). Debounce
+  // waits for the events to stop and sends the newest envelope; throttle sends the first
+  // of each window and drops the rest. Neither is visible to the server.
+  const deliver = (el, name, text) => \{
+    const st = limitState(el, name);
+    const d = parseInt(el.getAttribute('data-q-debounce'), 10);
+    if (d > 0) \{
+      clearTimeout(st.timer);
+      st.timer = setTimeout(() => ws.send(text), d);
+      return;
+    }
+    const t = parseInt(el.getAttribute('data-q-throttle'), 10);
+    if (t > 0) \{
+      const now = Date.now();
+      if (now - st.last < t) return;
+      st.last = now;
+    }
+    ws.send(text);
+  };
+  // A `keys` attribute filters key events client-side: only the named keys (whitespace
+  // separated, matched against KeyboardEvent.key) reach the server at all.
+  const keyAllowed = (e, el) => \{
+    const keys = el.getAttribute('data-q-keys');
+    if (keys == null || e.key == null) return true;
+    return keys.split(' ').filter(Boolean).indexOf(e.key) >= 0;
+  };
+  EVENTS.forEach((entry) => \{
+    const name = entry[0], cancel = entry[1], meta = entry[2];
+    const attr = 'data-q-' + name;
+    document.addEventListener(name, (e) => \{
+      const el = live(e, attr);
+      if (!el || !keyAllowed(e, el)) return;
+      if (cancel) e.preventDefault();
+      const text = envelope(el, attr, meta(e, el));
+      deliver(el, name, text);
+      if (name === 'submit') el.reset();
+    });
   });
   // Live navigation: a plain left-click on a `data-q-nav` link is sent as a nav
   // message and the URL is updated in place, instead of a full page load. Modified
@@ -1863,6 +2034,7 @@ handle = #[(req): '%http, (app): 'app] {
   encode: &encode,
   app: &app,
   component: &component,
+  redirect: &redirect,
   handle: &handle,
   sim: &sim,
   sim_text: &sim_text,

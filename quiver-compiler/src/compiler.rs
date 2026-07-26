@@ -1190,7 +1190,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 )));
             }
         }
-        if !annotations::is_annotatable(self.program, carrier_type) {
+        // A bare type *variable* carrier is permitted, deferring the carrier check to the
+        // runtime (`Annotate` fails fast on a value that cannot hold one). Generic code
+        // that stamps metadata onto a value it did not construct — the live layer joining
+        // a browser event to a decoded payload, a helper marking a state it was handed —
+        // has no other attach site, and a static check on an unpinned variable can only
+        // ever reject. The row is *not* extended in that case: nothing is provably visible
+        // through the variable, so the entry reads back only through a checked retrieval,
+        // exactly as a runtime-attached annotation does.
+        let opaque_carrier = matches!(
+            self.program.lookup_type(carrier_type),
+            Some(quiver_core::types::Type::Variable(_))
+        );
+        if !opaque_carrier && !annotations::is_annotatable(self.program, carrier_type) {
             return Err(Error::TypeUnresolved(format!(
                 "Annotations require a tuple or function carrier, but the annotated value has type {}",
                 quiver_core::format::format_type_by_id(&*self.program, carrier_type)
@@ -1246,6 +1258,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             self.codegen.add_instruction(Instruction::Annotate(key_id));
             entries.push((key_id, value_type));
+        }
+        if opaque_carrier {
+            return Ok(carrier_type);
         }
         Ok(self
             .program

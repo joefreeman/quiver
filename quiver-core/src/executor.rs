@@ -2319,12 +2319,14 @@ impl<E: Effect> Executor<E> {
         let annotation = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
         let carrier = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
-        let annotated = carrier
-            .annotated(key, annotation)
-            .ok_or_else(|| Error::TypeMismatch {
-                expected: "tuple, function or builtin".to_string(),
-                found: carrier.type_name().to_string(),
-            })?;
+        // Reachable only where the compiler could not decide: a carrier typed as a bare
+        // type variable, which a generic attach site defers to here.
+        let annotated = carrier.annotated(key, annotation).ok_or_else(|| {
+            Error::InvalidArgument(format!(
+                "Annotations require a tuple or function carrier, but the annotated value is {}",
+                carrier.type_name()
+            ))
+        })?;
         self.push_value(proc, annotated);
 
         if let Some(frame) = proc.frames.last_mut() {

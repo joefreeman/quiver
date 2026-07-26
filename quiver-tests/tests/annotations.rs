@@ -311,6 +311,49 @@ fn test_primitive_carrier_is_compile_error() {
 }
 
 #[test]
+fn test_generic_carrier_attaches_and_reads_back_checked() {
+    // A generic attach site — the carrier is a bare type variable, so the compiler
+    // cannot decide and defers the check to the runtime. Nothing is recorded in the
+    // row (nothing is provably visible through the variable), so the entry reads back
+    // through a checked retrieval, exactly as a runtime-attached annotation does.
+    quiver()
+        .evaluate(
+            r#"stamp = #<'t>['t, 'int] { $0 ~> { :seen $1 } }
+               e = stamp [Inc, 41]
+               [e, e:('int)seen]"#,
+        )
+        .expect("[Inc, 41]");
+}
+
+#[test]
+fn test_generic_carrier_is_invisible_to_the_row() {
+    // The attach does not widen the carrier's type, so a bare retrieval is still the
+    // same compile error it would be without the stamp — the checked form is the only
+    // way in, and the value itself is unchanged for matching.
+    quiver()
+        .evaluate(
+            r#"stamp = #<'t>['t, 'int] { $0 ~> { :seen $1 } }
+               stamp [Inc, 41] ~> =Inc"#,
+        )
+        .expect("Ok");
+}
+
+#[test]
+fn test_generic_carrier_with_primitive_is_runtime_error() {
+    // The deferred check, firing: a generic stamp instantiated with a primitive fails
+    // fast where a static check could only have rejected the whole (valid) function.
+    quiver()
+        .evaluate(
+            r#"stamp = #<'t>['t, 'int] { $0 ~> { :seen $1 } }
+               stamp [5, 41]"#,
+        )
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "Annotations require a tuple or function carrier, but the annotated value is integer"
+                .to_string(),
+        ));
+}
+
+#[test]
 fn test_primitive_retrieval_is_compile_error() {
     quiver().evaluate("x = 5; x:foo").expect_compile_error(
         quiver_compiler::compiler::Error::TypeUnresolved(

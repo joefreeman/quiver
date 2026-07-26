@@ -243,6 +243,12 @@ event_name? = #'%str {
   Str[%bin.slice [b, 3, %bin.length b]] ~> %str.concat ["data-q-", ~]
 }
 
+// The bare attribute names the live layer reserves, each emitted as `data-q-NAME` (or
+// nil for an ordinary name). `nav` marks a live-navigation link; `keys`, `debounce` and
+// `throttle` govern *when* this element's `on:*` bindings fire, and are read only by the
+// client — the server never sees them, and an element without them behaves as before.
+live_name? = #'%str { =("nav" | "keys" | "debounce" | "throttle"); %str.concat ["data-q-", $] }
+
 // An attribute value after its `=`: a `"…"` literal (verbatim bytes) or a `{ … }` hole
 // (recorded as its content span).
 attr_value_p = #[(cb): '%meta.cb, (state): '%parse] {
@@ -280,11 +286,11 @@ attrs_loop = #[(cb): '%meta.cb, (state): '%parse, (acc): 'pattrs] {
       =[nb, st2]
       name = Str[nb]
       // An `on:NAME` event attribute is stored (and deduplicated) under its emitted
-      // `data-q-NAME`; a bare `nav` (marking a live-navigation link) under `data-q-nav`;
-      // `ev` is nil for ordinary attributes, which store under their own name.
+      // `data-q-NAME`, as is each reserved bare name (`nav`, `keys`, …); `ev` is nil for
+      // ordinary attributes, which store under their own name.
       ev = event_name? name
       stored = {
-        | name ~> ="nav" => "data-q-nav"
+        | live_name? name ~> =Str[s] => Str[s]
         | ev ~> =Str[s] => Str[s]
         | name
       }

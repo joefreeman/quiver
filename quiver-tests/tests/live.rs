@@ -246,6 +246,24 @@ fn test_event_attributes_serialize_payloads_as_data() {
 }
 
 #[test]
+fn test_reserved_bare_attributes_emit_as_data_q() {
+    // `nav`, `keys`, `debounce` and `throttle` are the live layer's own bare attribute
+    // names: they emit under `data-q-` and are read only by the client, so they never
+    // reach the server as event metadata or as ordinary attributes.
+    quiver()
+        .evaluate(
+            r#"%html{ <input on:input={F} debounce="300" keys="Enter Escape" throttle="50"> } ~> %html.render"#,
+        )
+        .expect(
+            r#""<input data-q-input=\"Ev[F]\" data-q-debounce=\"300\" data-q-keys=\"Enter Escape\" data-q-throttle=\"50\">""#,
+        );
+    // An author still cannot write the instrumentation namespace directly.
+    quiver()
+        .evaluate(r#"%html{ <p data-q-keys="x">hi</p> }"#)
+        .expect_error_containing("'data-q' is reserved for template instrumentation");
+}
+
+#[test]
 fn test_event_payload_changes_patch_like_attributes() {
     // A payload that varies with state diffs as an ordinary attribute slot.
     quiver()
@@ -283,9 +301,9 @@ const KID: &str = r#"
     'cev = Bump
     cc = [
       mount: #'int,
-      update: #['int, 'cev] { =[n, _]; %num.add [n, 1] },
+      update: #[(state): 'int, (event): 'cev] { %num.add [$state, 1] },
       view: #'int { %str.from_int $ ~> %html{ <em>{~}</em> } },
-      decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['cev]> $0 },
+      decode: &%data.decode<Ev['cev]>,
     ]
     ccf = %html/live.component cc
 "#;
@@ -441,9 +459,9 @@ const COUNTER: &str = r#"
     'ev = Inc | Noop
     counter = [
       mount: #'%http { 0 },
-      update: #['int, 'ev] { =[n, e]; e ~> { | =Inc => %num.add [n, 1] | n } },
+      update: #[(state): 'int, (event): 'ev] { $event ~> { | =Inc => %num.add [$state, 1] | $state } },
       view: #'int { %str.from_int $ ~> %html{ <p>Count: {~}</p> } },
-      decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['ev]> $0 },
+      decode: &%data.decode<Ev['ev]>,
     ]
     req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
 "#;
@@ -502,14 +520,14 @@ fn test_sim_event_unchanged_view_answers_nil() {
 
 #[test]
 fn test_sim_text_envelope_decodes_to_patch() {
-    // A click's wire envelope — `[vid, payload, []]` as the socket Text frame carries
-    // it — through parse → decode → update → diff.
+    // A click's wire envelope — `[vid, payload, metadata]` as the socket Text frame
+    // carries it — through parse → decode → update → diff.
     quiver()
         .evaluate(
             &[
                 COUNTER,
                 r#"s = %html/live.sim [req, counter]
-                   %html/live.sim_text [s, "[\"0\", \"Ev[Inc]\", []]"] ~> =[_, ps]
+                   %html/live.sim_text [s, "[\"0\", \"Ev[Inc]\", [\"click\", 10, 20, 0, [false, false, false, false]]]"] ~> =[_, ps]
                    ps"#,
             ]
             .concat(),
@@ -527,7 +545,7 @@ fn test_sim_text_drops_malformed_and_forged() {
                 COUNTER,
                 r#"s = %html/live.sim [req, counter]
                    %html/live.sim_text [s, "not json"] ~> =[s2, ps1]
-                   %html/live.sim_text [s2, "[\"0\", \"zap\", []]"] ~> =[s3, ps2]
+                   %html/live.sim_text [s2, "[\"0\", \"zap\", [\"click\", 10, 20, 0, [false, false, false, false]]]"] ~> =[s3, ps2]
                    [ps1, ps2, %html/live.sim_html s3]"#,
             ]
             .concat(),
@@ -536,34 +554,181 @@ fn test_sim_text_drops_malformed_and_forged() {
 }
 
 #[test]
-fn test_sim_text_submit_pairs_reach_decode() {
-    // A submit envelope carries the form's `[name, value]` pairs; `decode` folds them
-    // into the event with the same helpers the POST fallback will use.
+fn test_submit_fields_reach_update_as_event_metadata() {
+    // A submit's form fields are browser metadata: they ride beside the payload and
+    // join the decoded event as the `:event` annotation, which `update` reads back with
+    // a checked retrieval. The payload itself is just the marker the view rendered.
     quiver()
         .evaluate(
-            r#"'ev = Set[Str['bin]]
+            r#"'ev = Submit
                comp = [
                  mount: #'%http { "" },
-                 update: #[Str['bin], 'ev] { =[_, Set[t]]; t },
-                 view: #Str['bin] { %html{ <p>{$}</p> } },
-                 decode: #[Str['bin], '%http.pairs] {
-                   =[t, form]
-                   %data.decode<Ev[Submit]> t ~> =Ev[Submit]
-                   %http.get [form, "v"] ~> =Str[v]
-                   Ev[Set[Str[v]]]
+                 update: #[(state): Str['bin], (event): 'ev] {
+                   $event:('%html/live.event)event ~> =Submit(fields: f)
+                   %http.get [f, "v"]
                  },
+                 view: #Str['bin] { %html{ <p>{$}</p> } },
+                 decode: &%data.decode<Ev['ev]>,
                ]
                req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
                s = %html/live.sim [req, comp]
-               %html/live.sim_text [s, "[\"0\", \"Ev[Submit]\", [[\"v\", \"hello\"]]]"] ~> =[_, ps]
+               %html/live.sim_text [s, "[\"0\", \"Ev[Submit]\", [\"submit\", [[\"v\", \"hello\"]]]]"] ~> =[_, ps]
                ps"#,
         )
         .expect(r#"Cons[SetText[path: Cons[0, Nil], value: "hello"], Nil]"#);
 }
 
+#[test]
+fn test_event_metadata_is_invisible_to_the_data_plane() {
+    // The stamp rides the value without changing it: the event still matches and
+    // compares as the bare payload it decoded to, and an `update` that never asks for
+    // the metadata is untouched by its presence.
+    quiver()
+        .evaluate(
+            r#"'ev = Inc
+               comp = [
+                 mount: #'%http { "" },
+                 update: #[(state): Str['bin], (event): 'ev] { $event ~> { | =Inc => "bare" | "wrapped" } },
+                 view: #Str['bin] { %html{ <p>{$}</p> } },
+                 decode: &%data.decode<Ev['ev]>,
+               ]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               s = %html/live.sim [req, comp]
+               %html/live.sim_text [s, "[\"0\", \"Ev[Inc]\", [\"click\", 1, 2, 0, [false, false, false, false]]]"] ~> =[_, ps]
+               ps"#,
+        )
+        .expect(r#"Cons[SetText[path: Cons[0, Nil], value: "bare"], Nil]"#);
+}
+
+#[test]
+fn test_change_metadata_carries_checked_state() {
+    // A checkbox's `value` is its value attribute whether or not it is ticked, so
+    // `checked?` is what says the box is on — the reason `'field` carries both.
+    quiver()
+        .evaluate(
+            r#"'ev = Toggle
+               comp = [
+                 mount: #'%http { "" },
+                 update: #[(state): Str['bin], (event): 'ev] {
+                   $event:('%html/live.event)event ~> =Change(value: v, checked?: c)
+                   c ~> { | =Ok => %str.concat ["on:", v] | %str.concat ["off:", v] }
+                 },
+                 view: #Str['bin] { %html{ <p>{$}</p> } },
+                 decode: &%data.decode<Ev['ev]>,
+               ]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               s = %html/live.sim [req, comp]
+               %html/live.sim_text [s, "[\"0\", \"Ev[Toggle]\", [\"change\", \"yes\", true]]"] ~> =[s2, _]
+               %html/live.sim_text [s2, "[\"0\", \"Ev[Toggle]\", [\"change\", \"yes\", false]]"] ~> =[_, ps]
+               ps"#,
+        )
+        .expect(r#"Cons[SetText[path: Cons[0, Nil], value: "off:yes"], Nil]"#);
+}
+
+#[test]
+fn test_input_and_change_share_one_shape() {
+    // `input` (per keystroke) and `change` (on commit) report the same thing, so they
+    // spread one `'field` type and an update can read either the same way.
+    quiver()
+        .evaluate(
+            r#"'ev = Edit
+               comp = [
+                 mount: #'%http { "" },
+                 update: #[(state): Str['bin], (event): 'ev] {
+                   $event:('%html/live.event)event ~> =(value: v)
+                   v
+                 },
+                 view: #Str['bin] { %html{ <p>{$}</p> } },
+                 decode: &%data.decode<Ev['ev]>,
+               ]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               s = %html/live.sim [req, comp]
+               %html/live.sim_text [s, "[\"0\", \"Ev[Edit]\", [\"input\", \"typed\", false]]"] ~> =[s2, _]
+               %html/live.sim_text [s2, "[\"0\", \"Ev[Edit]\", [\"change\", \"committed\", false]]"] ~> =[_, ps]
+               ps"#,
+        )
+        .expect(r#"Cons[SetText[path: Cons[0, Nil], value: "committed"], Nil]"#);
+}
+
+#[test]
+fn test_keydown_metadata_carries_key_and_modifiers() {
+    // Which keys reach the server is the client's `keys` filter; what arrives is the
+    // key name and the modifiers held with it.
+    quiver()
+        .evaluate(
+            r#"'ev = Commit
+               comp = [
+                 mount: #'%http { "" },
+                 update: #[(state): Str['bin], (event): 'ev] {
+                   $event:('%html/live.event)event ~> =KeyDown(key: k, mods: m)
+                   m ~> =(ctrl?: Ok)
+                   k
+                 },
+                 view: #Str['bin] { %html{ <p>{$}</p> } },
+                 decode: &%data.decode<Ev['ev]>,
+               ]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               s = %html/live.sim [req, comp]
+               %html/live.sim_text [s, "[\"0\", \"Ev[Commit]\", [\"keydown\", \"Enter\", [false, true, false, false]]]"] ~> =[_, ps]
+               ps"#,
+        )
+        .expect(r#"Cons[SetText[path: Cons[0, Nil], value: "Enter"], Nil]"#);
+}
+
+#[test]
+fn test_click_metadata_carries_coordinates_and_modifiers() {
+    // Every event name has its own metadata shape; a click's is its coordinates,
+    // button, and modifier keys.
+    quiver()
+        .evaluate(
+            r#"'ev = Mark
+               comp = [
+                 mount: #'%http { "" },
+                 update: #[(state): Str['bin], (event): 'ev] {
+                   $event:('%html/live.event)event ~> =Click(x: x, y: y, mods: m)
+                   m ~> =(shift?: Ok)
+                   %str.concat [%str.from_int x, %str.concat [",", %str.from_int y]]
+                 },
+                 view: #Str['bin] { %html{ <p>{$}</p> } },
+                 decode: &%data.decode<Ev['ev]>,
+               ]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               s = %html/live.sim [req, comp]
+               %html/live.sim_text [s, "[\"0\", \"Ev[Mark]\", [\"click\", 30, 40, 0, [false, false, true, false]]]"] ~> =[_, ps]
+               ps"#,
+        )
+        .expect(r#"Cons[SetText[path: Cons[0, Nil], value: "30,40"], Nil]"#);
+}
+
 // The socket round-trip test lives in tests/live_socket.rs — its own test binary, so
 // it runs without sibling-test thread contention (the harness's free-running virtual
 // clock turns the stack's virtual-time windows into real-time races under load).
+
+#[test]
+fn test_redirect_marks_state_without_changing_it() {
+    // Server-initiated navigation asks for a URL change by marking the state `update`
+    // returns. The mark rides the value invisibly — the state matches and prints exactly
+    // as before — and the view loop reads the target with a checked retrieval.
+    quiver()
+        .evaluate(
+            r#"s = [page: "x", clicks: 3] ~> %html/live.redirect [~, "/posts/7"]
+               [s, s:('%str)redirect, s ~> =(page: "x")]"#,
+        )
+        .expect(r#"[[page: "x", clicks: 3], "/posts/7", Ok]"#);
+}
+
+#[test]
+fn test_redirect_composes_inside_generic_app_code() {
+    // The mark is attached through a type variable, so an app's own generic helper can
+    // set it — not only code that knows the state's concrete type.
+    quiver()
+        .evaluate(
+            r#"to_home = #<'s>'s { %html/live.redirect [$, "/"] }
+               s = to_home [page: "x"]
+               s:('%str)redirect"#,
+        )
+        .expect(r#""/""#);
+}
 
 #[test]
 fn test_sim_changed_rerenders_after_store_step() {
@@ -577,9 +742,9 @@ fn test_sim_changed_rerenders_after_store_step() {
                  =store
                  [
                    mount: #'%http { [store: &store] },
-                   update: #['state, Ok] { =[s, _]; s },
+                   update: #[(state): 'state, (event): Ok] { $state },
                    view: #'state { =(store: st); ?st ~> %str.from_int ~> %html{ <p>{~}</p> } },
-                   decode: #[Str['bin], '%http.pairs] { [] },
+                   decode: #'%str { [] },
                  ]
                }
                st = 0 ~> @'int { !'int ~> { =n => ^ n } }
@@ -603,9 +768,9 @@ fn test_pinned_component_rejects_stray_event_payload() {
             r#"'ev = Inc | Dec
                bad = %html/live.component<'ev> [
                  mount: #[] { 0 },
-                 update: #['int, 'ev] { $0 },
+                 update: #[(state): 'int, (event): 'ev] { $state },
                  view: #'int { %html{ <button on:click={Bogus}>+</button> } },
-                 decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['ev]> $0 },
+                 decode: &%data.decode<Ev['ev]>,
                ]
                Ok"#,
         )
@@ -621,9 +786,11 @@ fn test_pinned_component_accepts_matching_events() {
             r#"'ev = Inc | Dec
                c = %html/live.component<'ev> [
                  mount: #[] { 0 },
-                 update: #['int, 'ev] { =[n, e]; e ~> { | =Inc => %num.add [n, 1] | %num.sub [n, 1] } },
+                 update: #[(state): 'int, (event): 'ev] {
+                   $event ~> { | =Inc => %num.add [$state, 1] | %num.sub [$state, 1] }
+                 },
                  view: #'int { %html{ <button on:click={Inc}>{$}</button> } },
-                 decode: #[Str['bin], '%http.pairs] { %data.decode<Ev['ev]> $0 },
+                 decode: &%data.decode<Ev['ev]>,
                ]
                Ok"#,
         )
@@ -631,29 +798,29 @@ fn test_pinned_component_accepts_matching_events() {
 }
 
 #[test]
-fn test_wire_and_decoded_event_types_may_differ() {
-    // The two event parameters split when decode maps wire markers to richer events:
-    // the view's payloads check against the pinned *wire* union, while `update` folds
-    // the decoded one (a submit's text arrives in the form pairs, so only decode can
-    // build `Add`).
+fn test_one_event_union_folds_markers_and_payloads_together() {
+    // One event type spans both kinds of event: a marker whose data the browser
+    // supplies (`Submit`) and a payload the view rendered in full (`Del[id]`). `update`
+    // folds them together, reaching for the metadata only for the marker.
     quiver()
         .evaluate(
-            r#"'wire = Submit | Del['int]
-               'cmd = Add[Str['bin]] | Del['int]
-               s = %html/live.sim [[], [
+            r#"'ev = Submit | Del['int]
+               comp = [
                  mount: #[] { "start" },
-                 update: #[Str['bin], 'cmd] { =[_, c]; c ~> { | =Add[Str[t]] => Str[t] | "deleted" } },
-                 view: #Str['bin] { %html{ <form on:submit={Submit}><b>{$}</b></form> } },
-                 decode: #[Str['bin], '%http.pairs] {
-                   =[t, form]
-                   %data.decode<Ev['wire]> t ~> =Ev[w]
-                   w ~> {
-                     | =Submit => { %http.get [form, "t"] ~> =Str[x]; Ev[Add[Str[x]]] }
-                     | =Del[id] => Ev[Del[id]]
+                 update: #[(state): Str['bin], (event): 'ev] {
+                   $event ~> {
+                     | =Del[_] => "deleted"
+                     | =Submit => {
+                       $event:('%html/live.event)event ~> =Submit(fields: f)
+                       %http.get [f, "t"]
+                     }
                    }
                  },
-               ]]
-               %html/live.sim_text [s, "[\"0\", \"Ev[Submit]\", [[\"t\", \"typed\"]]]"] ~> =[_, ps]
+                 view: #Str['bin] { %html{ <form on:submit={Submit}><b>{$}</b></form> } },
+                 decode: &%data.decode<Ev['ev]>,
+               ]
+               s = %html/live.sim [[], comp]
+               %html/live.sim_text [s, "[\"0\", \"Ev[Submit]\", [\"submit\", [[\"t\", \"typed\"]]]]"] ~> =[_, ps]
                ps"#,
         )
         .expect(r#"Cons[SetText[path: Cons[1, Nil], value: "typed"], Nil]"#);
