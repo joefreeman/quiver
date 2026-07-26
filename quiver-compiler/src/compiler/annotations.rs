@@ -14,6 +14,11 @@ use super::{Error, typing};
 pub const PRE: &str = "pre";
 pub const POST: &str = "post";
 
+/// Per-field defaults for a function's parameter tuple: a call site fills an omitted
+/// field from this entry, read off the callee value exactly as the contract keys are.
+/// Checked at attach by [`check_defaults`].
+pub const DEFAULTS: &str = "defaults";
+
 /// The failure-provenance key. Debug builds attach it to fresh nil results
 /// *row-invisibly* — the value carries it while the rows go on saying exact-empty — so
 /// for this one key an exact row lacking the entry proves nothing: both retrieval walks
@@ -357,6 +362,82 @@ pub fn single_callable(program: &Program, type_id: usize) -> Option<(usize, usiz
         Type::Union(members) if members.len() == 1 => single_callable(program, members[0]),
         _ => None,
     }
+}
+
+/// If `type_id` is a tuple (or a single-member union of one, or an annotated one), its
+/// tuple id — the tuple counterpart of [`single_callable`].
+pub fn single_tuple(program: &Program, type_id: usize) -> Option<usize> {
+    match program.lookup_type(type_id)? {
+        Type::Tuple(tuple_id) => Some(*tuple_id),
+        Type::Annotated { base, .. } => single_tuple(program, *base),
+        Type::Union(members) if members.len() == 1 => single_tuple(program, members[0]),
+        _ => None,
+    }
+}
+
+/// Check a `:defaults` value against the function it is attached to. The entry names
+/// per-field defaults that a call site fills omitted fields from, so every field must be
+/// labeled with a field of the parameter tuple, and carry a value assignable to it. A
+/// default that could never fire — a non-function carrier, a parameter that is not a
+/// single tuple, a label naming nothing — is rejected rather than left inert.
+pub fn check_defaults(
+    program: &Program,
+    carrier_type: usize,
+    value_type: usize,
+) -> Result<(), Error> {
+    let describe = |id| quiver_core::format::format_type_by_id(program, id);
+    let (parameter, _) = single_callable(program, carrier_type).ok_or_else(|| {
+        Error::TypeUnresolved(format!(
+            "Annotation :{DEFAULTS} can only be attached to a function"
+        ))
+    })?;
+    let parameter_fields = single_tuple(program, parameter)
+        .and_then(|id| program.lookup_tuple(id))
+        .map(|info| info.fields.clone())
+        .ok_or_else(|| {
+            Error::TypeUnresolved(format!(
+                "Annotation :{DEFAULTS} requires a tuple parameter, but the function takes {}",
+                describe(parameter)
+            ))
+        })?;
+    let value_fields = single_tuple(program, value_type)
+        .and_then(|id| program.lookup_tuple(id))
+        .map(|info| info.fields.clone())
+        .ok_or_else(|| {
+            Error::TypeUnresolved(format!(
+                "Annotation :{DEFAULTS} must be a tuple of per-field defaults, but is {}",
+                describe(value_type)
+            ))
+        })?;
+
+    // Duplicate labels can't reach here: a tuple literal rejects them as `FieldDuplicated`.
+    for (name, field_type) in &value_fields {
+        let name = name.as_deref().ok_or_else(|| {
+            Error::TypeUnresolved(format!(
+                "Annotation :{DEFAULTS} takes labeled fields, each naming a parameter field"
+            ))
+        })?;
+        let declared = parameter_fields
+            .iter()
+            .find(|(field, _)| field.as_deref() == Some(name))
+            .map(|(_, ty)| *ty)
+            .ok_or_else(|| {
+                Error::TypeUnresolved(format!(
+                    "Annotation :{DEFAULTS} names '{name}', which is not a field of the parameter {}",
+                    describe(parameter)
+                ))
+            })?;
+        if !quiver_core::types::is_compatible(*field_type, declared, program) {
+            return Err(Error::TypeMismatch {
+                expected: format!(
+                    "default for '{name}' compatible with {}",
+                    describe(declared)
+                ),
+                found: describe(*field_type),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The nil-shaped members of a type, rows preserved — the values that actually flow on a

@@ -491,7 +491,18 @@ fn resolve_tuple_fields_with_spread(
                 name,
                 omittable,
                 type_def,
+                default,
             } => {
+                // A default belongs to a function, not to a type. `compile_function` strips
+                // the ones it consumes from its parameter spelling before resolving it, so
+                // one surviving to here was written where it could never fire.
+                if default.is_some() {
+                    return Err(Error::TypeUnresolved(
+                        "A field default is only allowed in a function literal's parameter \
+                         type, where it attaches to that function"
+                            .to_string(),
+                    ));
+                }
                 // Resolve the field type
                 let field_type_id = resolve_ast_type_impl(
                     recursion_depth,
@@ -753,7 +764,18 @@ fn resolve_ast_type_impl(
                         name,
                         omittable,
                         type_def,
+                        default,
                     } => {
+                        // A default belongs to a function, not to a type. `compile_function`
+                        // strips the ones it consumes from its parameter spelling before
+                        // resolving it, so one surviving here could never fire.
+                        if default.is_some() {
+                            return Err(Error::TypeUnresolved(
+                                "A field default is only allowed in a function literal's \
+                                 parameter type, where it attaches to that function"
+                                    .to_string(),
+                            ));
+                        }
                         let field_type_id = resolve_ast_type_impl(
                             recursion_depth,
                             env,

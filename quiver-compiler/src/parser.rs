@@ -1224,7 +1224,42 @@ fn resource_type(input: Span) -> IResult<Span, Type> {
     map(preceded(char('\\'), resource_type_name), Type::Resource)(input)
 }
 
+/// A field's default value: ` = <chain>`, glued to nothing and spaced like a binding. A
+/// chain ends at the `,` or `]` closing the field, so no delimiter guard is needed. Only
+/// meaningful in a function literal's parameter spelling; anywhere else the compiler
+/// rejects it, which gives a better message than making the grammar positional.
+fn field_default(input: Span) -> IResult<Span, Chain> {
+    preceded(tuple((ws0, char('='), ws1)), chain)(input)
+}
+
 fn field_type(input: Span) -> IResult<Span, FieldType> {
+    let (rest, base) = field_type_base(input)?;
+    // Spreads name no field, so they take no default.
+    if matches!(base, FieldType::Spread { .. }) {
+        return Ok((rest, base));
+    }
+    let (rest, default) = opt(map(field_default, Box::new))(rest)?;
+    let FieldType::Field {
+        name,
+        omittable,
+        type_def,
+        ..
+    } = base
+    else {
+        unreachable!("spread handled above")
+    };
+    Ok((
+        rest,
+        FieldType::Field {
+            name,
+            omittable,
+            type_def,
+            default,
+        },
+    ))
+}
+
+fn field_type_base(input: Span) -> IResult<Span, FieldType> {
     alt((
         // Spread with optional type name and optional type arguments: ... or ...'alias or ...'alias<type, type>
         map(
@@ -1265,6 +1300,7 @@ fn field_type(input: Span) -> IResult<Span, FieldType> {
                 name: Some(name),
                 omittable: true,
                 type_def,
+                default: None,
             },
         ),
         // Named field: name: type
@@ -1274,6 +1310,7 @@ fn field_type(input: Span) -> IResult<Span, FieldType> {
                 name: Some(name),
                 omittable: false,
                 type_def,
+                default: None,
             },
         ),
         // Unnamed field: type
@@ -1281,6 +1318,7 @@ fn field_type(input: Span) -> IResult<Span, FieldType> {
             name: None,
             omittable: false,
             type_def,
+            default: None,
         }),
     ))(input)
 }

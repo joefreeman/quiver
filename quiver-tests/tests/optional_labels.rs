@@ -36,10 +36,33 @@ fn test_wrong_stated_label_rejected() {
 }
 
 #[test]
-fn test_reordered_labels_rejected() {
+fn test_reordered_labels_resolve() {
+    // A labeled entry names its slot, so labels may be written in any order — the value is
+    // built in the expected type's canonical order either way.
     quiver()
         .evaluate("f = #[(foo): 'int, (bar): 'int] { $foo }; f [bar: 2, foo: 1]")
+        .expect("1");
+    // Ordering is independent of the marker: it needs only a known expected tuple type.
+    quiver()
+        .evaluate("f = #[foo: 'int, bar: 'int] { $foo }; f [bar: 2, foo: 1]")
+        .expect("1");
+}
+
+#[test]
+fn test_positional_entry_after_label_rejected() {
+    // Adoption is positional, so a trailing positional entry has no well-defined slot
+    // once labels have claimed some out of order.
+    quiver()
+        .evaluate("f = #[(foo): 'int, (bar): 'int] { $bar }; f [bar: 2, 1]")
         .expect_type_mismatch();
+}
+
+#[test]
+fn test_bare_literal_keeps_written_order() {
+    // With no expected type there is no canonical order to reorder to.
+    quiver()
+        .evaluate("x = [bar: 2, foo: 1]; x")
+        .expect("[bar: 2, foo: 1]");
 }
 
 #[test]

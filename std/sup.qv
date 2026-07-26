@@ -161,8 +161,8 @@ run = #[specs: 'specs, max: 'int, window: 'int] {
   =[specs: ss, max: m, window: w]; ^loop [table: seed [ss, &.], max: m, window: w]
 }
 
-start = #[children: 'specs, max_restarts: 'int, window: 'int] {
-  :doc "Starts a supervisor over the child specs (one_for_one): each child is restarted per its spec's restart type, at most max_restarts times within window ms — beyond that the supervisor gives up and crashes, tearing down its subtree. The child set is dynamic: `add` a child, `drop` one. Answers the supervisor's pid, owned by the caller."
+start = #[children: 'specs, max_restarts: 'int = 3, window: 'int = 5000] {
+  :doc "Starts a supervisor over the child specs (one_for_one): each child is restarted per its spec's restart type, at most max_restarts times (default 3) within window ms (default 5000) — beyond that the supervisor gives up and crashes, tearing down its subtree. The child set is dynamic: `add` a child, `drop` one. Answers the supervisor's pid, owned by the caller."
   =[children: ss, max_restarts: m, window: w]; [specs: ss, max: m, window: w] ~> @run
 }
 

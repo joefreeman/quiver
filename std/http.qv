@@ -558,8 +558,8 @@ cookies = #' {
 
 attrs_join = #[(attrs): 'attrs, (acc): '%str] { %list.fold [$attrs, $acc, #{ "{$0}; {$1}" }] }
 
-set_cookie = #[(name): '%str, (value): '%str, (attrs): 'attrs] {
-  :doc "A Set-Cookie header pair for the name and value, with the given attribute strings (e.g. \"Path=/\", \"HttpOnly\")."
+set_cookie = #[(name): '%str, (value): '%str, (attrs): 'attrs = Nil] {
+  :doc "A Set-Cookie header pair for the name and value, with the given attribute strings (e.g. \"Path=/\", \"HttpOnly\"); none by default."
   ["set-cookie", attrs_join [$attrs, "{$name}={$value}"]]
 }
 

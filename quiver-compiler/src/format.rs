@@ -942,6 +942,7 @@ struct Anchor {
 /// Comments and blank lines recovered from the source. `leading` and `trailing` are keyed by the
 /// start offset of the AST node (type-alias statement, chain, or tuple field) they attach to;
 /// `dangling` holds anything after the last node.
+#[derive(Default)]
 struct Trivia {
     leading: HashMap<usize, Vec<TriviaItem>>,
     trailing: HashMap<usize, Vec<String>>,
@@ -1604,25 +1605,44 @@ fn render_tuple_type(tuple_type: &TupleType) -> String {
     format!("{}{}{}{}", name, open, fields, close)
 }
 
+/// A field's ` = <value>` default. Types render flat, and a default is a short value
+/// chain, so it flattens with them.
+fn render_field_default(default: &Option<Box<Chain>>) -> String {
+    match default {
+        Some(chain) => format!(
+            " = {}",
+            crate::pretty::flatten(&chain_doc(&Trivia::default(), chain))
+        ),
+        None => String::new(),
+    }
+}
+
 fn render_field_type(field_type: &FieldType) -> String {
     match field_type {
         FieldType::Field {
             name: Some(name),
             omittable,
             type_def,
+            default,
         } => {
             let label = if *omittable {
                 format!("({})", name)
             } else {
                 name.clone()
             };
-            format!("{}: {}", label, render_type(type_def))
+            format!(
+                "{}: {}{}",
+                label,
+                render_type(type_def),
+                render_field_default(default)
+            )
         }
         FieldType::Field {
             name: None,
             type_def,
+            default,
             ..
-        } => render_type(type_def),
+        } => format!("{}{}", render_type(type_def), render_field_default(default)),
         FieldType::Spread {
             identifier: None, ..
         } => "...".to_string(),

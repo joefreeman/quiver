@@ -1211,6 +1211,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut entries: Vec<(usize, usize)> = Vec::new();
         for annotation in annotation_list {
             let key_id = annotations::intern_key(self.program, &annotation.name);
+            let is_defaults = annotation.name == annotations::DEFAULTS;
             // The builtin keys keep an expected type — `doc` for sanity, `pre`/`post` so
             // a bare `#{ ... }` contract can infer its parameter from the carrier.
             let expected = match annotation.name.as_str() {
@@ -1256,6 +1257,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     found: quiver_core::format::format_type_by_id(&*self.program, value_type),
                 });
             }
+            // `:defaults` has no single expected type — it names a *subset* of the
+            // parameter's fields — so it is checked against the carrier after the fact.
+            if is_defaults {
+                annotations::check_defaults(&*self.program, carrier_type, value_type)?;
+            }
             self.codegen.add_instruction(Instruction::Annotate(key_id));
             entries.push((key_id, value_type));
         }
@@ -1287,9 +1293,22 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         ));
                     }
                 }
-                // Recursively validate field types
+                // Recursively validate field types. A default surviving to here is one
+                // written outside a function literal's parameter spelling — a type alias, a
+                // function type, a nested tuple — where it belongs to no function and so
+                // could never fire. `compile_function` strips the ones it consumes.
                 for field in &tuple.fields {
-                    if let ast::FieldType::Field { type_def, .. } = field {
+                    if let ast::FieldType::Field {
+                        type_def, default, ..
+                    } = field
+                    {
+                        if default.is_some() {
+                            return Err(Error::TypeUnresolved(
+                                "A field default is only allowed in a function literal's \
+                                 parameter type, where it attaches to that function"
+                                    .to_string(),
+                            ));
+                        }
                         Self::validate_type_ast(type_def)?;
                     }
                 }
@@ -1499,12 +1518,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // variable (`'t`) that a later function field's parameter (`#'t -> 'u`) depends on.
         let expected_tuple = expected.and_then(|e| self.expected_tuple_fields(e, fields.len()));
         let expected_fields = expected_tuple.as_ref().map(|(_, fields)| fields.clone());
+        // Which written field fills each slot. Labeled entries may name their slots in any
+        // order, so the literal is built — and therefore evaluated — in the expected type's
+        // canonical order rather than the written one.
+        let order: Vec<usize> = expected_tuple
+            .as_ref()
+            .and_then(|(tuple_id, _)| self.resolve_slots(*tuple_id, &fields))
+            .unwrap_or_else(|| (0..fields.len()).collect());
         let mut bindings: HashMap<String, usize> = HashMap::new();
 
         // Compile field values and collect their types and provenances
         let mut field_types = Vec::new();
         let mut field_provenances = Vec::new();
-        for (fields_compiled, field) in fields.iter().enumerate() {
+        for (fields_compiled, field) in order.iter().map(|&i| &fields[i]).enumerate() {
             // This field's expected type, with the variables solved so far substituted in.
             let field_expected = expected_fields
                 .as_ref()
@@ -1606,6 +1632,47 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// `arity` fields, for driving per-field inference and omittable-label adoption. A non-tuple
     /// or mismatched arity yields `None` (no inference), so the existing all-or-nothing call
     /// check still produces any real error.
+    /// Which written field fills each slot of `expected_tuple_id`, or `None` when the literal
+    /// doesn't resolve against it — in which case the caller keeps the written order and the
+    /// ordinary type check reports the mismatch.
+    ///
+    /// Positional entries fill slots as a prefix, in declared order, and must precede any
+    /// labeled entry: adoption is positional, so a trailing positional entry has no
+    /// well-defined slot once labels have claimed some out of order. A labeled entry names
+    /// its slot, in any order.
+    fn resolve_slots(
+        &self,
+        expected_tuple_id: usize,
+        fields: &[ast::TupleField],
+    ) -> Option<Vec<usize>> {
+        let expected = &self.program.lookup_tuple(expected_tuple_id)?.fields;
+        if expected.len() != fields.len() {
+            return None;
+        }
+        let mut slots: Vec<Option<usize>> = vec![None; fields.len()];
+        let mut positional = 0;
+        for (index, field) in fields.iter().enumerate() {
+            let slot = match &field.name {
+                None => {
+                    // A positional entry after a labeled one: unresolvable.
+                    if positional != index {
+                        return None;
+                    }
+                    positional += 1;
+                    index
+                }
+                Some(name) => expected
+                    .iter()
+                    .position(|(label, _)| label.as_deref() == Some(name.as_str()))?,
+            };
+            if slots[slot].is_some() {
+                return None;
+            }
+            slots[slot] = Some(index);
+        }
+        slots.into_iter().collect()
+    }
+
     fn expected_tuple_fields(&self, expected: usize, arity: usize) -> Option<(usize, Vec<usize>)> {
         let Some(Type::Tuple(tuple_id)) = self.program.lookup_type(expected) else {
             return None;
@@ -1621,8 +1688,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// so a function-literal argument can infer its parameter from it. Returns `None` when the
     /// head isn't a statically-resolvable callable (e.g. `~`, `^`, or a non-callable), leaving
     /// the argument to compile without an expected type.
-    fn callee_parameter_type(&mut self, access: &ast::Access) -> Option<usize> {
-        let callable = match &access.source {
+    /// The type of the value an applied head denotes — a bound variable, an import member,
+    /// or a (possibly outer) parameter field — with its **annotation row intact**, so
+    /// definition-carried metadata such as `:defaults` stays visible. `None` for heads that
+    /// denote no resolvable value (`~`, bare `^`, builtins), which carry none.
+    fn callee_value_type(&mut self, access: &ast::Access) -> Option<usize> {
+        match &access.source {
             Some(ast::AccessSource::Identifier(name) | ast::AccessSource::TailCall(Some(name))) => {
                 // A captured member (`iter.fold` inside a closure) is bound under its full path, so
                 // try that first; otherwise resolve the base binding (`iter`, a local record) and
@@ -1630,19 +1701,44 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 if let Some((ty, _)) =
                     scopes::lookup_variable(&self.scopes, name, &access.accessors)
                 {
-                    ty
+                    Some(ty)
                 } else {
                     let base =
                         scopes::lookup_variable(&self.scopes, name, &[]).map(|(ty, _)| ty)?;
-                    self.follow_accessors(base, &access.accessors)?
+                    self.follow_accessors(base, &access.accessors)
                 }
             }
             Some(ast::AccessSource::Import(module)) => {
                 // `resolve_import` applies the accessors, yielding the member type directly.
                 self.resolve_import(module, &access.accessors)
                     .ok()
-                    .map(|(_, _, ty, _)| ty)?
+                    .map(|(_, _, ty, _)| ty)
             }
+            Some(ast::AccessSource::Parameter { depth: 0 }) => {
+                let base = scopes::get_function_parameter(&self.scopes)
+                    .ok()
+                    .map(|(ty, _)| ty)?;
+                self.follow_accessors(base, &access.accessors)
+            }
+            Some(ast::AccessSource::Parameter { depth }) => {
+                // An outer parameter (`$$f`) peeks through its capture: the exact path when
+                // that's what was captured, else the bare run plus the accessor walk.
+                let name = variables::CaptureSource::OuterParameter(*depth).scope_name();
+                if let Some((ty, _)) =
+                    scopes::lookup_variable(&self.scopes, &name, &access.accessors)
+                {
+                    Some(ty)
+                } else {
+                    let (base, _) = scopes::lookup_variable(&self.scopes, &name, &[])?;
+                    self.follow_accessors(base, &access.accessors)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn callee_parameter_type(&mut self, access: &ast::Access) -> Option<usize> {
+        let callable = match &access.source {
             Some(ast::AccessSource::TailCall(None)) => {
                 // Bare `^` recurses into the current function, whose declared parameter is
                 // already in scope — so a positional `^ [args]` literal can adopt a labeled
@@ -1671,26 +1767,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.record_builtin_type_params(name, callable, parameter, result);
                 callable
             }
-            Some(ast::AccessSource::Parameter { depth: 0 }) => {
-                let base = scopes::get_function_parameter(&self.scopes)
-                    .ok()
-                    .map(|(ty, _)| ty)?;
-                self.follow_accessors(base, &access.accessors)?
-            }
-            Some(ast::AccessSource::Parameter { depth }) => {
-                // An outer parameter (`$$f`) peeks through its capture: the exact path when
-                // that's what was captured, else the bare run plus the accessor walk.
-                let name = variables::CaptureSource::OuterParameter(*depth).scope_name();
-                if let Some((ty, _)) =
-                    scopes::lookup_variable(&self.scopes, &name, &access.accessors)
-                {
-                    ty
-                } else {
-                    let (base, _) = scopes::lookup_variable(&self.scopes, &name, &[])?;
-                    self.follow_accessors(base, &access.accessors)?
-                }
-            }
-            _ => return None,
+            _ => self.callee_value_type(access)?,
         };
         // Explicit type arguments pin the callable's parameters before the argument
         // compiles, so the inference literal sees the instantiated types. Errors are
@@ -1703,6 +1780,163 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Type::Callable { parameter, .. } => Some(*parameter),
             _ => None,
         }
+    }
+
+    /// The type of annotation `key` on `type_id`, when the row makes it definitely visible.
+    /// A declared boundary erases the row, so this answers `None` there — which is exactly
+    /// how defaults come to be shed at one.
+    fn row_entry(&self, type_id: usize, key: usize) -> Option<usize> {
+        match self.program.lookup_type(type_id)? {
+            Type::Annotated { entries, .. } => entries
+                .binary_search_by_key(&key, |(k, _)| *k)
+                .ok()
+                .map(|index| entries[index].1),
+            Type::Union(members) if members.len() == 1 => self.row_entry(members[0], key),
+            _ => None,
+        }
+    }
+
+    /// The labels an applied head declares defaults for, from its visible `:defaults` row
+    /// entry. `None` when it carries none — a plain call, or one whose row was erased at a
+    /// declared boundary, where every field is mandatory.
+    fn callee_defaults(&mut self, access: &ast::Access) -> Option<Vec<String>> {
+        let value_type = self.callee_value_type(access)?;
+        let key = annotations::intern_key(self.program, annotations::DEFAULTS);
+        let entry = self.row_entry(value_type, key)?;
+        let tuple_id = annotations::single_tuple(&*self.program, entry)?;
+        Some(
+            self.program
+                .lookup_tuple(tuple_id)?
+                .fields
+                .iter()
+                .filter_map(|(label, _)| label.clone())
+                .collect(),
+        )
+    }
+
+    /// A synthetic call-argument field reading `<callee>:defaults.<label>`. The default
+    /// rides the *closure*, not the type, so it is fetched from the callee value — which is
+    /// what lets two functions with the same signature declare different defaults.
+    fn default_field(access: &ast::Access, label: &str) -> ast::TupleField {
+        let mut source = access.clone();
+        // Type arguments instantiate the callable; an annotation read doesn't want them.
+        source.type_arguments.clear();
+        source.accessors.push(ast::AccessPath::Annotation(
+            annotations::DEFAULTS.to_string(),
+            None,
+        ));
+        source
+            .accessors
+            .push(ast::AccessPath::Field(label.to_string()));
+        source.accessor_spans.push(ast::Spanned::default());
+        source.accessor_spans.push(ast::Spanned::default());
+        ast::TupleField {
+            name: Some(label.to_string()),
+            name_span: ast::Spanned::default(),
+            span: ast::Spanned::default(),
+            value: ast::FieldValue::Chain(ast::Chain {
+                match_pattern: None,
+                bind_span: ast::Spanned::default(),
+                span: ast::Spanned::default(),
+                terms: vec![ast::Term::Access(source)],
+            }),
+        }
+    }
+
+    /// Fill a call argument literal's omitted fields from the callee's `:defaults`, so the
+    /// literal reaching `compile_tuple` is already complete and the ordinary field loop —
+    /// including its ripple stack arithmetic — is untouched.
+    ///
+    /// `Ok(None)` leaves the argument alone: it isn't a plain literal, it is already
+    /// complete, or the callee declares no defaults (where a short literal is an ordinary
+    /// arity error). Only a callee that *does* declare defaults, yet leaves a slot
+    /// unfillable, reports a field-named error.
+    fn fill_defaults(
+        &mut self,
+        access: &ast::Access,
+        argument: &ast::Term,
+    ) -> Result<Option<ast::Tuple>, Error> {
+        let ast::Term::Tuple(tuple) = argument else {
+            return Ok(None);
+        };
+        if helpers::tuple_contains_spread(&tuple.fields) {
+            return Ok(None);
+        }
+        let Some(parameter) = self.callee_parameter_type(access) else {
+            return Ok(None);
+        };
+        let Some(expected) = annotations::single_tuple(&*self.program, parameter)
+            .and_then(|id| self.program.lookup_tuple(id))
+            .map(|info| {
+                info.fields
+                    .iter()
+                    .map(|(label, _)| label.clone())
+                    .collect::<Vec<_>>()
+            })
+        else {
+            return Ok(None);
+        };
+        if tuple.fields.len() >= expected.len() {
+            return Ok(None);
+        }
+        let Some(defaults) = self.callee_defaults(access) else {
+            return Ok(None);
+        };
+
+        // Which slot each written entry fills — positional as a prefix, labeled by name in
+        // any order. An unresolvable literal is left alone for the type check to report.
+        let mut filled: Vec<Option<ast::TupleField>> = vec![None; expected.len()];
+        let mut positional = 0;
+        for (index, field) in tuple.fields.iter().enumerate() {
+            let slot = match &field.name {
+                None if positional == index => {
+                    positional += 1;
+                    index
+                }
+                None => return Ok(None),
+                Some(name) => {
+                    match expected
+                        .iter()
+                        .position(|label| label.as_deref() == Some(name.as_str()))
+                    {
+                        Some(slot) => slot,
+                        None => return Ok(None),
+                    }
+                }
+            };
+            if filled[slot].is_some() {
+                return Ok(None);
+            }
+            filled[slot] = Some(field.clone());
+        }
+
+        let mut fields = Vec::with_capacity(expected.len());
+        for (slot, entry) in filled.into_iter().enumerate() {
+            match entry {
+                Some(field) => fields.push(field),
+                None => {
+                    let label = expected[slot]
+                        .as_deref()
+                        .filter(|label| defaults.iter().any(|d| d == label));
+                    let Some(label) = label else {
+                        let field = expected[slot]
+                            .as_deref()
+                            .map(|label| format!("'{label}'"))
+                            .unwrap_or_else(|| format!("at index {slot}"));
+                        return Err(Error::TypeUnresolved(format!(
+                            "Missing field {field} of {}, which declares no default for it",
+                            quiver_core::format::format_type_by_id(&*self.program, parameter)
+                        )));
+                    };
+                    fields.push(Self::default_field(access, label));
+                }
+            }
+        }
+        Ok(Some(ast::Tuple {
+            name: tuple.name.clone(),
+            fields,
+            span: tuple.span,
+        }))
     }
 
     /// Resolve the type after an accessor path, for type-only inspection (look-ahead
@@ -2040,6 +2274,65 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// Compile a function literal. `expected_parameter` is the parameter type the use site
     /// expects (from a call argument's callee), used to infer the parameter of an un-annotated
     /// literal (`#{ $0 }`); it is ignored when the literal declares its own parameter type.
+    /// Lower `name: type = value` defaults in a function literal's parameter spelling into
+    /// a synthetic `:defaults` annotation, stripping them from the type AST. Only top-level
+    /// parameter fields are consumed; one written anywhere else stays put and is rejected by
+    /// `validate_type_ast`.
+    ///
+    /// A body that already states `:defaults` explicitly keeps both, and the ordinary
+    /// duplicate-annotation check rejects the pair — mixing the two spellings is confusing
+    /// even when they name different fields.
+    fn lower_field_defaults(function: &mut ast::Function) -> Result<(), Error> {
+        let Some(ast::Type::Tuple(tuple)) = &mut function.parameter_type else {
+            return Ok(());
+        };
+        let mut fields = Vec::new();
+        for (index, field) in tuple.fields.iter_mut().enumerate() {
+            let ast::FieldType::Field { name, default, .. } = field else {
+                continue;
+            };
+            let Some(chain) = default.take() else {
+                continue;
+            };
+            let Some(name) = name.clone() else {
+                return Err(Error::TypeUnresolved(format!(
+                    "The parameter field at index {index} has a default but no label, so a \
+                     call could never omit an earlier field and still state it"
+                )));
+            };
+            fields.push(ast::TupleField {
+                name: Some(name),
+                name_span: ast::Spanned::default(),
+                span: ast::Spanned::default(),
+                value: ast::FieldValue::Chain(*chain),
+            });
+        }
+        if fields.is_empty() {
+            return Ok(());
+        }
+        let Some(body) = &mut function.body else {
+            return Err(Error::TypeUnresolved(
+                "A field default needs a function body to attach to".to_string(),
+            ));
+        };
+        body.annotations.push(ast::Annotation {
+            name: annotations::DEFAULTS.to_string(),
+            name_span: ast::Spanned::default(),
+            span: ast::Spanned::default(),
+            value: ast::Chain {
+                match_pattern: None,
+                bind_span: ast::Spanned::default(),
+                span: ast::Spanned::default(),
+                terms: vec![ast::Term::Tuple(ast::Tuple {
+                    name: ast::TupleName::Anonymous,
+                    fields,
+                    span: ast::Spanned::default(),
+                })],
+            },
+        });
+        Ok(())
+    }
+
     fn compile_function(
         &mut self,
         mut function: ast::Function,
@@ -2055,6 +2348,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         {
             self.expand_dialects_in_expression(body)?;
         }
+
+        // `name: type = value` in the parameter spelling is sugar for a `:defaults` entry
+        // on the closure. Lower it before the annotation prefix is taken, so the two
+        // spellings share one mechanism — and strip it from the type AST, since the
+        // default belongs to the function, never to its parameter type.
+        Self::lower_field_defaults(&mut function)?;
 
         // A function body's annotation prefix attaches to the *closure*, not the body's
         // result: extract it before capture collection (the annotation chains evaluate in
@@ -3720,20 +4019,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let terms: Vec<_> = chain.terms.into_iter().collect();
         let last_index = terms.len().saturating_sub(1);
         for (i, term) in terms.iter().enumerate() {
-            // Only the chain's final term produces the chain's value, so only it receives the
-            // chain's expected type. An earlier literal term flows its result into the next
-            // term, so when that next term is a statically-resolvable callable (a piped call,
-            // `[1, 2] ~> f`), *its* parameter type is this term's expected type — the piped
-            // counterpart of an Apply argument. This is what lets a piped tuple literal adopt
-            // omittable field labels, and a piped `#{…}` literal infer its parameter, exactly
-            // as they do at `f [1, 2]` / `f [.., #{…}]`.
-            let term_expected = if i == last_index {
-                expected
+            // The statically-resolvable callable a non-final literal term flows into — the
+            // piped counterpart of an Apply's head.
+            let piped_callee = if i == last_index {
+                None
             } else if matches!(term, ast::Term::Tuple(_) | ast::Term::Function(_))
                 && let Some(next) = terms.get(i + 1)
             {
                 match next {
-                    ast::Term::Access(next) => self.callee_parameter_type(next),
+                    ast::Term::Access(next) => Some(next),
                     // `x ~> f g`: the flow becomes `g`'s argument when `g` is a bare
                     // callable, so `g`'s parameter is the previous literal's expected
                     // type. A ripple head (`~ g`, `^~ g`) consumes the flow itself, so
@@ -3745,7 +4039,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         ) =>
                     {
                         match argument.as_ref() {
-                            ast::Term::Access(callable) => self.callee_parameter_type(callable),
+                            ast::Term::Access(callable) => Some(callable),
                             _ => None,
                         }
                     }
@@ -3754,8 +4048,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             } else {
                 None
             };
+            // Only the chain's final term produces the chain's value, so only it receives the
+            // chain's expected type. An earlier literal term flows its result into the next
+            // term, so a piped callable's parameter type is that literal's expected type. This
+            // is what lets a piped tuple literal adopt omittable field labels and omit
+            // defaulted fields, and a piped `#{…}` literal infer its parameter, exactly as
+            // they do at `f [1, 2]` / `f [.., #{…}]`.
+            let term_expected = match (i == last_index, piped_callee) {
+                (true, _) => expected,
+                (false, Some(callee)) => self.callee_parameter_type(callee),
+                (false, None) => None,
+            };
+            // A piped literal fills omitted fields from the callee, as an argument does.
+            let filled = match piped_callee {
+                Some(callee) => self.fill_defaults(callee, term)?,
+                None => None,
+            };
             let (term_type, term_prov) = self.compile_term(
-                term.clone(),
+                filled.map_or_else(|| term.clone(), ast::Term::Tuple),
                 FlowingValue {
                     ty: current_type,
                     provenance: current_prov,
@@ -6223,6 +6533,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // argument, so an un-annotated function-literal argument can infer its
                 // parameter from it.
                 let expected_arg = self.callee_parameter_type(&access);
+                // Omitted fields are filled from the callee's `:defaults` before the
+                // argument compiles, so the literal reaching `compile_tuple` is complete.
+                let argument = match self.fill_defaults(&access, &argument)? {
+                    Some(tuple) => Box::new(ast::Term::Tuple(tuple)),
+                    None => argument,
+                };
                 let (arg_type, arg_prov) = self.compile_term(
                     *argument,
                     FlowingValue {

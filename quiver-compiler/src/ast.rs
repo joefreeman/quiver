@@ -477,6 +477,13 @@ pub enum FieldType {
         /// a property of the written spelling: it never distinguishes types.
         omittable: bool,
         type_def: Type,
+        /// Written `name: type = value` — the field may be omitted by a call argument,
+        /// which fills it with this value. Legal only in a function literal's parameter
+        /// spelling, where it lowers to a `:defaults` annotation on the closure; the
+        /// default belongs to the *function*, never to the type, so two functions with
+        /// the same parameter type may declare different ones.
+        /// Boxed: a default is rare, and inlining a `Chain` here would bloat every field.
+        default: Option<Box<Chain>>,
     },
     Spread {
         identifier: Option<String>,

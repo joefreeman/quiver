@@ -591,3 +591,104 @@ fn test_std_module_docstring() {
         .evaluate("Cons[1, Cons[2, Nil]] ~> %list.head")
         .expect("1");
 }
+
+// `:defaults` — per-field defaults for a function's parameter tuple. Checked at attach
+// against the parameter's fields; read off the callee value at a call site (like the
+// contract keys), so it carries no type identity of its own.
+
+#[test]
+fn test_defaults_attaches_and_retrieves() {
+    quiver()
+        .evaluate("f = #[a: 'int, b: 'int] { :defaults [b: 2]; $a }; f:defaults")
+        .expect("[b: 2]");
+    // Attaching does not disturb calling.
+    quiver()
+        .evaluate("f = #[a: 'int, b: 'int] { :defaults [b: 2]; $a }; f [a: 1, b: 9]")
+        .expect("1");
+}
+
+#[test]
+fn test_defaults_same_signature_distinct_values() {
+    // Two functions with the same parameter type share a *type*, so the entry cannot
+    // live in the type — the values are distinguished by the closures they ride on.
+    quiver()
+        .evaluate(
+            "f = #[a: 'int] { :defaults [a: 1]; $a }
+             g = #[a: 'int] { :defaults [a: 2]; $a }
+             [f:defaults, g:defaults]",
+        )
+        .expect("[[a: 1], [a: 2]]");
+}
+
+#[test]
+fn test_defaults_visible_through_record_member() {
+    quiver()
+        .evaluate("f = #[a: 'int] { :defaults [a: 7]; $a }; m = [open: &f]; m.open:defaults")
+        .expect("[a: 7]");
+}
+
+#[test]
+fn test_defaults_shed_at_declared_boundary() {
+    // A declared parameter type erases the row, so the defaults are no longer visible —
+    // the same rule that stops a contract being enforced through a declared boundary.
+    quiver()
+        .evaluate("h = #[f: #[a: 'int] -> 'int] { $f:defaults }; h")
+        .expect_error_containing("may carry erased annotations");
+}
+
+#[test]
+fn test_defaults_requires_function_carrier() {
+    quiver()
+        .evaluate("x = { :defaults [a: 1]; [a: 5] }; x")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "Annotation :defaults can only be attached to a function".to_string(),
+        ));
+}
+
+#[test]
+fn test_defaults_requires_tuple_parameter() {
+    quiver()
+        .evaluate("f = #'int { :defaults [b: 2]; $ }; f 1")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "Annotation :defaults requires a tuple parameter, but the function takes 'int"
+                .to_string(),
+        ));
+}
+
+#[test]
+fn test_defaults_rejects_unknown_field() {
+    quiver()
+        .evaluate("f = #[a: 'int, b: 'int] { :defaults [c: 2]; $a }; f:defaults")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "Annotation :defaults names 'c', which is not a field of the parameter \
+             [a: 'int, b: 'int]"
+                .to_string(),
+        ));
+}
+
+#[test]
+fn test_defaults_rejects_unlabeled_field() {
+    quiver()
+        .evaluate("f = #[a: 'int, b: 'int] { :defaults [2]; $a }; f:defaults")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
+            "Annotation :defaults takes labeled fields, each naming a parameter field"
+                .to_string(),
+        ));
+}
+
+#[test]
+fn test_defaults_rejects_duplicate_field() {
+    // Caught by tuple construction, before the attach-time check sees the value.
+    quiver()
+        .evaluate("f = #[a: 'int, b: 'int] { :defaults [b: 1, b: 2]; $a }; f:defaults")
+        .expect_compile_error(quiver_compiler::compiler::Error::FieldDuplicated(
+            "b".to_string(),
+        ));
+}
+
+#[test]
+fn test_defaults_rejects_mistyped_value() {
+    quiver()
+        .evaluate("f = #[a: 'int, b: 'int] { :defaults [b: 0x00]; $a }; f:defaults")
+        .expect_error_containing("default for 'b' compatible with 'int");
+}
