@@ -671,8 +671,7 @@ fn test_defaults_rejects_unlabeled_field() {
     quiver()
         .evaluate("f = #[a: 'int, b: 'int] { :defaults [2]; $a }; f:defaults")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "Annotation :defaults takes labeled fields, each naming a parameter field"
-                .to_string(),
+            "Annotation :defaults takes labeled fields, each naming a parameter field".to_string(),
         ));
 }
 

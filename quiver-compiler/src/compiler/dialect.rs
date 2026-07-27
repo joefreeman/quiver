@@ -12,7 +12,13 @@
 //!   with the dialect term's flowing value as its chain input; provably pure
 //!   single-term holes splice inline instead.
 //! - `Call[member: Str['bin], arg: ^]` — a call to a top-level export of the *dialect
-//!   module itself*
+//!   module itself*, or of the module a `module: Str['bin]` field names (`"html"`,
+//!   `"html/live"`), which is how one module's emitter can be reused by another's
+//!   dialect. An `Unquote` argument is folded into the call's own hole, so the span is
+//!   spliced in **argument position** — the callee's parameter type reaches it, and a
+//!   tuple or `#{ … }` literal there elaborates exactly as at a handwritten call site
+//!   (omittable labels, `:defaults`, parameter inference). Bind-once then covers the
+//!   call as well as the span: two splices of one `Call` evaluate the member once.
 //! - `Tuple[name: (Nil | Str['bin]), fields: 'list<^ | Labeled[label: Str['bin], value: ^]>]`
 //!   — tuple construction (fields are bare expressions, positionally, unless wrapped in
 //!   `Labeled`, which exists only inside `fields`)
@@ -110,13 +116,21 @@ pub fn content_position(
     }
 }
 
-/// An `Unquote` hole collected during splicing: its content span (the dedupe key — the
-/// same span spliced twice shares one binding, so it evaluates once) and the chain that
-/// evaluates it into its `~dialect-hole-N` binding.
+/// An `Unquote` hole collected during splicing: its dedupe key — the same span spliced
+/// twice shares one binding, so it evaluates once — and the chain that evaluates it into
+/// its `~dialect-hole-N` binding.
 pub struct Hole {
-    /// `(offset, length)` into the unescaped content.
-    key: (usize, usize),
+    /// `(offset, length)` into the unescaped content, and the member the span is passed
+    /// to (empty when spliced bare): one span reaching two members is two holes.
+    key: (usize, usize, String),
     terms: Vec<ast::Term>,
+}
+
+/// A resolved `Call` target: the access term to append, and its `module/path.member`
+/// spelling, which distinguishes holes over one span in [`Hole::key`].
+struct Callee {
+    term: ast::Term,
+    key: String,
 }
 
 /// Wrap an expansion chain as a single term: a block binding the flowing value to
@@ -138,7 +152,7 @@ pub fn wrap_expansion(mut holes: Vec<Hole>, expansion: ast::Chain) -> ast::Term 
         ))],
     };
     let mut chains = vec![binder];
-    holes.sort_by_key(|hole| hole.key);
+    holes.sort_by(|a, b| a.key.cmp(&b.key));
     chains.extend(holes.into_iter().map(|hole| ast::Chain {
         binding: None,
         binding_span: ast::Spanned::default(),
@@ -217,22 +231,20 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 span: self.dialect.span,
             }))),
             "Unquote" => {
-                let offset = self.int_field(value, "Unquote", &["offset"], 0)?;
-                let length = self.int_field(value, "Unquote", &["length"], 1)?;
-                self.unquote(offset, length)
+                let (offset, length) = self.unquote_span(value)?;
+                self.unquote(offset, length, None)
             }
             "Call" => {
-                let member = self.str_field(value, "Call", &["member"], 0)?;
+                let callee = self.callee(value)?;
                 let arg = self.field(value, "Call", &["arg"], 1)?;
+                // An `Unquote` argument folds into the call: the span is spliced as the
+                // callee's argument rather than bound first and piped in, so it compiles
+                // against the parameter type.
+                if let Some((offset, length)) = self.as_unquote(arg)? {
+                    return self.unquote(offset, length, Some(callee));
+                }
                 let mut chain = self.value_to_chain(arg)?;
-                chain.terms.push(ast::Term::Access(ast::Access {
-                    source: Some(ast::AccessSource::Import(self.path.clone())),
-                    accessors: vec![ast::AccessPath::Field(member)],
-                    accessor_spans: vec![ast::Spanned::default()],
-                    type_arguments: vec![],
-                    base_span: self.dialect.span,
-                    span: self.dialect.span,
-                }));
+                chain.terms.push(callee.term);
                 Ok(chain)
             }
             "Tuple" => {
@@ -262,7 +274,16 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
     /// a literal, a text-only string, a `&`-reference, or a bare `~` — splice in place
     /// instead; anything else (including a bare identifier, whose callability is
     /// type-dependent) becomes a `~dialect-hole-N` binding, deduplicated by span.
-    fn unquote(&self, offset: usize, length: usize) -> Result<ast::Chain, Error> {
+    ///
+    /// `callee` is the member of a `Call` whose argument this span is: it is appended to
+    /// the span's own chain, so the span sits in argument position (typed by the callee's
+    /// parameter) and the call joins the span inside the binding — one evaluation of both.
+    fn unquote(
+        &self,
+        offset: usize,
+        length: usize,
+        callee: Option<Callee>,
+    ) -> Result<ast::Chain, Error> {
         let text = (length > 0)
             .then(|| self.content.get(offset..offset + length))
             .flatten()
@@ -283,26 +304,45 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
         })?;
         self.remap_chain_spans(&mut chain, offset);
 
-        if chain.binding.is_none() && chain.terms.len() == 1 {
-            let term = &chain.terms[0];
-            if term.is_bare_ripple() {
-                return Ok(term_chain(self.reference(RIPPLE_BINDING.to_string())));
+        let (ripple, pure) = match &chain.terms[..] {
+            [term] if chain.binding.is_none() => (
+                term.is_bare_ripple(),
+                matches!(term, ast::Term::Literal(_) | ast::Term::Reference(_))
+                    || matches!(term, ast::Term::String(_, segments)
+                        if segments.iter().all(|s| matches!(s, ast::StrSegment::Text(_)))),
+            ),
+            _ => (false, false),
+        };
+        if ripple || pure {
+            let mut spliced = if ripple {
+                term_chain(self.reference(RIPPLE_BINDING.to_string()))
+            } else {
+                chain
+            };
+            if let Some(callee) = callee {
+                spliced.terms.push(callee.term);
             }
-            let pure = matches!(term, ast::Term::Literal(_) | ast::Term::Reference(_))
-                || matches!(term, ast::Term::String(_, segments)
-                    if segments.iter().all(|s| matches!(s, ast::StrSegment::Text(_))));
-            if pure {
-                return Ok(chain);
-            }
+            return Ok(spliced);
         }
 
+        let key = (
+            offset,
+            length,
+            callee
+                .as_ref()
+                .map_or(String::new(), |callee| callee.key.clone()),
+        );
         let mut holes = self.holes.borrow_mut();
-        let index = match holes.iter().position(|hole| hole.key == (offset, length)) {
+        let index = match holes.iter().position(|hole| hole.key == key) {
             Some(index) => index,
             None => {
                 // The hole runs as a block applied to the ripple binding, so its chain
                 // input — and hence `~` — is the dialect term's flowing value, and any
-                // bindings it makes stay local to it.
+                // bindings it makes stay local to it. A `Call`'s member is applied inside
+                // the block, leaving the span in argument position.
+                if let Some(callee) = callee {
+                    chain.terms.push(callee.term);
+                }
                 let terms = vec![
                     self.reference(RIPPLE_BINDING.to_string()),
                     ast::Term::Block(ast::Block {
@@ -317,10 +357,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                         ast::Spanned::default(),
                     )),
                 ];
-                holes.push(Hole {
-                    key: (offset, length),
-                    terms,
-                });
+                holes.push(Hole { key, terms });
                 holes.len() - 1
             }
         };
@@ -419,6 +456,64 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 }
             }
         }
+    }
+
+    /// A `Call`'s target: the member of the module its `module` field names — a manifest
+    /// path, `"html"` or `"html/live"` — or of the dialect's own module when it names
+    /// none. The emitted access is resolved in the *invoking* module, so a dialect can
+    /// reach a companion module it does not itself import.
+    fn callee(&self, value: &Value) -> Result<Callee, Error> {
+        let member = self.str_field(value, "Call", &["member"], 0)?;
+        let path = match self.optional_field(value, &["module"]) {
+            Some(module) if !module.is_nil() => self
+                .str_bytes_to_string(self.str_bytes(module, "Call module")?)?
+                .split('/')
+                .map(str::to_string)
+                .collect(),
+            _ => self.path.clone(),
+        };
+        let key = format!("{}.{member}", path.join("/"));
+        Ok(Callee {
+            term: ast::Term::Access(ast::Access {
+                source: Some(ast::AccessSource::Import(path)),
+                accessors: vec![ast::AccessPath::Field(member)],
+                accessor_spans: vec![ast::Spanned::default()],
+                type_arguments: vec![],
+                base_span: self.dialect.span,
+                span: self.dialect.span,
+            }),
+            key,
+        })
+    }
+
+    /// The span of an `Unquote` value, or `None` for any other expression.
+    fn as_unquote(&self, value: &Value) -> Result<Option<(usize, usize)>, Error> {
+        match self.expect_tuple(value)? {
+            ("Unquote", _) => self.unquote_span(value).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    fn unquote_span(&self, value: &Value) -> Result<(usize, usize), Error> {
+        Ok((
+            self.int_field(value, "Unquote", &["offset"], 0)?,
+            self.int_field(value, "Unquote", &["length"], 1)?,
+        ))
+    }
+
+    /// A labeled field of an IR tuple, or `None` when the tuple carries no such label —
+    /// for fields a node may omit, which have no positional reading.
+    fn optional_field<'v>(&self, value: &'v Value, labels: &[&str]) -> Option<&'v Value> {
+        let Value::Tuple(tuple_id, payload) = value else {
+            return None;
+        };
+        let info = self.program.lookup_tuple(*tuple_id)?;
+        let position = info.fields.iter().position(|(label, _)| {
+            label
+                .as_deref()
+                .is_some_and(|label| labels.contains(&label))
+        })?;
+        payload.get(position)
     }
 
     fn reference(&self, name: String) -> ast::Term {

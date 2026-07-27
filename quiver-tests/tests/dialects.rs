@@ -95,6 +95,66 @@ fn test_call_applies_a_module_export() {
 }
 
 #[test]
+fn test_call_argument_span_adopts_labels_and_fills_defaults() {
+    // A `Call` whose argument is an `Unquote` splices the span in *argument* position, so
+    // the author's literal elaborates against the member's parameter exactly as at a
+    // handwritten call: a positional entry adopts its omittable label, and the omitted
+    // field takes the member's default.
+    quiver()
+        .with_modules(dialect_module(
+            "Call[member: \"opts\", arg: Unquote[offset: 0, length: 3]]",
+            "[opts: #[(keys): 'int, debounce: 'int = 50] { $ }]",
+        ))
+        .evaluate("%m{[7]}")
+        .expect("[keys: 7, debounce: 50]");
+}
+
+#[test]
+fn test_call_argument_span_infers_a_function_literal_parameter() {
+    // The same reach: an inferring `#{ … }` in the span takes its parameter from the
+    // member's declared one.
+    quiver()
+        .with_modules(dialect_module(
+            "Call[member: \"apply\", arg: Unquote[offset: 0, length: 11]]",
+            "[apply: #['int, #'int -> 'int] { $1 $0 }]",
+        ))
+        .evaluate("%m{[5, #{ $ }]}")
+        .expect("5");
+}
+
+#[test]
+fn test_call_argument_span_evaluates_once() {
+    // Bind-once now covers the call: two splices of one `Call` over one span share a
+    // binding, so the member runs once (both fields are the same ref).
+    quiver()
+        .with_modules(dialect_module(
+            r#"call = Call[member: "id", arg: Unquote[offset: 0, length: 3]]
+Tuple[name: Nil, fields: Cons[call, Cons[call, Nil]]]"#,
+            "[id: #'ref { $ }]",
+        ))
+        .evaluate("ref = &%ref; %m{ref} ~> =[a, b]; a ~> =&b")
+        .expect("Ok");
+}
+
+#[test]
+fn test_call_reaches_a_named_module() {
+    // A `module` field names the module to call into — resolved at the invocation site,
+    // so a dialect can emit calls to a companion module it does not itself import.
+    let mut modules = dialect_module(
+        "Call[module: \"helper\", member: \"double\", arg: Unquote[offset: 0, length: 1]]",
+        "Ok",
+    );
+    modules.insert(
+        vec!["helper".to_string()],
+        "[double: #'int { [~, 2] ~> __integer_multiply__ }]".to_string(),
+    );
+    quiver()
+        .with_modules(modules)
+        .evaluate("5 ~> %m{~}")
+        .expect("10");
+}
+
+#[test]
 fn test_expansions_chain() {
     quiver()
         .with_modules(dialect_module(

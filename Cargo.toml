@@ -14,3 +14,12 @@ serde_json = "1.0.143"
 num-bigint = { version = "0.4", features = ["serde"] }
 num-traits = "0.2"
 num-integer = "0.1"
+
+# The runtime is an interpreter: a dispatch loop over small operations, where nothing is
+# inlined at opt-level 0. Unoptimized builds run Quiver code ~4x slower, which is the
+# difference between a live view keeping up with a pointer stream and falling behind it.
+# opt-level 1 recovers almost all of that (2 is no faster here) and costs ~1s on an
+# incremental rebuild. Debug assertions stay on — they measure as free, and they carry the
+# refcount invariant check.
+[profile.dev]
+opt-level = 1

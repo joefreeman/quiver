@@ -1,7 +1,8 @@
-// Live-view frames and patches over `%html` template provenance.
+// Live views: the `%html/live{ … }` markup dialect, and the frames and patches that keep
+// a browser in step with it, over `%html` template provenance.
 //
 // A **frame** is the diffable shape of one render: derived from a node tree by reading
-// the `:template` annotation `%html{ … }` expansions attach. A template instance becomes
+// the `:template` annotation `%html{ … }` and `%html/live{ … }` expansions attach. A template instance becomes
 // `Tmpl` (its statics list doubles as its identity — equal statics, same template); its
 // hole values become child slots. A `Text` node in a child slot is a `Leaf` (compared by
 // value, patched as text); an attribute hole is an `ALeaf` (its element anchor and name
@@ -38,12 +39,18 @@
 //     ...
 //   }
 //
-// *When* a binding fires is the client's business, not the event type's: `debounce` and
-// `throttle` (ms) and `keys` are bare attributes on the element carrying the binding, and
-// never reach `update`. `<input on:input={Filter} debounce="300">` sends one event when
-// typing stops rather than one per keystroke, and `<input on:keydown={Commit}
-// keys="Enter">` sends nothing at all for the other keys.
+// *When* a binding fires is the client's business, not the event type's: it is configured
+// on the binding itself, in its `[ … ]` bracket, and never reaches `update`.
+// `<input on:input[300]={Filter}>` sends one event when typing stops rather than one per
+// keystroke, and `<input on:keydown["Enter"]={Commit}>` sends nothing at all for the
+// other keys (see "The markup dialect" below).
 'mods = [alt?: (Ok | []), ctrl?: (Ok | []), shift?: (Ok | []), meta?: (Ok | [])]
+
+// What a mouse event reports. `x`/`y` are relative to the **bound element's** box (the one
+// carrying the `on:*`), rounded to whole pixels — the frame a view actually reasons in, so
+// a drawing surface reads coordinates in its own space without knowing where it sits on
+// the page. `button` is 0 for the primary button, and is meaningless for `mousemove`.
+'pointer = [x: 'int, y: 'int, button: 'int, mods: 'mods]
 
 // What a form control reports about itself. `checked?` is nil for anything that isn't a
 // checkbox or radio, and `value` is the control's own value — for a checkbox that is its
@@ -51,11 +58,172 @@
 'field = [value: '%str, checked?: (Ok | [])]
 
 'event =
-  | Click[x: 'int, y: 'int, button: 'int, mods: 'mods]
+  | Click[...'pointer]
+  | MouseDown[...'pointer]
+  | MouseUp[...'pointer]
+  | MouseMove[...'pointer]
   | Submit[fields: '%http.pairs]
   | Input[...'field]
   | Change[...'field]
   | KeyDown[key: '%str, mods: 'mods]
+
+// === The markup dialect =================================================================
+// `%html/live{ … }` is `%html`'s grammar with the live vocabulary layered on top: this
+// module decides what `on:*` and `nav` mean, and `%html` knows neither. The parse tree is
+// the seam — `%html.parse` reads the markup, the policy below rewrites the attributes
+// this layer claims, and `%html.expand` emits the tree.
+//
+//   on:NAME={payload}        a binding: the payload is typed data, echoed by the client
+//   on:NAME[opts]={payload}  ... with client-side options — see "Binding options"
+//   nav                      a link the client follows without a full page load
+//
+// Both compile to the `data-q-*` attributes the client reads. Markup with no binding
+// needs none of this and stays plain `%html{ … }`.
+
+// The DOM events a binding may name, and which option shape each takes: a key event takes
+// a `keys` filter as well as rate limits. An unknown name is a compile error, rather than
+// markup that silently never fires.
+opts_member? = #'%str {
+  | ="keydown" => "key_opts"
+  | =("click" | "mousedown" | "mouseup" | "mousemove" | "submit" | "input" | "change") => "rate_opts"
+}
+
+// The event an `on:NAME` attribute names, or nil for any other attribute.
+event_name? = #'%str {
+  =Str[b]
+  __integer_compare__ [%bin.length b, 4] ~> =(0 | 1)
+  Str[%bin.slice [b, 0, 3]] ~> ="on:"
+  Str[%bin.slice [b, 3, %bin.length b]]
+}
+
+// An `on:NAME` binding: the `data-q-NAME` attribute carrying the payload the client
+// echoes back, plus — when the binding carries a bracket — the `data-q-NAME-opts`
+// attribute saying when it may fire. The bracket is spliced as the *argument* of the
+// event's option function, so its labels, defaults and types are checked there.
+binding = #[(attr): '%html.pattr, (event): '%str] {
+  $attr ~> =(pos: pos, mods: mods, value: value)
+  {
+    | opts_member? $event ~> =Str[m] => Str[m]
+    | %parse.fail [
+      pos,
+      "a supported event name (click, submit, input, change, keydown)",
+    ]
+  }
+  member = ~
+  {
+    | value ~> =AHole[sp] => Expr[
+      Call[
+        module: "html/live",
+        member: "event_value",
+        arg: Unquote[offset: sp.offset, length: sp.length],
+      ],
+    ]
+    | %parse.fail [pos, "'\{ … }' (a binding's payload is a hole)"]
+  }
+  payload = ~
+  name = %str.concat ["data-q-", $event]
+  bound = [name: name, pos: pos, mods: [], value: payload]
+  mods ~> {
+    | =[] => Cons[bound, Nil]
+    | =(offset: o, length: l) => Cons[
+      bound,
+      Cons[
+        [
+          name: %str.concat [name, "-opts"],
+          pos: pos,
+          mods: [],
+          value: Expr[
+            Call[module: "html/live", member: member, arg: Unquote[offset: o, length: l]],
+          ],
+        ],
+        Nil,
+      ],
+    ]
+  }
+}
+
+// What one written attribute means here. Anything this layer doesn't claim passes through
+// untouched — including its value, which %html normalizes as usual.
+live_policy = #'%html.pattr {
+  | event_name? $name ~> =Str[eb] => binding [$, Str[eb]]
+  | $name ~> ="nav" => {
+    | $mods ~> =[]; $value ~> =Flag => Cons[$[..., name: "data-q-nav"], Nil]
+    | %parse.fail [
+      $pos,
+      "a bare 'nav' (it takes no value and no modifiers)",
+    ]
+  }
+  | $mods ~> =[] => Cons[$, Nil]
+  | %parse.fail [
+    $pos,
+    "an attribute without a '[ … ]' modifier (only 'on:*' bindings take one)",
+  ]
+}
+
+// Normalizes an `on:NAME={ … }` payload: the value in the `Ev` envelope, marked as the
+// tree's typed data. The envelope is what the client echoes and `decode` reads back, so
+// it discriminates a decoded event from a dropped one; the `Data` marker is the tree's
+// and never reaches the wire.
+event_value = #<'t>'t { Ev[$] ~> %html.data_value }
+
+// A live view's markup: an `%html` tree whose data attributes carry `'e` events. Spell a
+// view's own type with these rather than `'%html<…>`, which would have to name the wire
+// envelope the bindings ride in.
+'<'e> = '%html<Ev['e]>
+'nodes<'e> = '%html.nodes<Ev['e]>
+
+live_dialect = #(content: '%str, term: '%meta.cb) {
+  %html.parse [$content, &$term]; %html.rewrite_attrs [~, &live_policy]; %html.expand
+}
+
+// === Binding options ====================================================================
+// A binding's bracket is compiled as the argument of one of these functions, so its
+// labels, defaults and types are the compiler's to check: `on:click["Enter"]` is a type
+// error, and a misspelled option names no field. What they answer is the attribute text
+// the client reads: `[debounce, throttle, keys]` as JSON, where 0 means "no limit" and an
+// empty key list "any key". Adding an option later is one defaulted field here, one line
+// in the client, and no change to any existing markup.
+
+// A key filter: one key, or a list of them (`on:keydown[%list{ "Enter", "Escape" }]`). A
+// bare string is one whole key, never split, so every key the browser can report —
+// including `" "` — is expressible.
+'keys = '%str | '%list<'%str>
+
+key_list = #('keys | []) {
+  | =[] => Nil
+  | =Str[b] => Cons[Str[b], Nil]
+  | $
+}
+
+// The keys as a JSON array body: each key stringified, so any key survives verbatim.
+keys_text = #[(items): '%list<'%str>, (acc): '%str] {
+  $items ~> {
+    | =Nil => $acc
+    | =Cons[k, rest] => {
+      sep = { $acc ~> ="" => "" | "," }
+      ^ [rest, %str.concat [$acc, sep] ~> %str.concat [~, %json.stringify k]]
+    }
+  }
+}
+
+ms_text = #('int | []) { =('int)n => %str.from_int n | "0" }
+
+opts_text = #[(debounce): ('int | []), (throttle): ('int | []), (keys): ('keys | [])] {
+  keys = key_list $keys ~> keys_text [~, ""]
+  rates = %str.concat ["[", ms_text $debounce] ~> %str.concat [~, ","]
+  head = %str.concat [rates, ms_text $throttle] ~> %str.concat [~, ",["]
+  %str.concat [head, keys] ~> %str.concat [~, "]]"]
+}
+
+rate_opts = #[(debounce): ('int | []) = [], (throttle): ('int | []) = []] {
+  :doc "The options an ordinary binding takes, as `on:click[…]`'s bracket: `debounce` (ms — fire once the events stop) and `throttle` (ms — fire the first of each window, drop the rest). Both are omittable and positional-first, so `on:input[300]` debounces by 300ms. Rate limiting is per binding and per element, and the server never sees it."
+  opts_text [debounce: $debounce, throttle: $throttle, keys: []]
+}
+
+key_opts = #[(keys): ('keys | []) = [], (debounce): ('int | []) = [], (throttle): ('int | []) = []] {
+  :doc "The options a key binding takes, as `on:keydown[…]`'s bracket: `keys` (one key, or a list — only these reach the server, matched against the browser's key name) plus `rate_opts`' `debounce` and `throttle`. Positional-first, so `on:keydown[\"Enter\"]` sends only Enter, and `on:keydown[%list\{ \"Enter\", \"Escape\" }]` those two."
+  opts_text [debounce: $debounce, throttle: $throttle, keys: $keys]
+}
 
 // === Session messages ===================================================================
 // Declared up front: boundary frames carry a view-spawning thunk typed against them.
@@ -134,7 +302,7 @@
 enc_attr = #<'e>'%html.attr_val<'e> {
   | =Str[b] => Str[b]
   | =Ok => Ok
-  | =Ev[_] => %data.encode $
+  | =Data[payload] => %data.encode payload
   | []
 }
 
@@ -557,8 +725,8 @@ encode = #[(vid): '%str, (ps): 'patches] {
 // re-derives state from a new URL without remounting — the root view's live-navigation
 // hook, receiving the raw request the app synthesized for the target; a component that
 // doesn't navigate omits it (the `_base` record) and gets an identity `nav`.
-'component<'i, 's, 'e> = [mount: #'i -> 's, update: #[(state): 's, (event): 'e] -> 's, view: #'s -> '%html<'e>, decode: #'%str -> (Ev['e] | []), nav: #[(state): 's, (request): '%http] -> 's]
-'component_base<'i, 's, 'e> = [mount: #'i -> 's, update: #[(state): 's, (event): 'e] -> 's, view: #'s -> '%html<'e>, decode: #'%str -> (Ev['e] | [])]
+'component<'i, 's, 'e> = [mount: #'i -> 's, update: #[(state): 's, (event): 'e] -> 's, view: #'s -> '<'e>, decode: #'%str -> (Ev['e] | []), nav: #[(state): 's, (request): '%http] -> 's]
+'component_base<'i, 's, 'e> = [mount: #'i -> 's, update: #[(state): 's, (event): 'e] -> 's, view: #'s -> '<'e>, decode: #'%str -> (Ev['e] | [])]
 
 // Fill in a default (identity) `nav` when the record omits it, so most components —
 // which never navigate — stay four fields. Both the `component` constructor and the
@@ -630,12 +798,14 @@ mods_of = #'%json {
 
 // Each metadata shape, from the arguments following its tag. Nil for a malformed one,
 // which drops the whole event.
-click_of = #'jsons {
+// The mouse events all report the same thing, so they share a reader and differ only in
+// their tag.
+pointer_of = #'jsons {
   =Cons[xj, Cons[yj, Cons[bj, Cons[mj, Nil]]]]
   xj ~> jval ~> =('int)x
   yj ~> jval ~> =('int)y
   bj ~> jval ~> =('int)b
-  Click[x: x, y: y, button: b, mods: mj ~> jval ~> mods_of]
+  [x: x, y: y, button: b, mods: mj ~> jval ~> mods_of]
 }
 
 submit_of = #'jsons { =Cons[fj, Nil]; fj ~> jval ~> =Array[fs]; Submit[fields: pairs_of fs] }
@@ -655,16 +825,20 @@ keydown_of = #'jsons {
 }
 
 // The browser metadata beside a payload, from its wire form — a tagged JSON array, one
-// shape per event name: `["click", x, y, button, [alt, ctrl, shift, meta]]`,
-// `["submit", [[name, value], …]]`, `["input", value, checked]`, `["change", value,
-// checked]`, `["keydown", key, [alt, ctrl, shift, meta]]`. Answers nil for anything else,
+// shape per event name: `["click" | "mousedown" | "mouseup" | "mousemove", x, y, button,
+// [alt, ctrl, shift, meta]]`, `["submit", [[name, value], …]]`, `["input", value,
+// checked]`, `["change", value, checked]`, `["keydown", key, [alt, ctrl, shift, meta]]`.
+// Answers nil for anything else,
 // which drops the whole envelope: metadata the server cannot read is an event it cannot
 // faithfully fold.
 event_of = #'%json {
   =Array[Cons[tagj, rest]]
   tagj ~> jval ~> =Str[tb]
   Str[tb] ~> {
-    | ="click" => click_of rest
+    | ="click" => pointer_of rest ~> Click[...]
+    | ="mousedown" => pointer_of rest ~> MouseDown[...]
+    | ="mouseup" => pointer_of rest ~> MouseUp[...]
+    | ="mousemove" => pointer_of rest ~> MouseMove[...]
     | ="submit" => submit_of rest
     | ="input" => field_of rest ~> Input[...]
     | ="change" => field_of rest ~> Change[...]
@@ -1739,10 +1913,14 @@ client_js = """
     while (r.open.nextSibling && r.open.nextSibling !== r.close) r.open.nextSibling.remove();
     r.close.parentNode.insertBefore(frag, r.close);
   };
-  const parseHtml = (h) => \{
-    const t = document.createElement('template');
-    t.innerHTML = h;
-    return t.content;
+  // Patch markup is parsed **in the context of the element it lands in**, so a fragment
+  // going into an <svg> is parsed as SVG. A detached <template> would parse everything as
+  // HTML, which puts a patched-in <circle> in the wrong namespace — present in the DOM,
+  // and invisible.
+  const parseHtml = (h, ctx) => \{
+    const range = document.createRange();
+    range.selectNodeContents(ctx && ctx.nodeType === 1 ? ctx : root);
+    return range.createContextualFragment(h);
   };
   const apply = (b, p) => \{
     if (p[0] === 'a') \{
@@ -1804,14 +1982,15 @@ client_js = """
         } else if (mclose(n)) depth--;
         return false;
       });
-      const frag = parseHtml(p[3]);
+      const frag = parseHtml(p[3], (before || r.close || root).parentNode);
       if (before) before.parentNode.insertBefore(frag, before);
       else if (r.close) r.close.parentNode.insertBefore(frag, r.close);
       else root.appendChild(frag);
     } else \{
       const r = resolve(p[1], b);
       if (!r) return;
-      setNodes(r, p[0] === 't' ? document.createTextNode(p[2]) : parseHtml(p[2]));
+      const ctx = r.close ? r.close.parentNode : root;
+      setNodes(r, p[0] === 't' ? document.createTextNode(p[2]) : parseHtml(p[2], ctx));
     }
   };
   let ws = null, delay = 500;
@@ -1883,6 +2062,12 @@ client_js = """
   const envelope = (el, attr, meta) =>
     '[' + JSON.stringify(vidOf(el)) + ',' + JSON.stringify(el.getAttribute(attr)) + ',' + JSON.stringify(meta) + ']';
   const mods = (e) => [!!e.altKey, !!e.ctrlKey, !!e.shiftKey, !!e.metaKey];
+  // A mouse event's position in the BOUND element's box, not the viewport: a surface
+  // reads coordinates in its own space wherever it sits on the page.
+  const pointer = (e, el) => \{
+    const r = el.getBoundingClientRect();
+    return [Math.round(e.clientX - r.left), Math.round(e.clientY - r.top), e.button | 0, mods(e)];
+  };
   // Read from the control that actually changed, not the bound element — a binding on a
   // <form> reports the field the user touched.
   const fieldOf = (t) => [
@@ -1901,7 +2086,10 @@ client_js = """
   // or form submission is ours to take over, while typing, selecting and key presses are
   // the user's own and must go through untouched.
   const EVENTS = [
-    ['click', true, (e, el) => ['click', e.clientX | 0, e.clientY | 0, e.button | 0, mods(e)]],
+    ['click', true, (e, el) => ['click'].concat(pointer(e, el))],
+    ['mousedown', false, (e, el) => ['mousedown'].concat(pointer(e, el))],
+    ['mouseup', false, (e, el) => ['mouseup'].concat(pointer(e, el))],
+    ['mousemove', false, (e, el) => ['mousemove'].concat(pointer(e, el))],
     ['submit', true, (e, el) => ['submit', formPairs(el)]],
     ['input', false, (e, el) => ['input'].concat(fieldOf(e.target))],
     ['change', false, (e, el) => ['change'].concat(fieldOf(e.target))],
@@ -1920,41 +2108,45 @@ client_js = """
     if (!m[name]) m[name] = \{ timer: 0, last: 0 };
     return m[name];
   };
-  // Deliver, or not, per the element's `debounce`/`throttle` attributes (ms). Debounce
-  // waits for the events to stop and sends the newest envelope; throttle sends the first
-  // of each window and drops the rest. Neither is visible to the server.
-  const deliver = (el, name, text) => \{
+  // A binding's options, from the `data-q-NAME-opts` its `[ … ]` bracket emitted:
+  // [debounce, throttle, keys]. A binding without a bracket carries no attribute, and
+  // takes the defaults — no rate limit, any key.
+  const NO_OPTS = [0, 0, []];
+  const optsOf = (el, name) => \{
+    const raw = el.getAttribute('data-q-' + name + '-opts');
+    return raw ? JSON.parse(raw) : NO_OPTS;
+  };
+  // Deliver, or not, per the binding's rate limits (ms). Debounce waits for the events to
+  // stop and sends the newest envelope; throttle sends the first of each window and drops
+  // the rest. Neither is visible to the server.
+  const deliver = (el, name, opts, text) => \{
     const st = limitState(el, name);
-    const d = parseInt(el.getAttribute('data-q-debounce'), 10);
-    if (d > 0) \{
+    if (opts[0] > 0) \{
       clearTimeout(st.timer);
-      st.timer = setTimeout(() => ws.send(text), d);
+      st.timer = setTimeout(() => ws.send(text), opts[0]);
       return;
     }
-    const t = parseInt(el.getAttribute('data-q-throttle'), 10);
-    if (t > 0) \{
+    if (opts[1] > 0) \{
       const now = Date.now();
-      if (now - st.last < t) return;
+      if (now - st.last < opts[1]) return;
       st.last = now;
     }
     ws.send(text);
   };
-  // A `keys` attribute filters key events client-side: only the named keys (whitespace
-  // separated, matched against KeyboardEvent.key) reach the server at all.
-  const keyAllowed = (e, el) => \{
-    const keys = el.getAttribute('data-q-keys');
-    if (keys == null || e.key == null) return true;
-    return keys.split(' ').filter(Boolean).indexOf(e.key) >= 0;
-  };
+  // A key filter drops the other keys client-side: they never reach the server at all.
+  const keyAllowed = (e, keys) =>
+    keys.length === 0 || e.key == null || keys.indexOf(e.key) >= 0;
   EVENTS.forEach((entry) => \{
     const name = entry[0], cancel = entry[1], meta = entry[2];
     const attr = 'data-q-' + name;
     document.addEventListener(name, (e) => \{
       const el = live(e, attr);
-      if (!el || !keyAllowed(e, el)) return;
+      if (!el) return;
+      const opts = optsOf(el, name);
+      if (!keyAllowed(e, opts[2])) return;
       if (cancel) e.preventDefault();
       const text = envelope(el, attr, meta(e, el));
-      deliver(el, name, text);
+      deliver(el, name, opts, text);
       if (name === 'submit') el.reset();
     });
   });
@@ -2027,18 +2219,25 @@ handle = #[(req): '%http, (app): 'app] {
   }
 }
 
-[
-  frame: &frame,
-  render: &render,
-  diff: &diff,
-  encode: &encode,
-  app: &app,
-  component: &component,
-  redirect: &redirect,
-  handle: &handle,
-  sim: &sim,
-  sim_text: &sim_text,
-  sim_event: &sim_event,
-  sim_changed: &sim_changed,
-  sim_html: &sim_html,
-]
+{
+  :dialect &live_dialect
+  [
+    frame: &frame,
+    render: &render,
+    diff: &diff,
+    encode: &encode,
+    app: &app,
+    component: &component,
+    redirect: &redirect,
+    handle: &handle,
+    sim: &sim,
+    sim_text: &sim_text,
+    sim_event: &sim_event,
+    sim_changed: &sim_changed,
+    sim_html: &sim_html,
+    // Reached by the dialect's emitted calls, not usually by name.
+    event_value: &event_value,
+    rate_opts: &rate_opts,
+    key_opts: &key_opts,
+  ]
+}

@@ -237,29 +237,102 @@ fn test_event_attributes_serialize_payloads_as_data() {
     // `Ev` envelope) into an emitted `data-q-click` attribute — events are data the
     // client echoes back verbatim, and the component decodes with `%data.decode`.
     quiver()
-        .evaluate(r#"%html{ <button on:click={Inc[5]}>+</button> } ~> %html.render"#)
+        .evaluate(r#"%html/live{ <button on:click={Inc[5]}>+</button> } ~> %html.render"#)
         .expect(r#""<button data-q-click=\"Ev[Inc[5]]\">+</button>""#);
     // A string payload is data too, attr-escaped like any attribute value.
     quiver()
-        .evaluate(r#"%html{ <button on:click={"inc"}>+</button> } ~> %html.render"#)
+        .evaluate(r#"%html/live{ <button on:click={"inc"}>+</button> } ~> %html.render"#)
         .expect(r#""<button data-q-click=\"Ev[&quot;inc&quot;]\">+</button>""#);
 }
 
 #[test]
-fn test_reserved_bare_attributes_emit_as_data_q() {
-    // `nav`, `keys`, `debounce` and `throttle` are the live layer's own bare attribute
-    // names: they emit under `data-q-` and are read only by the client, so they never
-    // reach the server as event metadata or as ordinary attributes.
+fn test_declared_view_return_type_checks_event_payloads() {
+    // Declaring a view's return type as `'%html<Ev['wire]>` checks its `on:*` payloads in
+    // place — the alternative to pinning at the component constructor. The diagnosis
+    // names the offending leaf.
     quiver()
         .evaluate(
-            r#"%html{ <input on:input={F} debounce="300" keys="Enter Escape" throttle="50"> } ~> %html.render"#,
+            r#"'wire = Submit | Toggle['int]
+               v = #'int -> '%html<Ev['wire]> { %html/live{ <button on:click={Toggle["oops"]}>t</button> } }
+               Ok"#,
+        )
+        .expect_error_containing("Str['bin] is not 'int");
+    quiver()
+        .evaluate(
+            r#"'wire = Submit | Toggle['int]
+               v = #'int -> '%html<Ev['wire]> { %html/live{ <button on:click={Toggle[$]}>t</button> } }
+               1 ~> v ~> %html.render"#,
+        )
+        .expect(r#""<button data-q-click=\"Ev[Toggle[1]]\">t</button>""#);
+}
+
+#[test]
+fn test_pointer_events_carry_element_relative_positions() {
+    // The mouse events share one metadata shape, and the position is the browser's to
+    // report: the payload is a bare marker, so a view that tracks a pointer renders no
+    // coordinate at all. `on:mousemove`'s throttle rides the binding, not the element.
+    quiver()
+        .evaluate(
+            r#"'ev = Move
+               comp = [
+                 mount: #'%http { "" },
+                 update: #[(state): Str['bin], (event): 'ev] {
+                   $event:('%html/live.event)event ~> =MouseMove(x: x, y: y)
+                   %str.from_int x ~> %str.concat [~, ","] ~> %str.concat [~, %str.from_int y]
+                 },
+                 view: #Str['bin] { %html/live{ <p on:mousemove[throttle: 40]={Move}>{$}</p> } },
+                 decode: &%data.decode<Ev['ev]>,
+               ]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               s = %html/live.sim [req, comp]
+               %html/live.sim_text [s, "[\"0\", \"Ev[Move]\", [\"mousemove\", 12, 34, 0, [false, false, false, false]]]"] ~> =[s2, ps]
+               [ps, %html/live.sim_html s2]"#,
         )
         .expect(
-            r#""<input data-q-input=\"Ev[F]\" data-q-debounce=\"300\" data-q-keys=\"Enter Escape\" data-q-throttle=\"50\">""#,
+            r#"[Cons[SetText[path: Cons[2, Nil], value: "12,34"], Nil], "<p data-q=\"0\" data-q-mousemove=\"Ev[Move]\" data-q-mousemove-opts=\"[0,40,[]]\"><!--q:2-->12,34<!--/q:2--></p>"]"#,
         );
+}
+
+#[test]
+fn test_binding_options_compile_as_call_arguments() {
+    // A binding's `[ … ]` bracket is the argument of the event's option function, so it
+    // takes labels, positional-first entries and defaults from the type system, and emits
+    // one `data-q-NAME-opts` attribute: [debounce, throttle, keys].
+    quiver()
+        .evaluate(
+            r#"%html/live{ <input on:input[300]={F} on:keydown["Enter", throttle: 50]={C}> } ~> %html.render"#,
+        )
+        .expect(
+            r#""<input data-q-input=\"Ev[F]\" data-q-input-opts=\"[300,0,[]]\" data-q-keydown=\"Ev[C]\" data-q-keydown-opts=\"[0,50,[&quot;Enter&quot;]]\">""#,
+        );
+    // A key list, and keys that a space-separated attribute could never carry.
+    quiver()
+        .evaluate(r#"%html/live{ <input on:keydown[%list{ " ", "Enter" }]={C}> } ~> %html.render"#)
+        .expect(
+            r#""<input data-q-keydown=\"Ev[C]\" data-q-keydown-opts=\"[0,0,[&quot; &quot;,&quot;Enter&quot;]]\">""#,
+        );
+    // The option vocabulary is per event: `keys` is a key-event option, and a misspelled
+    // option names no field of the parameter.
+    quiver()
+        .evaluate(r#"%html/live{ <b on:click["Enter"]={X}>t</b> }"#)
+        .expect_error_containing("[debounce: ('int | []), throttle: ('int | [])]");
+    quiver()
+        .evaluate(r#"%html/live{ <b on:click[debouce: 5]={X}>t</b> }"#)
+        .expect_error_containing("[debounce: ('int | []), throttle: ('int | [])]");
+    // An unknown event name is a compile error, not markup that never fires.
+    quiver()
+        .evaluate(r#"%html/live{ <b on:clik={X}>t</b> }"#)
+        .expect_error_containing("a supported event name");
+    // Modifiers belong to bindings; %html itself has no meaning for them at all.
+    quiver()
+        .evaluate(r#"%html/live{ <b foo["x"]>t</b> }"#)
+        .expect_error_containing("only 'on:*' bindings take one");
+    quiver()
+        .evaluate(r#"%html{ <b on:click[300]={X}>t</b> }"#)
+        .expect_error_containing("they have meaning only in a dialect that reads them");
     // An author still cannot write the instrumentation namespace directly.
     quiver()
-        .evaluate(r#"%html{ <p data-q-keys="x">hi</p> }"#)
+        .evaluate(r#"%html/live{ <p data-q-click="x">hi</p> }"#)
         .expect_error_containing("'data-q' is reserved for template instrumentation");
 }
 
@@ -268,7 +341,7 @@ fn test_event_payload_changes_patch_like_attributes() {
     // A payload that varies with state diffs as an ordinary attribute slot.
     quiver()
         .evaluate(
-            r#"view = #'int { %html{ <button on:click={Del[~]}>x</button> } }
+            r#"view = #'int { %html/live{ <button on:click={Del[~]}>x</button> } }
                f1 = 1 ~> view ~> %html/live.frame
                f2 = 2 ~> view ~> %html/live.frame
                %html/live.diff [f1, f2]"#,
@@ -769,7 +842,7 @@ fn test_pinned_component_rejects_stray_event_payload() {
                bad = %html/live.component<'ev> [
                  mount: #[] { 0 },
                  update: #[(state): 'int, (event): 'ev] { $state },
-                 view: #'int { %html{ <button on:click={Bogus}>+</button> } },
+                 view: #'int { %html/live{ <button on:click={Bogus}>+</button> } },
                  decode: &%data.decode<Ev['ev]>,
                ]
                Ok"#,
@@ -789,7 +862,7 @@ fn test_pinned_component_accepts_matching_events() {
                  update: #[(state): 'int, (event): 'ev] {
                    $event ~> { | =Inc => %num.add [$state, 1] | %num.sub [$state, 1] }
                  },
-                 view: #'int { %html{ <button on:click={Inc}>{$}</button> } },
+                 view: #'int { %html/live{ <button on:click={Inc}>{$}</button> } },
                  decode: &%data.decode<Ev['ev]>,
                ]
                Ok"#,
@@ -816,7 +889,7 @@ fn test_one_event_union_folds_markers_and_payloads_together() {
                      }
                    }
                  },
-                 view: #Str['bin] { %html{ <form on:submit={Submit}><b>{$}</b></form> } },
+                 view: #Str['bin] { %html/live{ <form on:submit={Submit}><b>{$}</b></form> } },
                  decode: &%data.decode<Ev['ev]>,
                ]
                s = %html/live.sim [[], comp]
@@ -833,7 +906,7 @@ fn test_event_attribute_frames_encode_to_data_notation() {
     // attribute string.
     quiver()
         .evaluate(
-            r#"view = #'int { %html{ <button on:click={Del[$]}>x</button> } }
+            r#"view = #'int { %html/live{ <button on:click={Del[$]}>x</button> } }
                f1 = 1 ~> view ~> %html/live.frame
                f2 = 2 ~> view ~> %html/live.frame
                %html/live.diff [f1, f2]"#,

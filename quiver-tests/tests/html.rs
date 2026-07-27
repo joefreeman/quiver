@@ -218,24 +218,3 @@ fn test_hole_type_errors_cite_the_hole() {
         .evaluate(r#"%html{ <p>{ [1, 2] }</p> }"#)
         .expect_error_containing("['int, 'int] does not fit");
 }
-
-#[test]
-fn test_declared_view_return_type_checks_event_payloads() {
-    // Declaring a view's return type as `'%html<'wire>` checks its `on:*` payloads in
-    // place — the alternative to pinning at the component constructor. The diagnosis
-    // names the offending leaf.
-    quiver()
-        .evaluate(
-            r#"'wire = Submit | Toggle['int]
-               v = #'int -> '%html<'wire> { %html{ <button on:click={Toggle["oops"]}>t</button> } }
-               Ok"#,
-        )
-        .expect_error_containing("Str['bin] is not 'int");
-    quiver()
-        .evaluate(
-            r#"'wire = Submit | Toggle['int]
-               v = #'int -> '%html<'wire> { %html{ <button on:click={Toggle[$]}>t</button> } }
-               1 ~> v ~> %html.render"#,
-        )
-        .expect(r#""<button data-q-click=\"Ev[Toggle[1]]\">t</button>""#);
-}

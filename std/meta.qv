@@ -8,8 +8,14 @@
 // content, parsed as ONE host chain and spliced in the *caller's* scope — evaluated once
 // (bind-once, deduplicated by span), with the dialect term's flowing value as its chain
 // input, so `~` inside a span is the dialect input, a bare callable is called with it,
-// and `&f` passes by value, exactly as inline host code. `Call` applies a dialect-module
-// export to an argument; `Tuple` constructs a tuple — the only way to build one, so the
+// and `&f` passes by value, exactly as inline host code. `Call` applies an export of the
+// dialect's own module — or of the module its `module` field names (`"html"`,
+// `"html/live"`), resolved at the invocation site, so a dialect can reach a companion
+// module it doesn't itself import. An `Unquote` argument is folded into the call, which
+// splices the span in **argument position**: the member's parameter type reaches it, so a
+// tuple or `#{ … }` literal there elaborates as at a handwritten call (omittable labels,
+// `:defaults`, parameter inference), and bind-once covers the call as well as the span.
+// `Tuple` constructs a tuple — the only way to build one, so the
 // wrapper names stay unambiguous (a data tuple named `Call` is spliced as
 // `Tuple["Call", …]`), and it covers names and labels that come from parsed text. Its
 // fields are bare expressions (positional) unless wrapped in `Labeled`, which exists
@@ -36,6 +42,7 @@
   | Nil
   | Unquote[offset: 'int, length: 'int]
   | Call[member: Str['bin], arg: ^]
+  | Call[module: Str['bin], member: Str['bin], arg: ^]
   | Tuple[name: (Nil | Str['bin]), fields: (Nil | Cons[(^ | Labeled[label: Str['bin], value: ^]), ^1])]
 
 // The context record a dialect function receives: the unescaped brace content, and the
