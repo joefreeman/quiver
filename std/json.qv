@@ -387,5 +387,5 @@ stringify = #' {
 
 {
   :dialect &json
-  [parse: &parse, stringify: &stringify]
+  (parse, stringify)
 }

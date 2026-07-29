@@ -674,6 +674,7 @@ fn rational_term(numer: BigInt, denom: BigInt) -> Term {
         name: TupleName::Named("Rational".to_string()),
         fields: vec![rational_field(n), rational_field(d)],
         span: Spanned::default(),
+        punned: false,
     })
 }
 
@@ -1875,6 +1876,7 @@ fn spread_update(input: Span) -> IResult<Span, Term> {
             name: TupleName::Inherit,
             fields,
             span: Spanned(Some(bracket_span)),
+            punned: false,
         }),
     ))
 }
@@ -2074,6 +2076,86 @@ fn dialect_term(input: Span) -> IResult<Span, Term> {
     ))
 }
 
+/// The label a punned entry lends its field: the final *named* segment of its access path — the
+/// last field accessor (`p.x`, `$conn.buf`, `%num.add` → `x`, `buf`, `add`), or, with no
+/// accessors, the path's own name (a variable `f`, or an import's last segment: `%num` → `num`).
+///
+/// The root must be one a reference can be taken of and that a label can be recovered from: a
+/// variable, a parameter (`$x`, `$$x`), or an import. A ripple root is excluded because `&~.f`
+/// is not supported; a builtin because `__integer_add__` is no field label (write the labeled
+/// form, `[add: &__integer_add__]`); self and tail calls because they name no field. A final
+/// index (`p.0`) or annotation (`f:doc`) likewise has no label to lend.
+fn pun_label(path: &Access) -> Option<String> {
+    match path.source {
+        Some(
+            AccessSource::Identifier(_) | AccessSource::Parameter { .. } | AccessSource::Import(_),
+        ) => {}
+        _ => return None,
+    }
+    match path.accessors.last() {
+        Some(AccessPath::Field(name)) => Some(name.clone()),
+        Some(AccessPath::Index(_) | AccessPath::Annotation(..)) => None,
+        None => match &path.source {
+            Some(AccessSource::Identifier(name)) => Some(name.clone()),
+            Some(AccessSource::Import(segments)) => segments.last().cloned(),
+            // A bare `$`/`$$` names the whole parameter, which has no label of its own.
+            _ => None,
+        },
+    }
+}
+
+/// A punned tuple entry: a bare access path standing for both a field label and its value, so
+/// `(a, p.x)` abbreviates `[a: &a, x: &p.x]`. The value is always taken *by reference* — an
+/// identifier inside `(…)` is a name, not an expression, so there is nothing for the flowing
+/// value to flow into and a callable entry names the function rather than calling it. That is
+/// what a record of functions wants, and it makes a punned tuple pure repackaging.
+///
+/// A leading `&` is accepted and discarded: it says exactly what a pun already means, so it
+/// carries no information, and the formatter renders the canonical spelling without it. This
+/// lets `[f: &f, g: &g]` be shortened by deleting the labels alone.
+fn pun_field(input: Span) -> IResult<Span, TupleField> {
+    let start = input;
+    let (rest, path) = preceded(opt(char('&')), access)(input)?;
+    let Some(name) = pun_label(&path) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    };
+    // The label and the value are the same text, so the label's span is the path's final
+    // segment — where go-to-definition on the field should land.
+    let name_span = path
+        .accessor_spans
+        .last()
+        .copied()
+        .unwrap_or(path.base_span);
+    Ok((
+        rest,
+        TupleField {
+            name: Some(name),
+            name_span,
+            span: Spanned(Some(span_between(start, rest))),
+            value: FieldValue::Chain(make_source_chain(Term::Reference(path))),
+        },
+    ))
+}
+
+/// The parenthesised entry list of a punning tuple: one or more puns, and *only* puns. An
+/// explicit `k: v` entry is not accepted, so `(…)` never becomes a second spelling for a general
+/// tuple literal — every entry in it is a name, exactly as in the partial *type* `(x: 'int)` and
+/// the partial *pattern* `(x, y)`. The empty list is rejected too: `()` has no name to pun, and
+/// nil is spelled `[]`.
+fn punned_field_list(input: Span) -> IResult<Span, Vec<TupleField>> {
+    delimited(
+        pair(char('('), wsc),
+        terminated(
+            separated_list1(tuple((wsc, char(','), wsc)), pun_field),
+            opt(pair(wsc, char(','))),
+        ),
+        pair(wsc, char(')')),
+    )(input)
+}
+
 fn tuple_field(input: Span) -> IResult<Span, TupleField> {
     let start = input;
     let (rest, mut field) = alt((
@@ -2130,6 +2212,7 @@ fn tuple_term(input: Span) -> IResult<Span, Tuple> {
                 name: TupleName::Named(name),
                 fields,
                 span: Spanned::default(),
+                punned: false,
             },
         ),
         // [...] - unnamed tuple with fields
@@ -2139,10 +2222,29 @@ fn tuple_term(input: Span) -> IResult<Span, Tuple> {
                 name: TupleName::Anonymous,
                 fields,
                 span: Spanned::default(),
+                punned: false,
             },
         ),
+        // TupleName(...) - named punning tuple, the `(` glued like every tuple bracket.
+        map(tuple((tuple_name, punned_field_list)), |(name, fields)| {
+            Tuple {
+                name: TupleName::Named(name),
+                fields,
+                span: Spanned::default(),
+                punned: true,
+            }
+        }),
+        // (...) - unnamed punning tuple. Only reached in expression position: a leading
+        // pattern (`(a, b) = p`) is taken by `chain`'s binding alternative first, so the same
+        // text still destructures there.
+        map(punned_field_list, |fields| Tuple {
+            name: TupleName::Anonymous,
+            fields,
+            span: Spanned::default(),
+            punned: true,
+        }),
         // TupleName - bare tuple name without fields
-        // Only parse if not followed by '(' (which would indicate a partial pattern)
+        // Only parse if not followed by '(' (which would indicate a punning tuple)
         map(
             tuple((
                 tuple_name,
@@ -2152,6 +2254,7 @@ fn tuple_term(input: Span) -> IResult<Span, Tuple> {
                 name: TupleName::Named(name),
                 fields: vec![],
                 span: Spanned::default(),
+                punned: false,
             },
         ),
     ))(input)?;

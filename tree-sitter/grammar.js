@@ -126,6 +126,12 @@ module.exports = grammar({
     [$.pattern_tuple, $.tuple_type],
     [$._pattern, $._type_atom],
     [$.pattern_partial, $.partial_type],
+    // `(a, b)` may be a punned tuple (value position) or a partial pattern (before a `=`,
+    // or after one as `=(a, b)`); the surrounding position decides, via GLR.
+    [$.pun, $._partial_field],
+    [$.pun, $._pattern, $._partial_field],
+    // A leading `&` inside `(…)` may begin a pinned pattern (`=(&y)`) or a redundant-`&` pun.
+    [$.pun, $.pattern_pin],
     // A `:key` token may open a block-prefix annotation (`:key value`) or be an
     // annotation-retrieval accessor on the flowing value; what follows decides, via GLR.
     [$.annotation, $._leading_accessor],
@@ -562,8 +568,27 @@ module.exports = grammar({
     tuple: $ => choice(
       seq(field('name', $.tuple_name), immBracketed($, '[', $._field, ']')),
       bracketed($, '[', $._field, ']'),
+      // Punning forms: `(a, b)` / `Foo(a, b)`, one or more puns and nothing else. Written
+      // out rather than via `bracketed` because an empty `()` is not a tuple — it has no
+      // name to pun, and nil is `[]`.
+      seq(
+        field('name', $.tuple_name),
+        token.immediate('('), optional($._nl), commaSep1($, $.pun), optional($._nl), ')',
+      ),
+      seq('(', optional($._nl), commaSep1($, $.pun), optional($._nl), ')'),
       field('name', $.tuple_name),
     ),
+
+    // A punned tuple entry: an access path standing for both a field label and its value,
+    // so `(a, p.x)` builds `[a: &a, x: &p.x]`. Rooted at a variable, the parameter, or an
+    // import; the label is the path's final named segment, so an index or annotation step
+    // cannot end one, and a ripple root is not punnable.
+    // A leading `&` is accepted and redundant — a pun is always by reference.
+    pun: $ => prec.right(seq(
+      optional('&'),
+      field('source', choice($.identifier, $.parameter, $.import)),
+      repeat(seq('.', field('field', $.identifier))),
+    )),
 
     _field: $ => choice(
       $.named_field,

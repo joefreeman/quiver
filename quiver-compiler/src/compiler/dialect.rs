@@ -229,6 +229,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 name: ast::TupleName::Named("Nil".to_string()),
                 fields: vec![],
                 span: self.dialect.span,
+                punned: false,
             }))),
             "Unquote" => {
                 let (offset, length) = self.unquote_span(value)?;
@@ -254,6 +255,8 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                     name,
                     fields,
                     span: self.dialect.span,
+                    // A dialect emits tuples structurally; punning is a source spelling only.
+                    punned: false,
                 })))
             }
             "Labeled" => {

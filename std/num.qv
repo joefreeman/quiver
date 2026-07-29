@@ -107,7 +107,7 @@ rcompare = #['rational, 'rational] {
 // Largest square divisor: `n = k²·m` with `m` square-free. Called as `[1, n, 2] sqfree`
 // for `n > 0`; pure trial division (O(√n)).
 sqfree = #[(k): 'int, (m): 'int, (d): 'int] {
-  | __integer_compare__ [__integer_multiply__ [$d, $d], $m] ~> =1 => [k: $k, m: $m]
+  | __integer_compare__ [__integer_multiply__ [$d, $d], $m] ~> =1 => ($k, $m)
   | __integer_modulo__ [$m, __integer_multiply__ [$d, $d]] ~> =0 => ^ [
       __integer_multiply__ [$k, $d],
       __integer_divide__ [$m, __integer_multiply__ [$d, $d]],

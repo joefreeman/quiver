@@ -562,18 +562,18 @@ set_cookie = #[(name): '%str, (value): '%str, (attrs): 'attrs = Nil] {
   ["set-cookie", attrs_join [$attrs, "{$name}={$value}"]]
 }
 
-[
-  header: &header,
-  get: &get,
-  lower: &lower,
-  form: &form,
-  form_decode: &form_decode,
-  form_encode: &form_encode,
-  cookies: &cookies,
-  set_cookie: &set_cookie,
-  parse_request: &parse_request,
-  parse_request_with: &parse_request_with,
-  split_target: &split_target,
-  serialize_response: &serialize_response,
-  reason: &reason,
-]
+(
+  header,
+  get,
+  lower,
+  form,
+  form_decode,
+  form_encode,
+  cookies,
+  set_cookie,
+  parse_request,
+  parse_request_with,
+  split_target,
+  serialize_response,
+  reason,
+)

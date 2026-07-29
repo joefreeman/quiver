@@ -42,7 +42,7 @@
 // A failure at a position: nil carrying the standard payload.
 fail = #[(offset): 'int, (message): Str['bin]] {
   :doc "A failure at a position: nil carrying `Expected[offset, message]` as its `:error` payload."
-  [] ~> { :error Expected[offset: $offset, message: $message] }
+  [] ~> { :error Expected($offset, $message) }
 }
 
 // The byte at the state's position, or nil at end of input.
@@ -454,31 +454,31 @@ run = #<'t>[(s): Str['bin], (p): 'p<'t>] {
   }
 }
 
-[
-  run: &run,
-  fail: &fail,
-  fail_in: &fail_in,
-  byte: &byte,
-  satisfy: &satisfy,
-  ws: &ws,
-  take_while: &take_while,
-  int: &int,
-  ident: &ident,
-  quoted: &quoted,
-  literal: &literal,
-  map: &map,
-  then: &then,
-  left: &left,
-  right: &right,
-  between: &between,
-  alt2: &alt2,
-  alt3: &alt3,
-  alt4: &alt4,
-  many0: &many0,
-  sep_by: &sep_by,
-  sep_end_by: &sep_end_by,
-  opt: &opt,
-  label: &label,
-  chainl: &chainl,
-  rec: &rec,
-]
+(
+  run,
+  fail,
+  fail_in,
+  byte,
+  satisfy,
+  ws,
+  take_while,
+  int,
+  ident,
+  quoted,
+  literal,
+  map,
+  then,
+  left,
+  right,
+  between,
+  alt2,
+  alt3,
+  alt4,
+  many0,
+  sep_by,
+  sep_end_by,
+  opt,
+  label,
+  chainl,
+  rec,
+)

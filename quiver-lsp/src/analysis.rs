@@ -311,6 +311,34 @@ mod tests {
     }
 
     #[test]
+    fn module_member_span_locates_a_punned_field() {
+        // A punned export tuple carries its labels in the same place, so member-level
+        // go-to-definition lands on the pun itself.
+        let src = "double = #'int { ~ }\ntriple = #'int { ~ }\n(double, triple)";
+        let ast = quiver_compiler::parse(src).unwrap();
+        let span = crate::symbols::module_member_span(&ast, "triple").expect("member span");
+        assert_eq!(&src[span.offset..span.offset + span.length], "triple");
+        assert_eq!(span.offset, src.rfind("triple").unwrap());
+    }
+
+    #[test]
+    fn module_member_at_finds_a_punned_member() {
+        let src = "double = #'int { ~ }\ntriple = #'int { ~ }\n(double, triple)";
+        let ast = quiver_compiler::parse(src).unwrap();
+        let (name, span) = crate::symbols::module_member_at(&ast, src.rfind("triple").unwrap())
+            .expect("member at cursor");
+        assert_eq!(name, "triple");
+        assert_eq!(&src[span.offset..span.offset + span.length], "triple");
+    }
+
+    #[test]
+    fn goto_definition_from_a_pun() {
+        // A pun is a reference as well as a label: jumping from it lands on the binding.
+        let text = "double = #'int { ~ }\n(double)";
+        assert_goto(text, "double", "double");
+    }
+
+    #[test]
     fn goto_definition_for_mid_chain_bind() {
         // The `=request` mid-chain binding form.
         let text = "5 ~> =request\nrequest ~> __increment__";

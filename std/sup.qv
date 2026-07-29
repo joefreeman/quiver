@@ -176,4 +176,4 @@ drop = #[(sup): @'msg, (id): '%str] {
   Drop[$id] ~> $sup; Ok
 }
 
-[start: &start, add: &add, drop: &drop, watch: &watch]
+(start, add, drop, watch)

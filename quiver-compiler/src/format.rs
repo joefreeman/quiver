@@ -607,6 +607,21 @@ fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
     if tuple.fields.is_empty() {
         return pretty::text(format!("{}[]", name));
     }
+    // A punned tuple renders back to the spelling it was written as — `(a, p.x)` rather than the
+    // `[a: &a, x: &p.x]` the parser desugared it to. Entries carry their own trivia, so comments
+    // and blank lines inside the parens survive as they do in any field list.
+    if tuple.punned {
+        return bracketed(
+            format!("{}(", name),
+            ")",
+            tuple
+                .fields
+                .iter()
+                .map(|field| pun_doc(trivia, field))
+                .collect(),
+            true,
+        );
+    }
     // Tuple field lists accept a trailing comma, so add one when broken.
     bracketed(
         format!("{}[", name),
@@ -703,6 +718,22 @@ fn protect_trailing_spaces(line: String) -> String {
         return line;
     }
     format!("{}{}", &line[..trimmed_len], "\\s".repeat(trailing))
+}
+
+/// Render a punned entry back to the bare access path it was written as — the inverse of the
+/// parser's desugaring, whose shape (`name: &path`) is what makes the match exhaustive.
+fn pun_doc(trivia: &Trivia, field: &TupleField) -> Doc {
+    let FieldValue::Chain(chain) = &field.value else {
+        unreachable!("a punned entry is a chain")
+    };
+    let [Term::Reference(path)] = chain.terms.as_slice() else {
+        unreachable!("a punned entry is a lone reference")
+    };
+    pretty::concat(vec![
+        trivia.leading_doc(field.span),
+        pretty::text(render_access(path)),
+        trivia.trailing_doc(field.span),
+    ])
 }
 
 fn field_doc(trivia: &Trivia, field: &TupleField) -> Doc {

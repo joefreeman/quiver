@@ -282,6 +282,13 @@ pub struct Tuple {
     pub fields: Vec<TupleField>,
     /// Span of the tuple literal, for hover (shows the constructed composite type).
     pub span: Spanned,
+    /// Written with the punning spelling `(a, b)` / `Foo(a, b)`, where each entry is a *name*
+    /// standing for both its own label and the value bound to it. The parser desugars a pun to
+    /// the labeled reference it abbreviates (`a` → `a: &a`), so the rest of the compiler sees an
+    /// ordinary tuple; the flag records the spelling so the formatter can render it back — like
+    /// [`Chain::binding`] and [`Term::String`]'s style. A punned tuple's fields are therefore
+    /// always labeled, always [`FieldValue::Chain`], and always a lone [`Term::Reference`].
+    pub punned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

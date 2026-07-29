@@ -859,7 +859,7 @@ data_value = #<'t>'t { Data[$] }
 // instrumented statics and the normalized hole values, as the `:template` annotation.
 // Identity on the tree; the annotation is invisible to matching, equality, and render.
 with_template = #<'d>[(tree): 'node<'d>, (statics): 'statics, (holes): 'holes<'d>] {
-  $tree ~> { :template [statics: $statics, holes: $holes] }
+  $tree ~> { :template ($statics, $holes) }
 }
 
 escape_text = #'%str {
@@ -874,19 +874,19 @@ escape_attr = #'%str {
 
 {
   :dialect &html_dialect
-  [
-    render: &render,
-    page: &page,
-    raw: &raw,
-    text: &text,
-    child: &child,
-    attr_value: &attr_value,
-    data_value: &data_value,
-    with_template: &with_template,
-    escape_text: &escape_text,
-    escape_attr: &escape_attr,
-    parse: &parse,
-    rewrite_attrs: &rewrite_attrs,
-    expand: &expand,
-  ]
+  (
+    render,
+    page,
+    raw,
+    text,
+    child,
+    attr_value,
+    data_value,
+    with_template,
+    escape_text,
+    escape_attr,
+    parse,
+    rewrite_attrs,
+    expand,
+  )
 }

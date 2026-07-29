@@ -111,11 +111,7 @@ binding = #[(attr): '%html.pattr, (event): '%str] {
   } ~> =('%str)member
   {
     | value ~> =AHole[sp] => Expr[
-      Call[
-        module: "html/live",
-        member: "event_value",
-        arg: Unquote[offset: sp.offset, length: sp.length],
-      ],
+      Call[module: "html/live", member: "event_value", arg: Unquote(sp.offset, sp.length)],
     ]
     | %parse.fail [pos, "'\{ … }' (a binding's payload is a hole)"]
   } ~> =('%html.pattr_val)payload
@@ -222,7 +218,7 @@ rate_opts = #[(debounce): ('int | []) = [], (throttle): ('int | []) = []] {
 
 key_opts = #[(keys): ('keys | []) = [], (debounce): ('int | []) = [], (throttle): ('int | []) = []] {
   :doc "The options a key binding takes, as `on:keydown[…]`'s bracket: `keys` (one key, or a list — only these reach the server, matched against the browser's key name) plus `rate_opts`' `debounce` and `throttle`. Positional-first, so `on:keydown[\"Enter\"]` sends only Enter, and `on:keydown[%list\{ \"Enter\", \"Escape\" }]` those two."
-  opts_text [debounce: $debounce, throttle: $throttle, keys: $keys]
+  opts_text ($debounce, $throttle, $keys)
 }
 
 // === Session messages ===================================================================
@@ -2217,23 +2213,23 @@ handle = #[(req): '%http, (app): 'app] {
 
 {
   :dialect &live_dialect
-  [
-    frame: &frame,
-    render: &render,
-    diff: &diff,
-    encode: &encode,
-    app: &app,
-    component: &component,
-    redirect: &redirect,
-    handle: &handle,
-    sim: &sim,
-    sim_text: &sim_text,
-    sim_event: &sim_event,
-    sim_changed: &sim_changed,
-    sim_html: &sim_html,
+  (
+    frame,
+    render,
+    diff,
+    encode,
+    app,
+    component,
+    redirect,
+    handle,
+    sim,
+    sim_text,
+    sim_event,
+    sim_changed,
+    sim_html,
     // Reached by the dialect's emitted calls, not usually by name.
-    event_value: &event_value,
-    rate_opts: &rate_opts,
-    key_opts: &key_opts,
-  ]
+    event_value,
+    rate_opts,
+    key_opts,
+  )
 }

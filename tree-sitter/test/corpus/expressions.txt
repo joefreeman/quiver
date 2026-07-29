@@ -486,3 +486,45 @@ explicit type application on an import member and a reference
           (type_arguments
             (type_identifier
               name: (type_name))))))))
+
+==================
+field punning
+==================
+
+r = (a, p.x, $y, %num.add)
+
+---
+
+(source_file
+  (sequence
+    (chain
+      binding: (identifier)
+      (tuple
+        (pun
+          source: (identifier))
+        (pun
+          source: (identifier)
+          field: (identifier))
+        (pun
+          source: (parameter
+            field: (identifier)))
+        (pun
+          source: (import
+            (identifier))
+          field: (identifier))))))
+
+==================
+named field punning
+==================
+
+Foo(a)
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (tuple
+        name: (tuple_name)
+        (pun
+          source: (identifier))))))

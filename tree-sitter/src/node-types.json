@@ -1854,6 +1854,40 @@
     }
   },
   {
+    "type": "pun",
+    "named": true,
+    "fields": {
+      "field": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "source": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "import",
+            "named": true
+          },
+          {
+            "type": "parameter",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "receive_type",
     "named": true,
     "fields": {},
@@ -2394,6 +2428,10 @@
         },
         {
           "type": "named_field",
+          "named": true
+        },
+        {
+          "type": "pun",
           "named": true
         },
         {

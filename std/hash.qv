@@ -274,4 +274,4 @@ hmac_sha256 = #[(key): 'bin, (msg): 'bin] {
   __binary_concat__ [__binary_xor__ [kp, opad], inner] ~> sha256
 }
 
-[sha256: &sha256, hmac_sha256: &hmac_sha256, sha1: &sha1]
+(sha256, hmac_sha256, sha1)

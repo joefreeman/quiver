@@ -163,12 +163,4 @@ not_found = #{
   plain [404, "Not Found"]
 }
 
-[
-  serve: &serve,
-  html: &html,
-  page: &page,
-  text: &text,
-  json: &json,
-  redirect: &redirect,
-  not_found: &not_found,
-]
+(serve, html, page, text, json, redirect, not_found)

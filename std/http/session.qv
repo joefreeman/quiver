@@ -59,4 +59,4 @@ clear = #'%http.response {
   Response[status: $status, headers: %list.prepend [$headers, h], body: $body]
 }
 
-[get: &get, put: &put, clear: &clear]
+(get, put, clear)

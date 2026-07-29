@@ -1914,6 +1914,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             name: tuple.name.clone(),
             fields,
             span: tuple.span,
+            // Elaboration reorders fields into the expected type's canonical order and fills
+            // defaults, so the result no longer matches any written spelling. Only the parsed
+            // AST is ever formatted, so dropping the flag here costs nothing.
+            punned: false,
         }))
     }
 
@@ -2300,6 +2304,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     name: ast::TupleName::Anonymous,
                     fields,
                     span: ast::Spanned::default(),
+                    punned: false,
                 })],
             },
         });

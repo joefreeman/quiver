@@ -87,4 +87,4 @@ list_expr = #'elist {
   build_rev [rev [~, Nil], Nil]
 }
 
-[pair2: &pair2, call2: &call2, list_expr: &list_expr]
+(pair2, call2, list_expr)

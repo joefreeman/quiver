@@ -96,10 +96,7 @@ frame_tail = #[(buf): 'bin, (fin): 'int, (opcode): 'int, (plen): 'int, (moff): '
 
           payload = %bin.slice [$buf, __integer_add__ [$moff, 4], total] ~> apply_mask [~, key]
 
-          [
-            Frame[fin: $fin, opcode: $opcode, payload: payload],
-            %bin.slice [$buf, total, %bin.length $buf],
-          ]
+          [Frame($fin, $opcode, payload), %bin.slice [$buf, total, %bin.length $buf]]
         }
       }
     }
@@ -169,7 +166,7 @@ wrap_message = #['int, 'bin] { $0 ~> =1 => Text[Str[$1]] | Binary[$1] }
 fail = #[(conn): ', (code): 'int, (reason): '%str] {
   __tcp_socket_write__ [$conn.sock, close_payload [$code, $reason] ~> encode_frame [8, ~]]
   __tcp_socket_close__ $conn.sock
-  [Close[code: $code, reason: $reason], $conn[..., buf: 0x, part: Nil]]
+  [Close($code, $reason), $conn[..., buf: 0x, part: Nil]]
 }
 
 recv = #' {
@@ -199,7 +196,7 @@ recv = #' {
         close_info p ~> =(code, reason)
         __tcp_socket_write__ [$sock, encode_frame [8, p]]
         __tcp_socket_close__ $sock
-        [Close[code: code, reason: reason], $[..., buf: rest, part: Nil]]
+        [Close(code, reason), $[..., buf: rest, part: Nil]]
       }
       | op ~> =0 => $part ~> {
         | =Part[opcode: o, data: d] => {
@@ -234,7 +231,7 @@ recv = #' {
 drain = #[', 'messages] {
   =[Conn[sock: sock, buf: buf, part: part], acc]
   parse_frame buf ~> {
-    | =Incomplete => [%list.reverse acc, Conn[sock: sock, buf: buf, part: part]]
+    | =Incomplete => [%list.reverse acc, Conn(sock, buf, part)]
     | =Bad[r] => {
       fail [Conn[sock: sock, buf: 0x, part: Nil], 1002, r] ~> =[close, c2]
       [%list.reverse Cons[close, acc], c2]
@@ -249,10 +246,7 @@ drain = #[', 'messages] {
         close_info p ~> =(code, reason)
         __tcp_socket_write__ [sock, encode_frame [8, p]]
         __tcp_socket_close__ sock
-        [
-          %list.reverse Cons[Close[code: code, reason: reason], acc],
-          Conn[sock: sock, buf: rest, part: Nil],
-        ]
+        [%list.reverse Cons[Close(code, reason), acc], Conn[sock: sock, buf: rest, part: Nil]]
       }
       | op ~> =0 => part ~> {
         | =Part[opcode: o, data: d] => {
@@ -329,17 +323,17 @@ close = #[', 'int, '%str] {
   Ok
 }
 
-[
-  accept_key: &accept_key,
-  handshake_response: &handshake_response,
-  parse_frame: &parse_frame,
-  encode_frame: &encode_frame,
-  encode_masked_frame: &encode_masked_frame,
-  conn: &conn,
-  recv: &recv,
-  on_data: &on_data,
-  send_text: &send_text,
-  send_binary: &send_binary,
-  ping: &ping,
-  close: &close,
-]
+(
+  accept_key,
+  handshake_response,
+  parse_frame,
+  encode_frame,
+  encode_masked_frame,
+  conn,
+  recv,
+  on_data,
+  send_text,
+  send_binary,
+  ping,
+  close,
+)
