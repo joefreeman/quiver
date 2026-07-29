@@ -1326,6 +1326,14 @@ fn collect_variables_by_variance(
     }
 }
 
+/// Whether a type variable is *rigid* in a body compiled under `enclosing_suffix`: it
+/// carries that definition's uniquification suffix, so it names one of the enclosing
+/// generic's own parameters — an opaque but real type here — rather than a variable some
+/// callee has yet to solve.
+pub fn is_rigid_variable(name: &str, enclosing_suffix: Option<usize>) -> bool {
+    enclosing_suffix.is_some_and(|suffix| name.ends_with(&format!("#{suffix}")))
+}
+
 /// Close a call result's unpinned type parameters: any variable the unification left
 /// unbound, occurring only covariantly in the result, is bound to the empty union — no
 /// value of that type was supplied, so the result provably can't produce one
@@ -1343,15 +1351,12 @@ pub fn close_unpinned_result(
     let mut co = std::collections::HashSet::new();
     let mut contra = std::collections::HashSet::new();
     collect_variables_by_variance(result_id, program, true, &mut co, &mut contra);
-    let rigid_marker = enclosing_suffix.map(|suffix| format!("#{suffix}"));
     let unpinned: Vec<String> = co
         .into_iter()
         .filter(|name| {
             !contra.contains(name)
                 && !bindings.contains_key(name)
-                && rigid_marker
-                    .as_ref()
-                    .is_none_or(|marker| !name.ends_with(marker))
+                && !is_rigid_variable(name, enclosing_suffix)
         })
         .collect();
     if unpinned.is_empty() {

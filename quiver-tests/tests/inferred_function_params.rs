@@ -60,6 +60,46 @@ fn test_inferred_param_via_local_higher_order_function() {
 }
 
 #[test]
+fn test_inferred_param_pinned_to_enclosing_type_parameter() {
+    // A sibling argument can pin the callee's variable to the *enclosing* generic's own type
+    // parameter. That is a real (if opaque) type, so the literal takes it as its parameter
+    // instead of falling back to nil — a fallback would infer `#[] -> []` and, unifying that
+    // against `#'t -> ('t | [])`, silently widen the caller's `'t` to `'t | []`. The declared
+    // return type is what catches the widening.
+    quiver()
+        .evaluate(
+            r#"
+            keep = #<'t>[(list): '%list<'t>] -> '%list<'t> { %list.filter [$list, #{ $ }] };
+            keep [Cons[1, Cons[2, Nil]]]
+            "#,
+        )
+        .expect("Cons[1, Cons[2, Nil]]");
+}
+
+#[test]
+fn test_inferred_mapper_keeps_the_enclosing_element_type() {
+    // The same for `%list.map`, whose result variable is pinned by the literal's own result:
+    // a nil fallback would make the mapped list `'%list<[]>`.
+    quiver()
+        .evaluate(
+            r#"
+            same = #<'t>[(list): '%list<'t>] -> '%list<'t> { %list.map [$list, #{ $ }] };
+            same [Cons[1, Cons[2, Nil]]]
+            "#,
+        )
+        .expect("Cons[1, Cons[2, Nil]]");
+}
+
+#[test]
+fn test_unsolved_callee_variable_still_falls_back_to_nil() {
+    // Only a *rigid* variable is usable. One the callee has yet to solve has nothing to pin
+    // it, so the literal keeps its nilary meaning.
+    quiver()
+        .evaluate("run = #<'t>[#'t -> 'int] { =[g]; g }; run [#{ 42 }]")
+        .expect("42");
+}
+
+#[test]
 fn test_inferred_param_concrete_callee() {
     // When the callee's parameter is fully concrete, no sibling is needed to pin it.
     quiver()

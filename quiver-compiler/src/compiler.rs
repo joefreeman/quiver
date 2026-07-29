@@ -2397,11 +2397,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             None => {
                 // No annotation: infer the parameter from the expected callable type at the use
-                // site when one is available and usable. A bare type variable (`'t`) is not usable
-                // — there's nothing to pin it, so the literal couldn't act on its parameter — so
-                // fall back to nil, preserving the `#{ ... }` nilary-function shorthand.
-                let usable = expected_parameter
-                    .filter(|&ep| !matches!(self.program.lookup_type(ep), Some(Type::Variable(_))));
+                // site when one is available and usable. A type variable the callee has yet to
+                // solve is not usable — there's nothing to pin it, so the literal couldn't act on
+                // its parameter — so fall back to nil, preserving the `#{ ... }` nilary-function
+                // shorthand. A *rigid* variable is usable: an earlier sibling argument pinned the
+                // callee's variable to one of the enclosing generic's own parameters (`%list.map
+                // [$list, #{ $ }]` inside `#<'t>['%list<'t>, …]`), which is an opaque but real
+                // type the literal can pass through. Falling back there would infer `#[] -> []`
+                // and silently widen the caller's `'t` to `'t | []`.
+                let usable = expected_parameter.filter(|&ep| match self.program.lookup_type(ep) {
+                    Some(Type::Variable(name)) => typing::is_rigid_variable(name, inherited_suffix),
+                    _ => true,
+                });
                 match usable {
                     Some(ep) => ep,
                     None => self.program.register_type(Type::nil()),
