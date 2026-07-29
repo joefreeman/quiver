@@ -50,20 +50,30 @@ fn test_nested_chain_value_dropped() {
 }
 
 #[test]
-fn test_sequence_threads_previous_result() {
-    // A `,`-separated step operates on the previous step's result (threading), not on the block
-    // parameter. So `~` in the second step is the first step's `5`, not the argument `9`.
-    quiver().evaluate("f = #'int { 5; ~ }; 9 ~> f").expect("5");
+fn test_sequence_step_starts_from_the_block_value() {
+    // Every step starts from the block value — the enclosing block's parameter, or the value
+    // piped into it — not from the previous step's result. So `~` in the second step is the
+    // argument `9`, and the first step's `5` is discarded.
+    quiver().evaluate("f = #'int { 5; ~ }; 9 ~> f").expect("9");
+    // Which makes `~` at the start of a step mean what `$` means in a function body.
+    quiver().evaluate("f = #'int { 5; $ }; 9 ~> f").expect("9");
 }
 
 #[test]
-fn test_sequence_threads_through_multiple_steps() {
-    // The value flows step to step: 1 -> 11 -> 111.
+fn test_each_step_restarts_from_the_block_value() {
+    // A sequence is not a pipeline: each step starts from `0` again, so only the last one is
+    // the sequence's result and the earlier steps are dead.
     quiver()
         .evaluate(
             "f = #'int { 1; [~, 10] ~> __integer_add__; [~, 100] ~> __integer_add__ }; 0 ~> f",
         )
-        .expect("111");
+        .expect("100");
+    // To carry a value across a step boundary, name it.
+    quiver()
+        .evaluate(
+            "f = #'int { a = [~, 10] ~> __integer_add__; [a, 100] ~> __integer_add__ }; 0 ~> f",
+        )
+        .expect("110");
 }
 
 #[test]
@@ -97,10 +107,11 @@ fn test_whitespace_is_not_a_chain_separator() {
 
 #[test]
 fn test_newline_is_a_sequence_separator() {
-    // A newline is a sequence separator, synonymous with semicolon: the steps thread 1 -> 11 -> 111.
+    // A newline is a sequence separator, synonymous with semicolon — including that each step
+    // restarts from the block value.
     quiver()
         .evaluate("f = #'int {\n  1\n  [~, 10] ~> __integer_add__\n  [~, 100] ~> __integer_add__\n}\n0 ~> f")
-        .expect("111");
+        .expect("100");
 }
 
 #[test]

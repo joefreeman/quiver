@@ -292,6 +292,50 @@ fn test_annotations_are_invisible_to_pin_equality() {
 }
 
 #[test]
+fn test_error_payload_propagates_through_a_failed_match() {
+    // A match that fails *because its scrutinee was nil* re-emits that nil rather than minting
+    // a fresh one, so a payload survives the one-step `expr ~> =pat` exactly as it survives the
+    // two-step `expr; =pat`. Without this the single-step form silently drops the payload,
+    // which is what broke %parse's furthest-error tracking and the dialect error positions.
+    let source = "
+        div = #['int, 'int] {
+          | =[_, 0] => [] ~> { :error DivisionByZero }
+          | __integer_divide__
+        };
+    ";
+    quiver()
+        .evaluate(&format!(
+            "{source} g = #{{ [4, 0] ~> div ~> =('int)x; 5 }}; g ~> :error"
+        ))
+        .expect("DivisionByZero");
+    // The two-step spelling answers the same, for a different reason: the first step is the
+    // nil, so the boundary short-circuits and the later steps never run. Both forms carry the
+    // payload, which is what makes the one-liner a faithful rewrite of the two-stepper.
+    quiver()
+        .evaluate(&format!(
+            "{source} g = #{{ [4, 0] ~> div; =x; 5 }}; g ~> :error"
+        ))
+        .expect("DivisionByZero");
+}
+
+#[test]
+fn test_failed_match_carries_only_a_nil_scrutinee() {
+    // Same code, same types — only the runtime value differs. A nil scrutinee's failure is that
+    // nil propagating, so its payload survives; a non-nil value that simply doesn't fit the
+    // pattern is a fresh failure, and cannot inherit the payload of the value it rejected.
+    let source = "
+        f = #'int { | =0 => [] ~> { :error Boom } | A[1] ~> { :error Stale } };
+        g = #'int { f ~> =B[x]; 5 };
+    ";
+    quiver()
+        .evaluate(&format!("{source} 0 ~> g ~> :error"))
+        .expect("Boom");
+    quiver()
+        .evaluate(&format!("{source} 1 ~> g ~> :error"))
+        .expect("[]");
+}
+
+#[test]
 fn test_duplicate_annotation_is_compile_error() {
     quiver()
         .evaluate("A[b: 1] ~> {\n:foo 1\n:foo 2\n}")

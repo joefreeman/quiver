@@ -43,8 +43,7 @@ below = #'int {
   :doc "A uniform random integer in [0, n) — cryptographically sourced, unbiased (rejection sampling); nil when n < 1."
   =n
   __integer_compare__ [n, 0] ~> =1
-  klen_loop [n, 1, 256]
-  =(count, power)
+  klen_loop [n, 1, 256] ~> =(count, power)
 
   limit = __integer_subtract__ [power, __integer_modulo__ [power, n]]
 

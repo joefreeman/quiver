@@ -147,8 +147,7 @@ int = #' {
   st = { peek st0 ~> =45; advance [st0, 1] | st0 }
   {
     | peek st ~> =('int)b; digit_val b => {
-      int_digits [st, 0]
-      =[n: n, st: st2]
+      int_digits [st, 0] ~> =[n: n, st: st2]
       {
         | peek st0 ~> =45 => [__integer_subtract__ [0, n], st2]
         | [n, st2]
@@ -230,8 +229,7 @@ qstr_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 quoted = #' {
   :doc "A double-quoted string with `\\\" \\\\ \\/ \\b \\f \\n \\t \\r` escapes, as a Str."
   | peek $ ~> =34 => {
-    qstr_loop [$data, __integer_add__ [$pos, 1], $len, 0x]
-    =(bytes, end)
+    qstr_loop [$data, __integer_add__ [$pos, 1], $len, 0x] ~> =(bytes, end)
     [Str[bytes], $[..., pos: end]]
   }
   | fail_in [$, "a string"]
@@ -257,14 +255,14 @@ literal = #[(s): Str['bin], (what): Str['bin]] {
 // Apply `f` to a parser's value.
 map = #<'t, 'u>['p<'t>, #'t -> 'u] {
   :doc "Applies a function to a parser's value."
-  =[p, f]; #' { p $; =[v, st]; [f v, st] }
+  =[p, f]; #' { p $ ~> =[v, st]; [f v, st] }
 }
 
 // Both in sequence, as a pair.
 then = #<'t, 'u>['p<'t>, 'p<'u>] {
   :doc "Both in sequence, as a pair."
   =[p, q]
-  #' { p $; =[v, st]; q st; =[w, st2]; [[v, w], st2] }
+  #' { p $ ~> =[v, st]; q st ~> =[w, st2]; [[v, w], st2] }
 }
 
 // Both in sequence, keeping only the first / only the second value.
@@ -272,11 +270,13 @@ then = #<'t, 'u>['p<'t>, 'p<'u>] {
 // generic body the literal's parameter inference has no concrete pin and misbehaves.)
 left = #<'t, 'u>['p<'t>, 'p<'u>] {
   :doc "Both in sequence, keeping only the first value."
-  =[p, q]; #' { p $; =[v, st]; q st; =[_, st2]; [v, st2] }
+  =[p, q]
+  #' { p $ ~> =[v, st]; q st ~> =[_, st2]; [v, st2] }
 }
 right = #<'t, 'u>['p<'t>, 'p<'u>] {
   :doc "Both in sequence, keeping only the second value."
-  =[p, q]; #' { p $; =[_, st]; q st; =[w, st2]; [w, st2] }
+  =[p, q]
+  #' { p $ ~> =[_, st]; q st ~> =[w, st2]; [w, st2] }
 }
 
 // `p` between `open` and `close`, keeping `p`'s value.
@@ -413,8 +413,7 @@ chain_run = #<'t>[(p): 'p<'t>, (op): 'p<#['t, 't] -> 't>, (st): ', (lhs): 't] {
   r = $op $st
   {
     | r ~> =[f, st1] => {
-      $p st1
-      =[rhs, st2]
+      $p st1 ~> =[rhs, st2]
       {
         // Recurse only on progress: an operator and operand that both matched empty
         // would repeat forever.
@@ -430,7 +429,7 @@ chain_run = #<'t>[(p): 'p<'t>, (op): 'p<#['t, 't] -> 't>, (st): ', (lhs): 't] {
 // combining function for each pair — the classic precedence-level combinator.
 chainl = #<'t>['p<'t>, 'p<#['t, 't] -> 't>] {
   :doc "One or more of a parser separated by an operator parser yielding combining functions, folded left-associatively."
-  =[p, op]; #' { p $; =[v, st]; chain_run [&p, &op, st, v] }
+  =[p, op]; #' { p $ ~> =[v, st]; chain_run [&p, &op, st, v] }
 }
 
 rec_run = #<'t>[#^ -> (['t, '] | []), 'builder<'t>, '] {
@@ -448,8 +447,7 @@ rec = #<'t>'builder<'t> {
 run = #<'t>[(s): Str['bin], (p): 'p<'t>] {
   :doc "Applies a parser to a whole string: the value, or nil with a positioned `:error` payload — the dialect failure contract."
   $s ~> =Str[data]
-  $p P[data: data, pos: 0, len: %bin.length data, err: []]
-  =[v, st]
+  $p P[data: data, pos: 0, len: %bin.length data, err: []] ~> =[v, st]
   {
     | __integer_compare__ [st.pos, st.len] ~> =(0 | 1) => v
     | fail_in [st, "end of input"]

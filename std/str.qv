@@ -133,8 +133,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
       | 0
     }
     %num.lt? [start, len]
-    int_digits [data, start, len, 0]
-    =(n, end)
+    int_digits [data, start, len, 0] ~> =(n, end)
     end ~> =&len
     { start ~> =1 => %num.sub [0, n] | n }
   },

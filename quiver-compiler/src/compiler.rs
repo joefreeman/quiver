@@ -1081,7 +1081,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             return Ok(self.program.register_type(Type::nil()));
         }
-        let (ty, _prov) = self.compile_sequence(ast::Sequence { steps }, None, None, None)?;
+        let (ty, _prov) = self.compile_sequence(ast::Sequence { steps }, None, None)?;
         Ok(ty)
     }
 
@@ -2871,6 +2871,33 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     #[allow(clippy::too_many_arguments)]
+    /// Emit a match's failure path: the scrutinee sits on the stack and must be replaced by the
+    /// verdict's nil.
+    ///
+    /// A match that fails because its scrutinee was *nil* is that nil propagating, not a fresh
+    /// failure — re-emitting it keeps the annotations (an `:error` payload) alive, exactly as a
+    /// step boundary's short-circuit does. Without this, `expr ~> =pat` mints a fresh nil where
+    /// the two-step `expr; =pat` carries the payload: the difference that silently dropped
+    /// `%parse`'s furthest-error tracking and the dialect error positions. Any other failure — a
+    /// shape, literal, type or pin mismatch — has no incoming failure to carry, so it mints nil.
+    ///
+    /// Answers the carried nil's type when the scrutinee could have been one, so the caller can
+    /// widen the verdict's nil past a provably annotation-free `[]`.
+    fn emit_match_failure(&mut self, value_type: usize) -> Option<usize> {
+        let members = annotations::nil_members(self.program, value_type);
+        let carried = (!members.is_empty()).then(|| typing::union_type_ids(self.program, members));
+        // The test is only worth emitting where the scrutinee could actually be nil.
+        let carry_jump = carried
+            .is_some()
+            .then(|| self.codegen.emit_duplicate_jump_if_nil());
+        self.codegen.add_instruction(Instruction::Pop);
+        self.codegen.add_instruction(Instruction::Tuple(NIL));
+        if let Some(addr) = carry_jump {
+            self.codegen.patch_jump_to_here(addr);
+        }
+        carried
+    }
+
     fn compile_match(
         &mut self,
         pattern: ast::Match,
@@ -2950,11 +2977,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             n.disable();
         }
 
-        // If result type is never (empty union), pattern won't match - skip pattern matching code
+        // If result type is never (empty union), pattern won't match - skip pattern matching code.
+        // The failure still carries a nil scrutinee through (see the failure path below): a
+        // pattern that provably cannot match a nil is the degenerate case of failing against
+        // one, not a different kind of failure.
         if self.is_never(result_type) {
-            self.codegen.add_instruction(Instruction::Pop);
-            self.codegen.add_instruction(Instruction::Tuple(NIL));
-            return Ok(self.program.register_type(Type::nil()));
+            let carried = self.emit_match_failure(value_type);
+            return Ok(carried.unwrap_or_else(|| self.program.register_type(Type::nil())));
         }
 
         // Register locals for all bindings (indices needed for Load)
@@ -3078,9 +3107,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.codegen.add_instruction(Instruction::Store);
             }
         }
-        // Failure path: pop the value and push nil
-        self.codegen.add_instruction(Instruction::Pop);
-        self.codegen.add_instruction(Instruction::Tuple(NIL));
+        let carried_nil = self.emit_match_failure(value_type);
 
         self.codegen.patch_jump_to_here(success_jump_addr);
 
@@ -3091,8 +3118,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // the term is statically dead (nil) — emitting `Ok | []` here would wrongly keep a dead
         // branch alive. (If the value can be nil the pattern matches that nil value, so it stays a
         // real success.)
-        // Match verdicts are freshly minted Ok/nil values, so their rows are exact-empty:
-        // provably annotation-free (a failed match's nil never carries an error payload).
+        // A verdict's `Ok` is freshly minted, so its row is exact-empty: provably
+        // annotation-free. Its nil is not, in general — a failure against a nil scrutinee
+        // re-emits that scrutinee (see the failure path above), so the verdict's nil is
+        // either a fresh one (a shape mismatch) or whichever nil members the scrutinee could
+        // have been, payload rows intact.
         //
         // Nil in `result_type` is not by itself fallibility: a bare binder (`=x`) on a
         // nil-typed value *matches* the nil and binds it. A pattern is irrefutable when
@@ -3104,7 +3134,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             } else if self.contains_nil(result_type) && !irrefutable {
                 let closed_ok = annotations::closed_ok(self.program);
                 let closed_nil = annotations::closed_nil(self.program);
-                typing::union_type_ids(self.program, vec![closed_ok, closed_nil])
+                let mut members = vec![closed_ok, closed_nil];
+                members.extend(carried_nil);
+                typing::union_type_ids(self.program, members)
             } else {
                 annotations::closed_ok(self.program)
             }
@@ -3250,7 +3282,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let (condition_type, condition_prov) = self.compile_sequence(
                 branch.condition.clone(),
                 on_no_match,
-                None,
                 complement_faithful.then_some(&mut narrowing),
             )?;
 
@@ -3365,7 +3396,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let (consequence_type, _) = self.compile_sequence(
                     consequence.clone(),
                     None,
-                    None, // No input - consequence loads parameter via implicit_continuation
                     None, // No narrowing for consequence
                 )?;
                 branch_types.push(consequence_type);
@@ -3782,27 +3812,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(())
     }
 
-    /// Compile a sequence of `,`-separated chains, short-circuiting to nil if any yields nil.
+    /// Compile a sequence of steps, short-circuiting to nil if any yields nil.
+    ///
+    /// Every step starts from the **block value** — the enclosing block's parameter, or the value
+    /// piped into it — not from the previous step's result. That makes steps consistent with the
+    /// two places that already worked this way: a block's branches, and a `=>` consequence (which
+    /// never received its condition's result either). What a step's result still does is gate the
+    /// boundary: nil ends the sequence, and the sequence evaluates to that nil.
     fn compile_sequence(
         &mut self,
         sequence: ast::Sequence,
         on_no_match: Option<usize>,
-        input_type: Option<usize>,
         mut narrowing: Option<&mut Narrowing>,
     ) -> Result<(usize, Provenance), Error> {
         // The sequence's result/short-circuit type, accumulated across chains.
-        let mut last_type = input_type;
+        let mut last_type = None;
         let mut last_prov = Provenance::Unknown;
-        // The value threaded into the next chain: the previous chain's result, which is left on the
-        // stack. `None` means there is no threaded value yet, so the first chain starts from the
-        // block parameter (via `implicit_continuation`) — unless the caller supplied an
-        // `input_type` (the value is then already on the stack).
-        let mut threaded: Option<(usize, Provenance)> =
-            input_type.map(|t| (t, Provenance::Unknown));
         let mut end_jumps = Vec::new();
-        // Type aliases are transparent to the flow, so threading is indexed by *chain* step: the
-        // last chain keeps its result (the sequence's value) rather than short-circuiting, and a
-        // trailing alias must not make the chain before it look non-final.
+        // Type aliases are transparent to the flow, so the step boundary is indexed by *chain*
+        // step: the last chain keeps its result (the sequence's value) rather than
+        // short-circuiting, and a trailing alias must not make the chain before it look non-final.
         let last_chain_index = sequence
             .steps
             .iter()
@@ -3858,18 +3887,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let is_first_chain = chain_ordinal == 0;
             let is_last_chain = Some(step_index) == last_chain_index;
             chain_ordinal += 1;
-            // A chain after the first threads from the previous chain's result (on the stack). That
-            // value is non-nil — a nil result short-circuits to the end — so strip nil from its
-            // type. The first chain has no threaded value and loads the block parameter instead.
-            let chain_input = threaded.map(|(t, p)| (self.without_nil(t), p));
-
             let (chain_type, chain_prov) = self.compile_chain_with_input(
                 chain.clone(),
                 on_no_match,
                 None,
-                chain_input,
+                None, // every step starts from the block value, not the previous step's result
                 narrowing.as_deref_mut(),
-                true, // implicit_continuation: only consulted for the first chain (no threaded input)
+                true, // implicit_continuation: load the block parameter
                 None,
                 true, // a step's nil short-circuits the sequence: its result gates
             )?;
@@ -3908,9 +3932,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             });
             last_prov = chain_prov.clone();
 
-            // Thread this chain's result into the next chain.
-            threaded = Some((chain_type, chain_prov));
-
             // If last_type is NIL, subsequent chains are unreachable - break early
             if let Some(last_type_id) = last_type
                 && self.is_nil(last_type_id)
@@ -3919,10 +3940,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
 
             if !is_last_chain {
-                // Keep the result on the stack for the next chain (threading); short-circuit to the
-                // end of the sequence if it is nil.
+                // Short-circuit to the end of the sequence if the result is nil — the jump keeps
+                // that nil on the stack as the sequence's value. Otherwise discard it: the next
+                // step starts from the block value, so nothing consumes it.
                 let end_jump = self.codegen.emit_duplicate_jump_if_nil();
                 end_jumps.push(end_jump);
+                self.codegen.add_instruction(Instruction::Pop);
 
                 // Passing the short-circuit proves this chain's *result* was non-nil, so
                 // narrow whatever the result's provenance tracks — the `=x, x, ...`

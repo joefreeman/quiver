@@ -1625,20 +1625,34 @@ fn test_type_alias_over_function_type_parameter() {
 
 #[test]
 fn test_type_alias_step_is_transparent_to_the_flow() {
-    // An alias step neither consumes nor produces a value: the chain before it threads
-    // into the chain after it.
+    // An alias step neither consumes nor produces a value: it never becomes the sequence's
+    // result, and the chain after it is still the last one.
     quiver()
         .evaluate(
             r#"
             main = #{
               5 ~> __integer_add__ [~, 1]
               'p = 'int
-              __integer_add__ [~, 2]
+              __integer_add__ [7, 2]
             }
             main
             "#,
         )
-        .expect("8");
+        .expect("9");
+    // Nor does it interrupt short-circuiting: a nil step before an alias still ends the
+    // sequence.
+    quiver()
+        .evaluate(
+            r#"
+            main = #{
+              []
+              'p = 'int
+              7
+            }
+            main
+            "#,
+        )
+        .expect("[]");
 }
 
 #[test]

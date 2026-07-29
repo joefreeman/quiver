@@ -77,15 +77,21 @@ fn test_format_preserves_behavior() {
 fn multi_step_block_is_a_noop() {
     quiver().evaluate("5; 6").expect("6");
     quiver().evaluate("{ 5; 6 }").expect("6");
+    // Every step starts from the block value, so both steps see the 1; the last one is the
+    // block's result and the first is dead.
     quiver()
         .evaluate("1 ~> { [~, 1] ~> __integer_add__; [~, 10] ~> __integer_add__ }")
-        .expect("12");
+        .expect("11");
     // nil short-circuits identically whether or not the steps are wrapped.
     quiver().evaluate("[]; 5").expect("[]");
     quiver().evaluate("{ []; 5 }").expect("[]");
-    // a tail call as the final step still tail-calls after lifting.
+    // a tail call as the final step still tail-calls after lifting. The decrement and the call
+    // are one chain: as a separate step, `^` would start from the block value and never make
+    // progress.
     quiver()
-        .evaluate("f = #'int { | =0 => Done | { [~, 1] ~> __integer_subtract__; ^ } }; 100000 ~> f")
+        .evaluate(
+            "f = #'int { | =0 => Done | { [~, 1] ~> __integer_subtract__ ~> ^ } }; 100000 ~> f",
+        )
         .expect("Done");
 }
 

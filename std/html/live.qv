@@ -108,8 +108,7 @@ binding = #[(attr): '%html.pattr, (event): '%str] {
       pos,
       "a supported event name (click, submit, input, change, keydown)",
     ]
-  }
-  member = ~
+  } ~> =('%str)member
   {
     | value ~> =AHole[sp] => Expr[
       Call[
@@ -119,8 +118,7 @@ binding = #[(attr): '%html.pattr, (event): '%str] {
       ],
     ]
     | %parse.fail [pos, "'\{ … }' (a binding's payload is a hole)"]
-  }
-  payload = ~
+  } ~> =('%html.pattr_val)payload
   name = %str.concat ["data-q-", $event]
   bound = [name: name, pos: pos, mods: [], value: payload]
   mods ~> {
@@ -173,7 +171,9 @@ event_value = #<'t>'t { Ev[$] ~> %html.data_value }
 'nodes<'e> = '%html.nodes<Ev['e]>
 
 live_dialect = #(content: '%str, term: '%meta.cb) {
-  %html.parse [$content, &$term]; %html.rewrite_attrs [~, &live_policy]; %html.expand
+  %html.parse [$content, &$term] ~> =('%html.pnodes)nodes
+  %html.rewrite_attrs [nodes, &live_policy] ~> =('%html.pnodes)rewritten
+  %html.expand rewritten
 }
 
 // === Binding options ====================================================================
@@ -1473,8 +1473,7 @@ alife = #[(req): '%http, (mode): 'amode, (buffer): 'strs, (token): ('%str | []),
       | =Attach[conn] => {
         flush_frames [%list.reverse $buffer, conn]
         tell_views [$routes, Wake]
-        %http/websocket.on_data [conn, 0x]
-        =[msgs, c2]
+        %http/websocket.on_data [conn, 0x] ~> =[msgs, c2]
         route_events [$req, msgs, $routes] ~> {
           | =Go => ^ [$req, Attached[c2], Nil, $token, &reg, $routes]
           | Ok
@@ -1497,8 +1496,7 @@ alife = #[(req): '%http, (mode): 'amode, (buffer): 'strs, (token): ('%str | []),
       #(Frame['%str] | Route['%str, @'view_msg] | Unroute['%str])
     ] ~> {
       | =Data[sock: _, data: d] => {
-        %http/websocket.on_data [conn, d]
-        =[msgs, c2]
+        %http/websocket.on_data [conn, d] ~> =[msgs, c2]
         route_events [$req, msgs, $routes] ~> {
           | =Go => ^ [$req, Attached[c2], Nil, $token, &reg, $routes]
           | Ok
@@ -1758,8 +1756,7 @@ run_cold = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (regis
 join = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (registry): @'reg_msg] {
   // The pid is taken by reference (a bare access would send), so bind it locally.
   reg = &$registry
-  %http/websocket.recv $conn
-  =[first, c2]
+  %http/websocket.recv $conn ~> =[first, c2]
   first ~> {
     | =Text[tok] => {
       Claim[tok, &.] ~> reg
@@ -2205,8 +2202,7 @@ handle = #[(req): '%http, (app): 'app] {
       %proc.detach &ap
       ![#'%str, 5000] ~> {
         | =Str[region] => {
-          page_shell [Str[region], token]
-          =Str[b]
+          page_shell [Str[region], token] ~> =Str[b]
           Response[
             status: 200,
             headers: Cons[["content-type", "text/html; charset=utf-8"], Nil],

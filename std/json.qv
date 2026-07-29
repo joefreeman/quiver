@@ -29,8 +29,7 @@ tok = #[(b): 'int, (what): '%str] { %parse.right [&%parse.ws, %parse.byte [$b, $
 ripple_p = #'%parse {
   =st
   tilde = %parse.byte [126, "'~'"]
-  tilde st
-  =[_, st2]
+  tilde st ~> =[_, st2]
   [Unquote[offset: st.pos, length: 1], st2]
 }
 
@@ -38,8 +37,7 @@ ripple_p = #'%parse {
 // identifier's span is spliced as host code (a caller-scope variable).
 word_p = #'%parse {
   =st
-  %parse.ident st
-  =[w, st2]
+  %parse.ident st ~> =[w, st2]
   w ~> {
     | ="null" => [Tuple[name: "Null", fields: Nil], st2]
     | ="true" => [Tuple[name: "True", fields: Nil], st2]
@@ -234,8 +232,7 @@ parse_value = #['%parse.p<'>, '%parse] {
 
   keyword = #'%parse {
     =kst
-    %parse.ident kst
-    =[w, kst2]
+    %parse.ident kst ~> =[w, kst2]
     w ~> {
       | ="null" => [Null, kst2]
       | ="true" => [True, kst2]

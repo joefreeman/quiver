@@ -9,8 +9,7 @@ use common::*;
 fn test_parse_request_basics() {
     quiver()
         .evaluate(
-            r#""GET /posts/7 HTTP/1.1\r\nHost: x\r\n\r\n" ~> .0 ~> %http.parse_request
-               =[r, rest]; [r.method, r.path, r.version, rest ~> %bin.length]"#,
+            r#""GET /posts/7 HTTP/1.1\r\nHost: x\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[r, rest]; [r.method, r.path, r.version, rest ~> %bin.length]"#,
         )
         .expect(r#"[GET, Cons["posts", Cons["7", Nil]], "HTTP/1.1", 0]"#);
 }
@@ -20,8 +19,7 @@ fn test_parse_request_decodes_target() {
     // Percent-decoded segments and query pairs; `+` is a space; raw target preserved.
     quiver()
         .evaluate(
-            r#""GET /a%20b?x=1&msg=hi+there HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request
-               =[r, _]; [r.target, r.path, r.query]"#,
+            r#""GET /a%20b?x=1&msg=hi+there HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[r, _]; [r.target, r.path, r.query]"#,
         )
         .expect(r#"["/a%20b?x=1&msg=hi+there", Cons["a b", Nil], Cons[["x", "1"], Cons[["msg", "hi there"], Nil]]]"#);
 }
@@ -44,8 +42,7 @@ fn test_parse_request_body_and_leftover() {
     // Content-Length delimits the body; pipelined bytes come back as the leftover.
     quiver()
         .evaluate(
-            r#""POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET /" ~> .0 ~> %http.parse_request
-               =[r, rest]; [r.body, rest]"#,
+            r#""POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET /" ~> .0 ~> %http.parse_request ~> =[r, rest]; [r.body, rest]"#,
         )
         .expect(r#"[0x68656c6c6f, 0x474554202f]"#);
 }
@@ -97,8 +94,7 @@ fn test_parse_request_limits() {
 fn test_header_lookup_is_case_insensitive() {
     quiver()
         .evaluate(
-            r#""GET / HTTP/1.1\r\nX-Thing: One\r\nx-thing: Two\r\n\r\n" ~> .0 ~> %http.parse_request
-               =[r, _]; [[r.headers, "X-THING"] ~> %http.header, [r.headers, "missing"] ~> %http.header]"#,
+            r#""GET / HTTP/1.1\r\nX-Thing: One\r\nx-thing: Two\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[r, _]; [[r.headers, "X-THING"] ~> %http.header, [r.headers, "missing"] ~> %http.header]"#,
         )
         .expect(r#"["One", []]"#);
 }
@@ -107,8 +103,7 @@ fn test_header_lookup_is_case_insensitive() {
 fn test_form_decoding() {
     quiver()
         .evaluate(
-            r#""POST /x HTTP/1.1\r\nContent-Length: 23\r\n\r\na=1&b=hi+x&c=%2Fpath%2F" ~> .0 ~> %http.parse_request
-               =[r, _]; r ~> %http.form"#,
+            r#""POST /x HTTP/1.1\r\nContent-Length: 23\r\n\r\na=1&b=hi+x&c=%2Fpath%2F" ~> .0 ~> %http.parse_request ~> =[r, _]; r ~> %http.form"#,
         )
         .expect(r#"Cons[["a", "1"], Cons[["b", "hi x"], Cons[["c", "/path/"], Nil]]]"#);
     // Duplicates preserved in order; `get` answers the first.
@@ -212,8 +207,7 @@ fn test_crashed_handler_answers_500_and_connection_survives() {
 fn test_cookie_parsing() {
     quiver()
         .evaluate(
-            r#""GET / HTTP/1.1\r\nCookie: a=1; session=abc.def; b=x%20y\r\n\r\n" ~> .0 ~> %http.parse_request
-               =[r, _]; r ~> %http.cookies"#,
+            r#""GET / HTTP/1.1\r\nCookie: a=1; session=abc.def; b=x%20y\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[r, _]; r ~> %http.cookies"#,
         )
         .expect(r#"Cons[["a", "1"], Cons[["session", "abc.def"], Cons[["b", "x%20y"], Nil]]]"#);
     // No Cookie header → no cookies; malformed segments are skipped.
@@ -294,8 +288,7 @@ fn test_session_rejects_tampering() {
 fn test_session_clear() {
     quiver()
         .evaluate(
-            r#"Response[status: 200, headers: Nil, body: 0x] ~> %http/session.clear
-               =Response(headers: hs); [hs, "set-cookie"] ~> %http.header"#,
+            r#"Response[status: 200, headers: Nil, body: 0x] ~> %http/session.clear ~> =Response(headers: hs); [hs, "set-cookie"] ~> %http.header"#,
         )
         .expect(r#""session=; Path=/; Max-Age=0""#);
 }

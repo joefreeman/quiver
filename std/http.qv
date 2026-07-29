@@ -386,8 +386,7 @@ parse_request_with = #[(data): 'bin, (max_head): 'int, (max_body): 'int] {
                       bend = __integer_add__ [bstart, cl]
                       {
                         | __integer_compare__ [bend, len] ~> =(-1 | 0) => {
-                          split_target target
-                          =[path, query]
+                          split_target target ~> =[path, query]
                           [
                             Request[
                               method: m,

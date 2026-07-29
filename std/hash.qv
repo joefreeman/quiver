@@ -101,8 +101,7 @@ blocks = #[(data): 'bin, (off): 'int, (st): 'state] {
     ]
 
     $st ~> =[a0, b0, c0, d0, e0, f0, g0, h0]
-    rounds [w, 0, $st]
-    =[a, b, c, d, e, f, g, h]
+    rounds [w, 0, $st] ~> =[a, b, c, d, e, f, g, h]
     st2 = [
       madd [a0, a],
       madd [b0, b],

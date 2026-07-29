@@ -226,7 +226,7 @@ ws_only_from = #[(data): 'bin, (pos): 'int] {
 tag_name = #'%parse {
   =st
   {
-    | peek_at st ~> =('int)b; lower? b => { tag_rest st; =[bytes, st2]; [Str[bytes], st2] }
+    | peek_at st ~> =('int)b; lower? b => { tag_rest st ~> =[bytes, st2]; [Str[bytes], st2] }
     | peek_at st ~> =('int)b; __integer_compare__ [b, 65] ~> =(0 | 1); __integer_compare__ [b, 90] ~> =(-1 | 0) => %parse.fail_in [
       st,
       "a lowercase tag name (capitalized tags are reserved for components)",
@@ -252,8 +252,7 @@ reserved? = #'%str {
 // An attribute value after its `=`: a `"…"` literal (verbatim bytes) or a `{ … }` hole
 // (recorded as its content span).
 attr_value_p = #[(cb): '%meta.cb, (state): '%parse] {
-  %parse.ws $state
-  =[_, st]
+  %parse.ws $state ~> =[_, st]
   {
     | peek_at st ~> =34 => {
       qstart = __integer_add__ [st.pos, 1]
@@ -296,12 +295,10 @@ attr_mods_p = #[(cb): '%meta.cb, (state): '%parse] {
 // optionally carrying a glued `name[ … ]` modifier bracket. Names are stored as written —
 // what they *mean* is the policy layer's business (see `rewrite_attrs`).
 attrs_loop = #[(cb): '%meta.cb, (state): '%parse, (acc): 'pattrs] {
-  %parse.ws $state
-  =[_, st]
+  %parse.ws $state ~> =[_, st]
   {
     | peek_at st ~> =('int)b; letter? b => {
-      attr_rest st
-      =[nb, st2]
+      attr_rest st ~> =[nb, st2]
       name = Str[nb]
       {
         | seen? [$acc, name] => %parse.fail [st.pos, "a unique attribute name"]
@@ -311,14 +308,11 @@ attrs_loop = #[(cb): '%meta.cb, (state): '%parse, (acc): 'pattrs] {
         ]
         | Ok
       }
-      attr_mods_p [&$cb, st2]
-      =[mods, st3]
-      %parse.ws st3
-      =[_, st4]
+      attr_mods_p [&$cb, st2] ~> =[mods, st3]
+      %parse.ws st3 ~> =[_, st4]
       {
         | peek_at st4 ~> =61 => {
-          attr_value_p [&$cb, st4[..., pos: __integer_add__ [st4.pos, 1]]]
-          =[v, st5]
+          attr_value_p [&$cb, st4[..., pos: __integer_add__ [st4.pos, 1]]] ~> =[v, st5]
           ^ [
             &$cb,
             st5,
@@ -386,8 +380,7 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
         | {
           // An element: `<` tag attrs (`/>` | `>` children `</` tag `>`).
           st1 = $state[..., pos: __integer_add__ [$state.pos, 1]]
-          tag_name st1
-          =[tag, st2]
+          tag_name st1 ~> =[tag, st2]
           {
             | tag ~> =("script" | "style") => %parse.fail [
               st1.pos,
@@ -395,8 +388,7 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
             ]
             | Ok
           }
-          attrs_loop [&$cb, st2, Nil]
-          =[alist, st3]
+          attrs_loop [&$cb, st2, Nil] ~> =[alist, st3]
           {
             | peek_at st3 ~> =47 => {
               | peek_at2 st3 ~> =62 => [
@@ -410,14 +402,12 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
               {
                 | void? tag => [PElem[tag: tag, attrs: alist, children: Nil], st4]
                 | {
-                  $self [&$self, &$cb, st4, Nil]
-                  =[fkids, st5]
+                  $self [&$self, &$cb, st4, Nil] ~> =[fkids, st5]
                   kids = fkids ~> strip
                   {
                     | peek_at st5 ~> =60; peek_at2 st5 ~> =47 => {
                       st6 = st5[..., pos: __integer_add__ [st5.pos, 2]]
-                      tag_name st6
-                      =[ctag, st7]
+                      tag_name st6 ~> =[ctag, st7]
                       {
                         | ctag ~> =&tag => Ok
                         | {
@@ -426,8 +416,7 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
                           %parse.fail [st6.pos, msg]
                         }
                       }
-                      %parse.ws st7
-                      =[_, st8]
+                      %parse.ws st7 ~> =[_, st8]
                       {
                         | peek_at st8 ~> =62 => [
                           PElem[tag: tag, attrs: alist, children: kids],
@@ -446,8 +435,7 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
               }
             }
             | %parse.fail_in [st3, "'>'"]
-          }
-          =[node, stn]
+          } ~> =[node, stn]
           ^ [&$self, &$cb, stn, Cons[[node, []], $acc]]
         }
       }
@@ -673,8 +661,8 @@ rewrite_attr_list = #[(items): 'pattrs, (f): 'apolicy, (acc): 'pattrs] {
   $items ~> {
     | =Nil => %list.reverse $acc
     | =Cons[attr, rest] => {
-      $f attr
-      ^ [rest, &$f, %list.fold [~, $acc, #{ Cons[$1, $0] }]]
+      $f attr ~> =('pattrs)as
+      ^ [rest, &$f, %list.fold [as, $acc, #{ Cons[$1, $0] }]]
     }
   }
 }
@@ -685,16 +673,17 @@ rewrite_list = #[(self): #^ -> ('pnodes | []), (items): 'pnodes, (f): 'apolicy, 
   $items ~> {
     | =Nil => %list.reverse $acc
     | =Cons[node, rest] => {
-      node ~> {
+      node
+      ~> {
         | =PElem[tag: t, attrs: alist, children: kids] => {
-          rewrite_attr_list [alist, &$f, Nil]
-          alist2 = ~
-          $self [&$self, kids, &$f, Nil]
-          PElem[tag: t, attrs: alist2, children: ~]
+          rewrite_attr_list [alist, &$f, Nil] ~> =('pattrs)alist2
+          $self [&$self, kids, &$f, Nil] ~> =('pnodes)kids2
+          PElem[tag: t, attrs: alist2, children: kids2]
         }
         | node
-      }
-      ^ [&$self, rest, &$f, Cons[~, $acc]]
+      } ~> =('pnode)node2
+
+      ^ [&$self, rest, &$f, Cons[node2, $acc]]
     }
   }
 }
@@ -718,8 +707,7 @@ parse = #[(content): '%str, (term): '%meta.cb] {
   :doc "Parses HTML dialect content into its node tree, with the host `term` callback locating `\{ … }` holes and `[ … ]` modifier brackets. Answers the root nodes (whitespace-only text trimmed at the edges), or nil with a positioned `:error` payload — the dialect failure contract, so a dialect can return it as-is."
   cb = &$term
   full = #'%parse {
-    nodes_loop [&nodes_loop, &cb, $, Nil]
-    =[items, st]
+    nodes_loop [&nodes_loop, &cb, $, Nil] ~> =[items, st]
     {
       | __integer_compare__ [st.pos, st.len] ~> =(0 | 1) => [trim_root items ~> strip, st]
       | %parse.fail_in [st, "end of input (unmatched close tag?)"]
@@ -753,7 +741,9 @@ expand = #'pnodes {
 // stage is its own step, so a failure is the step's value and short-circuits carrying its
 // own `:error` payload — which is what positions the compile error.
 html_dialect = #(content: '%str, term: '%meta.cb) {
-  parse [$content, &$term]; rewrite_attrs [~, &plain_policy]; expand
+  parse [$content, &$term] ~> =('pnodes)nodes
+  rewrite_attrs [nodes, &plain_policy] ~> =('pnodes)rewritten
+  expand rewritten
 }
 
 // === Rendering ==========================================================================
