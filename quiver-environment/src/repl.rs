@@ -10,6 +10,7 @@ use quiver_core::process::ProcessId;
 use quiver_core::program::Program;
 use quiver_core::types::{Type, TypeLookup};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Debug)]
 pub enum ReplError {
@@ -86,7 +87,7 @@ impl<E: Effect> Repl<E> {
     /// match, and modules compiled from source are extracted into it (see
     /// `quiver_compiler::artifact`). Safe at any point in a session — the store only
     /// affects future imports.
-    pub fn set_artifact_store(&mut self, store: std::sync::Arc<quiver_compiler::ArtifactStore>) {
+    pub fn set_artifact_store(&mut self, store: Rc<quiver_compiler::ArtifactStore>) {
         self.module_cache.artifact_store = Some(store);
     }
 

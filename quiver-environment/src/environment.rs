@@ -16,6 +16,7 @@ use quiver_core::process::{
 use quiver_core::program::Program;
 use quiver_core::types::{NIL, OK, Type, TypeLookup};
 use quiver_core::value::{ResourceId, Value};
+use quiver_core::wire::WireValue;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -259,11 +260,10 @@ fn import_tuple(
 }
 
 // Type aliases for complex types
-pub type ValueWithHeap = (Value, Vec<Vec<u8>>);
-pub type RuntimeResult = Result<ValueWithHeap, quiver_core::error::Error>;
+pub type RuntimeResult = Result<WireValue, quiver_core::error::Error>;
 pub type ProcessResultsMap = HashMap<ProcessId, Option<RuntimeResult>>;
 pub type WorkerResponsesMap = HashMap<WorkerId, ProcessResultsMap>;
-pub type LocalsResult = Result<Vec<ValueWithHeap>, EnvironmentError>;
+pub type LocalsResult = Result<Vec<WireValue>, EnvironmentError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EnvironmentError {
@@ -340,14 +340,14 @@ impl std::error::Error for EnvironmentError {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestResult {
     Result(
-        Result<ValueWithHeap, quiver_core::error::Error>,
+        Result<WireValue, quiver_core::error::Error>,
         Option<quiver_core::executor::ExecutionStats>,
     ),
     Statuses(HashMap<ProcessId, ProcessStatus>),
     WorkerInfo(Vec<quiver_core::process::WorkerInfo>),
     ProcessTypes(HashMap<ProcessId, (Type, usize)>),
     ProcessInfo(Option<ProcessInfo>),
-    Locals(Vec<ValueWithHeap>),
+    Locals(Vec<WireValue>),
 }
 
 struct PendingAwait {
@@ -1181,13 +1181,8 @@ impl<E: Effect> Environment<E> {
                 function_index,
                 captures,
                 argument,
-                heap,
-            } => self.handle_spawn(caller, function_index, captures, argument, heap),
-            Event::DeliverAction {
-                target,
-                message,
-                heap,
-            } => self.handle_deliver(target, message, heap),
+            } => self.handle_spawn(caller, function_index, captures, argument),
+            Event::DeliverAction { target, message } => self.handle_deliver(target, message),
             Event::AwaitAction { awaiter, targets } => {
                 self.handle_await_processes(awaiter, targets)
             }
@@ -1262,11 +1257,7 @@ impl<E: Effect> Environment<E> {
                 }
                 Ok(())
             }
-            Event::StateRead {
-                caller,
-                state,
-                heap,
-            } => {
+            Event::StateRead { caller, state } => {
                 let worker_id = self
                     .process_router
                     .get(&caller)
@@ -1275,7 +1266,6 @@ impl<E: Effect> Environment<E> {
                     .send(Command::NotifyState {
                         process_id: caller,
                         state,
-                        heap,
                     })
                     .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
                 Ok(())
@@ -1574,9 +1564,8 @@ impl<E: Effect> Environment<E> {
         &mut self,
         caller: ProcessId,
         function_index: usize,
-        captures: Vec<Value>,
-        argument: Value,
-        heap: Vec<Vec<u8>>,
+        captures: Vec<WireValue>,
+        argument: WireValue,
     ) -> Result<(), EnvironmentError> {
         // Each spawn is a future tombstone; count it to drive the reclamation auto-trigger.
         self.spawns_since_collection += 1;
@@ -1591,7 +1580,7 @@ impl<E: Effect> Environment<E> {
             .iter()
             .chain(std::iter::once(&argument))
             .find_map(|value| {
-                if let Value::Resource(resource_id, _) = value {
+                if let WireValue::Resource(resource_id, _) = value {
                     // Look up the owner of this resource and find their worker
                     self.resource_ownership
                         .get(resource_id)
@@ -1606,9 +1595,9 @@ impl<E: Effect> Environment<E> {
 
         // Transfer ownership of any resources in captures or argument to the new process
         for capture in &captures {
-            self.transfer_resource_ownership(capture, new_pid);
+            self.transfer_wire_resource_ownership(capture, new_pid);
         }
-        self.transfer_resource_ownership(&argument, new_pid);
+        self.transfer_wire_resource_ownership(&argument, new_pid);
 
         // Spawn process on chosen worker with function, captures, and argument
         self.workers[worker_id]
@@ -1617,7 +1606,6 @@ impl<E: Effect> Environment<E> {
                 function_index,
                 captures,
                 argument,
-                heap_data: heap.clone(),
             })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
@@ -1638,20 +1626,23 @@ impl<E: Effect> Environment<E> {
         Ok(())
     }
 
-    /// Recursively transfer ownership of all resources in a value to a target process
-    fn transfer_resource_ownership(&mut self, value: &Value, new_owner: ProcessId) {
+    /// Recursively transfer ownership of all resources in a transferred value to its new
+    /// owner. Walks the wire form: the environment owns no heap, so an executor's `Value`
+    /// is not its to inspect.
+    fn transfer_wire_resource_ownership(&mut self, value: &WireValue, new_owner: ProcessId) {
         match value {
-            Value::Resource(resource_id, _) => {
+            WireValue::Resource(resource_id, _) => {
                 self.resource_ownership.insert(*resource_id, new_owner);
             }
-            Value::Tuple(_, fields) => {
-                for field in fields.iter() {
-                    self.transfer_resource_ownership(field, new_owner);
-                }
-            }
-            Value::Function(_, captures) => {
-                for capture in captures.iter() {
-                    self.transfer_resource_ownership(capture, new_owner);
+            // `all_values`, not `elements`: an annotation carries a value like any other
+            // field, so a handle attached as one crosses with the message and must move with
+            // it. A builtin's elements are always empty — its payload exists only to carry
+            // annotations — so that arm is about annotations alone.
+            WireValue::Tuple(_, payload)
+            | WireValue::Function(_, payload)
+            | WireValue::Builtin(_, Some(payload)) => {
+                for value in payload.all_values() {
+                    self.transfer_wire_resource_ownership(value, new_owner);
                 }
             }
             _ => {} // Other value types don't contain resources
@@ -1661,11 +1652,10 @@ impl<E: Effect> Environment<E> {
     fn handle_deliver(
         &mut self,
         target: ProcessId,
-        message: Value,
-        heap: Vec<Vec<u8>>,
+        message: WireValue,
     ) -> Result<(), EnvironmentError> {
         // Transfer ownership of any resources in the message to the target process
-        self.transfer_resource_ownership(&message, target);
+        self.transfer_wire_resource_ownership(&message, target);
 
         let worker_id = self
             .process_router
@@ -1673,11 +1663,7 @@ impl<E: Effect> Environment<E> {
             .ok_or(EnvironmentError::ProcessNotFound(target))?;
 
         self.workers[*worker_id]
-            .send(Command::DeliverMessage {
-                target,
-                message,
-                heap,
-            })
+            .send(Command::DeliverMessage { target, message })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         Ok(())
@@ -1686,7 +1672,7 @@ impl<E: Effect> Environment<E> {
     fn handle_result_response(
         &mut self,
         request_id: u64,
-        result: Result<ValueWithHeap, quiver_core::error::Error>,
+        result: Result<WireValue, quiver_core::error::Error>,
         stats: Option<quiver_core::executor::ExecutionStats>,
     ) -> Result<(), EnvironmentError> {
         // Stats come directly from the worker that executed the process
@@ -1972,7 +1958,9 @@ impl<E: Effect> Environment<E> {
     }
 
     /// Format a value for display
-    pub fn format_value(&self, value: &Value, heap: &[Vec<u8>]) -> String {
+    /// Format a value that never crossed a worker boundary — the web bridge builds one
+    /// directly from JS. Transferred values use [`format_value`](Self::format_value).
+    pub fn format_core_value(&self, value: &Value, heap: &[Vec<u8>]) -> String {
         let binary_lookup = quiver_core::format::HeapAndProgramLookup {
             heap,
             program: &self.program,
@@ -1980,15 +1968,25 @@ impl<E: Effect> Environment<E> {
         quiver_core::format::format_value(value, &self.program, &binary_lookup)
     }
 
+    pub fn format_value(&self, value: &WireValue) -> String {
+        let (value, heap) = value.for_display();
+        let binary_lookup = quiver_core::format::HeapAndProgramLookup {
+            heap: &heap,
+            program: &self.program,
+        };
+        quiver_core::format::format_value(&value, &self.program, &binary_lookup)
+    }
+
     /// Describe a nil result's failure provenance (debug builds): the `origin`
     /// annotation's site, rendered as e.g. `no branch matched at shapes:12:9`.
-    pub fn describe_origin(&self, value: &Value, heap: &[Vec<u8>]) -> Option<String> {
+    pub fn describe_origin(&self, value: &WireValue) -> Option<String> {
+        let (value, heap) = value.for_display();
         let binary_lookup = quiver_core::format::HeapAndProgramLookup {
-            heap,
+            heap: &heap,
             program: &self.program,
         };
         quiver_core::format::describe_origin(
-            value,
+            &value,
             self.program.get_annotation_keys(),
             &self.program,
             &binary_lookup,
@@ -2203,7 +2201,7 @@ impl<E: Effect> Environment<E> {
         resource_id: ResourceId,
         resource_type: usize,
         event: quiver_core::process::StreamEvent,
-        heap: Vec<Vec<u8>>,
+        bytes: Vec<u8>,
     ) -> Result<(), EnvironmentError> {
         let Some(owner) = self.resource_ownership.get(&resource_id).copied() else {
             // Owner gone: release anything the event carries. A fresh produced
@@ -2233,7 +2231,7 @@ impl<E: Effect> Environment<E> {
             resource_id,
             resource_type,
             event,
-            heap,
+            bytes,
         })?;
         Ok(())
     }
@@ -2255,7 +2253,6 @@ impl<E: Effect> Environment<E> {
             .send(Command::EffectCompletion {
                 process_id,
                 result: Err(message),
-                heap: vec![],
             })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
         Ok(())
@@ -2265,19 +2262,16 @@ impl<E: Effect> Environment<E> {
     fn handle_effect_completion(
         &mut self,
         process_id: ProcessId,
-        result: Result<(Value, Vec<Vec<u8>>), quiver_core::effects::EffectError>,
+        result: Result<WireValue, quiver_core::effects::EffectError>,
     ) -> Result<(), EnvironmentError> {
         // If this was a resource-creating operation, register ownership
-        if result.is_ok()
-            && let Ok((Value::Resource(rid, _), _)) = &result
-        {
+        if let Ok(WireValue::Resource(rid, _)) = &result {
             self.resource_ownership.insert(*rid, process_id);
         }
 
-        // Unwrap the result and heap data
-        let (result, heap) = match result {
-            Ok((value, heap_data)) => (Ok(value), heap_data),
-            Err(err) => (Err(format!("{}", err)), vec![]),
+        let result = match result {
+            Ok(value) => Ok(value),
+            Err(err) => Err(format!("{}", err)),
         };
 
         // Send completion to the worker
@@ -2287,11 +2281,7 @@ impl<E: Effect> Environment<E> {
             .ok_or(EnvironmentError::ProcessNotFound(process_id))?;
 
         self.workers[*worker_id]
-            .send(Command::EffectCompletion {
-                process_id,
-                result,
-                heap,
-            })
+            .send(Command::EffectCompletion { process_id, result })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         Ok(())

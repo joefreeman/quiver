@@ -3,7 +3,7 @@ use crate::types::{NIL, OK};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::rc::Rc;
 
 /// Maximum binary size in bytes (16MB)
 pub const MAX_BINARY_SIZE: usize = 16 * 1024 * 1024;
@@ -149,7 +149,7 @@ impl Payload {
             .chain(self.annotations().iter().map(|(_, value)| value))
     }
 
-    /// This payload as a shared handle — the single funnel every `Arc<Payload>` is built
+    /// This payload as a shared handle — the single funnel every `Rc<Payload>` is built
     /// through. A payload carrying nothing yields [`EMPTY_PAYLOAD`] instead of a fresh
     /// allocation, so a field-less tuple costs a refcount bump.
     ///
@@ -158,11 +158,11 @@ impl Payload {
     /// hottest path in the runtime. (Measured no difference either way on a noisy machine —
     /// it is the safe default for a wrapper this small, not a tuned result.)
     #[inline]
-    pub fn shared(self) -> Arc<Payload> {
+    pub fn shared(self) -> Rc<Payload> {
         if self.carries_nothing() {
-            return EMPTY_PAYLOAD.clone();
+            return Payload::empty();
         }
-        Arc::new(self)
+        Rc::new(self)
     }
 
     /// Whether this payload has no content of its own, and so is interchangeable with every
@@ -177,8 +177,14 @@ impl Payload {
     /// they skip building a `Payload` only for [`shared`](Self::shared) to discard it.
     /// Worth having: `nil`/`ok` run on every match verdict.
     #[inline]
-    pub fn empty() -> Arc<Payload> {
-        EMPTY_PAYLOAD.clone()
+    pub fn empty() -> Rc<Payload> {
+        // `try_with`: a value can be constructed while a thread is tearing down (a TLS
+        // destructor dropping a structure that rebuilds one), and TLS destruction order is
+        // unspecified. Falling back to a fresh payload costs an allocation on a path that
+        // runs once per thread exit at most.
+        EMPTY_PAYLOAD
+            .try_with(Rc::clone)
+            .unwrap_or_else(|_| Rc::new(Payload::new(Vec::new())))
     }
 
     /// Every value in this payload, mutably — the `&mut` twin of [`all_values`](Self::all_values).
@@ -201,7 +207,7 @@ impl Payload {
 
 /// Move every payload this one owns onto `stack`, leaving trivially-droppable values behind.
 /// After this, `payload`'s own drop terminates at the fast path.
-fn take_payloads(payload: &mut Payload, stack: &mut Vec<Arc<Payload>>) {
+fn take_payloads(payload: &mut Payload, stack: &mut Vec<Rc<Payload>>) {
     for value in payload.all_values_mut() {
         if value.owns_payload() {
             // `Value::Int` owns nothing, so the vacated slot costs no refcount traffic —
@@ -218,12 +224,12 @@ fn take_payloads(payload: &mut Payload, stack: &mut Vec<Arc<Payload>>) {
 
 /// Tear `payload`'s owned subtree down using `stack` as the work-list, descending only into
 /// payloads we uniquely own — a shared one must stay intact, and its handle simply decrements.
-fn drain_payloads(payload: &mut Payload, stack: &mut Vec<Arc<Payload>>) {
+fn drain_payloads(payload: &mut Payload, stack: &mut Vec<Rc<Payload>>) {
     take_payloads(payload, stack);
     while let Some(owned) = stack.pop() {
         // Sole owner: vacate its children before it drops, so its own drop terminates at the
         // fast path below rather than recursing.
-        if let Ok(mut owned) = Arc::try_unwrap(owned) {
+        if let Ok(mut owned) = Rc::try_unwrap(owned) {
             take_payloads(&mut owned, stack);
         }
     }
@@ -234,7 +240,7 @@ thread_local! {
     /// as ~9 extra allocations per unit of work on cons-heavy code — enough to undo what
     /// `handle_tuple`'s `with_capacity` had just saved. Depth-first popping keeps this shallow
     /// (a cons chain never exceeds one entry), so retaining it costs almost nothing.
-    static DROP_STACK: std::cell::RefCell<Vec<Arc<Payload>>> =
+    static DROP_STACK: std::cell::RefCell<Vec<Rc<Payload>>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -258,35 +264,44 @@ impl Drop for Payload {
         if !self.owns_payloads() {
             return;
         }
-        let reused = DROP_STACK.with(|cell| match cell.try_borrow_mut() {
-            Ok(mut stack) => {
-                drain_payloads(self, &mut stack);
-                if stack.capacity() > DROP_STACK_RETAIN {
-                    stack.shrink_to(DROP_STACK_RETAIN);
+        // `try_with` as well as `try_borrow_mut`: values are dropped during thread teardown
+        // (a TLS destructor releasing a structure that owns them), and by then this work-list
+        // may itself have been destroyed — TLS destruction order is unspecified.
+        let reused = DROP_STACK
+            .try_with(|cell| match cell.try_borrow_mut() {
+                Ok(mut stack) => {
+                    drain_payloads(self, &mut stack);
+                    if stack.capacity() > DROP_STACK_RETAIN {
+                        stack.shrink_to(DROP_STACK_RETAIN);
+                    }
+                    true
                 }
-                true
-            }
-            // Re-entrant. The fast path above should make this unreachable, but correctness
-            // must not rest on that — fall back to a private work-list.
-            Err(_) => false,
-        });
+                // Re-entrant. The fast path above should make this unreachable, but
+                // correctness must not rest on that — fall back to a private work-list.
+                Err(_) => false,
+            })
+            .unwrap_or(false);
         if !reused {
             drain_payloads(self, &mut Vec::new());
         }
     }
 }
 
-/// The one payload behind every value that carries nothing. A tuple's identity is its
-/// `tuple_id`, which lives in the `Value` rather than the payload, so `[]`, `Ok`, `Nil`,
-/// `Done` and every other field-less tuple can share a single immutable payload. That is the
-/// majority of tuple construction — and, since `IsType` and `Equal` answer with `Ok`/`[]`,
-/// every pattern test allocated one before this existed.
-///
-/// Sharing is sound because payloads are immutable: annotations attach copy-on-write (see
-/// [`Value::annotated`]), equality is structural, and nothing anywhere takes `Arc::get_mut`
-/// or compares payloads by pointer.
-static EMPTY_PAYLOAD: std::sync::LazyLock<Arc<Payload>> =
-    std::sync::LazyLock::new(|| Arc::new(Payload::new(Vec::new())));
+thread_local! {
+    /// The one payload behind every value that carries nothing. A tuple's identity is its
+    /// `tuple_id`, which lives in the `Value` rather than the payload, so `[]`, `Ok`, `Nil`,
+    /// `Done` and every other field-less tuple can share a single immutable payload. That is
+    /// the majority of tuple construction — and, since `IsType` and `Equal` answer with
+    /// `Ok`/`[]`, every pattern test allocated one before this existed.
+    ///
+    /// Sharing is sound because payloads are immutable: annotations attach copy-on-write (see
+    /// [`Value::annotated`]), equality is structural, and nothing anywhere takes
+    /// `Rc::get_mut` or compares payloads by pointer.
+    ///
+    /// Per-thread, necessarily (`Rc` is not `Sync`) and preferably: each worker interns its
+    /// own, so the refcount is never a cache line contended between workers.
+    static EMPTY_PAYLOAD: Rc<Payload> = Rc::new(Payload::new(Vec::new()));
+}
 
 impl std::ops::Deref for Payload {
     type Target = [Value];
@@ -400,13 +415,13 @@ pub enum Value {
     Reference(u64), // Unique ref: (worker_id << 48) | counter
     // Tuple/Function payloads are reference-counted so cloning a value is O(1) (refcount bump)
     // rather than a deep copy. Values are immutable, so sharing is safe.
-    Tuple(usize, Arc<Payload>),
-    Function(usize, Arc<Payload>),
+    Tuple(usize, Rc<Payload>),
+    Function(usize, Rc<Payload>),
     // builtin_id (index into builtins table), plus annotations when attached. The payload's
     // elements are always empty — the slot exists only so builtins can carry annotations
     // like any other callable; the bare, un-annotated form is `None` (no allocation). The
     // `Option` fits the variant's existing padding, so `Value` stays at 24 bytes.
-    Builtin(usize, Option<Arc<Payload>>),
+    Builtin(usize, Option<Rc<Payload>>),
     Process(ProcessId, usize),
     Resource(ResourceId, usize), // resource_id, resource_type_id
 }
@@ -539,7 +554,7 @@ impl Value {
         }
     }
 
-    /// Whether this value owns an `Arc<Payload>` — i.e. whether dropping it can recurse.
+    /// Whether this value owns an `Rc<Payload>` — i.e. whether dropping it can recurse.
     /// Used by [`Payload`]'s iterative drop to decide what to move onto its work-list.
     #[inline]
     fn owns_payload(&self) -> bool {

@@ -1,11 +1,12 @@
 use crate::WorkerId;
-use crate::environment::{LocalsResult, ProcessResultsMap, ValueWithHeap};
+use crate::environment::{LocalsResult, ProcessResultsMap};
 use quiver_core::effects::Effect;
 use quiver_core::executor::ProgramUpdate;
 use quiver_core::process::{
     ProcessAdjacency, ProcessId, ProcessInfo, ProcessStatus, StreamEvent, WorkerInfo,
 };
-use quiver_core::value::{ResourceId, Value};
+use quiver_core::value::ResourceId;
+use quiver_core::wire::WireValue;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -48,9 +49,8 @@ pub enum Command<E: Effect> {
     SpawnProcess {
         id: ProcessId,
         function_index: usize,
-        captures: Vec<Value>,
-        argument: Value,
-        heap_data: Vec<Vec<u8>>,
+        captures: Vec<WireValue>,
+        argument: WireValue,
     },
 
     /// Resume a sleeping persistent process
@@ -77,8 +77,7 @@ pub enum Command<E: Effect> {
     /// Deliver a message to a process
     DeliverMessage {
         target: ProcessId,
-        message: Value,
-        heap: Vec<Vec<u8>>,
+        message: WireValue,
     },
 
     /// Notify a process with the PID of a spawned process
@@ -155,19 +154,19 @@ pub enum Command<E: Effect> {
     /// Effect operation completed
     EffectCompletion {
         process_id: ProcessId,
-        result: Result<Value, String>,
-        heap: Vec<Vec<u8>>,
+        result: Result<WireValue, String>,
     },
 
     /// A stream resource's next event (the completion of a select-armed read):
-    /// stash it on the owning process and wake its select. `Data` bytes travel in
-    /// `heap`.
+    /// stash it on the owning process and wake its select.
     ResourceEvent {
         process_id: ProcessId,
         resource_id: ResourceId,
         resource_type: usize,
         event: StreamEvent,
-        heap: Vec<Vec<u8>>,
+        /// A `Data` event's bytes; empty for the other kinds. A stream event is not a
+        /// value, so it carries its payload directly rather than through a wire value.
+        bytes: Vec<u8>,
     },
 
     /// Read a process's current state on behalf of a remote `?` sample (a snapshot —
@@ -189,8 +188,7 @@ pub enum Command<E: Effect> {
     /// Deliver a remote `?` sample to the caller that requested it
     NotifyState {
         process_id: ProcessId,
-        state: Value,
-        heap: Vec<Vec<u8>>,
+        state: WireValue,
     },
 
     /// Phase 1 of a reclamation round: pause
@@ -225,16 +223,14 @@ pub enum Event<E: Effect> {
     SpawnAction {
         caller: ProcessId,
         function_index: usize,
-        captures: Vec<Value>,
-        argument: Value,
-        heap: Vec<Vec<u8>>,
+        captures: Vec<WireValue>,
+        argument: WireValue,
     },
 
     /// Action: Deliver message
     DeliverAction {
         target: ProcessId,
-        message: Value,
-        heap: Vec<Vec<u8>>,
+        message: WireValue,
     },
 
     /// Action: Await multiple processes
@@ -272,7 +268,7 @@ pub enum Event<E: Effect> {
     /// Response to GetResult (only sent when process completes)
     ResultResponse {
         request_id: u64,
-        result: Result<ValueWithHeap, quiver_core::error::Error>,
+        result: Result<WireValue, quiver_core::error::Error>,
         stats: Option<quiver_core::executor::ExecutionStats>,
     },
 
@@ -344,11 +340,7 @@ pub enum Event<E: Effect> {
     },
 
     /// A `?` sample read on the target's worker, headed back to the caller
-    StateRead {
-        caller: ProcessId,
-        state: Value,
-        heap: Vec<Vec<u8>>,
-    },
+    StateRead { caller: ProcessId, state: WireValue },
 
     /// Ack for `BeginCollection`: this worker is paused.
     CollectionReady {

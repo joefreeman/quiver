@@ -9,7 +9,7 @@ use crate::value::{Payload, Value};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::rc::Rc;
 
 /// View a value as an integer, erroring with a type mismatch if it isn't one.
 pub fn value_as_int(value: &Value) -> Result<crate::value::IntRef<'_>, Error> {
@@ -88,7 +88,7 @@ pub enum Completion<E: Effect> {
     /// boundary and could route an action the dispatch site doesn't collect.
     Call {
         function: usize,
-        captures: Arc<Payload>,
+        captures: Rc<Payload>,
     },
 }
 

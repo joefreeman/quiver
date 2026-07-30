@@ -218,6 +218,40 @@ fn test_resource_ownership_transfers_on_send() {
 }
 
 #[test]
+fn test_resource_ownership_transfers_in_an_annotation() {
+    let temp_path =
+        std::env::temp_dir().join(format!("quiver_test_ownannot_{}.txt", std::process::id()));
+    let path_str = temp_path.to_str().unwrap();
+    std::fs::write(&temp_path, "Hello").expect("Failed to create test file");
+
+    // An annotation carries a value like any other field, so a handle attached as one
+    // travels with the message — and its ownership must travel too. The message type says
+    // nothing about the handle (annotations are invisible to the rows), so the reader digs
+    // it out with a checked retrieval.
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            'msg = Go;
+            r = @{{
+                !#'msg ~> {{
+                    =m
+                    m:(\File)handle ~> =(\File)f
+                    [f, 0, 5] ~> __file_read__ ~> Str[~]
+                }}
+            }};
+            file = ["{}" ~> .0, 0, 0] ~> __file_open__;
+            Go ~> {{ :handle file }} ~> r;
+            !r
+        "#,
+            path_str
+        ))
+        .expect("\"Hello\"");
+
+    let _ = std::fs::remove_file(&temp_path);
+}
+
+#[test]
 fn test_resource_ownership_enforced_after_transfer() {
     let temp_path =
         std::env::temp_dir().join(format!("quiver_test_ownenforce_{}.txt", std::process::id()));

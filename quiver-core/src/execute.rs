@@ -9,6 +9,7 @@ use crate::executor::Executor;
 use crate::executor::ProgramUpdate;
 use crate::process::Action;
 use crate::value::Value;
+use crate::wire::WireValue;
 use std::sync::Arc;
 
 /// Execute bytecode synchronously, returning the result value and executor.
@@ -93,7 +94,7 @@ pub fn execute_bytecode_sync_with<E: Effect>(
     let process_id = 0;
 
     // Spawn a process with the entry function (no captures, nil argument)
-    executor.spawn_process(process_id, Some(entry), vec![], Value::nil(), vec![], false)?;
+    executor.spawn_process(process_id, Some(entry), vec![], WireValue::nil(), false)?;
 
     // Execute until completion
     loop {

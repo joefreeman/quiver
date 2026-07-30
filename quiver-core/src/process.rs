@@ -26,7 +26,10 @@ impl fmt::Display for RestrictedContext {
 pub type ProcessId = usize;
 
 /// Result type containing a value with its heap data
-pub type ProcessResult = Result<(Value, Vec<Vec<u8>>), crate::error::Error>;
+/// A completed process's result, in the form it leaves the worker in (see
+/// [`crate::wire`]). The process's own `result` field holds a live `Value`; this is what a
+/// requester receives.
+pub type ProcessResult = Result<crate::wire::WireValue, crate::error::Error>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProcessStatus {

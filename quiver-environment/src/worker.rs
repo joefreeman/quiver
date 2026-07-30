@@ -5,6 +5,7 @@ use quiver_core::effects::Effect;
 use quiver_core::executor::Executor;
 use quiver_core::process::{Action, Frame, ProcessId, ProcessInfo, Watcher};
 use quiver_core::value::Value;
+use quiver_core::wire::WireValue;
 use std::collections::HashMap;
 
 const MAX_STEP_UNITS: usize = 1000;
@@ -226,9 +227,8 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 function_index,
                 captures,
                 argument,
-                heap_data,
             } => {
-                self.spawn_process(id, function_index, captures, argument, heap_data)?;
+                self.spawn_process(id, function_index, captures, argument)?;
             }
             Command::ResumeProcess { id, function_index } => {
                 self.resume_process(id, function_index)?;
@@ -239,12 +239,8 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             Command::UpdateAwaitResults { awaiter, results } => {
                 self.update_await_results(awaiter, results)?;
             }
-            Command::DeliverMessage {
-                target,
-                message,
-                heap,
-            } => {
-                self.deliver_message(target, message, heap)?;
+            Command::DeliverMessage { target, message } => {
+                self.deliver_message(target, message)?;
             }
             Command::NotifySpawn {
                 process_id,
@@ -340,13 +336,9 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             Command::Unsubscribe { subscription_id } => {
                 self.subscriptions.remove(&subscription_id);
             }
-            Command::EffectCompletion {
-                process_id,
-                result,
-                heap,
-            } => {
+            Command::EffectCompletion { process_id, result } => {
                 self.executor
-                    .notify_effect_completion(process_id, result, heap)
+                    .notify_effect_completion(process_id, result)
                     .map_err(EnvironmentError::Executor)?;
             }
             Command::ResourceEvent {
@@ -354,10 +346,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 resource_id,
                 resource_type,
                 event,
-                heap,
+                bytes,
             } => {
                 self.executor
-                    .notify_resource_event(process_id, resource_id, resource_type, event, heap)
+                    .notify_resource_event(process_id, resource_id, resource_type, event, bytes)
                     .map_err(EnvironmentError::Executor)?;
             }
             Command::ReadState {
@@ -378,26 +370,18 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     .get_process(target)
                     .map(|p| p.state.clone())
                     .unwrap_or_else(Value::nil);
-                let (state, heap) = self
+                let state = self
                     .executor
-                    .extract_heap_data(&state)
+                    .to_wire(&state)
                     .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
-                self.sender.send(Event::StateRead {
-                    caller,
-                    state,
-                    heap,
-                })?;
+                self.sender.send(Event::StateRead { caller, state })?;
             }
             Command::UnsubscribeState { target, subscriber } => {
                 self.executor.remove_subscriber(target, subscriber);
             }
-            Command::NotifyState {
-                process_id,
-                state,
-                heap,
-            } => {
+            Command::NotifyState { process_id, state } => {
                 self.executor
-                    .notify_state(process_id, state, heap)
+                    .notify_state(process_id, &state)
                     .map_err(EnvironmentError::Executor)?;
             }
             Command::BeginCollection { request_id } => {
@@ -449,38 +433,31 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 captures,
                 argument,
             } => {
-                // Extract heap data from the captures and argument together, against
-                // one shared index space — they travel with a single side-channel vec.
-                let mut values = captures;
-                values.push(argument);
-                let (mut extracted, all_heap_data) = self
-                    .executor
-                    .extract_heap_data_many(&values)
-                    .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
-                let extracted_argument = extracted
-                    .pop()
-                    .expect("extract_heap_data_many preserves arity");
-                let extracted_captures = extracted;
-
+                // Each value converts independently: a `WireValue` carries its own bytes,
+                // so there is no shared index space to keep them consistent with (which is
+                // all `extract_heap_data_many` ever existed for).
+                let to_wire = |value| {
+                    self.executor
+                        .to_wire(value)
+                        .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))
+                };
                 self.sender.send(Event::SpawnAction {
                     caller,
                     function_index,
-                    captures: extracted_captures,
-                    argument: extracted_argument,
-                    heap: all_heap_data,
+                    captures: captures
+                        .iter()
+                        .map(to_wire)
+                        .collect::<Result<Vec<_>, _>>()?,
+                    argument: to_wire(&argument)?,
                 })?;
             }
             Action::Deliver { target, value } => {
-                let (message, heap) = self
+                let message = self
                     .executor
-                    .extract_heap_data(&value)
+                    .to_wire(&value)
                     .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
 
-                self.sender.send(Event::DeliverAction {
-                    target,
-                    message,
-                    heap,
-                })?;
+                self.sender.send(Event::DeliverAction { target, message })?;
             }
             Action::Await {
                 caller,
@@ -561,7 +538,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
 
         // Spawn the persistent process (sleeping if no function)
         self.executor
-            .spawn_process(id, function_index, vec![], Value::nil(), vec![], true)
+            .spawn_process(id, function_index, vec![], WireValue::nil(), true)
             .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))
     }
 
@@ -569,25 +546,17 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         &mut self,
         id: ProcessId,
         function_index: usize,
-        captures: Vec<Value>,
-        argument: Value,
-        heap_data: Vec<Vec<u8>>,
+        captures: Vec<WireValue>,
+        argument: WireValue,
     ) -> Result<(), EnvironmentError> {
         // Validate function exists
         if self.executor.get_function(function_index).is_none() {
             return Err(EnvironmentError::FunctionNotFound(function_index));
         }
 
-        // Delegate to executor which handles heap injection and initialization
+        // The executor rebuilds the wire values on its own heap and initialises the process.
         self.executor
-            .spawn_process(
-                id,
-                Some(function_index),
-                captures,
-                argument,
-                heap_data,
-                false,
-            )
+            .spawn_process(id, Some(function_index), captures, argument, false)
             .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))
     }
 
@@ -693,10 +662,9 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         result: RuntimeResult,
     ) -> Result<(), EnvironmentError> {
         match result {
-            Ok((value, heap)) => {
-                // Executor now handles heap injection
+            Ok(value) => {
                 self.executor
-                    .notify_result(awaiter, awaited, value, heap)
+                    .notify_result(awaiter, awaited, &value)
                     .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
             }
             // `!` is never lethal: a crashed target is delivered to awaiters as a
@@ -730,12 +698,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
     fn deliver_message(
         &mut self,
         target: ProcessId,
-        message: Value,
-        heap: Vec<Vec<u8>>,
+        message: WireValue,
     ) -> Result<(), EnvironmentError> {
-        // Executor now handles heap injection
         self.executor
-            .notify_message(target, message, heap)
+            .notify_message(target, &message)
             .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))
     }
 
@@ -778,13 +744,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         };
         let process = self.executor.get_process(process_id).unwrap();
         let result = match process.result.as_ref().unwrap() {
-            Ok(value) => {
-                let (extracted_value, heap) = self
-                    .executor
-                    .extract_heap_data(value)
-                    .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
-                Ok((extracted_value, heap))
-            }
+            Ok(value) => Ok(self
+                .executor
+                .to_wire(value)
+                .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?),
             Err(error) => Err(error.clone()),
         };
         self.sender.send(Event::ResultResponse {
@@ -848,11 +811,11 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 for &index in &indices {
                     match process.locals.get(index) {
                         Some(value) => {
-                            let (extracted, heap) = self
-                                .executor
-                                .extract_heap_data(value)
-                                .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
-                            locals.push((extracted, heap));
+                            locals.push(
+                                self.executor
+                                    .to_wire(value)
+                                    .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?,
+                            );
                         }
                         None => {
                             return self.sender.send(Event::LocalsResponse {
@@ -918,11 +881,11 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         {
             let extracted = match result {
                 Ok(value) => {
-                    let (extracted_value, heap) = self
+                    let extracted_value = self
                         .executor
-                        .extract_heap_data(value)
+                        .to_wire(value)
                         .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
-                    Ok((extracted_value, heap))
+                    Ok(extracted_value)
                 }
                 Err(error) => Err(error.clone()),
             };
@@ -986,11 +949,14 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 .executor
                 .changed_value()
                 .map_err(EnvironmentError::Executor)?;
+            let wire_message = self
+                .executor
+                .to_wire(&message)
+                .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
             for subscriber in wakeups {
                 self.sender.send(Event::DeliverAction {
                     target: subscriber,
-                    message: message.clone(),
-                    heap: vec![],
+                    message: wire_message.clone(),
                 })?;
             }
         }

@@ -1,12 +1,13 @@
 use colored::Colorize;
 use quiver_cli::spawn_worker;
 use quiver_compiler::{ModuleResolver, PackageResolver, find_project_root};
-use quiver_core::value::Value;
+use quiver_core::wire::WireValue;
 use quiver_environment::{Environment, Repl, ReplError, RequestResult, WorkerHandle};
 use quiver_io::NativeEffect;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use std::io::IsTerminal;
+use std::rc::Rc;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -16,8 +17,7 @@ use std::thread::{self, JoinHandle};
 const HISTORY_FILE: &str = ".quiv_history";
 
 struct EvaluationResult {
-    value: Value,
-    heap: Vec<Vec<u8>>,
+    value: WireValue,
 }
 
 pub struct ReplCli {
@@ -30,7 +30,7 @@ pub struct ReplCli {
     /// time, project) modules from — and extracts freshly-compiled modules into.
     /// Attaching it is monotonic (it only affects future imports), so sessions use it
     /// from the start with no readiness ceremony.
-    artifact_store: Arc<quiver_compiler::ArtifactStore>,
+    artifact_store: Rc<quiver_compiler::ArtifactStore>,
 }
 
 /// Build the resolver for a REPL session: project-aware when launched inside a project (the
@@ -113,10 +113,16 @@ impl ReplCli {
         // lands — link instead of compiling. Sessions never wait on it: a miss just
         // compiles from source (and saves the artifact itself). Debug to match the
         // REPL's compile options.
-        let artifact_store = Arc::new(quiver_compiler::ArtifactStore::cache());
+        let artifact_store = Rc::new(quiver_compiler::ArtifactStore::cache());
         {
-            let store = artifact_store.clone();
+            // The warmer gets its OWN store handle rather than sharing this one. A module
+            // artifact holds a compile-time `Value`, and a `Value`'s payload is `Rc` — so an
+            // `ArtifactStore` is not `Sync`. Sharing happens through the cache *directory*,
+            // which is content-addressed: the warmer's writes are exactly what this session's
+            // store reads. The only cost is that a warmed artifact reaches this session from
+            // disk rather than from its in-memory map.
             thread::spawn(move || {
+                let store = Rc::new(quiver_compiler::ArtifactStore::cache());
                 quiver_compiler::warm_std_store(
                     &store,
                     &crate::build_builtin_registry(),
@@ -468,12 +474,12 @@ impl ReplCli {
                     .unwrap_or_else(|| "―".to_string());
                 println!("{}", format!("  Type: {}", type_str).bright_black());
 
-                if let Some(Ok((ref value, ref heap))) = info.result {
+                if let Some(Ok(ref value)) = info.result {
                     println!(
                         "{}",
                         format!(
                             "  Result: {}",
-                            self.environment.lock().unwrap().format_value(value, heap)
+                            self.environment.lock().unwrap().format_value(value)
                         )
                         .bright_black()
                     );
@@ -631,11 +637,11 @@ impl ReplCli {
             .wait_for_result(request_id)
             .map_err(ReplError::Environment)?
         {
-            RequestResult::Result(Ok((value, heap)), _) => {
+            RequestResult::Result(Ok(value), _) => {
                 // The worker has already released this line's orphaned locals as part of delivering
                 // the result (the keep-set was handed to it via `request_result`), so `\p`/`\w`
                 // reflect the post-line heap with no extra round-trip here.
-                Ok(Some(EvaluationResult { value, heap }))
+                Ok(Some(EvaluationResult { value }))
             }
             RequestResult::Result(Err(e), _) => Err(ReplError::Runtime(e)),
             _ => Err(ReplError::Environment(
@@ -646,15 +652,17 @@ impl ReplCli {
 
     fn print(&self, result: Option<EvaluationResult>) {
         match result {
-            Some(EvaluationResult { value, heap }) => {
-                let formatted_value = self.environment.lock().unwrap().format_value(&value, &heap);
+            Some(EvaluationResult { value }) => {
+                let formatted_value = self.environment.lock().unwrap().format_value(&value);
 
                 // Show type for functions, builtins, and processes; failure provenance
                 // for stamped nil results (debug builds).
                 let output = match &value {
-                    Value::Function(_, _) | Value::Builtin(..) | Value::Process(_, _) => {
+                    WireValue::Function(..) | WireValue::Builtin(..) | WireValue::Process(..) => {
                         let mut env = self.environment.lock().unwrap();
-                        let value_type = env.value_to_type(&value);
+                        // Type derivation reads only ids and the discriminant, both of which
+                        // the display form preserves.
+                        let value_type = env.value_to_type(&value.for_display().0);
                         let formatted_type = env.format_type(&value_type);
                         format!(
                             "{} {}",
@@ -664,7 +672,7 @@ impl ReplCli {
                     }
                     value if value.is_nil() => {
                         let env = self.environment.lock().unwrap();
-                        match env.describe_origin(value, &heap) {
+                        match env.describe_origin(value) {
                             Some(origin) => format!(
                                 "{} {}",
                                 formatted_value,

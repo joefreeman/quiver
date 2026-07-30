@@ -5,6 +5,7 @@
 // module, and the shared warm state of the test harness itself.
 mod common;
 use common::quiver;
+use std::rc::Rc;
 
 use quiver::spawn_worker;
 use quiver_compiler::PackageResolver;
@@ -81,7 +82,7 @@ fn session(debug: bool, first_line: Option<&str>) -> String {
 fn session_with_artifacts(
     debug: bool,
     first_line: Option<&str>,
-    store: &Arc<quiver_compiler::ArtifactStore>,
+    store: &Rc<quiver_compiler::ArtifactStore>,
 ) -> String {
     run_session(debug, first_line, Some(store.clone()))
 }
@@ -89,7 +90,7 @@ fn session_with_artifacts(
 fn run_session(
     debug: bool,
     first_line: Option<&str>,
-    artifacts: Option<Arc<quiver_compiler::ArtifactStore>>,
+    artifacts: Option<Rc<quiver_compiler::ArtifactStore>>,
 ) -> String {
     let virtual_time_ms = Arc::new(AtomicU64::new(0));
 
@@ -209,25 +210,30 @@ fn options(debug: bool) -> quiver_compiler::compiler::CompileOptions {
     }
 }
 
-fn warm_store(debug: bool) -> Arc<quiver_compiler::ArtifactStore> {
-    let store = Arc::new(quiver_compiler::ArtifactStore::in_memory());
+fn warm_store(debug: bool) -> Rc<quiver_compiler::ArtifactStore> {
+    let store = Rc::new(quiver_compiler::ArtifactStore::in_memory());
     quiver_compiler::warm_std_store(&store, &builtins(), options(debug));
     store
 }
 
 /// The whole standard library warmed once per compile mode, shared by the linking
 /// tests in this binary (memory-only, hermetic from the user cache).
-fn build_artifacts(debug: bool) -> Arc<quiver_compiler::ArtifactStore> {
+fn build_artifacts(debug: bool) -> Rc<quiver_compiler::ArtifactStore> {
+    use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::sync::{LazyLock, Mutex};
-    static WARMED: LazyLock<Mutex<HashMap<bool, Arc<quiver_compiler::ArtifactStore>>>> =
-        LazyLock::new(Default::default);
-    WARMED
-        .lock()
-        .unwrap()
-        .entry(debug)
-        .or_insert_with(|| warm_store(debug))
-        .clone()
+    thread_local! {
+        // Per-thread: an artifact holds a compile-time `Value`, whose payload is `Rc`, so a
+        // store cannot be shared across the test harness's threads. Warming is repeated per
+        // thread that asks for it.
+        static WARMED: RefCell<HashMap<bool, Rc<quiver_compiler::ArtifactStore>>> =
+            RefCell::new(HashMap::new());
+    }
+    if let Some(store) = WARMED.with(|w| w.borrow().get(&debug).cloned()) {
+        return store;
+    }
+    let store = warm_store(debug);
+    WARMED.with(|w| w.borrow_mut().insert(debug, store.clone()));
+    store
 }
 
 #[test]
@@ -324,7 +330,7 @@ fn warming_is_order_independent() {
     // a module's functions could collapse onto whichever structural twin happened to
     // register first, and attribution — hence artifact content — would vary here.)
     let canonical = build_artifacts(false);
-    let reversed = Arc::new(quiver_compiler::ArtifactStore::in_memory());
+    let reversed = Rc::new(quiver_compiler::ArtifactStore::in_memory());
     let line: String = quiver_compiler::resolver::std_module_names()
         .iter()
         .rev()
@@ -377,7 +383,7 @@ fn artifacts_round_trip_through_disk() {
         disk.save(key, (*artifact).clone());
     }
     // A fresh store over the same directory sees only the files.
-    let reloaded = Arc::new(quiver_compiler::ArtifactStore::at_dir(dir.clone()));
+    let reloaded = Rc::new(quiver_compiler::ArtifactStore::at_dir(dir.clone()));
     for (key, artifact) in warmed.entries() {
         let restored = reloaded.load(key).expect("persisted artifact must load");
         assert_eq!(

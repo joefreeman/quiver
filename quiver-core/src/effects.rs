@@ -1,6 +1,6 @@
 use crate::error::Error;
 use crate::process::{ProcessId, StreamEvent};
-use crate::value::{ResourceId, Value};
+use crate::value::ResourceId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -48,7 +48,10 @@ impl std::error::Error for EffectError {}
 
 /// Result of an effect execution: either (Value, heap_data) or an error
 /// The Vec<Vec<u8>> contains heap-allocated binary data that needs to be transferred to the worker
-pub type EffectResult = Result<(Value, Vec<Vec<u8>>), EffectError>;
+/// What an effect backend hands back. The value is already detached from any executor
+/// heap — a backend has none — so it is a [`WireValue`](crate::wire::WireValue) by nature,
+/// and the receiving worker rebuilds it on its own heap.
+pub type EffectResult = Result<crate::wire::WireValue, EffectError>;
 
 /// Trait for platform-specific effects that processes can request.
 ///
@@ -139,7 +142,7 @@ pub trait EffectBackend: Send {
     /// in per-resource arrival order. The type id lets the executor pick the kind's
     /// declared event tuples; `Data`'s bytes ride the heap side-channel, like an
     /// effect completion's.
-    fn take_stream_events(&mut self) -> Vec<(ResourceId, usize, StreamEvent, Vec<Vec<u8>>)> {
+    fn take_stream_events(&mut self) -> Vec<(ResourceId, usize, StreamEvent, Vec<u8>)> {
         Vec::new()
     }
 }

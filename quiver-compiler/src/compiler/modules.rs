@@ -60,7 +60,7 @@ pub struct ModuleCache {
     pub type_namespace_stack: Vec<ModuleId>,
     /// The artifact store this session links modules from and extracts them into (see
     /// `crate::artifact`). None outside artifact-aware embedders.
-    pub artifact_store: Option<std::sync::Arc<crate::artifact::ArtifactStore>>,
+    pub artifact_store: Option<std::rc::Rc<crate::artifact::ArtifactStore>>,
     /// Per cached module — linked *or* compiled from source — its own-function index →
     /// session function id. The forward map every artifact link resolves its function
     /// imports through; populated at link time and at source-compile time alike, so the

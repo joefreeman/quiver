@@ -538,7 +538,7 @@ fn execute_bytecode_with_environment(
         let did_work = environment.step().unwrap_or(false);
 
         match environment.poll_request(request_id) {
-            Ok(Some(quiver_environment::RequestResult::Result(Ok((value, heap)), stats))) => {
+            Ok(Some(quiver_environment::RequestResult::Result(Ok(value), stats))) => {
                 let wall_time = start_time.elapsed();
 
                 // Print profiling report if enabled
@@ -551,7 +551,7 @@ fn execute_bytecode_with_environment(
                 // Formatting uses the environment's merged program: the authoritative
                 // id space for the value (the loaded bytecode's ids were remapped).
                 if value.is_nil() {
-                    if !quiet && let Some(origin) = environment.describe_origin(&value, &heap) {
+                    if !quiet && let Some(origin) = environment.describe_origin(&value) {
                         eprintln!("[]  ({origin})");
                     }
                     std::process::exit(1);
@@ -559,7 +559,7 @@ fn execute_bytecode_with_environment(
 
                 // Print result unless quiet or OK/NIL
                 if !quiet && !value.is_ok() && !value.is_nil() {
-                    println!("{}", environment.format_value(&value, &heap));
+                    println!("{}", environment.format_value(&value));
                 }
 
                 return Ok(());

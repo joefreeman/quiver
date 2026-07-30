@@ -1,23 +1,29 @@
 use quiver::spawn_worker;
 use quiver_compiler::{ArtifactStore, PackageResolver};
-use quiver_core::value::Value;
+use quiver_core::wire::WireValue;
 use quiver_environment::{Environment, Repl, ReplError, WorkerHandle};
 use quiver_io::NativeEffect;
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
 
-type ReplResult = Result<Option<(Value, Vec<Vec<u8>>)>, ReplError>;
+type ReplResult = Result<Option<WireValue>, ReplError>;
 
-/// The artifact store shared by every non-scoped test session: content-addressed
-/// and disk-backed, so a module compiled by one test links everywhere else — across
-/// tests, binaries, and runs (keys carry the debug flag, so both compile modes
-/// share one store). Warming is organic: the first test to import a module compiles
-/// and saves it. Scoped (no-io) tests never carry a store: their capability model
-/// depends on io-referencing std modules failing to compile, which pre-built
-/// artifacts would defeat.
-#[allow(dead_code)]
-static ARTIFACTS: LazyLock<Arc<ArtifactStore>> = LazyLock::new(|| Arc::new(ArtifactStore::cache()));
+thread_local! {
+    /// The artifact store for every non-scoped test session on this thread:
+    /// content-addressed and disk-backed, so a module compiled by one test links
+    /// everywhere else — across tests, binaries, and runs (keys carry the debug flag, so
+    /// both compile modes share one store). Warming is organic: the first test to import a
+    /// module compiles and saves it. Scoped (no-io) tests never carry a store: their
+    /// capability model depends on io-referencing std modules failing to compile, which
+    /// pre-built artifacts would defeat.
+    ///
+    /// Per-thread because an artifact holds a compile-time `Value`, whose payload is `Rc`.
+    /// Sharing is through the cache *directory*, which is what made it shareable across
+    /// test binaries and runs in the first place; only the in-memory map is now per-thread.
+    static ARTIFACTS: Rc<ArtifactStore> = Rc::new(ArtifactStore::cache());
+}
 
 /// Evaluate source and return a TestResult
 fn evaluate(
@@ -55,8 +61,8 @@ fn evaluate(
                 }
 
                 match environment.poll_request(request_id) {
-                    Ok(Some(quiver_environment::RequestResult::Result(Ok((value, heap)), _))) => {
-                        break Ok(Some((value, heap)));
+                    Ok(Some(quiver_environment::RequestResult::Result(Ok(value), _))) => {
+                        break Ok(Some(value));
                     }
                     Ok(Some(quiver_environment::RequestResult::Result(Err(e), _))) => {
                         break Err(ReplError::Runtime(e));
@@ -237,7 +243,7 @@ impl TestBuilder {
         let mut repl =
             Repl::new(&mut environment, resolver, builtins).expect("Failed to create REPL");
         if !self.scoped_no_io {
-            repl.set_artifact_store(ARTIFACTS.clone());
+            repl.set_artifact_store(ARTIFACTS.with(Rc::clone));
         }
         if self.debug {
             repl.set_compile_options(quiver_compiler::compiler::CompileOptions {
@@ -268,8 +274,8 @@ impl TestResult {
     /// Expect a value matching the given Quiver syntax string representation
     pub fn expect(self, expected: &str) -> Self {
         match self.result {
-            Ok(Some((ref value, ref heap_data))) => {
-                let actual = self.environment.format_value(value, heap_data);
+            Ok(Some(ref value)) => {
+                let actual = self.environment.format_value(value);
                 assert_eq!(
                     actual, expected,
                     "Expected '{}', got '{}' for source: {}",
@@ -298,8 +304,8 @@ impl TestResult {
     /// (e.g. `"match failed at test:1:8"`). Debug builds only.
     pub fn expect_origin(self, expected: &str) -> Self {
         match self.result {
-            Ok(Some((ref value, ref heap_data))) => {
-                let actual = self.environment.describe_origin(value, heap_data);
+            Ok(Some(ref value)) => {
+                let actual = self.environment.describe_origin(value);
                 assert_eq!(
                     actual.as_deref(),
                     Some(expected),
@@ -318,8 +324,8 @@ impl TestResult {
     /// Expect the result to carry no failure-provenance origin (release builds, or nil
     /// in a non-result position).
     pub fn expect_no_origin(self) -> Self {
-        if let Ok(Some((ref value, ref heap_data))) = self.result {
-            let actual = self.environment.describe_origin(value, heap_data);
+        if let Ok(Some(ref value)) = self.result {
+            let actual = self.environment.describe_origin(value);
             assert_eq!(actual, None, "for source: {}", self.source);
         }
         self

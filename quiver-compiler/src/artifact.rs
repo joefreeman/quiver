@@ -28,11 +28,12 @@
 //! session: the import pipeline ensures them (linked or source-compiled, both record
 //! the function map) before linking, so a missing map is a pipeline bug and panics.
 
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::rc::Rc;
 
 use crate::compiler::{
     Bindings, CachedModule, CompileOptions, Compiler, Error, ModuleCache, ModuleTypeNamespace,
@@ -142,7 +143,11 @@ impl ModuleArtifact {
 /// the module compiles from source (which then saves its artifact here).
 pub struct ArtifactStore {
     dir: Option<PathBuf>,
-    memory: RwLock<HashMap<u64, Arc<ModuleArtifact>>>,
+    /// `RefCell`, not `RwLock`: an artifact holds a compile-time `Value`, whose payload is
+    /// `Rc`, so a store never crosses a thread and has nothing to lock against. Sharing
+    /// between threads (and between sessions and runs) happens through the content-addressed
+    /// cache *directory*, which is what made artifacts shareable in the first place.
+    memory: RefCell<HashMap<u64, Rc<ModuleArtifact>>>,
 }
 
 impl ArtifactStore {
@@ -163,7 +168,7 @@ impl ArtifactStore {
         }
         Self {
             dir,
-            memory: RwLock::new(HashMap::new()),
+            memory: RefCell::new(HashMap::new()),
         }
     }
 
@@ -171,7 +176,7 @@ impl ArtifactStore {
     pub fn in_memory() -> Self {
         Self {
             dir: None,
-            memory: RwLock::new(HashMap::new()),
+            memory: RefCell::new(HashMap::new()),
         }
     }
 
@@ -180,20 +185,20 @@ impl ArtifactStore {
     pub fn at_dir(dir: PathBuf) -> Self {
         Self {
             dir: Some(dir).filter(|dir| std::fs::create_dir_all(dir).is_ok()),
-            memory: RwLock::new(HashMap::new()),
+            memory: RefCell::new(HashMap::new()),
         }
     }
 
     const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
 
-    pub fn load(&self, key: u64) -> Option<Arc<ModuleArtifact>> {
-        if let Some(artifact) = self.memory.read().unwrap().get(&key) {
+    pub fn load(&self, key: u64) -> Option<Rc<ModuleArtifact>> {
+        if let Some(artifact) = self.memory.borrow().get(&key) {
             return Some(artifact.clone());
         }
         let bytes = std::fs::read(self.path(key)?).ok()?;
         let artifact: ModuleArtifact = serde_json::from_slice(&bytes).ok()?;
-        let artifact = Arc::new(artifact);
-        self.memory.write().unwrap().insert(key, artifact.clone());
+        let artifact = Rc::new(artifact);
+        self.memory.borrow_mut().insert(key, artifact.clone());
         Some(artifact)
     }
 
@@ -201,8 +206,8 @@ impl ArtifactStore {
     /// with a per-process temp name, so concurrent writers never tear a file). Equal
     /// keys always carry equal content, so an existing file is left untouched.
     pub fn save(&self, key: u64, artifact: ModuleArtifact) {
-        let artifact = Arc::new(artifact);
-        self.memory.write().unwrap().insert(key, artifact.clone());
+        let artifact = Rc::new(artifact);
+        self.memory.borrow_mut().insert(key, artifact.clone());
         if let Some(path) = self.path(key)
             && !path.exists()
             && let Ok(bytes) = serde_json::to_vec(&*artifact)
@@ -216,11 +221,10 @@ impl ArtifactStore {
 
     /// Every artifact currently in memory, sorted by key (a test hook; disk entries
     /// appear only once loaded).
-    pub fn entries(&self) -> Vec<(u64, Arc<ModuleArtifact>)> {
-        let mut entries: Vec<(u64, Arc<ModuleArtifact>)> = self
+    pub fn entries(&self) -> Vec<(u64, Rc<ModuleArtifact>)> {
+        let mut entries: Vec<(u64, Rc<ModuleArtifact>)> = self
             .memory
-            .read()
-            .unwrap()
+            .borrow()
             .iter()
             .map(|(key, artifact)| (*key, artifact.clone()))
             .collect();
@@ -334,7 +338,7 @@ pub(crate) fn key_for_resolved(
 /// session side effects; the scratch session is discarded. Panics on a std compile
 /// failure (a build invariant).
 pub fn warm_std_store<E: Effect>(
-    store: &Arc<ArtifactStore>,
+    store: &Rc<ArtifactStore>,
     builtins: &BuiltinRegistry<E>,
     options: CompileOptions,
 ) {

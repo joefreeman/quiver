@@ -8,6 +8,7 @@ use crate::process::{
 };
 use crate::types::{BuiltinInfo, NIL, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Payload, ResourceId, Value};
+use crate::wire::{WirePayload, WireValue};
 use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -805,11 +806,7 @@ impl<E: Effect> Executor<E> {
     /// other runtime error. Must run on the *crashed process's* executor: the pid field
     /// carries its root function index, so it compares equal (`=&p`) to the pid values
     /// other processes hold.
-    pub fn crash_result(
-        &mut self,
-        pid: ProcessId,
-        error: &Error,
-    ) -> Result<(Value, Vec<Vec<u8>>), Error> {
+    pub fn crash_result(&mut self, pid: ProcessId, error: &Error) -> Result<WireValue, Error> {
         let table = self
             .crash_table
             .clone()
@@ -843,12 +840,12 @@ impl<E: Effect> Executor<E> {
             NIL,
             Payload::with_annotations(vec![], vec![(table.crash_key, payload)]).shared(),
         );
-        // Root → extract → release, so the freshly allocated message binary goes
+        // Root → convert → release, so the freshly allocated message binary goes
         // through the refcount lifecycle and its slot is reclaimable afterwards.
         self.retain(&stamped);
-        let extracted = self.extract_heap_data(&stamped);
+        let converted = self.to_wire(&stamped);
         self.release(&stamped);
-        extracted
+        converted
     }
 
     /// Validate the reference-count invariant against the tracing oracle: every heap slot must
@@ -1108,9 +1105,8 @@ impl<E: Effect> Executor<E> {
         &mut self,
         id: ProcessId,
         function_index: Option<usize>,
-        captures: Vec<Value>,
-        argument: Value,
-        heap_data: Vec<Vec<u8>>,
+        captures: Vec<WireValue>,
+        argument: WireValue,
         persistent: bool,
     ) -> Result<(), Error> {
         // Create the process
@@ -1126,10 +1122,10 @@ impl<E: Effect> Executor<E> {
 
         self.processes.insert(id, process);
 
-        // Inject heap data and populate locals with captures
+        // Rebuild the captures on this worker's heap and populate locals with them.
         let captures_count = captures.len();
         for value in captures {
-            let injected = self.inject_heap_data(value, &heap_data)?;
+            let injected = self.from_wire(&value)?;
             // Injected into rooted storage (the new frame's locals).
             self.retain(&injected);
             let process = self
@@ -1140,7 +1136,7 @@ impl<E: Effect> Executor<E> {
 
         // Push argument onto stack; it is also the process's initial observable state
         // (one retain per storage location).
-        let injected_arg = self.inject_heap_data(argument, &heap_data)?;
+        let injected_arg = self.from_wire(&argument)?;
         self.retain(&injected_arg);
         self.retain(&injected_arg);
         let process = self
@@ -1216,13 +1212,8 @@ impl<E: Effect> Executor<E> {
 
     /// Deliver a remote `?` state sample to the process that requested it: push the
     /// sample and wake the caller. No gate — the state type is statically known.
-    pub fn notify_state(
-        &mut self,
-        id: ProcessId,
-        state: Value,
-        heap: Vec<Vec<u8>>,
-    ) -> Result<(), Error> {
-        let sample = self.inject_heap_data(state, &heap)?;
+    pub fn notify_state(&mut self, id: ProcessId, state: &WireValue) -> Result<(), Error> {
+        let sample = self.from_wire(state)?;
         self.retain(&sample);
 
         match self.get_process_mut(id) {
@@ -1246,11 +1237,10 @@ impl<E: Effect> Executor<E> {
         &mut self,
         awaiter: ProcessId,
         awaited: ProcessId,
-        result: Value,
-        heap: Vec<Vec<u8>>,
+        result: &WireValue,
     ) -> Result<(), Error> {
-        // Inject heap data into the result value
-        let injected_result = self.inject_heap_data(result, &heap)?;
+        // Rebuild the result on this worker's heap.
+        let injected_result = self.from_wire(result)?;
 
         // Store the result in the process's awaiting map (retaining as it enters storage,
         // releasing any stale result the insert displaces). A terminated awaiter (e.g.
@@ -1283,14 +1273,13 @@ impl<E: Effect> Executor<E> {
     pub fn notify_effect_completion(
         &mut self,
         process_id: ProcessId,
-        result: Result<Value, String>,
-        heap: Vec<Vec<u8>>,
+        result: Result<WireValue, String>,
     ) -> Result<(), Error> {
         let was_effecting = self.effecting.remove(&process_id);
 
         // Convert result to either Ok(Value) or Err(Error)
         let value_result = match result {
-            Ok(v) => Ok(self.inject_heap_data(v, &heap)?),
+            Ok(v) => Ok(self.from_wire(&v)?),
             Err(err_msg) => Err(Error::InvalidArgument(format!(
                 "Effect operation failed: {}",
                 err_msg
@@ -1335,22 +1324,18 @@ impl<E: Effect> Executor<E> {
         Ok(())
     }
 
-    pub fn notify_message(
-        &mut self,
-        id: ProcessId,
-        message: Value,
-        heap: Vec<Vec<u8>>,
-    ) -> Result<(), Error> {
+    pub fn notify_message(&mut self, id: ProcessId, message: &WireValue) -> Result<(), Error> {
         // A completed process can never receive again — drop the message (rather than
         // queueing it forever on the tombstone). Persistent (REPL) processes complete
-        // between submissions but stay addressable, so they still queue. Skipping the
-        // heap injection entirely means there is nothing to account for.
+        // between submissions but stay addressable, so they still queue. Never rebuilding
+        // the value means its binaries are never allocated here, so there is nothing to
+        // account for.
         let deliverable = self
             .get_process(id)
             .is_some_and(|p| p.persistent || p.result.is_none());
 
         if deliverable {
-            let injected_message = self.inject_heap_data(message, &heap)?;
+            let injected_message = self.from_wire(message)?;
             self.retain(&injected_message);
             self.get_process_mut(id)
                 .unwrap()
@@ -1376,7 +1361,7 @@ impl<E: Effect> Executor<E> {
         resource_id: ResourceId,
         resource_type: usize,
         event: StreamEvent,
-        heap: Vec<Vec<u8>>,
+        bytes: Vec<u8>,
     ) -> Result<(), Error> {
         let deliverable = self
             .get_process(id)
@@ -1404,7 +1389,6 @@ impl<E: Effect> Executor<E> {
                 let tuple = info.data_tuple.ok_or_else(|| {
                     Error::InvalidArgument("stream kind yields no bytes".to_string())
                 })?;
-                let bytes = heap.into_iter().next().unwrap_or_default();
                 let binary = self.allocate_binary(bytes)?;
                 Value::tuple(tuple, vec![source, Value::Binary(binary)])
             }
@@ -1607,12 +1591,13 @@ impl<E: Effect> Executor<E> {
 
     pub fn get_process_info(&self, id: ProcessId) -> Option<ProcessInfo> {
         self.processes.get(&id).map(|process| {
-            // Extract heap data from result if present
+            // The reported result leaves this worker, so it takes the wire form. A value
+            // that fails to convert (a dangling heap slot — a bug, not a program state) is
+            // reported as nil rather than failing the whole inspection.
             let result = match &process.result {
-                Some(Ok(value)) => match self.extract_heap_data(value) {
-                    Ok((extracted_value, heap)) => Some(Ok((extracted_value, heap))),
-                    Err(_) => process.result.clone().map(|r| r.map(|v| (v, vec![]))),
-                },
+                Some(Ok(value)) => {
+                    Some(Ok(self.to_wire(value).unwrap_or_else(|_| WireValue::nil())))
+                }
                 Some(Err(e)) => Some(Err(e.clone())),
                 None => None,
             };
@@ -3824,78 +3809,6 @@ impl<E: Effect> Executor<E> {
             _ => false,
         }
     }
-
-    /// Extract heap data from a value for serialization across thread boundaries
-    /// Returns (value, heap_data) where heap_data is a Vec of flattened binary data
-    /// Extract heap data across several values at once, remapped against ONE shared
-    /// index space — the values ship with a single side-channel vec (a spawn's
-    /// captures plus argument). Extracting values separately and concatenating their
-    /// vecs would leave every value after the first pointing at the wrong entries.
-    pub fn extract_heap_data_many(
-        &self,
-        values: &[Value],
-    ) -> Result<(Vec<Value>, Vec<Vec<u8>>), Error> {
-        let mut heap_indices = HashSet::new();
-        for value in values {
-            collect_heap_indices(value, &mut heap_indices);
-        }
-        let mut indices_vec: Vec<usize> = heap_indices.into_iter().collect();
-        indices_vec.sort_unstable();
-        let mut index_map = HashMap::new();
-        for (new_idx, &old_idx) in indices_vec.iter().enumerate() {
-            index_map.insert(old_idx, new_idx);
-        }
-        let mut heap_data = Vec::new();
-        for &old_idx in &indices_vec {
-            if let Some(binary_data) = self.heap.get(old_idx) {
-                heap_data.push(binary_data.to_vec());
-            } else {
-                return Err(Error::InvalidArgument(format!(
-                    "Heap index {} not found",
-                    old_idx
-                )));
-            }
-        }
-        let remapped = values
-            .iter()
-            .map(|value| remap_heap_indices(value, &index_map))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((remapped, heap_data))
-    }
-
-    pub fn extract_heap_data(&self, value: &Value) -> Result<(Value, Vec<Vec<u8>>), Error> {
-        // Collect all unique heap indices referenced by this value
-        let mut heap_indices = HashSet::new();
-        collect_heap_indices(value, &mut heap_indices);
-
-        // Sort indices for deterministic ordering
-        let mut indices_vec: Vec<usize> = heap_indices.into_iter().collect();
-        indices_vec.sort_unstable();
-
-        // Create index mapping from old heap index to new compact index
-        let mut index_map = HashMap::new();
-        for (new_idx, &old_idx) in indices_vec.iter().enumerate() {
-            index_map.insert(old_idx, new_idx);
-        }
-
-        // Extract and flatten binary data
-        let mut heap_data = Vec::new();
-        for &old_idx in &indices_vec {
-            if let Some(binary_data) = self.heap.get(old_idx) {
-                heap_data.push(binary_data.to_vec());
-            } else {
-                return Err(Error::InvalidArgument(format!(
-                    "Heap index {} not found",
-                    old_idx
-                )));
-            }
-        }
-
-        // Remap value indices
-        let remapped_value = remap_heap_indices(value, &index_map)?;
-
-        Ok((remapped_value, heap_data))
-    }
 }
 
 /// Recursively collect all pids referenced by a value (the reclamation-graph twin of
@@ -3939,87 +3852,6 @@ fn collect_heap_indices(value: &Value, indices: &mut HashSet<usize>) {
     }
 }
 
-/// Remap the heap indices in a payload's annotations (helper for `remap_heap_indices`).
-fn remap_annotations(
-    payload: &Payload,
-    index_map: &HashMap<usize, usize>,
-) -> Result<Vec<(usize, Value)>, Error> {
-    payload
-        .annotations()
-        .iter()
-        .map(|(key, value)| Ok((*key, remap_heap_indices(value, index_map)?)))
-        .collect()
-}
-
-/// Remap heap indices in a value according to the provided mapping
-/// Remap the heap-binary indices in a value that has crossed a registry-less boundary (an effect
-/// result or an incoming message) into this executor's heap via `index_map`. Tuple/function ids
-/// are left untouched — the producer (a registry-ful process, or a backend handed its type ids)
-/// already stamped real ids.
-fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Result<Value, Error> {
-    match value {
-        Value::Binary(Binary::Heap(old_idx)) => {
-            if let Some(&new_idx) = index_map.get(old_idx) {
-                Ok(Value::Binary(Binary::Heap(new_idx)))
-            } else {
-                Err(Error::InvalidArgument(format!(
-                    "Heap index {} not in mapping",
-                    old_idx
-                )))
-            }
-        }
-        Value::Binary(binary @ Binary::Constant(_)) => Ok(Value::Binary(*binary)),
-        Value::Tuple(type_id, elements) => {
-            let remapped_elements: Result<Vec<_>, _> = elements
-                .iter()
-                .map(|elem| remap_heap_indices(elem, index_map))
-                .collect();
-            Ok(Value::Tuple(
-                *type_id,
-                Payload::with_annotations(
-                    remapped_elements?,
-                    remap_annotations(elements, index_map)?,
-                )
-                .shared(),
-            ))
-        }
-        Value::Function(func_idx, captures) => {
-            let remapped_captures: Result<Vec<_>, _> = captures
-                .iter()
-                .map(|capture| remap_heap_indices(capture, index_map))
-                .collect();
-            Ok(Value::Function(
-                *func_idx,
-                Payload::with_annotations(
-                    remapped_captures?,
-                    remap_annotations(captures, index_map)?,
-                )
-                .shared(),
-            ))
-        }
-        Value::Int(n) => Ok(Value::Int(*n)),
-        Value::BigInt(n) => Ok(Value::BigInt(n.clone())),
-        Value::Builtin(builtin_id, payload) => {
-            let payload = payload
-                .as_ref()
-                .map(|payload| {
-                    // Type ids are program-global across workers (like tuple ids), so a
-                    // type-consuming builtin's argument crosses unchanged.
-                    Ok::<_, Error>(
-                        Payload::with_annotations(vec![], remap_annotations(payload, index_map)?)
-                            .with_type_argument(payload.type_argument())
-                            .shared(),
-                    )
-                })
-                .transpose()?;
-            Ok(Value::Builtin(*builtin_id, payload))
-        }
-        Value::Process(pid, func_idx) => Ok(Value::Process(*pid, *func_idx)),
-        Value::Resource(id, type_name) => Ok(Value::Resource(*id, *type_name)),
-        Value::Reference(r) => Ok(Value::Reference(*r)),
-    }
-}
-
 // The executor carries the program's full type/tuple tables (shipped in every build),
 // so a type-consuming builtin can resolve its type argument's structure at runtime —
 // `format_type_by_id`, and eventually type-directed decoding, read through this.
@@ -4034,26 +3866,91 @@ impl<E: Effect> crate::types::TypeLookup for Executor<E> {
 }
 
 impl<E: Effect> Executor<E> {
-    /// Inject heap data into this executor and remap heap indices in the value.
-    /// Binary heap data is allocated to the executor's heap and indices are remapped.
-    pub fn inject_heap_data(
-        &mut self,
-        value: Value,
-        heap_data: &[Vec<u8>],
-    ) -> Result<Value, Error> {
-        // Allocate all heap data to executor and build index mapping. Goes through
-        // `allocate_binary_data` so `refcounts` stays parallel to `heap` (the injected slots
-        // start floating at 0; the receiving process's placement sites retain them).
-        let mut index_map = HashMap::new();
-        for (new_idx, bytes) in heap_data.iter().enumerate() {
-            let Binary::Heap(heap_idx) = self.allocate_binary(bytes.clone())? else {
-                unreachable!("allocate_binary always returns a heap binary")
-            };
-            index_map.insert(new_idx, heap_idx);
-        }
+    /// This value in its self-contained [`WireValue`] form: binaries materialised, so the
+    /// result depends on no executor state and can cross a process boundary. The copy is not
+    /// new — every send already performed it (see [`crate::wire`]).
+    ///
+    /// Recursive, like the walks it replaces. A deep enough value still needs stack
+    /// proportional to its nesting on this path; only `Payload`'s teardown is iterative so far.
+    pub fn to_wire(&self, value: &Value) -> Result<WireValue, Error> {
+        Ok(match value {
+            Value::Int(n) => WireValue::Int(*n),
+            Value::BigInt(n) => WireValue::BigInt((**n).clone()),
+            Value::Binary(Binary::Constant(index)) => WireValue::Constant(*index),
+            Value::Binary(binary) => WireValue::Binary(self.get_binary_data(binary)?.to_vec()),
+            Value::Reference(id) => WireValue::Reference(*id),
+            Value::Tuple(type_id, payload) => {
+                WireValue::Tuple(*type_id, self.payload_to_wire(payload)?)
+            }
+            Value::Function(index, payload) => {
+                WireValue::Function(*index, self.payload_to_wire(payload)?)
+            }
+            Value::Builtin(id, payload) => WireValue::Builtin(
+                *id,
+                payload
+                    .as_deref()
+                    .map(|payload| self.payload_to_wire(payload))
+                    .transpose()?,
+            ),
+            Value::Process(pid, function_index) => WireValue::Process(*pid, *function_index),
+            Value::Resource(id, type_id) => WireValue::Resource(*id, *type_id),
+        })
+    }
 
-        // Remap value indices
-        remap_heap_indices(&value, &index_map)
+    fn payload_to_wire(&self, payload: &Payload) -> Result<WirePayload, Error> {
+        let elements = payload
+            .iter()
+            .map(|value| self.to_wire(value))
+            .collect::<Result<_, _>>()?;
+        let annotations = payload
+            .annotations()
+            .iter()
+            .map(|(key, value)| Ok((*key, self.to_wire(value)?)))
+            .collect::<Result<_, Error>>()?;
+        Ok(WirePayload::with_annotations(elements, annotations)
+            .with_type_argument(payload.type_argument()))
+    }
+
+    /// The inverse of [`to_wire`](Self::to_wire): rebuild a value in *this* executor, so its
+    /// binaries land on this worker's heap. Fresh slots start floating at refcount 0; the
+    /// receiving process's placement site retains them, as for any freshly built value.
+    pub fn from_wire(&mut self, wire: &WireValue) -> Result<Value, Error> {
+        Ok(match wire {
+            WireValue::Int(n) => Value::Int(*n),
+            WireValue::BigInt(n) => Value::integer(n.clone()),
+            WireValue::Binary(bytes) => Value::Binary(self.allocate_binary(bytes.clone())?),
+            WireValue::Constant(index) => Value::Binary(Binary::Constant(*index)),
+            WireValue::Reference(id) => Value::Reference(*id),
+            WireValue::Tuple(type_id, payload) => {
+                Value::Tuple(*type_id, self.payload_from_wire(payload)?)
+            }
+            WireValue::Function(index, payload) => {
+                Value::Function(*index, self.payload_from_wire(payload)?)
+            }
+            WireValue::Builtin(id, payload) => Value::Builtin(
+                *id,
+                payload
+                    .as_ref()
+                    .map(|payload| self.payload_from_wire(payload))
+                    .transpose()?,
+            ),
+            WireValue::Process(pid, function_index) => Value::Process(*pid, *function_index),
+            WireValue::Resource(id, type_id) => Value::Resource(*id, *type_id),
+        })
+    }
+
+    fn payload_from_wire(&mut self, wire: &WirePayload) -> Result<Rc<Payload>, Error> {
+        let mut elements = Vec::with_capacity(wire.elements.len());
+        for element in &wire.elements {
+            elements.push(self.from_wire(element)?);
+        }
+        let mut annotations = Vec::with_capacity(wire.annotations().len());
+        for (key, value) in wire.annotations() {
+            annotations.push((*key, self.from_wire(value)?));
+        }
+        Ok(Payload::with_annotations(elements, annotations)
+            .with_type_argument(wire.type_argument)
+            .shared())
     }
 }
 
@@ -4521,45 +4418,73 @@ mod annotation_tests {
         assert_eq!(ex.refcounts[idx], 0);
     }
 
+    /// Every shape a message can carry survives `to_wire` -> `from_wire` between two
+    /// executors: nesting, annotations, a builtin's type argument, constants (which cross as
+    /// references, not bytes), and the identity-bearing variants.
     #[test]
-    fn transfer_round_trip_preserves_builtin_annotations() {
+    fn wire_round_trip_preserves_every_shape() {
         let mut source = executor();
-        let b = source.allocate_binary(vec![6, 6, 6]).unwrap();
-        let annotated = Value::builtin(7).annotated(2, Value::Binary(b)).unwrap();
+        let heap = source.allocate_binary(vec![1, 2, 3]).unwrap();
+        let inner = Value::tuple(3, vec![Value::Binary(heap), Value::int(-9)])
+            .annotated(
+                2,
+                Value::Binary(source.allocate_binary(vec![4, 5]).unwrap()),
+            )
+            .unwrap();
+        let value = Value::tuple(
+            3,
+            vec![
+                inner,
+                Value::Binary(Binary::Constant(0)),
+                Value::builtin_typed(7, Some(11)),
+                Value::function(1, vec![Value::int(42)]),
+                Value::Process(5, 6),
+                Value::Resource(8, 9),
+                Value::Reference(0xdead_beef),
+                Value::nil(),
+            ],
+        );
 
-        let (wire_value, heap_data) = source.extract_heap_data(&annotated).unwrap();
-        assert_eq!(heap_data, vec![vec![6, 6, 6]]);
+        let wire = source.to_wire(&value).unwrap();
+        // The bytes a send moves are exactly the heap binaries; the constant is a reference.
+        assert_eq!(wire.byte_size(), 5, "3 + 2 bytes of heap binaries");
+        assert!(matches!(
+            wire,
+            WireValue::Tuple(3, ref p) if matches!(p.elements[1], WireValue::Constant(0))
+        ));
 
         let mut target = executor();
-        let received = target.inject_heap_data(wire_value, &heap_data).unwrap();
-        let Some(Value::Binary(Binary::Heap(new_idx))) = received.get_annotation(2).cloned() else {
-            panic!("annotation lost or not a heap binary after transfer");
+        let received = target.from_wire(&wire).unwrap();
+
+        // Structural equality ignores annotations and heap placement, so compare the parts
+        // that must survive explicitly as well.
+        assert_eq!(received, value, "structure and identities preserved");
+        let Value::Tuple(_, fields) = &received else {
+            panic!("expected a tuple")
+        };
+        let Value::Tuple(_, inner_fields) = &fields[0] else {
+            panic!("expected a nested tuple")
+        };
+        let Value::Binary(binary) = &inner_fields[0] else {
+            panic!("expected a heap binary")
         };
         assert_eq!(
-            target.get_heap_binary(new_idx).unwrap().to_vec(),
-            vec![6, 6, 6]
+            target.get_binary_data(binary).unwrap().to_vec(),
+            vec![1, 2, 3]
         );
-    }
-
-    #[test]
-    fn transfer_round_trip_preserves_annotations() {
-        let mut source = executor();
-        let b = source.allocate_binary(vec![9, 8, 7]).unwrap();
-        let carrier = Value::tuple(3, vec![Value::int(1)]);
-        let annotated = carrier.annotated(2, Value::Binary(b)).unwrap();
-
-        let (wire_value, heap_data) = source.extract_heap_data(&annotated).unwrap();
-        assert_eq!(heap_data, vec![vec![9, 8, 7]]);
-
-        let mut target = executor();
-        let received = target.inject_heap_data(wire_value, &heap_data).unwrap();
-        let Some(Value::Binary(Binary::Heap(new_idx))) = received.get_annotation(2).cloned() else {
-            panic!("annotation lost or not a heap binary after transfer");
+        let Some(Value::Binary(annotation)) = fields[0].get_annotation(2) else {
+            panic!("annotation lost in transit")
         };
         assert_eq!(
-            target.get_heap_binary(new_idx).unwrap().to_vec(),
-            vec![9, 8, 7]
+            target.get_binary_data(annotation).unwrap().to_vec(),
+            vec![4, 5]
         );
+        assert_eq!(
+            fields[2].type_argument(),
+            Some(11),
+            "type argument survives"
+        );
+        assert!(matches!(fields[1], Value::Binary(Binary::Constant(0))));
     }
 }
 

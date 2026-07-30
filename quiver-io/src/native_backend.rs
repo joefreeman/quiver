@@ -4,7 +4,8 @@ use quiver_core::ProcessId;
 use quiver_core::effects::{EffectBackend, EffectError, EffectResult, ResultTupleInfo};
 use quiver_core::error::Error;
 use quiver_core::process::StreamEvent;
-use quiver_core::value::{ResourceId, Value};
+use quiver_core::value::ResourceId;
+use quiver_core::wire::WireValue;
 use socket2::Socket;
 use std::collections::HashMap;
 use std::fs::File;
@@ -94,7 +95,7 @@ pub struct NativeEffectBackend {
     /// Stream resources with an armed read (dedup: at most one per resource).
     armed_resources: std::collections::HashSet<ResourceId>,
     /// Completed armed reads awaiting `take_stream_events`.
-    stream_events: Vec<(ResourceId, usize, StreamEvent, Vec<Vec<u8>>)>,
+    stream_events: Vec<(ResourceId, usize, StreamEvent, Vec<u8>)>,
 }
 
 /// A select-armed stream read in flight: the next-event read of a socket or listener.
@@ -152,12 +153,8 @@ impl NativeEffectBackend {
                         .push((resource_id, socket_type, StreamEvent::End, vec![]));
                 } else {
                     buffer.truncate(result_code as usize);
-                    self.stream_events.push((
-                        resource_id,
-                        socket_type,
-                        StreamEvent::Data,
-                        vec![buffer],
-                    ));
+                    self.stream_events
+                        .push((resource_id, socket_type, StreamEvent::Data, buffer));
                 }
             }
             ArmedOp::Accept { resource_id } => {
@@ -203,11 +200,11 @@ impl NativeEffectBackend {
 
 /// Build a `kind` tag value (`File`/`Dir`/`Symlink`/`Other`) from its name, using the real tuple
 /// ids carried in `info.variants`.
-fn kind_tag(info: &ResultTupleInfo, name: &str) -> Result<Value, Error> {
+fn kind_tag(info: &ResultTupleInfo, name: &str) -> Result<WireValue, Error> {
     let id = info.variants.get(name).copied().ok_or_else(|| {
         Error::InvalidArgument(format!("no tuple id registered for kind tag `{name}`"))
     })?;
-    Ok(Value::tuple(id, vec![]))
+    Ok(WireValue::tuple(id, vec![]))
 }
 
 /// EffectBackend implementation for NativeEffect
@@ -379,7 +376,7 @@ impl EffectBackend for NativeEffectBackend {
         Ok(())
     }
 
-    fn take_stream_events(&mut self) -> Vec<(ResourceId, usize, StreamEvent, Vec<Vec<u8>>)> {
+    fn take_stream_events(&mut self) -> Vec<(ResourceId, usize, StreamEvent, Vec<u8>)> {
         std::mem::take(&mut self.stream_events)
     }
 
@@ -466,7 +463,7 @@ impl NativeEffectBackend {
 
         // Return immediate completion with the resource
         let type_id = self.get_resource_type_id("File");
-        Ok(Some(Ok((Value::Resource(resource_id, type_id), vec![]))))
+        Ok(Some(Ok(WireValue::Resource(resource_id, type_id))))
     }
 
     fn execute_stat(&mut self, path: Vec<u8>) -> Result<Option<EffectResult>, Error> {
@@ -478,7 +475,7 @@ impl NativeEffectBackend {
         let metadata = match std::fs::metadata(&path_str) {
             Ok(md) => md,
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                return Ok(Some(Ok((Value::nil(), vec![]))));
+                return Ok(Some(Ok(WireValue::nil())));
             }
             Err(e) => {
                 return Err(Error::InvalidArgument(format!(
@@ -512,17 +509,14 @@ impl NativeEffectBackend {
 
         // `[kind, size, modified, mode]` tuple, stamped with `filesystem_stat`'s real result type
         // ids (pushed by the environment — the backend has no type registry of its own).
-        Ok(Some(Ok((
-            Value::tuple(
-                info.tuple_id,
-                vec![
-                    kind,
-                    Value::int(size as i64),
-                    Value::int(modified_nanos as i64),
-                    Value::int(mode as i64),
-                ],
-            ),
-            vec![],
+        Ok(Some(Ok(WireValue::tuple(
+            info.tuple_id,
+            vec![
+                kind,
+                WireValue::Int(size as i64),
+                WireValue::Int(modified_nanos as i64),
+                WireValue::Int(mode as i64),
+            ],
         ))))
     }
 
@@ -541,7 +535,7 @@ impl NativeEffectBackend {
             .insert(resource_id, Resource::Dir { entries });
 
         let type_id = self.get_resource_type_id("Dir");
-        Ok(Some(Ok((Value::Resource(resource_id, type_id), vec![]))))
+        Ok(Some(Ok(WireValue::Resource(resource_id, type_id))))
     }
 
     fn execute_read_dir_next(
@@ -575,12 +569,11 @@ impl NativeEffectBackend {
                 let kind = kind_tag(&info, kind_name)?;
                 // `[name, kind]` pair, stamped with `directory_next`'s real result type ids (pushed
                 // by the environment). The name bytes travel via the heap side-channel (`Heap(0)`).
-                Ok(Some(Ok((
-                    Value::tuple(
-                        info.tuple_id,
-                        vec![Value::Binary(quiver_core::value::Binary::Heap(0)), kind],
-                    ),
-                    vec![name_bytes],
+                // The name bytes ride in the value itself now, rather than in a
+                // side-channel slot the value pointed at by index.
+                Ok(Some(Ok(WireValue::tuple(
+                    info.tuple_id,
+                    vec![WireValue::Binary(name_bytes), kind],
                 ))))
             }
             Some(Err(e)) => Err(Error::InvalidArgument(format!(
@@ -588,7 +581,7 @@ impl NativeEffectBackend {
                 e
             ))),
             // Iterator exhausted - return Nil.
-            None => Ok(Some(Ok((Value::nil(), vec![])))),
+            None => Ok(Some(Ok(WireValue::nil()))),
         }
     }
 
@@ -600,7 +593,7 @@ impl NativeEffectBackend {
             .remove(&resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
 
-        Ok(Some(Ok((Value::ok(), vec![]))))
+        Ok(Some(Ok(WireValue::ok())))
     }
 
     fn execute_dns_resolve(&mut self, hostname: Vec<u8>) -> Result<Option<EffectResult>, Error> {
@@ -647,7 +640,7 @@ impl NativeEffectBackend {
         );
 
         let type_id = self.get_resource_type_id("DnsResolver");
-        Ok(Some(Ok((Value::Resource(resource_id, type_id), vec![]))))
+        Ok(Some(Ok(WireValue::Resource(resource_id, type_id))))
     }
 
     fn execute_dns_next(&mut self, resource_id: ResourceId) -> Result<Option<EffectResult>, Error> {
@@ -669,13 +662,10 @@ impl NativeEffectBackend {
         if *position < addresses.len() {
             let ip_bytes = addresses[*position].clone();
             *position += 1;
-            Ok(Some(Ok((
-                Value::Binary(quiver_core::value::Binary::Heap(0)),
-                vec![ip_bytes],
-            ))))
+            Ok(Some(Ok(WireValue::Binary(ip_bytes))))
         } else {
             // No more addresses - return Nil
-            Ok(Some(Ok((Value::nil(), vec![]))))
+            Ok(Some(Ok(WireValue::nil())))
         }
     }
 
@@ -687,7 +677,7 @@ impl NativeEffectBackend {
             .remove(&resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
 
-        Ok(Some(Ok((Value::ok(), vec![]))))
+        Ok(Some(Ok(WireValue::ok())))
     }
 
     fn execute_tcp_connect(
@@ -804,7 +794,7 @@ impl NativeEffectBackend {
         self.resources.insert(resource_id, metadata);
 
         let type_id = self.get_resource_type_id("TcpListener");
-        Ok(Some(Ok((Value::Resource(resource_id, type_id), vec![]))))
+        Ok(Some(Ok(WireValue::Resource(resource_id, type_id))))
     }
 
     fn execute_file_read(
@@ -1021,7 +1011,7 @@ impl NativeEffectBackend {
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
 
         // Return immediate completion
-        Ok(Some(Ok((Value::ok(), vec![]))))
+        Ok(Some(Ok(WireValue::ok())))
     }
 
     fn execute_tcp_listener_accept(
@@ -1071,7 +1061,7 @@ impl NativeEffectBackend {
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
 
         // Return immediate completion
-        Ok(Some(Ok((Value::ok(), vec![]))))
+        Ok(Some(Ok(WireValue::ok())))
     }
 
     fn execute_tcp_listener_close(
@@ -1084,7 +1074,7 @@ impl NativeEffectBackend {
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
 
         // Return immediate completion
-        Ok(Some(Ok((Value::ok(), vec![]))))
+        Ok(Some(Ok(WireValue::ok())))
     }
 
     fn handle_read_completion(&self, result_code: i32, mut buffer: Vec<u8>) -> EffectResult {
@@ -1105,10 +1095,7 @@ impl NativeEffectBackend {
         let bytes_read = result_code as usize;
         buffer.truncate(bytes_read);
 
-        Ok((
-            Value::Binary(quiver_core::value::Binary::Heap(0)),
-            vec![buffer],
-        ))
+        Ok(WireValue::Binary(buffer))
     }
 
     fn handle_write_completion(&self, result_code: i32, _buffer_len: usize) -> EffectResult {
@@ -1126,7 +1113,7 @@ impl NativeEffectBackend {
 
         // Return bytes actually written (may be less than requested)
         let bytes_written = result_code as i64;
-        Ok((Value::int(bytes_written), vec![]))
+        Ok(WireValue::Int(bytes_written))
     }
 
     fn handle_flush_completion(&self, result_code: i32) -> EffectResult {
@@ -1137,7 +1124,7 @@ impl NativeEffectBackend {
                 _ => EffectError::IO(format!("Flush error: {}", -result_code)),
             })
         } else {
-            Ok((Value::ok(), vec![]))
+            Ok(WireValue::ok())
         }
     }
 
@@ -1172,7 +1159,7 @@ impl NativeEffectBackend {
             .insert(new_resource_id, Resource::TcpSocket { socket, peer_addr });
 
         let type_id = self.get_resource_type_id("TcpSocket");
-        Ok((Value::Resource(new_resource_id, type_id), vec![]))
+        Ok(WireValue::Resource(new_resource_id, type_id))
     }
 
     fn handle_connect_completion(
@@ -1201,6 +1188,6 @@ impl NativeEffectBackend {
             .insert(new_resource_id, Resource::TcpSocket { socket, peer_addr });
 
         let type_id = self.get_resource_type_id("TcpSocket");
-        Ok((Value::Resource(new_resource_id, type_id), vec![]))
+        Ok(WireValue::Resource(new_resource_id, type_id))
     }
 }

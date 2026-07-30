@@ -640,7 +640,7 @@ impl Environment {
         Ok(self
             .environment
             .borrow()
-            .format_value(&core_value, &extended_heap))
+            .format_core_value(&core_value, &extended_heap))
     }
 
     /// Format a type for display (derives type from value)
@@ -663,9 +663,11 @@ impl Environment {
         result: RequestResult,
     ) {
         match result {
-            RequestResult::Result(Ok((value, heap)), _) => {
+            RequestResult::Result(Ok(value), _) => {
+                // The JS bridge speaks `(Value, heap)`; a wire value renders to that pair.
+                let (core, heap) = value.for_display();
                 callback.invoke(crate::types::Result::ok(Some(EvaluationResult {
-                    value: crate::types::Value::from_core_value(&value, &heap, env.get_program()),
+                    value: crate::types::Value::from_core_value(&core, &heap, env.get_program()),
                     heap,
                 })));
             }
@@ -695,14 +697,17 @@ impl Environment {
                         .and_then(|idx| env.format_process_type(idx));
 
                     let result = info.result.map(|r| match r {
-                        Ok((value, heap)) => crate::types::Result::Ok {
-                            value: EvaluationResult {
-                                value: crate::types::Value::from_core_value(
-                                    &value,
-                                    &heap,
-                                    env.get_program(),
-                                ),
-                                heap,
+                        Ok(value) => crate::types::Result::Ok {
+                            value: {
+                                let (core, heap) = value.for_display();
+                                EvaluationResult {
+                                    value: crate::types::Value::from_core_value(
+                                        &core,
+                                        &heap,
+                                        env.get_program(),
+                                    ),
+                                    heap,
+                                }
                             },
                         },
                         Err(e) => crate::types::Result::Err {
