@@ -4,7 +4,7 @@ use crate::value::{Binary, Payload, Value};
 use serde::{Deserialize, Serialize};
 
 // Re-export bytecode types
-pub use crate::bytecode::{Bytecode, Constant, Function, Instruction};
+pub use crate::bytecode::{Bytecode, Constant, Function, Id, Instruction};
 
 /// Program represents the compiled program data that is static during execution.
 /// It contains constants, functions, builtins, and type information.
@@ -669,7 +669,7 @@ impl Program {
     ) {
         for (key, value) in payload.annotations() {
             instrs.extend(self.value_to_instructions(value, executor));
-            instrs.push(Instruction::Annotate(*key));
+            instrs.push(Instruction::Annotate(*key as Id));
         }
     }
 
@@ -683,17 +683,17 @@ impl Program {
         match value {
             Value::Int(n) => {
                 let const_idx = self.register_constant(Constant::Integer((*n).into()));
-                vec![Instruction::Constant(const_idx)]
+                vec![Instruction::Constant(const_idx as Id)]
             }
             Value::BigInt(n) => {
                 let const_idx = self.register_constant(Constant::Integer((**n).clone()));
-                vec![Instruction::Constant(const_idx)]
+                vec![Instruction::Constant(const_idx as Id)]
             }
             Value::Binary(binary) => {
                 match binary {
                     Binary::Constant(const_idx) => {
                         // Already a constant, just reference it
-                        vec![Instruction::Constant(*const_idx)]
+                        vec![Instruction::Constant(*const_idx as Id)]
                     }
                     Binary::Heap(heap_idx) => {
                         // Get bytes from heap and create a new constant
@@ -702,7 +702,7 @@ impl Program {
                             .expect("Heap binary index should be valid");
                         let bytes = binary_data.to_vec();
                         let const_idx = self.register_constant(Constant::Binary(bytes));
-                        vec![Instruction::Constant(const_idx)]
+                        vec![Instruction::Constant(const_idx as Id)]
                     }
                 }
             }
@@ -711,7 +711,7 @@ impl Program {
                 for elem in elements.iter() {
                     instrs.extend(self.value_to_instructions(elem, executor));
                 }
-                instrs.push(Instruction::Tuple(*tuple_id));
+                instrs.push(Instruction::Tuple(*tuple_id as Id));
                 self.annotations_to_instructions(&mut instrs, elements, executor);
                 instrs
             }
@@ -721,14 +721,17 @@ impl Program {
                 } else {
                     *function
                 };
-                let mut instrs = vec![Instruction::Function(func_index)];
+                let mut instrs = vec![Instruction::Function(func_index as Id)];
                 self.annotations_to_instructions(&mut instrs, captures, executor);
                 instrs
             }
             Value::Builtin(builtin_id, payload) => {
                 // An instantiated builtin re-emits its type argument on the push.
                 let type_argument = payload.as_deref().and_then(Payload::type_argument);
-                let mut instrs = vec![Instruction::Builtin(*builtin_id, type_argument)];
+                let mut instrs = vec![Instruction::Builtin(
+                    *builtin_id as Id,
+                    type_argument.map(|id| id as Id),
+                )];
                 if let Some(payload) = payload {
                     self.annotations_to_instructions(&mut instrs, payload, executor);
                 }

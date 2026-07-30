@@ -29,14 +29,19 @@ pub struct ProgramUpdate {
     /// Builtin information (name and resolved types)
     pub builtins: Vec<BuiltinInfo>,
     pub resources: Vec<String>,
-    /// For each type_id, the set of concrete types compatible with it (for IsType checks)
-    pub type_compatibility: Vec<HashSet<ConcreteType>>,
+    /// For each type_id, the set of concrete types compatible with it (for IsType checks).
+    /// Shared rather than copied: these tables are replaced wholesale on every update and are
+    /// identical in every worker, so on the native transport all workers reference one copy.
+    /// The web transport serializes (separate WASM linear memories), which serde's `rc`
+    /// feature handles — a web worker deserializes its own handle at refcount 1. The type is
+    /// therefore uniform across platforms and needs no `cfg`; only the sharing differs.
+    pub type_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
     /// For each function_id, the set of concrete types compatible with its parameter
-    pub function_param_compatibility: Vec<HashSet<ConcreteType>>,
+    pub function_param_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
     /// For each builtin_id, the set of concrete types compatible with its parameter
-    pub builtin_param_compatibility: Vec<HashSet<ConcreteType>>,
+    pub builtin_param_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
     /// For each field-name id, each tuple_id's offset for that field (for GetNamed)
-    pub field_offsets: Vec<Vec<Option<usize>>>,
+    pub field_offsets: Arc<Vec<Vec<Option<usize>>>>,
     /// Failure-provenance sites (debug builds): the full table, from which the executor
     /// prebuilds each site's annotated-nil value. `None` leaves any existing table as is.
     pub debug: Option<crate::bytecode::SiteTable>,
@@ -47,7 +52,7 @@ pub struct ProgramUpdate {
     pub runtime: Option<crate::bytecode::RuntimeTables>,
     /// For each tuple_id, a canonical *value-shape* id (same name + field labels). Lets `==`
     /// treat structurally-identical tuples built via different paths as equal.
-    pub canonical_tuples: Vec<usize>,
+    pub canonical_tuples: Arc<Vec<usize>>,
 }
 
 /// Instruction type for profiling statistics (groups parameterized instructions)
@@ -263,15 +268,15 @@ pub struct Executor<E: Effect> {
     resources: Vec<String>, // Resource type names
     /// For each tuple_id, a canonical value-shape id (same name + field labels) — used by `==`
     /// so structurally-identical tuples built via different paths compare equal.
-    canonical_tuples: Vec<usize>,
+    canonical_tuples: Arc<Vec<usize>>,
     /// For each type_id, the set of concrete types compatible with it (for IsType checks)
-    type_compatibility: Vec<HashSet<ConcreteType>>,
+    type_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
     /// For each function_id, the set of concrete types compatible with its parameter
-    function_param_compatibility: Vec<HashSet<ConcreteType>>,
+    function_param_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
     /// For each builtin_id, the set of concrete types compatible with its parameter
-    builtin_param_compatibility: Vec<HashSet<ConcreteType>>,
+    builtin_param_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
     /// For each field-name id, each tuple_id's offset for that field — GetNamed's table.
-    field_offsets: Vec<Vec<Option<usize>>>,
+    field_offsets: Arc<Vec<Vec<Option<usize>>>>,
     // Heap for runtime-allocated binaries (using BinaryData for O(1) operations)
     heap: Vec<BinaryData>,
     // Reference count per heap slot, parallel to `heap`. A freshly allocated slot starts at 0
@@ -397,7 +402,10 @@ impl<E: Effect> Executor<E> {
     fn process_pending_free(&mut self) {
         while let Some(index) = self.pending_free.pop() {
             if self.refcounts[index] == 0 && !self.freed[index] {
-                self.heap[index] = BinaryData::new(Vec::new()); // drop the data, reclaim memory
+                // `Zeroed(0)` rather than `new(Vec::new())`: the latter is `Rc::new`, which
+                // allocates a 40-byte control block for an empty buffer — so freeing a slot
+                // would itself allocate. `binary.rs` uses the same payload-free filler.
+                self.heap[index] = BinaryData::Zeroed(0); // drop the data, reclaim memory
                 self.freed[index] = true;
                 self.free.push(index);
                 self.reclaimed += 1;
@@ -833,10 +841,7 @@ impl<E: Effect> Executor<E> {
         };
         let stamped = Value::Tuple(
             NIL,
-            Arc::new(Payload::with_annotations(
-                vec![],
-                vec![(table.crash_key, payload)],
-            )),
+            Payload::with_annotations(vec![], vec![(table.crash_key, payload)]).shared(),
         );
         // Root → extract → release, so the freshly allocated message binary goes
         // through the refcount lifecycle and its slot is reclaimable afterwards.
@@ -1062,12 +1067,12 @@ impl<E: Effect> Executor<E> {
             ],
             types: vec![],
             // NIL (id 0) and OK (id 1) are each their own canonical shape; replaced on first update.
-            canonical_tuples: vec![0, 1],
+            canonical_tuples: Arc::new(vec![0, 1]),
             resources: vec![],
-            type_compatibility: vec![],
-            function_param_compatibility: vec![],
-            builtin_param_compatibility: vec![],
-            field_offsets: vec![],
+            type_compatibility: Arc::default(),
+            function_param_compatibility: Arc::default(),
+            builtin_param_compatibility: Arc::default(),
+            field_offsets: Arc::default(),
             heap: vec![],
             refcounts: vec![],
             free: vec![],
@@ -1728,10 +1733,8 @@ impl<E: Effect> Executor<E> {
             .map(|origin| {
                 Value::Tuple(
                     NIL,
-                    Arc::new(Payload::with_annotations(
-                        vec![],
-                        vec![(table.origin_key, origin.clone())],
-                    )),
+                    Payload::with_annotations(vec![], vec![(table.origin_key, origin.clone())])
+                        .shared(),
                 )
             })
             .collect();
@@ -1980,32 +1983,38 @@ impl<E: Effect> Executor<E> {
             None
         };
 
+        // Operands widen back to `usize` here: they are `u32` in the instruction stream to
+        // keep it dense (see `bytecode::Id`), but every consumer indexes a table or a stack.
         let result = match instruction {
-            Instruction::Constant(index) => self.handle_constant(proc, index),
+            Instruction::Constant(index) => self.handle_constant(proc, index as usize),
             Instruction::Pop => self.handle_pop(proc),
             Instruction::Duplicate => self.handle_duplicate(proc),
-            Instruction::Pick(n) => self.handle_pick(proc, n),
-            Instruction::Rotate(n) => self.handle_rotate(proc, n),
-            Instruction::Load(index) => self.handle_load(proc, index),
+            Instruction::Pick(n) => self.handle_pick(proc, n as usize),
+            Instruction::Rotate(n) => self.handle_rotate(proc, n as usize),
+            Instruction::Load(index) => self.handle_load(proc, index as usize),
             Instruction::Store => self.handle_store(proc),
-            Instruction::Tuple(type_id) => self.handle_tuple(proc, type_id),
-            Instruction::GetPositional(index) => self.handle_get_positional(proc, index),
-            Instruction::GetNamed(name_id) => self.handle_get_named(proc, name_id),
-            Instruction::IsType(type_id) => self.handle_is_type(proc, type_id),
-            Instruction::Jump(offset) => self.handle_jump(proc, offset),
-            Instruction::JumpIf(offset) => self.handle_jump_if(proc, offset),
+            Instruction::Tuple(type_id) => self.handle_tuple(proc, type_id as usize),
+            Instruction::GetPositional(index) => self.handle_get_positional(proc, index as usize),
+            Instruction::GetNamed(name_id) => self.handle_get_named(proc, name_id as usize),
+            Instruction::IsType(type_id) => self.handle_is_type(proc, type_id as usize),
+            Instruction::Jump(offset) => self.handle_jump(proc, offset as isize),
+            Instruction::JumpIf(offset) => self.handle_jump_if(proc, offset as isize),
             Instruction::Call => self.handle_call(proc, pid),
             Instruction::TailCall(recurse) => self.handle_tail_call(proc, recurse),
-            Instruction::Function(function_index) => self.handle_function(proc, function_index),
-            Instruction::Reset(index) => self.handle_reset(proc, index),
-            Instruction::Builtin(index, type_argument) => {
-                self.handle_builtin(proc, index, type_argument)
+            Instruction::Function(function_index) => {
+                self.handle_function(proc, function_index as usize)
             }
-            Instruction::Equal(count) => self.handle_equal(proc, count),
+            Instruction::Reset(index) => self.handle_reset(proc, index as usize),
+            Instruction::Builtin(index, type_argument) => {
+                self.handle_builtin(proc, index as usize, type_argument.map(|id| id as usize))
+            }
+            Instruction::Equal(count) => self.handle_equal(proc, count as usize),
             Instruction::Not => self.handle_not(proc),
-            Instruction::Annotate(key) => self.handle_annotate(proc, key),
-            Instruction::GetAnnotation(key, check) => self.handle_get_annotation(proc, key, check),
-            Instruction::Stamp(site) => self.handle_stamp(proc, site),
+            Instruction::Annotate(key) => self.handle_annotate(proc, key as usize),
+            Instruction::GetAnnotation(key, check) => {
+                self.handle_get_annotation(proc, key as usize, check.map(|id| id as usize))
+            }
+            Instruction::Stamp(site) => self.handle_stamp(proc, site as usize),
             _ => unreachable!("cold instruction routed to execute_hot"),
         };
 
@@ -2047,7 +2056,7 @@ impl<E: Effect> Executor<E> {
             Instruction::Self_ => self.handle_self(pid),
             Instruction::Select => self.handle_select(pid, current_time_ms),
             Instruction::Process(process_id, function_index) => {
-                self.handle_process_ref(pid, process_id, function_index)
+                self.handle_process_ref(pid, process_id as usize, function_index as usize)
             }
             Instruction::State => self.handle_state(pid),
             _ => unreachable!("hot instruction routed to execute_cold"),
@@ -2226,7 +2235,10 @@ impl<E: Effect> Executor<E> {
 
         // Pop the fields (releasing each as it leaves the stack), then push the tuple, whose
         // deep retain re-counts them in their new home — a net-zero move into the tuple.
-        let mut values = Vec::new();
+        // `with_capacity` is not decoration: `Vec`'s minimum non-zero capacity for a 24-byte
+        // `Value` is 4, so growing from empty allocates 96 bytes for every tuple of arity 1-4
+        // — 72 wasted on the arity-1 case, which is among the most common.
+        let mut values = Vec::with_capacity(size);
         for _ in 0..size {
             let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
             values.push(value);
@@ -3203,14 +3215,14 @@ impl<E: Effect> Executor<E> {
             None
         };
 
-        process.select_state = Some(SelectState {
+        process.select_state = Some(Box::new(SelectState {
             frame: current_frame,
             instruction: current_instruction,
             sources,
             cursors: vec![0; receive_count],
             start_time,
             receiving: None,
-        });
+        }));
 
         // If we found PIDs or resources to arm, register/route before processing
         // sources. Re-awaiting a target displaces the previously stored result —
@@ -3964,10 +3976,11 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
                 .collect();
             Ok(Value::Tuple(
                 *type_id,
-                Arc::new(Payload::with_annotations(
+                Payload::with_annotations(
                     remapped_elements?,
                     remap_annotations(elements, index_map)?,
-                )),
+                )
+                .shared(),
             ))
         }
         Value::Function(func_idx, captures) => {
@@ -3977,10 +3990,11 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
                 .collect();
             Ok(Value::Function(
                 *func_idx,
-                Arc::new(Payload::with_annotations(
+                Payload::with_annotations(
                     remapped_captures?,
                     remap_annotations(captures, index_map)?,
-                )),
+                )
+                .shared(),
             ))
         }
         Value::Int(n) => Ok(Value::Int(*n)),
@@ -3991,10 +4005,11 @@ fn remap_heap_indices(value: &Value, index_map: &HashMap<usize, usize>) -> Resul
                 .map(|payload| {
                     // Type ids are program-global across workers (like tuple ids), so a
                     // type-consuming builtin's argument crosses unchanged.
-                    Ok::<_, Error>(Arc::new(
+                    Ok::<_, Error>(
                         Payload::with_annotations(vec![], remap_annotations(payload, index_map)?)
-                            .with_type_argument(payload.type_argument()),
-                    ))
+                            .with_type_argument(payload.type_argument())
+                            .shared(),
+                    )
                 })
                 .transpose()?;
             Ok(Value::Builtin(*builtin_id, payload))
@@ -4118,14 +4133,14 @@ mod heap_stats_tests {
         p.locals.push(bin(&in_locals));
         p.mailbox.push_back(bin(&in_mailbox));
         p.result = Some(Ok(bin(&in_result)));
-        p.select_state = Some(SelectState {
+        p.select_state = Some(Box::new(SelectState {
             frame: 0,
             instruction: 0,
             sources: vec![bin(&in_select)],
             cursors: vec![],
             start_time: None,
             receiving: Some((0, bin(&in_receiving))),
-        });
+        }));
         p.awaiting.insert(1, Some(bin(&in_awaiting)));
         ex.processes.insert(0, p);
 
@@ -4348,14 +4363,14 @@ mod process_adjacency_tests {
         p.locals.push(pid(11));
         p.mailbox.push_back(pid(12));
         p.state = pid(13);
-        p.select_state = Some(SelectState {
+        p.select_state = Some(Box::new(SelectState {
             frame: 0,
             instruction: 0,
             sources: vec![pid(14)],
             cursors: vec![],
             start_time: None,
             receiving: Some((0, pid(15))),
-        });
+        }));
         // A delivered await *result* is an edge; the key (16, the awaited pid) is not — it
         // can linger stale, and a live await is covered by select_state.sources above.
         p.awaiting.insert(16, Some(pid(17)));
@@ -4659,10 +4674,10 @@ mod reactive_notification_tests {
         let mut tracker = Process::new(false);
         tracker.frames.push(Frame::new(0, 0, 0));
         tracker.subscriptions = vec![1];
-        tracker.tracking = Some(TrackingState {
+        tracker.tracking = Some(Box::new(TrackingState {
             sampled: HashSet::new(),
             boundary_len: 1,
-        });
+        }));
         ex.processes.insert(0, tracker);
 
         ex.reconcile_tracking(0);

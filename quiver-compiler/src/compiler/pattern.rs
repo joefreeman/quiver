@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::ast;
 use quiver_core::{
-    bytecode::{Constant, Instruction},
+    bytecode::{Constant, Id, Instruction},
     program::Program,
     types::{Type, TypeLookup},
 };
@@ -105,8 +105,8 @@ type AccessPath = Vec<Access>;
 /// Emit the instruction for one access-path step.
 fn emit_access(codegen: &mut InstructionBuilder, access: Access) {
     codegen.add_instruction(match access {
-        Access::Position(index) => Instruction::GetPositional(index),
-        Access::Named(name) => Instruction::GetNamed(name),
+        Access::Position(index) => Instruction::GetPositional(index as Id),
+        Access::Named(name) => Instruction::GetNamed(name as Id),
     });
 }
 
@@ -313,18 +313,18 @@ pub fn generate_pattern_code(
                 }
                 RuntimeCheck::TypeId(type_id) => {
                     generate_value_access(codegen, &requirement.path);
-                    codegen.add_instruction(Instruction::IsType(*type_id));
+                    codegen.add_instruction(Instruction::IsType(*type_id as Id));
                 }
                 RuntimeCheck::Literal(literal) => {
                     generate_value_access(codegen, &requirement.path);
                     match literal {
                         ast::Literal::Integer(val) => {
                             let idx = program.register_constant(Constant::Integer(val.clone()));
-                            codegen.add_instruction(Instruction::Constant(idx));
+                            codegen.add_instruction(Instruction::Constant(idx as Id));
                         }
                         ast::Literal::Binary(bytes) => {
                             let idx = program.register_constant(Constant::Binary(bytes.clone()));
-                            codegen.add_instruction(Instruction::Constant(idx));
+                            codegen.add_instruction(Instruction::Constant(idx as Id));
                         }
                     }
                     codegen.add_instruction(Instruction::Equal(2));
@@ -341,7 +341,7 @@ pub fn generate_pattern_code(
                         }
                         PinLoad::Parameter => super::scopes::get_function_parameter(scopes)?.1,
                     };
-                    codegen.add_instruction(Instruction::Load(index));
+                    codegen.add_instruction(Instruction::Load(index as Id));
                     for &step in steps {
                         emit_access(codegen, step);
                     }

@@ -40,7 +40,7 @@ use crate::compiler::{
 };
 use crate::resolver::{ModuleId, ModuleResolver, PackageId, PackageResolver, std_module_names};
 use quiver_core::builtins::BuiltinRegistry;
-use quiver_core::bytecode::{Function, IdRemaps, Instruction, Site};
+use quiver_core::bytecode::{Function, Id, IdRemaps, Instruction, Site};
 use quiver_core::effects::Effect;
 use quiver_core::program::{Constant, Program};
 use quiver_core::types::{TupleTypeInfo, Type};
@@ -1109,30 +1109,30 @@ fn collect_payload(
 fn collect_instruction(instruction: &Instruction, closure: &mut Closure, queue: &mut Vec<Item>) {
     match instruction {
         Instruction::Constant(constant_id) => {
-            closure.constants.insert(*constant_id);
+            closure.constants.insert(*constant_id as usize);
         }
-        Instruction::Function(function_id) => add_function(*function_id, closure, queue),
+        Instruction::Function(function_id) => add_function(*function_id as usize, closure, queue),
         Instruction::Builtin(builtin_id, type_argument) => {
-            closure.builtins.insert(*builtin_id);
+            closure.builtins.insert(*builtin_id as usize);
             if let Some(type_id) = type_argument {
-                add_type(*type_id, closure, queue);
+                add_type(*type_id as usize, closure, queue);
             }
         }
-        Instruction::Tuple(tuple_id) => add_tuple(*tuple_id, closure, queue),
-        Instruction::IsType(type_id) => add_type(*type_id, closure, queue),
+        Instruction::Tuple(tuple_id) => add_tuple(*tuple_id as usize, closure, queue),
+        Instruction::IsType(type_id) => add_type(*type_id as usize, closure, queue),
         Instruction::GetNamed(name_id) => {
-            closure.field_names.insert(*name_id);
+            closure.field_names.insert(*name_id as usize);
         }
         Instruction::Annotate(key) => {
-            closure.annotation_keys.insert(*key);
+            closure.annotation_keys.insert(*key as usize);
         }
         Instruction::GetAnnotation(key, check) => {
-            closure.annotation_keys.insert(*key);
+            closure.annotation_keys.insert(*key as usize);
             if let Some(type_id) = check {
-                add_type(*type_id, closure, queue);
+                add_type(*type_id as usize, closure, queue);
             }
         }
-        Instruction::Stamp(site_id) => add_site(*site_id, closure, queue),
+        Instruction::Stamp(site_id) => add_site(*site_id as usize, closure, queue),
         _ => {}
     }
 }
@@ -1207,14 +1207,16 @@ fn verify(artifact: &ModuleArtifact) {
         check("type", function.type_id, artifact.types.len());
         for instruction in &function.instructions {
             match instruction {
-                Instruction::Constant(id) => check("constant", *id, artifact.constants.len()),
+                Instruction::Constant(id) => {
+                    check("constant", *id as usize, artifact.constants.len())
+                }
                 Instruction::Function(id) => {
-                    check("function", *id, function_space);
+                    check("function", *id as usize, function_space);
                     // The linked program's function table must reference strictly
                     // backward (the environment merge rewrites single-pass): an own
                     // function may reference earlier own functions or any import —
                     // imports are always linked first.
-                    let valid = *id < position || *id >= artifact.functions.len();
+                    let valid = *id < position as Id || *id >= (artifact.functions.len()) as Id;
                     assert!(
                         valid,
                         "artifact {:?}: function {} references unregistrable function {}",
@@ -1222,24 +1224,32 @@ fn verify(artifact: &ModuleArtifact) {
                     );
                 }
                 Instruction::Builtin(id, check_ty) => {
-                    check("builtin", *id, artifact.builtins.len());
+                    check("builtin", *id as usize, artifact.builtins.len());
                     if let Some(type_id) = check_ty {
-                        check("type", *type_id, artifact.types.len());
+                        check("type", *type_id as usize, artifact.types.len());
                     }
                 }
-                Instruction::Tuple(id) => check("tuple", *id, artifact.tuples.len()),
-                Instruction::IsType(id) => check("type", *id, artifact.types.len()),
-                Instruction::GetNamed(id) => check("field name", *id, artifact.field_names.len()),
-                Instruction::Annotate(id) => {
-                    check("annotation key", *id, artifact.annotation_keys.len())
+                Instruction::Tuple(id) => check("tuple", *id as usize, artifact.tuples.len()),
+                Instruction::IsType(id) => check("type", *id as usize, artifact.types.len()),
+                Instruction::GetNamed(id) => {
+                    check("field name", *id as usize, artifact.field_names.len())
                 }
+                Instruction::Annotate(id) => check(
+                    "annotation key",
+                    *id as usize,
+                    artifact.annotation_keys.len(),
+                ),
                 Instruction::GetAnnotation(id, check_ty) => {
-                    check("annotation key", *id, artifact.annotation_keys.len());
+                    check(
+                        "annotation key",
+                        *id as usize,
+                        artifact.annotation_keys.len(),
+                    );
                     if let Some(type_id) = check_ty {
-                        check("type", *type_id, artifact.types.len());
+                        check("type", *type_id as usize, artifact.types.len());
                     }
                 }
-                Instruction::Stamp(id) => check("site", *id, artifact.sites.len()),
+                Instruction::Stamp(id) => check("site", *id as usize, artifact.sites.len()),
                 _ => {}
             }
         }

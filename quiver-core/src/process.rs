@@ -266,7 +266,10 @@ pub struct Process {
     pub mailbox: VecDeque<Value>,
     pub persistent: bool,
     pub result: Option<Result<Value, crate::error::Error>>,
-    pub select_state: Option<SelectState>,
+    /// Boxed: `SelectState` is 112 bytes and almost every process is `None` here, so inline
+    /// it would be the single largest field in `Process` and paid by every process that never
+    /// selects.
+    pub select_state: Option<Box<SelectState>>,
     pub awaiting: HashMap<ProcessId, Option<Value>>,
     /// Who to notify when this process terminates (see [`Watcher`]). Taken (emptied)
     /// exactly once, when the process completes.
@@ -286,7 +289,9 @@ pub struct Process {
     /// state. Empty ⇒ no allocation. Reconciled by each `%proc.track` render.
     pub subscriptions: Vec<ProcessId>,
     /// Set while a `%proc.track` render runs (see [`TrackingState`]); `None` otherwise.
-    pub tracking: Option<TrackingState>,
+    /// Boxed, for the same reason as `select_state`: 56 bytes inline, `None` in every
+    /// process that is not mid-`%proc.track` render.
+    pub tracking: Option<Box<TrackingState>>,
     /// Stream events that arrived while no select was waiting on their resource —
     /// one slot per resource, since at most one read is armed per stream. Consumed
     /// (in preference to arming) by the next select naming the resource, or by a

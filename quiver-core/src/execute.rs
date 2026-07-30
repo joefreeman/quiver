@@ -9,6 +9,7 @@ use crate::executor::Executor;
 use crate::executor::ProgramUpdate;
 use crate::process::Action;
 use crate::value::Value;
+use std::sync::Arc;
 
 /// Execute bytecode synchronously, returning the result value and executor.
 ///
@@ -75,11 +76,11 @@ pub fn execute_bytecode_sync_with<E: Effect>(
         types: bytecode.types,
         builtins: bytecode.builtins,
         resources: bytecode.resources,
-        type_compatibility,
-        function_param_compatibility,
-        builtin_param_compatibility,
-        field_offsets,
-        canonical_tuples,
+        type_compatibility: Arc::new(type_compatibility),
+        function_param_compatibility: Arc::new(function_param_compatibility),
+        builtin_param_compatibility: Arc::new(builtin_param_compatibility),
+        field_offsets: Arc::new(field_offsets),
+        canonical_tuples: Arc::new(canonical_tuples),
         debug: bytecode.debug,
         // The sync driver rejects spawn/send/await, so no runtime-delivered values
         // arrive here: a select timeout falls back to a bare nil, and stream arms

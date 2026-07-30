@@ -75,7 +75,9 @@ pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<Con
         for instruction in &function.instructions {
             match instruction {
                 Instruction::IsType(type_id) | Instruction::GetAnnotation(_, Some(type_id)) => {
-                    pattern_type_ids.insert(*type_id);
+                    // Widen here, at the edge of the instruction stream; everything
+                    // downstream indexes tables and stays `usize`.
+                    pattern_type_ids.insert(*type_id as usize);
                 }
                 _ => {}
             }
@@ -330,11 +332,12 @@ impl CompatibilityTables {
             for instruction in &function.instructions {
                 if let Instruction::IsType(type_id) | Instruction::GetAnnotation(_, Some(type_id)) =
                     instruction
-                    && *type_id < input.types.len()
-                    && self.pattern_ids.insert(*type_id)
+                    && (*type_id as usize) < input.types.len()
+                    && self.pattern_ids.insert(*type_id as usize)
                 {
-                    self.type_compatibility[*type_id] =
-                        compute_compatible_concrete_types(*type_id, input, &lookup, &index);
+                    let type_id = *type_id as usize;
+                    self.type_compatibility[type_id] =
+                        compute_compatible_concrete_types(type_id, input, &lookup, &index);
                 }
             }
         }

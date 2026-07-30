@@ -236,10 +236,10 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
     /// non-nested, so this refuses both restricted contexts.
     pub fn begin_tracking(&mut self) -> Result<(), Error> {
         self.allow(Operation::Track)?;
-        self.process.tracking = Some(TrackingState {
+        self.process.tracking = Some(Box::new(TrackingState {
             sampled: HashSet::new(),
             boundary_len: 0,
-        });
+        }));
         Ok(())
     }
 }

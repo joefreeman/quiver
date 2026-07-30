@@ -18,6 +18,7 @@ use quiver_core::types::{NIL, OK, Type, TypeLookup};
 use quiver_core::value::{ResourceId, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 type WorkerRequestMap<T> = HashMap<u64, Option<HashMap<ProcessId, T>>>;
 
@@ -1111,12 +1112,19 @@ impl<E: Effect> Environment<E> {
             if std::env::var("QUIVER_VERIFY_COMPAT").is_ok() {
                 self.compatibility.assert_matches_full(&input);
             }
-            let type_compatibility = self.compatibility.type_compatibility.clone();
-            let function_param_compatibility = self.compatibility.function_params.clone();
-            let builtin_param_compatibility = self.compatibility.builtin_params.clone();
-            let canonical_tuples = compute_canonical_tuples(self.program.get_tuples());
-            let field_offsets =
-                compute_field_offsets(self.program.get_field_names(), self.program.get_tuples());
+            // Built once and wrapped once. `update_cmd.clone()` below runs per worker, so
+            // without the `Arc` each of these tables was deep-copied N times into N identical
+            // private copies; now the clone is a refcount bump and the natives share one copy.
+            // (The web transport serializes each command anyway, so it is unaffected either
+            // way — see `ProgramUpdate::type_compatibility`.)
+            let type_compatibility = Arc::new(self.compatibility.type_compatibility.clone());
+            let function_param_compatibility = Arc::new(self.compatibility.function_params.clone());
+            let builtin_param_compatibility = Arc::new(self.compatibility.builtin_params.clone());
+            let canonical_tuples = Arc::new(compute_canonical_tuples(self.program.get_tuples()));
+            let field_offsets = Arc::new(compute_field_offsets(
+                self.program.get_field_names(),
+                self.program.get_tuples(),
+            ));
 
             let update = ProgramUpdate {
                 constants: new_constants,

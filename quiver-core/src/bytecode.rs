@@ -45,6 +45,13 @@ impl IdRemaps {
     fn map(table: &std::collections::HashMap<usize, usize>, id: usize) -> usize {
         *table.get(&id).unwrap_or(&id)
     }
+
+    /// The [`Id`]-typed twin of [`map`](Self::map), for instruction operands. The remap
+    /// tables are keyed by `usize` because they also remap table entries, which are indexed
+    /// that way; only the instruction operands are narrowed.
+    fn map_id(table: &std::collections::HashMap<usize, usize>, id: Id) -> Id {
+        Self::map(table, id as usize) as Id
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -65,34 +72,36 @@ impl Function {
             .into_iter()
             .map(|instruction| match instruction {
                 Instruction::Constant(idx) => {
-                    Instruction::Constant(IdRemaps::map(&remaps.constants, idx))
+                    Instruction::Constant(IdRemaps::map_id(&remaps.constants, idx))
                 }
                 Instruction::Function(idx) => {
-                    Instruction::Function(IdRemaps::map(&remaps.functions, idx))
+                    Instruction::Function(IdRemaps::map_id(&remaps.functions, idx))
                 }
                 Instruction::Builtin(idx, type_argument) => Instruction::Builtin(
-                    IdRemaps::map(&remaps.builtins, idx),
+                    IdRemaps::map_id(&remaps.builtins, idx),
                     // A type-consuming builtin's type argument is a type reference,
                     // like GetAnnotation's check.
-                    type_argument.map(|type_id| IdRemaps::map(&remaps.types, type_id)),
+                    type_argument.map(|type_id| IdRemaps::map_id(&remaps.types, type_id)),
                 ),
                 Instruction::Tuple(tuple_id) => {
-                    Instruction::Tuple(IdRemaps::map(&remaps.tuples, tuple_id))
+                    Instruction::Tuple(IdRemaps::map_id(&remaps.tuples, tuple_id))
                 }
                 Instruction::IsType(type_id) => {
-                    Instruction::IsType(IdRemaps::map(&remaps.types, type_id))
+                    Instruction::IsType(IdRemaps::map_id(&remaps.types, type_id))
                 }
                 Instruction::GetNamed(name_id) => {
-                    Instruction::GetNamed(IdRemaps::map(&remaps.field_names, name_id))
+                    Instruction::GetNamed(IdRemaps::map_id(&remaps.field_names, name_id))
                 }
                 Instruction::Annotate(key) => {
-                    Instruction::Annotate(IdRemaps::map(&remaps.annotation_keys, key))
+                    Instruction::Annotate(IdRemaps::map_id(&remaps.annotation_keys, key))
                 }
                 Instruction::GetAnnotation(key, check) => Instruction::GetAnnotation(
-                    IdRemaps::map(&remaps.annotation_keys, key),
-                    check.map(|type_id| IdRemaps::map(&remaps.types, type_id)),
+                    IdRemaps::map_id(&remaps.annotation_keys, key),
+                    check.map(|type_id| IdRemaps::map_id(&remaps.types, type_id)),
                 ),
-                Instruction::Stamp(site) => Instruction::Stamp(IdRemaps::map(&remaps.sites, site)),
+                Instruction::Stamp(site) => {
+                    Instruction::Stamp(IdRemaps::map_id(&remaps.sites, site))
+                }
                 other => other,
             })
             .collect();
@@ -274,53 +283,64 @@ impl TypeLookup for Bytecode {
     }
 }
 
+/// An instruction operand that indexes a table (constants, functions, types, tuples,
+/// builtins, field names, annotation keys, sites) or names a stack/frame slot. `u32` rather
+/// than `usize`: instructions are the largest static table a program carries — a live-view
+/// app is ~60k of them, replicated per worker — and the two-word operands were what forced
+/// `Instruction` to 32 bytes. No program comes close to 4 billion of anything, and a denser
+/// instruction also means more of them per cache line in the dispatch loop.
+pub type Id = u32;
+
+/// A relative jump, in instructions. `i32` for the same reason as [`Id`].
+pub type Offset = i32;
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Instruction {
-    Constant(usize),
+    Constant(Id),
     Pop,
     Duplicate,
-    Pick(usize),
-    Rotate(usize),
-    Reset(usize),
-    Load(usize),
+    Pick(Id),
+    Rotate(Id),
+    Reset(Id),
+    Load(Id),
     Store,
-    Tuple(usize),
+    Tuple(Id),
     /// Pop a tuple; push the field at the given position. Emitted where the static type
     /// pins the field's position (a concrete tuple, or a union agreeing on one).
-    GetPositional(usize),
+    GetPositional(Id),
     /// Pop a tuple; push the field whose *name* is the given field-name id, resolved
     /// against the tuple's own type at runtime via the precomputed offset table. Emitted
     /// where the static type doesn't pin a position — a partial type's field, or a union
     /// whose members carry the field at different positions.
-    GetNamed(usize),
-    IsType(usize),
-    Jump(isize),
-    JumpIf(isize),
+    GetNamed(Id),
+    IsType(Id),
+    Jump(Offset),
+    JumpIf(Offset),
     Call,
     TailCall(bool),
-    Function(usize),
+    Function(Id),
     /// Push a builtin value by id. The optional type id is a type-consuming builtin's
     /// explicit type argument (`__type_name__<'t>`), resolved to a concrete type at
     /// compile time and carried on the pushed value for the implementation to read.
-    Builtin(usize, Option<usize>),
-    Equal(usize),
+    Builtin(Id, Option<Id>),
+    Equal(Id),
     Not,
     /// Pop an annotation value, then a tuple/function carrier; push the carrier with the
     /// annotation attached under the given key id (copy-on-annotate).
-    Annotate(usize),
+    Annotate(Id),
     /// Pop a carrier; push its annotation under the given key id, or nil. The optional
     /// type id is the checked form's expected shape (`x:('t)key`): a carried entry
     /// incompatible with it also answers nil, via the same table `IsType` consults.
-    GetAnnotation(usize, Option<usize>),
+    GetAnnotation(Id, Option<Id>),
     /// Debug builds only: if the top of the stack is a nil result not yet carrying an
     /// `origin` annotation, stamp it with this site's provenance (see `SiteTable`).
     /// Fresh-only, so a propagating failure keeps its original site. No-op otherwise.
-    Stamp(usize),
+    Stamp(Id),
     Spawn,
     Send,
     Self_,
     Select,
-    Process(usize, usize), // (process_id, function_index)
+    Process(Id, Id), // (process_id, function_index)
     /// Sample a process's current state (`?p`): pop a process
     /// value, push its state. No runtime test — the state type is statically known
     /// (inferred at spawns; enforced by strict state subtyping at declared boundaries).

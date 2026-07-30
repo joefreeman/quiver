@@ -85,7 +85,7 @@ impl BinaryData {
 
         // Empty slice
         if length == 0 {
-            return Some(BinaryData::new(Vec::new()));
+            return Some(BinaryData::Zeroed(0));
         }
 
         // Full slice - return parent
@@ -104,7 +104,7 @@ impl BinaryData {
     /// Normalises the degenerate cases so callers needn't special-case them.
     pub fn tiled(unit: Rc<BinaryData>, count: usize) -> Self {
         if count == 0 || unit.is_empty() {
-            return BinaryData::new(Vec::new());
+            return BinaryData::Zeroed(0);
         }
         if count == 1 {
             return (*unit).clone();

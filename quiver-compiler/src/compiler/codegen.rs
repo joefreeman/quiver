@@ -1,4 +1,4 @@
-use quiver_core::bytecode::Instruction;
+use quiver_core::bytecode::{Id, Instruction, Offset};
 
 /// Helper struct for managing instruction generation and jumps
 pub struct InstructionBuilder {
@@ -44,7 +44,7 @@ impl InstructionBuilder {
 
     /// Patches a jump instruction to target a specific address
     pub fn patch_jump_to_addr(&mut self, jump_addr: usize, target_addr: usize) {
-        let offset = (target_addr as isize) - (jump_addr as isize) - 1;
+        let offset = (target_addr as Offset) - (jump_addr as Offset) - 1;
         self.instructions[jump_addr] = match &self.instructions[jump_addr] {
             Instruction::Jump(_) => Instruction::Jump(offset),
             Instruction::JumpIf(_) => Instruction::JumpIf(offset),
@@ -55,14 +55,14 @@ impl InstructionBuilder {
     /// Emits an unconditional jump that immediately targets the given address
     pub fn emit_jump_to_addr(&mut self, addr: usize) {
         let current_addr = self.instructions.len();
-        let offset = (addr as isize) - (current_addr as isize) - 1;
+        let offset = (addr as Offset) - (current_addr as Offset) - 1;
         self.add_instruction(Instruction::Jump(offset));
     }
 
     /// Emits a conditional jump that immediately targets the given address
     pub fn emit_jump_if_to_addr(&mut self, addr: usize) {
         let current_addr = self.instructions.len();
-        let offset = (addr as isize) - (current_addr as isize) - 1;
+        let offset = (addr as Offset) - (current_addr as Offset) - 1;
         self.add_instruction(Instruction::JumpIf(offset));
     }
 
@@ -78,7 +78,7 @@ impl InstructionBuilder {
 
     /// Emits Rotate followed by Pop - common pattern for cleaning up stack values
     pub fn emit_rotate_pop(&mut self, rotate_count: usize) {
-        self.add_instruction(Instruction::Rotate(rotate_count));
+        self.add_instruction(Instruction::Rotate(rotate_count as Id));
         self.add_instruction(Instruction::Pop);
     }
 
@@ -86,8 +86,8 @@ impl InstructionBuilder {
     /// Returns the jump address for patching later
     /// Used when branching based on type matching
     pub fn emit_type_check_branch(&mut self, depth: usize, type_id: usize) -> usize {
-        self.add_instruction(Instruction::Pick(depth));
-        self.add_instruction(Instruction::IsType(type_id));
+        self.add_instruction(Instruction::Pick(depth as Id));
+        self.add_instruction(Instruction::IsType(type_id as Id));
         self.add_instruction(Instruction::Not);
         self.emit_jump_if_placeholder()
     }

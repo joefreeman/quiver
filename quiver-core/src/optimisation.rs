@@ -1,6 +1,14 @@
-use crate::bytecode::{Bytecode, Function, Instruction, Site, SiteTable};
+use crate::bytecode::{Bytecode, Function, Id, Instruction, Site, SiteTable};
 use crate::types::{BuiltinInfo, TupleTypeInfo, Type};
 use std::collections::{HashMap, HashSet, VecDeque};
+
+/// Look up an instruction operand in a `usize`-keyed remap table. The tables are keyed by
+/// `usize` because they also renumber the tables themselves; only the operands are [`Id`].
+/// Panics on a missing entry, like the direct indexing it replaces — a stripped id reaching
+/// here is a bug in the reachability walk, not a recoverable condition.
+fn remap(table: &std::collections::HashMap<usize, usize>, id: Id) -> Id {
+    table[&(id as usize)] as Id
+}
 
 /// Tree shake bytecode to remove unreachable code.
 /// Returns an optimized Bytecode with only reachable functions, constants, builtins, tuples, and types.
@@ -239,12 +247,13 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
         for instruction in &function.instructions {
             match instruction {
                 Instruction::Function(id) => {
-                    queue.push_back(*id);
+                    queue.push_back(*id as usize);
                 }
                 Instruction::Constant(id) => {
-                    used_constants.insert(*id);
+                    used_constants.insert(*id as usize);
                 }
                 Instruction::Tuple(id) => {
+                    let id = &(*id as usize);
                     collect_tuple_refs(
                         *id,
                         &bytecode.types,
@@ -271,7 +280,7 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                 }
                 Instruction::IsType(id) | Instruction::GetAnnotation(_, Some(id)) => {
                     collect_type_refs(
-                        *id,
+                        *id as usize,
                         &bytecode.types,
                         &bytecode.tuples,
                         &mut used_types,
@@ -280,12 +289,12 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                     );
                 }
                 Instruction::Builtin(id, type_argument) => {
-                    used_builtins.insert(*id);
+                    used_builtins.insert(*id as usize);
                     // A type-consuming builtin's explicit type argument is a type
                     // reference like IsType's: keep its closure alive through stripping.
                     if let Some(type_id) = type_argument {
                         collect_type_refs(
-                            *type_id,
+                            *type_id as usize,
                             &bytecode.types,
                             &bytecode.tuples,
                             &mut used_types,
@@ -295,7 +304,7 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                     }
                 }
                 Instruction::Process(_, func_id) => {
-                    queue.push_back(*func_id);
+                    queue.push_back(*func_id as usize);
                 }
                 _ => {}
             }
@@ -440,23 +449,19 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                 .instructions
                 .iter()
                 .map(|instr| match instr {
-                    Instruction::Function(id) => {
-                        Instruction::Function(*function_remap.get(id).unwrap())
-                    }
-                    Instruction::Constant(id) => {
-                        Instruction::Constant(*constant_remap.get(id).unwrap())
-                    }
-                    Instruction::Tuple(id) => Instruction::Tuple(*tuple_remap.get(id).unwrap()),
-                    Instruction::IsType(id) => Instruction::IsType(*type_remap.get(id).unwrap()),
+                    Instruction::Function(id) => Instruction::Function(remap(&function_remap, *id)),
+                    Instruction::Constant(id) => Instruction::Constant(remap(&constant_remap, *id)),
+                    Instruction::Tuple(id) => Instruction::Tuple(remap(&tuple_remap, *id)),
+                    Instruction::IsType(id) => Instruction::IsType(remap(&type_remap, *id)),
                     Instruction::GetAnnotation(key, Some(id)) => {
-                        Instruction::GetAnnotation(*key, Some(*type_remap.get(id).unwrap()))
+                        Instruction::GetAnnotation(*key, Some(remap(&type_remap, *id)))
                     }
                     Instruction::Builtin(id, type_argument) => Instruction::Builtin(
-                        *builtin_remap.get(id).unwrap(),
-                        type_argument.map(|t| *type_remap.get(&t).unwrap()),
+                        remap(&builtin_remap, *id),
+                        type_argument.map(|t| remap(&type_remap, t)),
                     ),
                     Instruction::Process(pid, fid) => {
-                        Instruction::Process(*pid, *function_remap.get(fid).unwrap())
+                        Instruction::Process(*pid, remap(&function_remap, *fid))
                     }
                     other => *other,
                 })

@@ -148,7 +148,145 @@ impl Payload {
             .iter()
             .chain(self.annotations().iter().map(|(_, value)| value))
     }
+
+    /// This payload as a shared handle — the single funnel every `Arc<Payload>` is built
+    /// through. A payload carrying nothing yields [`EMPTY_PAYLOAD`] instead of a fresh
+    /// allocation, so a field-less tuple costs a refcount bump.
+    ///
+    /// `#[inline]` because this sits in front of every tuple construction and takes `self`
+    /// by value: out of line, the 56-byte `Payload` move would be a real memcpy on the
+    /// hottest path in the runtime. (Measured no difference either way on a noisy machine —
+    /// it is the safe default for a wrapper this small, not a tuned result.)
+    #[inline]
+    pub fn shared(self) -> Arc<Payload> {
+        if self.carries_nothing() {
+            return EMPTY_PAYLOAD.clone();
+        }
+        Arc::new(self)
+    }
+
+    /// Whether this payload has no content of its own, and so is interchangeable with every
+    /// other such payload. Elements and annotations are observable; the type argument is
+    /// operational (equality compares it), so a payload carrying one is never shared.
+    #[inline]
+    fn carries_nothing(&self) -> bool {
+        self.elements.is_empty() && self.annotations.is_none() && self.type_argument.is_none()
+    }
+
+    /// The shared payload directly, for callers that know they have nothing to carry — so
+    /// they skip building a `Payload` only for [`shared`](Self::shared) to discard it.
+    /// Worth having: `nil`/`ok` run on every match verdict.
+    #[inline]
+    pub fn empty() -> Arc<Payload> {
+        EMPTY_PAYLOAD.clone()
+    }
+
+    /// Every value in this payload, mutably — the `&mut` twin of [`all_values`](Self::all_values).
+    /// `elements` and `annotations` are distinct fields, so borrowing both at once is disjoint.
+    fn all_values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
+        self.elements.iter_mut().chain(
+            self.annotations
+                .as_deref_mut()
+                .into_iter()
+                .flat_map(|entries| entries.iter_mut().map(|(_, value)| value)),
+        )
+    }
+
+    /// Whether any value here owns a payload of its own — i.e. whether dropping this one
+    /// would recurse. The gate on [`Drop`]'s slow path.
+    fn owns_payloads(&self) -> bool {
+        self.all_values().any(Value::owns_payload)
+    }
 }
+
+/// Move every payload this one owns onto `stack`, leaving trivially-droppable values behind.
+/// After this, `payload`'s own drop terminates at the fast path.
+fn take_payloads(payload: &mut Payload, stack: &mut Vec<Arc<Payload>>) {
+    for value in payload.all_values_mut() {
+        if value.owns_payload() {
+            // `Value::Int` owns nothing, so the vacated slot costs no refcount traffic —
+            // cheaper than leaving a nil (which would clone the interned empty payload).
+            match std::mem::replace(value, Value::Int(0)) {
+                Value::Tuple(_, owned)
+                | Value::Function(_, owned)
+                | Value::Builtin(_, Some(owned)) => stack.push(owned),
+                _ => unreachable!("owns_payload gated the replacement"),
+            }
+        }
+    }
+}
+
+/// Tear `payload`'s owned subtree down using `stack` as the work-list, descending only into
+/// payloads we uniquely own — a shared one must stay intact, and its handle simply decrements.
+fn drain_payloads(payload: &mut Payload, stack: &mut Vec<Arc<Payload>>) {
+    take_payloads(payload, stack);
+    while let Some(owned) = stack.pop() {
+        // Sole owner: vacate its children before it drops, so its own drop terminates at the
+        // fast path below rather than recursing.
+        if let Ok(mut owned) = Arc::try_unwrap(owned) {
+            take_payloads(&mut owned, stack);
+        }
+    }
+}
+
+thread_local! {
+    /// Work-list for [`Payload`]'s drop, reused across drops. A fresh `Vec` per drop measured
+    /// as ~9 extra allocations per unit of work on cons-heavy code — enough to undo what
+    /// `handle_tuple`'s `with_capacity` had just saved. Depth-first popping keeps this shallow
+    /// (a cons chain never exceeds one entry), so retaining it costs almost nothing.
+    static DROP_STACK: std::cell::RefCell<Vec<Arc<Payload>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Capacity retained between drops. A pathologically wide value could grow the work-list far
+/// beyond what any later drop needs; releasing the excess keeps the per-thread cost bounded.
+const DROP_STACK_RETAIN: usize = 1024;
+
+impl Drop for Payload {
+    /// Drop iteratively. The default (recursive) glue walks one stack frame per level of
+    /// nesting, and `'list<'t> = Nil | Cons['t, ^]` — the idiomatic list — is exactly a deep
+    /// nest, so a long enough list overflows the stack on teardown (measured at 66 bytes of
+    /// stack per cons cell, i.e. ~16k cells per MiB). That is why the native worker reserved a
+    /// 256 MiB stack, and why peak RSS on long lists exceeded the data by the stack it
+    /// committed. Mirrors [`BinaryData`](crate::binary::BinaryData)'s drop, for the same
+    /// reason.
+    fn drop(&mut self) {
+        // Fast path: nothing here owns a payload, so the field drops that follow terminate
+        // immediately. This covers every leaf, and — because `drain_payloads` vacates a
+        // payload before it drops — every payload the walk descends into. That is also what
+        // keeps the borrow below non-reentrant.
+        if !self.owns_payloads() {
+            return;
+        }
+        let reused = DROP_STACK.with(|cell| match cell.try_borrow_mut() {
+            Ok(mut stack) => {
+                drain_payloads(self, &mut stack);
+                if stack.capacity() > DROP_STACK_RETAIN {
+                    stack.shrink_to(DROP_STACK_RETAIN);
+                }
+                true
+            }
+            // Re-entrant. The fast path above should make this unreachable, but correctness
+            // must not rest on that — fall back to a private work-list.
+            Err(_) => false,
+        });
+        if !reused {
+            drain_payloads(self, &mut Vec::new());
+        }
+    }
+}
+
+/// The one payload behind every value that carries nothing. A tuple's identity is its
+/// `tuple_id`, which lives in the `Value` rather than the payload, so `[]`, `Ok`, `Nil`,
+/// `Done` and every other field-less tuple can share a single immutable payload. That is the
+/// majority of tuple construction — and, since `IsType` and `Equal` answer with `Ok`/`[]`,
+/// every pattern test allocated one before this existed.
+///
+/// Sharing is sound because payloads are immutable: annotations attach copy-on-write (see
+/// [`Value::annotated`]), equality is structural, and nothing anywhere takes `Arc::get_mut`
+/// or compares payloads by pointer.
+static EMPTY_PAYLOAD: std::sync::LazyLock<Arc<Payload>> =
+    std::sync::LazyLock::new(|| Arc::new(Payload::new(Vec::new())));
 
 impl std::ops::Deref for Payload {
     type Target = [Value];
@@ -336,17 +474,17 @@ impl Value {
             Value::Binary(Binary::Heap(_)) => self.clone(),
             Value::Tuple(tuple_id, payload) => Value::Tuple(
                 *remaps.tuples.get(tuple_id).unwrap_or(tuple_id),
-                Arc::new(remap_payload(payload, remaps)),
+                remap_payload(payload, remaps).shared(),
             ),
             Value::Function(function_id, payload) => Value::Function(
                 *remaps.functions.get(function_id).unwrap_or(function_id),
-                Arc::new(remap_payload(payload, remaps)),
+                remap_payload(payload, remaps).shared(),
             ),
             Value::Builtin(builtin_id, payload) => Value::Builtin(
                 *remaps.builtins.get(builtin_id).unwrap_or(builtin_id),
                 payload
                     .as_ref()
-                    .map(|payload| Arc::new(remap_payload(payload, remaps))),
+                    .map(|payload| remap_payload(payload, remaps).shared()),
             ),
             Value::Process(..) | Value::Resource(..) => self.clone(),
         }
@@ -354,22 +492,22 @@ impl Value {
 
     /// Create a NIL tuple value
     pub fn nil() -> Self {
-        Value::Tuple(NIL, Arc::new(Payload::new(vec![])))
+        Value::Tuple(NIL, Payload::empty())
     }
 
     /// Create an OK tuple value
     pub fn ok() -> Self {
-        Value::Tuple(OK, Arc::new(Payload::new(vec![])))
+        Value::Tuple(OK, Payload::empty())
     }
 
     /// Construct a tuple value from owned fields.
     pub fn tuple(type_id: usize, fields: Vec<Value>) -> Self {
-        Value::Tuple(type_id, Arc::new(Payload::new(fields)))
+        Value::Tuple(type_id, Payload::new(fields).shared())
     }
 
     /// Construct a function value from owned captures.
     pub fn function(function_index: usize, captures: Vec<Value>) -> Self {
-        Value::Function(function_index, Arc::new(Payload::new(captures)))
+        Value::Function(function_index, Payload::new(captures).shared())
     }
 
     /// Construct a bare (un-annotated) builtin value.
@@ -384,9 +522,11 @@ impl Value {
             None => Value::Builtin(builtin_id, None),
             Some(_) => Value::Builtin(
                 builtin_id,
-                Some(Arc::new(
-                    Payload::new(vec![]).with_type_argument(type_argument),
-                )),
+                Some(
+                    Payload::new(vec![])
+                        .with_type_argument(type_argument)
+                        .shared(),
+                ),
             ),
         }
     }
@@ -397,6 +537,16 @@ impl Value {
             Value::Builtin(_, Some(payload)) => payload.type_argument(),
             _ => None,
         }
+    }
+
+    /// Whether this value owns an `Arc<Payload>` — i.e. whether dropping it can recurse.
+    /// Used by [`Payload`]'s iterative drop to decide what to move onto its work-list.
+    #[inline]
+    fn owns_payload(&self) -> bool {
+        matches!(
+            self,
+            Value::Tuple(..) | Value::Function(..) | Value::Builtin(_, Some(_))
+        )
     }
 
     /// True if this value may (transitively) reference an executor-heap binary and thus
@@ -431,9 +581,9 @@ impl Value {
         let elements = payload.map(|p| p.elements.clone()).unwrap_or_default();
         // Re-attach preserves a builtin's type argument — it is operational, not metadata.
         let type_argument = payload.and_then(Payload::type_argument);
-        let payload = Arc::new(
-            Payload::with_annotations(elements, annotations).with_type_argument(type_argument),
-        );
+        let payload = Payload::with_annotations(elements, annotations)
+            .with_type_argument(type_argument)
+            .shared();
         Some(match self {
             Value::Tuple(id, _) => Value::Tuple(*id, payload),
             Value::Function(id, _) => Value::Function(*id, payload),
