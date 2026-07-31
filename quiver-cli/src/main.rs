@@ -12,9 +12,9 @@ use std::fs;
 use std::io::{self, IsTerminal, Read};
 
 mod diagnostics;
-mod native_transport;
 mod repl_cli;
-use native_transport::spawn_worker;
+use quiver_cli::native_transport;
+use quiver_cli::spawn_worker;
 use repl_cli::ReplCli;
 
 /// Build complete builtin registry including core builtins and network builtins
@@ -495,18 +495,17 @@ fn execute_bytecode_with_environment(
 
     let builtins = build_builtin_registry();
 
+    // One wake signal for every worker: the environment loop blocks on it instead of polling.
+    let (waker, wake) = native_transport::wake_channel();
+
     let mut workers: Vec<Box<dyn WorkerHandle<quiver_io::NativeEffect>>> = Vec::new();
     for i in 0..num_workers {
         workers.push(Box::new(spawn_worker(
-            || {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64
-            },
+            native_transport::SystemClock,
             builtins.clone(),
             profile,
             i as u16,
+            waker.clone(),
         )));
     }
 
@@ -533,7 +532,8 @@ fn execute_bytecode_with_environment(
         .request_result(process_id, None)
         .map_err(|e| format!("Failed to request result: {:?}", e))?;
 
-    // Event loop
+    // Event loop. Every message the environment routes crosses this loop, so how it idles is on
+    // the latency of every spawn, await and select wake — hence the wake signal.
     loop {
         let did_work = environment.step().unwrap_or(false);
 
@@ -572,7 +572,7 @@ fn execute_bytecode_with_environment(
             }
             Ok(None) => {
                 if !did_work {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    wake.wait(environment.io_in_flight());
                 }
             }
             Err(e) => return Err(format!("Environment error: {:?}", e).into()),

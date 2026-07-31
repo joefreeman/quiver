@@ -483,6 +483,15 @@ impl<E: Effect> Environment<E> {
         self.runtime_declarations = declarations;
     }
 
+    /// Whether the effect backend has an operation outstanding, so a blocking driver must keep
+    /// coming back to drain completions rather than sleeping until a worker wakes it. `false`
+    /// with no backend attached — there is nothing to complete.
+    pub fn io_in_flight(&self) -> bool {
+        self.effect_backend
+            .as_ref()
+            .is_some_and(|backend| backend.has_operations_in_flight())
+    }
+
     pub fn set_effect_backend(&mut self, backend: Box<dyn EffectBackend<E = E>>) {
         self.effect_backend = Some(backend);
         // Hand the backend the type ids it needs for any program already loaded (the backend may

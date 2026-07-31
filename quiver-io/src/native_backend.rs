@@ -271,6 +271,14 @@ impl EffectBackend for NativeEffectBackend {
         }
     }
 
+    /// Outstanding submissions: effect operations a process is parked on, plus select-armed
+    /// stream reads. Both complete through the io_uring completion queue, which only
+    /// `process_completions`/`take_stream_events` drain — so the driver must keep looking while
+    /// either is non-empty.
+    fn has_operations_in_flight(&self) -> bool {
+        !self.pending.is_empty() || !self.armed.is_empty()
+    }
+
     fn process_completions(&mut self) -> Vec<(ProcessId, EffectResult)> {
         let mut completions = Vec::new();
 

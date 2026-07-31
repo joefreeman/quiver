@@ -101,15 +101,16 @@ fn run_session(
         module(&mut builtins);
     }
 
+    let (waker, _wake) = quiver::native_transport::wake_channel();
     let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
     for i in 0..2 {
         let builtins_clone = builtins.clone();
-        let time = virtual_time_ms.clone();
         workers.push(Box::new(spawn_worker(
-            move || time.load(Ordering::Relaxed),
+            quiver::native_transport::SteppedClock::new(virtual_time_ms.clone()),
             builtins_clone,
             false,
             i as u16,
+            waker.clone(),
         )));
     }
 

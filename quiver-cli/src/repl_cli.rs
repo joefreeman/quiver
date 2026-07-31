@@ -58,18 +58,16 @@ impl ReplCli {
         // Build registry from core modules and network builtins
         let builtins = crate::build_builtin_registry();
 
+        let (waker, wake) = quiver_cli::native_transport::wake_channel();
+
         let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
         for i in 0..num_workers {
             workers.push(Box::new(spawn_worker(
-                || {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .expect("System time before Unix epoch")
-                        .as_millis() as u64
-                },
+                quiver_cli::native_transport::SystemClock,
                 builtins.clone(),
                 false, // Don't enable profiling in REPL
                 i as u16,
+                waker.clone(),
             )));
         }
         let effect_backend = crate::create_effect_backend();
@@ -96,13 +94,18 @@ impl ReplCli {
                     false
                 };
 
-                // Adaptive sleep: short when active, longer when idle
-                let sleep_duration = if did_work {
-                    std::time::Duration::from_micros(100) // 100μs when busy
-                } else {
-                    std::time::Duration::from_millis(10) // 10ms when idle
-                };
-                thread::sleep(sleep_duration);
+                // Block until a worker signals (or a completion may be due) rather than
+                // sleeping a fixed interval, which used to sit on the latency of every routed
+                // message. The shutdown flag is checked on each wake, so a signal is all it
+                // takes to leave; `io_in_flight` bounds the wait so a completion is still
+                // noticed.
+                if !did_work {
+                    let io_in_flight = env_clone
+                        .lock()
+                        .map(|env| env.io_in_flight())
+                        .unwrap_or(true);
+                    wake.wait(io_in_flight);
+                }
             }
         }));
 

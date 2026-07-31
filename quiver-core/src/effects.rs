@@ -106,6 +106,19 @@ pub trait EffectBackend: Send {
     /// were previously submitted and have now completed.
     fn process_completions(&mut self) -> Vec<(ProcessId, EffectResult)>;
 
+    /// Whether any submitted operation is still outstanding.
+    ///
+    /// A driver that *blocks* waiting for work needs this: a completion arrives from the host
+    /// (the kernel, the browser), not through any channel the driver can wait on, so while this
+    /// is true it must keep coming back to look. With nothing outstanding it can block
+    /// indefinitely and be woken by a worker instead.
+    ///
+    /// Defaults to `true` — the conservative answer, which costs a poll but can never starve a
+    /// completion. Override it to let an idle driver actually sleep.
+    fn has_operations_in_flight(&self) -> bool {
+        true
+    }
+
     /// Close a resource without going through the effect system.
     ///
     /// This is used for automatic cleanup when processes terminate.

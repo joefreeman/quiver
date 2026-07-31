@@ -163,6 +163,20 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         self.executor.next_timeout_ms()
     }
 
+    /// Block until a command arrives, or `timeout` elapses. Call only when
+    /// [`step`](Self::step) reported no work — this blocks, so a caller with runnable
+    /// processes would stall them.
+    ///
+    /// Nothing but a command can make a worker runnable — a message, a spawn, a delivered
+    /// await result and an effect completion all arrive as one — so with no deadline pending
+    /// an unbounded wait is exact. A `timeout` exists only to honour a pending select
+    /// deadline, and must be computed by whoever owns the clock (see the transport's
+    /// `WorkerClock`), since the deadline is in that clock's units and this wait is in real
+    /// ones. A spurious wake is harmless: the loop steps and idles again.
+    pub fn wait_for_commands(&mut self, timeout: Option<std::time::Duration>) {
+        self.receiver.wait(timeout);
+    }
+
     /// Push any changed subscriptions to the environment. Called at tick boundaries by the worker
     /// loop: with `force = false` on a busy-yield (subject to the [`MIN_FLUSH_INTERVAL_MS`]
     /// throttle) and `force = true` on settle to idle (bypassing the throttle so the final state

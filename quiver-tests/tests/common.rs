@@ -190,27 +190,30 @@ impl TestBuilder {
             quiver_io::attach_system_builtins(&mut builtins);
         }
 
-        // Create workers with virtual time function
+        // Create workers with virtual time function. The harness drives the environment itself
+        // (advancing the stepped clock as it idles), so it never waits on the wake signal — the
+        // workers still poke it, and its capacity of 1 keeps that harmless.
+        let (waker, _wake) = quiver::native_transport::wake_channel();
         let num_workers = 2;
         let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
         for i in 0..num_workers {
             let builtins_clone = builtins.clone();
 
             if self.real_time {
-                let t0 = std::time::Instant::now();
                 workers.push(Box::new(spawn_worker(
-                    move || t0.elapsed().as_millis() as u64,
+                    quiver::native_transport::SystemClock,
                     builtins_clone,
                     false, // Don't enable profiling in tests
                     i as u16,
+                    waker.clone(),
                 )));
             } else {
-                let time = virtual_time_ms.clone();
                 workers.push(Box::new(spawn_worker(
-                    move || time.load(Ordering::Relaxed),
+                    quiver::native_transport::SteppedClock::new(virtual_time_ms.clone()),
                     builtins_clone,
                     false, // Don't enable profiling in tests
                     i as u16,
+                    waker.clone(),
                 )));
             }
         }
