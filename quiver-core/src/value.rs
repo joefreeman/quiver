@@ -30,26 +30,71 @@ pub enum Binary {
     Data(Rc<crate::binary::BinaryData>),
 }
 
-/// The shared payload of a tuple or function value: its elements, and its annotations if
-/// any. Reference-counted, so cloning a value is O(1) whatever it contains.
-#[derive(Debug, Serialize, Deserialize)]
+/// The shared payload of a tuple or function value: its elements, and — for the small
+/// minority of values that carry either — its annotations and type argument. Reference-counted,
+/// so cloning a value is O(1) whatever it contains.
+#[derive(Debug, Deserialize)]
 #[serde(from = "PayloadData")]
 pub struct Payload {
     elements: Vec<Value>,
+    /// Everything a payload only *sometimes* carries, in one box, so an ordinary tuple pays a
+    /// single pointer-sized `None` for all of it. Both parts are rare and neither is on a read
+    /// path, which is what makes the shared indirection the right trade: `type_argument` in
+    /// particular was 16 inline bytes on *every* tuple in the system to serve instantiated
+    /// builtins alone.
+    ///
+    /// Not a serde field: `Payload` deserializes via [`PayloadData`] (see the `from` attribute),
+    /// which reads the flat shape and routes through the ordinary constructors.
+    #[serde(skip)]
+    extras: Option<Box<Extras>>,
+}
+
+/// The occasional cargo of a [`Payload`]. Never constructed empty — a payload with nothing to
+/// carry holds `None` instead, so `Some(extras)` always means at least one of these is present.
+#[derive(Debug)]
+struct Extras {
     /// Annotations attached to the owning value: `(key id, value)` pairs, sorted by key id.
     /// Invisible to equality and pattern matching — only `GetAnnotation` observes them.
-    /// Boxed (not `Option<Vec>`) so the common unannotated case costs one pointer-sized
-    /// `None` rather than an inline three-word `Vec`.
-    #[allow(clippy::box_collection)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    annotations: Option<Box<Vec<(usize, Value)>>>,
+    annotations: Vec<(usize, Value)>,
     /// A type-consuming builtin's explicit type argument (`__type_name__<'t>` → the
     /// resolved type id), carried on the *value* so an instantiated builtin flows
     /// through bindings and generic code intact. Unlike annotations it is operational
     /// (the implementation reads it), so equality compares it. Always `None` on tuple
     /// and function payloads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     type_argument: Option<usize>,
+}
+
+impl Extras {
+    /// Whether this carries nothing, and so should be dropped for a bare `None`. The invariant
+    /// the type's "never constructed empty" contract rests on.
+    fn is_empty(&self) -> bool {
+        self.annotations.is_empty() && self.type_argument.is_none()
+    }
+}
+
+/// Hand-written so the serialized shape is unchanged by the boxing: `elements`, plus
+/// `annotations` and `type_argument` when present. That is exactly what [`PayloadData`]
+/// reads back, and only self-describing formats (`serde_json`) are in use, so an omitted
+/// field and an absent one are the same thing.
+impl Serialize for Payload {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let annotations = self.annotations();
+        let type_argument = self.type_argument();
+        let fields =
+            1 + usize::from(!annotations.is_empty()) + usize::from(type_argument.is_some());
+
+        let mut payload = serializer.serialize_struct("Payload", fields)?;
+        payload.serialize_field("elements", &self.elements)?;
+        if !annotations.is_empty() {
+            payload.serialize_field("annotations", annotations)?;
+        }
+        if let Some(type_argument) = type_argument {
+            payload.serialize_field("type_argument", &type_argument)?;
+        }
+        payload.end()
+    }
 }
 
 /// The serialized shape of [`Payload`]. Deserialization routes through the ordinary
@@ -58,7 +103,8 @@ pub struct Payload {
 #[derive(Deserialize)]
 struct PayloadData {
     elements: Vec<Value>,
-    // Boxed to mirror the field it deserializes (see `Payload::annotations`).
+    // `Option` so an absent field deserializes without allocating; boxed only to keep this
+    // shape one word wide, since it is unboxed straight into `Extras`.
     #[allow(clippy::box_collection)]
     #[serde(default)]
     annotations: Option<Box<Vec<(usize, Value)>>>,
@@ -80,8 +126,7 @@ impl Payload {
     pub fn new(elements: Vec<Value>) -> Self {
         Payload {
             elements,
-            annotations: None,
-            type_argument: None,
+            extras: None,
         }
     }
 
@@ -97,27 +142,49 @@ impl Payload {
         );
         Payload {
             elements,
-            annotations: Some(Box::new(annotations)),
-            type_argument: None,
+            extras: Some(Box::new(Extras {
+                annotations,
+                type_argument: None,
+            })),
         }
     }
 
     /// The same payload carrying a type argument (see the field). Builder-style, used
     /// when constructing an instantiated builtin value or re-attaching annotations to
     /// one.
+    ///
+    /// Setting it back to `None` drops an otherwise-empty box, keeping [`Extras`]'s
+    /// never-empty invariant — on which `carries_nothing`, and so empty-payload interning,
+    /// depends.
     pub fn with_type_argument(mut self, type_argument: Option<usize>) -> Self {
-        self.type_argument = type_argument;
+        match (&mut self.extras, type_argument) {
+            (Some(extras), _) => {
+                extras.type_argument = type_argument;
+                if extras.is_empty() {
+                    self.extras = None;
+                }
+            }
+            (None, Some(_)) => {
+                self.extras = Some(Box::new(Extras {
+                    annotations: Vec::new(),
+                    type_argument,
+                }));
+            }
+            (None, None) => {}
+        }
         self
     }
 
     /// A type-consuming builtin's explicit type argument, if the owning value carries one.
     pub fn type_argument(&self) -> Option<usize> {
-        self.type_argument
+        self.extras.as_ref().and_then(|e| e.type_argument)
     }
 
     /// The annotations attached to the owning value (empty if none).
     pub fn annotations(&self) -> &[(usize, Value)] {
-        self.annotations.as_deref().map_or(&[], |a| a.as_slice())
+        self.extras
+            .as_ref()
+            .map_or(&[], |e| e.annotations.as_slice())
     }
 
     /// Look up an annotation by key id.
@@ -144,9 +211,9 @@ impl Payload {
     /// allocation, so a field-less tuple costs a refcount bump.
     ///
     /// `#[inline]` because this sits in front of every tuple construction and takes `self`
-    /// by value: out of line, the 56-byte `Payload` move would be a real memcpy on the
-    /// hottest path in the runtime. (Measured no difference either way on a noisy machine —
-    /// it is the safe default for a wrapper this small, not a tuned result.)
+    /// by value: out of line, the `Payload` move would be a real memcpy on the hottest path
+    /// in the runtime. (Measured no difference either way on a noisy machine — it is the safe
+    /// default for a wrapper this small, not a tuned result.)
     #[inline]
     pub fn shared(self) -> Rc<Payload> {
         if self.carries_nothing() {
@@ -157,10 +224,11 @@ impl Payload {
 
     /// Whether this payload has no content of its own, and so is interchangeable with every
     /// other such payload. Elements and annotations are observable; the type argument is
-    /// operational (equality compares it), so a payload carrying one is never shared.
+    /// operational (equality compares it), so a payload carrying one is never shared. Both
+    /// live in `extras`, which is `None` exactly when neither is present.
     #[inline]
     fn carries_nothing(&self) -> bool {
-        self.elements.is_empty() && self.annotations.is_none() && self.type_argument.is_none()
+        self.elements.is_empty() && self.extras.is_none()
     }
 
     /// The shared payload directly, for callers that know they have nothing to carry — so
@@ -178,13 +246,13 @@ impl Payload {
     }
 
     /// Every value in this payload, mutably — the `&mut` twin of [`all_values`](Self::all_values).
-    /// `elements` and `annotations` are distinct fields, so borrowing both at once is disjoint.
+    /// `elements` and `extras` are distinct fields, so borrowing both at once is disjoint.
     fn all_values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
         self.elements.iter_mut().chain(
-            self.annotations
+            self.extras
                 .as_deref_mut()
                 .into_iter()
-                .flat_map(|entries| entries.iter_mut().map(|(_, value)| value)),
+                .flat_map(|extras| extras.annotations.iter_mut().map(|(_, value)| value)),
         )
     }
 

@@ -62,3 +62,42 @@ fn value_json_round_trip() {
     );
     assert!(matches!(fields[2], Value::Binary(Binary::Constant(2))));
 }
+
+/// The two things a payload carries *besides* its elements. Both live in one boxed `Extras`
+/// and are serialized by a hand-written impl that emits each field only when present, so
+/// neither is exercised by the round trip above — and neither can be checked with `assert_eq!`,
+/// since `Value`'s equality ignores annotations by design and compares builtins by id and type
+/// argument alone.
+#[test]
+fn value_extras_survive_a_json_round_trip() {
+    const DOC: usize = 3;
+    const TYPE_ID: usize = 11;
+
+    let annotated = Value::tuple(7, vec![Value::Int(1)])
+        .annotated(DOC, Value::Int(42))
+        .expect("a tuple can carry an annotation");
+    let back: Value = serde_json::from_str(&serde_json::to_string(&annotated).expect("serialize"))
+        .expect("deserialize");
+    assert_eq!(
+        back.get_annotation(DOC),
+        Some(&Value::Int(42)),
+        "annotation survives"
+    );
+    assert_eq!(back, annotated, "and the elements still compare equal");
+
+    let typed = Value::builtin_typed(5, Some(TYPE_ID));
+    let back: Value = serde_json::from_str(&serde_json::to_string(&typed).expect("serialize"))
+        .expect("deserialize");
+    assert_eq!(
+        back.type_argument(),
+        Some(TYPE_ID),
+        "an instantiated builtin keeps its type argument"
+    );
+
+    // A bare builtin must not gain one — the empty `Extras` is dropped, not serialized as a
+    // present-but-empty field.
+    let bare = Value::builtin(5);
+    let back: Value =
+        serde_json::from_str(&serde_json::to_string(&bare).expect("serialize")).expect("des");
+    assert_eq!(back.type_argument(), None, "a bare builtin carries none");
+}
