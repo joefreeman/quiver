@@ -3349,58 +3349,77 @@ impl<E: Effect> Executor<E> {
             .unwrap_or(tuple_id)
     }
 
+    /// Structural equality, as the `Equal` instruction sees it.
+    ///
+    /// **Iterative**: a pair work-list rather than recursion, because a value nests once per
+    /// list element and comparing two long lists (`xs ~> =&ys`) would otherwise abort. Order of
+    /// comparison is unobservable — the answer is a conjunction — so a LIFO list is fine.
     fn values_equal(&self, a: &Value, b: &Value) -> bool {
-        match (a, b) {
-            (Value::Int(a), Value::Int(b)) => a == b,
-            // Mixed small/big pairs are unequal by the canonical-form invariant.
-            (Value::BigInt(a), Value::BigInt(b)) => a == b,
-            (Value::Binary(a), Value::Binary(b)) => {
-                // Compare contents, whichever side owns its bytes. `to_vec` realises a rope,
-                // which a byte-wise walk would have to do anyway.
-                let bytes = |binary: &Binary| -> Option<Vec<u8>> {
-                    match binary {
-                        Binary::Data(data) => Some(data.to_vec()),
-                        Binary::Constant(index) => match self.get_constant(*index) {
-                            Some(Constant::Binary(bytes)) => Some(bytes.clone()),
-                            _ => None,
-                        },
+        // `Vec::new`, and the first pair handled without it: a `Vec` does not allocate until
+        // something is pushed, so comparing two scalars — much the commonest case, and on the
+        // `Equal` instruction's hot path — costs nothing beyond the comparison.
+        let mut pending: Vec<(&Value, &Value)> = Vec::new();
+        let mut next = Some((a, b));
+        while let Some((a, b)) = next.take().or_else(|| pending.pop()) {
+            let equal = match (a, b) {
+                (Value::Int(a), Value::Int(b)) => a == b,
+                // Mixed small/big pairs are unequal by the canonical-form invariant.
+                (Value::BigInt(a), Value::BigInt(b)) => a == b,
+                (Value::Binary(a), Value::Binary(b)) => {
+                    // Compare contents, whichever side owns its bytes. `to_vec` realises a
+                    // rope, which a byte-wise walk would have to do anyway.
+                    let bytes = |binary: &Binary| -> Option<Vec<u8>> {
+                        match binary {
+                            Binary::Data(data) => Some(data.to_vec()),
+                            Binary::Constant(index) => match self.get_constant(*index) {
+                                Some(Constant::Binary(bytes)) => Some(bytes.clone()),
+                                _ => None,
+                            },
+                        }
+                    };
+                    match (bytes(a), bytes(b)) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => false,
                     }
-                };
-                match (bytes(a), bytes(b)) {
-                    (Some(a), Some(b)) => a == b,
-                    _ => false,
                 }
+                (Value::Tuple(type_a, elements_a), Value::Tuple(type_b, elements_b)) => {
+                    // Compare by canonical value-shape (name + field labels), not raw tuple-id:
+                    // the same shape built via paths that inferred different field types gets
+                    // distinct ids but is the same value. Elements are then compared
+                    // structurally, by queueing them.
+                    if self.canonical_tuple(*type_a) != self.canonical_tuple(*type_b)
+                        || elements_a.len() != elements_b.len()
+                    {
+                        return false;
+                    }
+                    pending.extend(elements_a.iter().zip(elements_b.iter()));
+                    continue;
+                }
+                (Value::Function(idx_a, caps_a), Value::Function(idx_b, caps_b)) => {
+                    if idx_a != idx_b || caps_a.len() != caps_b.len() {
+                        return false;
+                    }
+                    pending.extend(caps_a.iter().zip(caps_b.iter()));
+                    continue;
+                }
+                // The type argument is operational (a differently-instantiated builtin behaves
+                // differently), so it participates; annotations stay invisible.
+                (Value::Builtin(a, p), Value::Builtin(b, q)) => {
+                    a == b
+                        && p.as_deref().and_then(Payload::type_argument)
+                            == q.as_deref().and_then(Payload::type_argument)
+                }
+                (Value::Process(a, func_a), Value::Process(b, func_b)) => {
+                    a == b && func_a == func_b
+                }
+                (Value::Reference(a), Value::Reference(b)) => a == b,
+                _ => false,
+            };
+            if !equal {
+                return false;
             }
-            (Value::Tuple(type_a, elements_a), Value::Tuple(type_b, elements_b)) => {
-                // Compare by canonical value-shape (name + field labels), not raw tuple-id: the
-                // same tuple shape built via paths that inferred different field types gets distinct
-                // ids, but is the same value. Elements are then compared structurally.
-                self.canonical_tuple(*type_a) == self.canonical_tuple(*type_b)
-                    && elements_a.len() == elements_b.len()
-                    && elements_a
-                        .iter()
-                        .zip(elements_b.iter())
-                        .all(|(a, b)| self.values_equal(a, b))
-            }
-            (Value::Function(idx_a, caps_a), Value::Function(idx_b, caps_b)) => {
-                idx_a == idx_b
-                    && caps_a.len() == caps_b.len()
-                    && caps_a
-                        .iter()
-                        .zip(caps_b.iter())
-                        .all(|(a, b)| self.values_equal(a, b))
-            }
-            // The type argument is operational (a differently-instantiated builtin
-            // behaves differently), so it participates; annotations stay invisible.
-            (Value::Builtin(a, p), Value::Builtin(b, q)) => {
-                a == b
-                    && p.as_deref().and_then(Payload::type_argument)
-                        == q.as_deref().and_then(Payload::type_argument)
-            }
-            (Value::Process(a, func_a), Value::Process(b, func_b)) => a == b && func_a == func_b,
-            (Value::Reference(a), Value::Reference(b)) => a == b,
-            _ => false,
         }
+        true
     }
 }
 
@@ -3409,19 +3428,17 @@ impl<E: Effect> Executor<E> {
 /// which covers annotations too — so a pid inside a `:crash` payload is followed. Pushes
 /// duplicates; the caller dedups.
 fn collect_process_refs(value: &Value, pids: &mut Vec<ProcessId>) {
-    match value {
-        Value::Process(pid, _) => pids.push(*pid),
-        Value::Tuple(_, elements) | Value::Function(_, elements) => {
-            for elem in elements.all_values() {
-                collect_process_refs(elem, pids);
+    let mut pending: Vec<&Value> = Vec::new();
+    let mut next = Some(value);
+    while let Some(value) = next.take().or_else(|| pending.pop()) {
+        match value {
+            Value::Process(pid, _) => pids.push(*pid),
+            Value::Tuple(_, elements) | Value::Function(_, elements) => {
+                pending.extend(elements.all_values())
             }
+            Value::Builtin(_, Some(payload)) => pending.extend(payload.all_values()),
+            _ => {}
         }
-        Value::Builtin(_, Some(payload)) => {
-            for elem in payload.all_values() {
-                collect_process_refs(elem, pids);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -3443,28 +3460,26 @@ struct BinaryStat {
 /// Every distinct binary buffer a value references, keyed by identity so a buffer shared
 /// between roots is counted once.
 fn collect_binaries(value: &Value, out: &mut HashMap<*const BinaryData, BinaryStat>) {
-    match value {
-        Value::Binary(Binary::Data(data)) => {
-            out.insert(
-                Rc::as_ptr(data),
-                BinaryStat {
-                    bytes: data.len(),
-                    depth: data.depth(),
-                    shared: data.bytes_shared(),
-                },
-            );
-        }
-        Value::Tuple(_, elements) | Value::Function(_, elements) => {
-            for element in elements.all_values() {
-                collect_binaries(element, out);
+    let mut pending: Vec<&Value> = Vec::new();
+    let mut next = Some(value);
+    while let Some(value) = next.take().or_else(|| pending.pop()) {
+        match value {
+            Value::Binary(Binary::Data(data)) => {
+                out.insert(
+                    Rc::as_ptr(data),
+                    BinaryStat {
+                        bytes: data.len(),
+                        depth: data.depth(),
+                        shared: data.bytes_shared(),
+                    },
+                );
             }
-        }
-        Value::Builtin(_, Some(payload)) => {
-            for value in payload.all_values() {
-                collect_binaries(value, out);
+            Value::Tuple(_, elements) | Value::Function(_, elements) => {
+                pending.extend(elements.all_values())
             }
+            Value::Builtin(_, Some(payload)) => pending.extend(payload.all_values()),
+            _ => {}
         }
-        _ => {}
     }
 }
 
@@ -3481,14 +3496,174 @@ impl<E: Effect> crate::types::TypeLookup for Executor<E> {
     }
 }
 
+/// Which composite a conversion frame is rebuilding when its children are done.
+#[derive(Clone, Copy)]
+enum Node {
+    Tuple(usize),
+    Function(usize),
+    Builtin(usize),
+}
+
+/// One level of an in-progress [`Executor::to_wire`]: the composite being rebuilt, the payload
+/// its children come from, and the children converted so far (elements first, then annotation
+/// values, matching [`Payload::all_values`]).
+struct ToWireFrame<'a> {
+    node: Node,
+    payload: &'a Payload,
+    done: Vec<WireValue>,
+}
+
+impl<'a> ToWireFrame<'a> {
+    /// The `index`-th child of a payload in `all_values` order, or `None` past the end.
+    fn child(payload: &'a Payload, index: usize) -> Option<&'a Value> {
+        payload.get(index).or_else(|| {
+            payload
+                .annotations()
+                .get(index - payload.len())
+                .map(|(_, v)| v)
+        })
+    }
+
+    fn assemble(self) -> WireValue {
+        let ToWireFrame {
+            node,
+            payload,
+            mut done,
+        } = self;
+        let annotation_values = done.split_off(payload.len());
+        let annotations = payload
+            .annotations()
+            .iter()
+            .map(|(key, _)| *key)
+            .zip(annotation_values)
+            .collect();
+        let wire = WirePayload::with_annotations(done, annotations)
+            .with_type_argument(payload.type_argument());
+        match node {
+            Node::Tuple(id) => WireValue::Tuple(id, wire),
+            Node::Function(id) => WireValue::Function(id, wire),
+            Node::Builtin(id) => WireValue::Builtin(id, Some(wire)),
+        }
+    }
+}
+
+/// One level of an in-progress [`Executor::from_wire`]. The wire form is consumed, so unlike
+/// [`ToWireFrame`] this owns its remaining children rather than borrowing them.
+struct FromWireFrame {
+    node: Node,
+    elements: usize,
+    keys: Vec<usize>,
+    type_argument: Option<usize>,
+    remaining: std::iter::Chain<std::vec::IntoIter<WireValue>, std::vec::IntoIter<WireValue>>,
+    done: Vec<Value>,
+}
+
+thread_local! {
+    /// Frame stack for [`Executor::from_wire`], reused across calls. A fresh `Vec` per message
+    /// is not free: a `FromWireFrame` is fat, and `Vec`'s minimum capacity is 4, so the first
+    /// push of a *shallow* message allocated ~576 bytes — measurable on `zzmem`'s `binary_send`.
+    /// The same lesson as `Payload`'s drop work-list. `to_wire`'s frames borrow their payloads,
+    /// so only this side can be a thread-local.
+    static FROM_WIRE_STACK: std::cell::RefCell<Vec<FromWireFrame>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Capacity retained between conversions; a pathologically deep message should not leave its
+/// stack reserved for the rest of the thread's life.
+const FROM_WIRE_RETAIN: usize = 64;
+
+impl FromWireFrame {
+    fn new(node: Node, mut payload: WirePayload) -> Self {
+        let (elements, annotations, type_argument) = payload.take_parts();
+        let (keys, annotation_values): (Vec<usize>, Vec<WireValue>) =
+            annotations.into_iter().unzip();
+        let count = elements.len();
+        FromWireFrame {
+            node,
+            elements: count,
+            keys,
+            type_argument,
+            remaining: elements.into_iter().chain(annotation_values),
+            done: Vec::with_capacity(count),
+        }
+    }
+
+    fn assemble(self) -> Value {
+        let FromWireFrame {
+            node,
+            elements,
+            keys,
+            type_argument,
+            mut done,
+            ..
+        } = self;
+        let annotations = keys.into_iter().zip(done.split_off(elements)).collect();
+        let payload = Payload::with_annotations(done, annotations)
+            .with_type_argument(type_argument)
+            .shared();
+        match node {
+            Node::Tuple(id) => Value::Tuple(id, payload),
+            Node::Function(id) => Value::Function(id, payload),
+            Node::Builtin(id) => Value::Builtin(id, Some(payload)),
+        }
+    }
+}
+
 impl<E: Effect> Executor<E> {
-    /// This value in its self-contained [`WireValue`] form: binaries materialised, so the
-    /// result depends on no executor state and can cross a process boundary. The copy is not
-    /// new — every send already performed it (see [`crate::wire`]).
+    /// This value in its self-contained [`WireValue`] form: binaries carried as a shared handle,
+    /// so the result depends on no executor state and can cross a process boundary.
     ///
-    /// Recursive, like the walks it replaces. A deep enough value still needs stack
-    /// proportional to its nesting on this path; only `Payload`'s teardown is iterative so far.
+    /// **Iterative.** A message is arbitrarily deep — a cons list is a value nested once per
+    /// element — and a recursive conversion aborted the process on a 400k-element list even
+    /// against the worker's 256 MiB stack. An abort is uncatchable, so depth has to be bounded
+    /// by the heap rather than merely given a lot of stack. Same shape as the receiving side and
+    /// as `Payload`'s drop: an explicit frame stack, one level per composite.
     pub fn to_wire(&self, value: &Value) -> Result<WireValue, Error> {
+        let mut stack: Vec<ToWireFrame<'_>> = Vec::new();
+        let mut value = value;
+
+        'descend: loop {
+            // Convert leaves outright; descend into composites, pushing a frame each time.
+            let mut converted = loop {
+                let (node, payload) = match value {
+                    Value::Tuple(id, payload) => (Node::Tuple(*id), payload),
+                    Value::Function(id, payload) => (Node::Function(*id), payload),
+                    Value::Builtin(id, Some(payload)) => (Node::Builtin(*id), payload),
+                    leaf => break self.leaf_to_wire(leaf)?,
+                };
+                stack.push(ToWireFrame {
+                    node,
+                    payload,
+                    done: Vec::with_capacity(payload.len()),
+                });
+                match ToWireFrame::child(payload, 0) {
+                    Some(child) => value = child,
+                    // A field-less composite has nothing to descend into.
+                    None => break stack.pop().expect("just pushed").assemble(),
+                }
+            };
+
+            // Hand the finished child to its parent, then either move on to the parent's next
+            // child or assemble the parent and keep unwinding.
+            loop {
+                let Some(frame) = stack.last_mut() else {
+                    return Ok(converted);
+                };
+                frame.done.push(converted);
+                match ToWireFrame::child(frame.payload, frame.done.len()) {
+                    Some(child) => {
+                        value = child;
+                        continue 'descend;
+                    }
+                    None => converted = stack.pop().expect("just borrowed").assemble(),
+                }
+            }
+        }
+    }
+
+    /// The wire form of a value that owns no payload — everything `to_wire`'s frame stack does
+    /// not descend into.
+    fn leaf_to_wire(&self, value: &Value) -> Result<WireValue, Error> {
         Ok(match value {
             Value::Int(n) => WireValue::Int(*n),
             Value::BigInt(n) => WireValue::BigInt((**n).clone()),
@@ -3497,85 +3672,107 @@ impl<E: Effect> Executor<E> {
                 WireValue::Binary(self.get_binary_data(binary)?.shared_bytes())
             }
             Value::Reference(id) => WireValue::Reference(*id),
-            Value::Tuple(type_id, payload) => {
-                WireValue::Tuple(*type_id, self.payload_to_wire(payload)?)
-            }
-            Value::Function(index, payload) => {
-                WireValue::Function(*index, self.payload_to_wire(payload)?)
-            }
-            Value::Builtin(id, payload) => WireValue::Builtin(
-                *id,
-                payload
-                    .as_deref()
-                    .map(|payload| self.payload_to_wire(payload))
-                    .transpose()?,
-            ),
+            Value::Builtin(id, None) => WireValue::Builtin(*id, None),
             Value::Process(pid, function_index) => WireValue::Process(*pid, *function_index),
             Value::Resource(id, type_id) => WireValue::Resource(*id, *type_id),
+            Value::Tuple(..) | Value::Function(..) | Value::Builtin(_, Some(_)) => {
+                unreachable!("composites are handled by the frame stack")
+            }
         })
     }
 
-    fn payload_to_wire(&self, payload: &Payload) -> Result<WirePayload, Error> {
-        let elements = payload
-            .iter()
-            .map(|value| self.to_wire(value))
-            .collect::<Result<_, _>>()?;
-        let annotations = payload
-            .annotations()
-            .iter()
-            .map(|(key, value)| Ok((*key, self.to_wire(value)?)))
-            .collect::<Result<_, Error>>()?;
-        Ok(WirePayload::with_annotations(elements, annotations)
-            .with_type_argument(payload.type_argument()))
+    /// The inverse of [`to_wire`](Self::to_wire): rebuild a value in *this* executor.
+    ///
+    /// Takes the wire value **by value**: the receiver owns it and drops it immediately after,
+    /// so a binary's handle is adopted rather than its bytes copied. Iterative for the same
+    /// reason as `to_wire`.
+    pub fn from_wire(&mut self, wire: WireValue) -> Result<Value, Error> {
+        // Take the shared stack, use it, put it back. Taking rather than holding a borrow
+        // across the conversion keeps `wire` moveable (cloning it to satisfy two branches would
+        // undo the whole point of taking it by value), and leaves an empty `Vec` behind so any
+        // unexpected re-entry gets its own. `try_with` because a value can be rebuilt during
+        // thread teardown, when the thread-local may already be destroyed.
+        let mut stack = FROM_WIRE_STACK
+            .try_with(|cell| {
+                cell.try_borrow_mut()
+                    .map(|mut stack| std::mem::take(&mut *stack))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+
+        let result = self.rebuild_from_wire(&mut stack, wire);
+
+        stack.clear();
+        if stack.capacity() > FROM_WIRE_RETAIN {
+            stack.shrink_to(FROM_WIRE_RETAIN);
+        }
+        let _ = FROM_WIRE_STACK.try_with(|cell| {
+            if let Ok(mut slot) = cell.try_borrow_mut() {
+                *slot = stack;
+            }
+        });
+        result
     }
 
-    /// The inverse of [`to_wire`](Self::to_wire): rebuild a value in *this* executor, so its
-    /// binaries land on this worker's heap. Fresh slots start floating at refcount 0; the
-    /// receiving process's placement site retains them, as for any freshly built value.
-    ///
-    /// Takes the wire value **by value**: the receiver owns it and drops it immediately
-    /// after, so a binary's handle is adopted rather than its bytes copied.
-    pub fn from_wire(&mut self, wire: WireValue) -> Result<Value, Error> {
+    fn rebuild_from_wire(
+        &mut self,
+        stack: &mut Vec<FromWireFrame>,
+        wire: WireValue,
+    ) -> Result<Value, Error> {
+        let mut wire = wire;
+
+        'descend: loop {
+            let mut converted = loop {
+                let (node, payload) = match wire {
+                    WireValue::Tuple(id, payload) => (Node::Tuple(id), payload),
+                    WireValue::Function(id, payload) => (Node::Function(id), payload),
+                    WireValue::Builtin(id, Some(payload)) => (Node::Builtin(id), payload),
+                    leaf => break self.leaf_from_wire(leaf)?,
+                };
+                let mut frame = FromWireFrame::new(node, payload);
+                match frame.remaining.next() {
+                    Some(child) => {
+                        stack.push(frame);
+                        wire = child;
+                    }
+                    None => break frame.assemble(),
+                }
+            };
+
+            loop {
+                let Some(frame) = stack.last_mut() else {
+                    return Ok(converted);
+                };
+                frame.done.push(converted);
+                match frame.remaining.next() {
+                    Some(child) => {
+                        wire = child;
+                        continue 'descend;
+                    }
+                    None => converted = stack.pop().expect("just borrowed").assemble(),
+                }
+            }
+        }
+    }
+
+    /// The value form of a wire value that owns no payload.
+    fn leaf_from_wire(&mut self, wire: WireValue) -> Result<Value, Error> {
         Ok(match wire {
             WireValue::Int(n) => Value::Int(n),
             WireValue::BigInt(n) => Value::integer(n),
-            // The handle is adopted, not copied: the receiver's slot points at the sender's
-            // allocation.
+            // The handle is adopted, not copied: the receiver points at the sender's allocation.
             WireValue::Binary(bytes) => {
                 Value::Binary(self.allocate_binary_data(BinaryData::Owned(bytes))?)
             }
             WireValue::Constant(index) => Value::Binary(Binary::Constant(index)),
             WireValue::Reference(id) => Value::Reference(id),
-            WireValue::Tuple(type_id, payload) => {
-                Value::Tuple(type_id, self.payload_from_wire(payload)?)
-            }
-            WireValue::Function(index, payload) => {
-                Value::Function(index, self.payload_from_wire(payload)?)
-            }
-            WireValue::Builtin(id, payload) => Value::Builtin(
-                id,
-                payload
-                    .map(|payload| self.payload_from_wire(payload))
-                    .transpose()?,
-            ),
+            WireValue::Builtin(id, None) => Value::Builtin(id, None),
             WireValue::Process(pid, function_index) => Value::Process(pid, function_index),
             WireValue::Resource(id, type_id) => Value::Resource(id, type_id),
+            WireValue::Tuple(..) | WireValue::Function(..) | WireValue::Builtin(_, Some(_)) => {
+                unreachable!("composites are handled by the frame stack")
+            }
         })
-    }
-
-    fn payload_from_wire(&mut self, wire: WirePayload) -> Result<Rc<Payload>, Error> {
-        let (wire_elements, wire_annotations, type_argument) = wire.into_parts();
-        let mut elements = Vec::with_capacity(wire_elements.len());
-        for element in wire_elements {
-            elements.push(self.from_wire(element)?);
-        }
-        let mut annotations = Vec::with_capacity(wire_annotations.len());
-        for (key, value) in wire_annotations {
-            annotations.push((key, self.from_wire(value)?));
-        }
-        Ok(Payload::with_annotations(elements, annotations)
-            .with_type_argument(type_argument)
-            .shared())
     }
 }
 

@@ -45,7 +45,7 @@ pub enum WireValue {
 }
 
 /// The wire form of a tuple's or function's payload.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct WirePayload {
     pub elements: Vec<WireValue>,
     /// `(key id, value)`, as on `Payload`, and boxed for the same reason: a payload sits
@@ -72,11 +72,14 @@ impl WireValue {
 
     /// A wire tuple with the given fields and no annotations.
     pub fn tuple(type_id: usize, elements: Vec<WireValue>) -> Self {
+        // Field-by-field rather than `..Default::default()`: the struct-update syntax moves
+        // the remaining fields out of a temporary, which `Drop` forbids.
         WireValue::Tuple(
             type_id,
             WirePayload {
                 elements,
-                ..WirePayload::default()
+                annotations: None,
+                type_argument: None,
             },
         )
     }
@@ -108,7 +111,77 @@ impl WireValue {
         (value, heap)
     }
 
+    /// Build the display `Value` iteratively, for the same reason every other walk over value
+    /// structure is iterative: a message nests once per list element, and a recursive render
+    /// aborted the process on a 200,000-element list. One frame per composite.
     fn display_value(&self, heap: &mut Vec<Vec<u8>>) -> crate::value::Value {
+        use crate::value::Value;
+
+        struct Frame<'a> {
+            node: WireNode,
+            payload: &'a WirePayload,
+            done: Vec<Value>,
+        }
+
+        fn assemble(frame: Frame) -> Value {
+            let Frame {
+                node,
+                payload,
+                mut done,
+            } = frame;
+            let annotations = payload
+                .annotations()
+                .iter()
+                .map(|(key, _)| *key)
+                .zip(done.split_off(payload.elements.len()))
+                .collect();
+            let built = crate::value::Payload::with_annotations(done, annotations)
+                .with_type_argument(payload.type_argument)
+                .shared();
+            match node {
+                WireNode::Tuple(id) => Value::Tuple(id, built),
+                WireNode::Function(id) => Value::Function(id, built),
+                WireNode::Builtin(id) => Value::Builtin(id, Some(built)),
+            }
+        }
+
+        let mut stack: Vec<Frame<'_>> = Vec::new();
+        let mut value = self;
+
+        'descend: loop {
+            let mut converted = loop {
+                let Some((node, payload)) = WireNode::of(value) else {
+                    break value.display_leaf(heap);
+                };
+                stack.push(Frame {
+                    node,
+                    payload,
+                    done: Vec::with_capacity(payload.elements.len()),
+                });
+                match wire_child(payload, 0) {
+                    Some(next) => value = next,
+                    None => break assemble(stack.pop().expect("just pushed")),
+                }
+            };
+
+            loop {
+                let Some(frame) = stack.last_mut() else {
+                    return converted;
+                };
+                frame.done.push(converted);
+                match wire_child(frame.payload, frame.done.len()) {
+                    Some(next) => {
+                        value = next;
+                        continue 'descend;
+                    }
+                    None => converted = assemble(stack.pop().expect("just borrowed")),
+                }
+            }
+        }
+    }
+
+    /// The display form of a wire value that owns no payload.
+    fn display_leaf(&self, heap: &mut Vec<Vec<u8>>) -> crate::value::Value {
         use crate::value::{Binary, Value};
         match self {
             WireValue::Int(n) => Value::Int(*n),
@@ -118,20 +191,13 @@ impl WireValue {
             ))),
             WireValue::Constant(index) => Value::Binary(Binary::Constant(*index)),
             WireValue::Reference(id) => Value::Reference(*id),
-            WireValue::Tuple(type_id, payload) => {
-                Value::Tuple(*type_id, payload.display_payload(heap))
-            }
-            WireValue::Function(index, payload) => {
-                Value::Function(*index, payload.display_payload(heap))
-            }
-            WireValue::Builtin(id, payload) => Value::Builtin(
-                *id,
-                payload
-                    .as_ref()
-                    .map(|payload| payload.display_payload(heap)),
-            ),
+            WireValue::Builtin(id, None) => Value::Builtin(*id, None),
             WireValue::Process(pid, function_index) => Value::Process(*pid, *function_index),
             WireValue::Resource(id, type_id) => Value::Resource(*id, *type_id),
+            WireValue::Tuple(..) | WireValue::Function(..) | WireValue::Builtin(_, Some(_)) => {
+                let _ = heap;
+                unreachable!("composites are handled by the frame stack")
+            }
         }
     }
 
@@ -143,6 +209,189 @@ impl WireValue {
             WireValue::Tuple(_, payload) | WireValue::Function(_, payload) => payload.byte_size(),
             WireValue::Builtin(_, Some(payload)) => payload.byte_size(),
             _ => 0,
+        }
+    }
+}
+
+/// Which composite an iterative walk over wire values is rebuilding when its children are done.
+#[derive(Clone, Copy)]
+enum WireNode {
+    Tuple(usize),
+    Function(usize),
+    Builtin(usize),
+}
+
+impl WireNode {
+    /// The node kind a composite wire value rebuilds as, with its payload.
+    fn of(value: &WireValue) -> Option<(WireNode, &WirePayload)> {
+        match value {
+            WireValue::Tuple(id, payload) => Some((WireNode::Tuple(*id), payload)),
+            WireValue::Function(id, payload) => Some((WireNode::Function(*id), payload)),
+            WireValue::Builtin(id, Some(payload)) => Some((WireNode::Builtin(*id), payload)),
+            _ => None,
+        }
+    }
+
+    fn rebuild(self, payload: WirePayload) -> WireValue {
+        match self {
+            WireNode::Tuple(id) => WireValue::Tuple(id, payload),
+            WireNode::Function(id) => WireValue::Function(id, payload),
+            WireNode::Builtin(id) => WireValue::Builtin(id, Some(payload)),
+        }
+    }
+}
+
+/// The `index`-th child of a payload in `all_values` order: elements, then annotation values.
+fn wire_child(payload: &WirePayload, index: usize) -> Option<&WireValue> {
+    payload.elements.get(index).or_else(|| {
+        payload
+            .annotations()
+            .get(index - payload.elements.len())
+            .map(|(_, value)| value)
+    })
+}
+
+impl Clone for WirePayload {
+    /// Deep-copy iteratively. The derived `Clone` walks one stack frame per level of nesting,
+    /// and a message nests once per list element — so cloning a result to fan it out to several
+    /// requesters, or a `Changed` wakeup to several subscribers, aborted the process on a
+    /// 1,000,000-element list.
+    ///
+    /// On `WirePayload` rather than [`WireValue`] for the same reason as [`Drop`]: the value
+    /// stays freely destructurable, and its derived `Clone` bottoms out here after one step.
+    fn clone(&self) -> Self {
+        struct Frame<'a> {
+            node: WireNode,
+            src: &'a WirePayload,
+            done: Vec<WireValue>,
+        }
+
+        fn assemble(frame: Frame) -> WireValue {
+            frame.node.rebuild(copy_payload(frame.src, frame.done))
+        }
+
+        fn copy_payload(src: &WirePayload, mut done: Vec<WireValue>) -> WirePayload {
+            let annotations = src
+                .annotations()
+                .iter()
+                .map(|(key, _)| *key)
+                .zip(done.split_off(src.elements.len()))
+                .collect();
+            WirePayload::with_annotations(done, annotations).with_type_argument(src.type_argument)
+        }
+
+        let mut stack: Vec<Frame<'_>> = Vec::new();
+        let mut done: Vec<WireValue> = Vec::with_capacity(self.elements.len());
+        let mut index = 0usize;
+        let mut src = self;
+
+        loop {
+            match wire_child(src, index) {
+                Some(value) => match WireNode::of(value) {
+                    // A composite: descend, saving this level's progress.
+                    Some((node, payload)) => {
+                        stack.push(Frame {
+                            node,
+                            src,
+                            done: std::mem::take(&mut done),
+                        });
+                        src = payload;
+                        index = 0;
+                        done = Vec::with_capacity(payload.elements.len());
+                    }
+                    // A leaf: its derived `Clone` copies no children, so it cannot recurse.
+                    None => {
+                        done.push(value.clone());
+                        index += 1;
+                    }
+                },
+                None => match stack.pop() {
+                    Some(frame) => {
+                        let finished = assemble(Frame {
+                            node: frame.node,
+                            src,
+                            done,
+                        });
+                        src = frame.src;
+                        done = frame.done;
+                        done.push(finished);
+                        index = done.len();
+                    }
+                    None => return copy_payload(src, done),
+                },
+            }
+        }
+    }
+}
+
+thread_local! {
+    /// Work-list for [`WirePayload`]'s drop, reused across drops — a fresh `Vec` each time
+    /// would cost an allocation per composite on the message path.
+    static WIRE_DROP_STACK: std::cell::RefCell<Vec<WirePayload>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Capacity retained between drops, so one pathological message does not reserve a large buffer
+/// for the rest of the thread's life.
+const WIRE_DROP_RETAIN: usize = 1024;
+
+/// Move every payload this one owns onto `stack`, leaving it empty so its own field drops
+/// terminate immediately.
+fn take_wire_payloads(payload: &mut WirePayload, stack: &mut Vec<WirePayload>) {
+    let annotations = payload.annotations.take().map(|a| *a).unwrap_or_default();
+    let children = payload
+        .elements
+        .drain(..)
+        .chain(annotations.into_iter().map(|(_, value)| value));
+    for value in children {
+        // Moving a payload out of a `WireValue` is legal precisely because `WireValue` has no
+        // `Drop` of its own — which is why this impl lives here rather than one level up.
+        match value {
+            WireValue::Tuple(_, payload) | WireValue::Function(_, payload) => stack.push(payload),
+            WireValue::Builtin(_, Some(payload)) => stack.push(payload),
+            _ => {}
+        }
+    }
+}
+
+impl Drop for WirePayload {
+    /// Drop iteratively. The derived glue walks one stack frame per level of nesting, and a
+    /// message nests once per list element — so discarding a deeply-nested message aborted the
+    /// process. That happens on ordinary paths: the CLI drops a result after printing it, and
+    /// the environment drops a message whose target has gone, both on `main`'s 8 MiB stack.
+    ///
+    /// This is deliberately on `WirePayload` rather than on [`WireValue`]. Implementing `Drop`
+    /// for the value would make it illegal to move out of its fields, which is exactly what
+    /// [`Executor::from_wire`](crate::executor::Executor::from_wire) does to adopt a binary's
+    /// handle instead of copying its bytes. Owning the recursion one level down costs nothing
+    /// and keeps the value freely destructurable.
+    fn drop(&mut self) {
+        if self.elements.is_empty() && self.annotations.is_none() {
+            return;
+        }
+        let reused = WIRE_DROP_STACK
+            .try_with(|cell| match cell.try_borrow_mut() {
+                Ok(mut stack) => {
+                    take_wire_payloads(self, &mut stack);
+                    while let Some(mut payload) = stack.pop() {
+                        take_wire_payloads(&mut payload, &mut stack);
+                    }
+                    if stack.capacity() > WIRE_DROP_RETAIN {
+                        stack.shrink_to(WIRE_DROP_RETAIN);
+                    }
+                    true
+                }
+                // Re-entrant: the fast path above should preclude it, but correctness must not
+                // rest on that.
+                Err(_) => false,
+            })
+            .unwrap_or(false);
+        if !reused {
+            let mut stack = Vec::new();
+            take_wire_payloads(self, &mut stack);
+            while let Some(mut payload) = stack.pop() {
+                take_wire_payloads(&mut payload, &mut stack);
+            }
         }
     }
 }
@@ -172,13 +421,16 @@ impl WirePayload {
         self.annotations.as_deref().map_or(&[], |a| a.as_slice())
     }
 
-    /// Consume this payload into its parts, for a receiver rebuilding a `Payload` from it —
-    /// which owns the wire form and is about to drop it, so its buffers should move rather
-    /// than be copied.
-    pub fn into_parts(self) -> (Vec<WireValue>, Vec<(usize, WireValue)>, Option<usize>) {
+    /// Take this payload's parts, for a receiver rebuilding a `Payload` from it — which owns
+    /// the wire form and is about to drop it, so its buffers should move rather than be copied.
+    ///
+    /// `&mut self` rather than `self`: this type implements [`Drop`] (see the impl), which
+    /// makes moving out of its fields illegal. Taking leaves it empty, so the drop that follows
+    /// hits its fast path.
+    pub fn take_parts(&mut self) -> (Vec<WireValue>, Vec<(usize, WireValue)>, Option<usize>) {
         (
-            self.elements,
-            self.annotations.map(|a| *a).unwrap_or_default(),
+            std::mem::take(&mut self.elements),
+            self.annotations.take().map(|a| *a).unwrap_or_default(),
             self.type_argument,
         )
     }
@@ -191,22 +443,6 @@ impl WirePayload {
         self.elements
             .iter()
             .chain(self.annotations().iter().map(|(_, value)| value))
-    }
-
-    fn display_payload(&self, heap: &mut Vec<Vec<u8>>) -> std::rc::Rc<crate::value::Payload> {
-        use crate::value::Payload;
-        Payload::with_annotations(
-            self.elements
-                .iter()
-                .map(|value| value.display_value(heap))
-                .collect(),
-            self.annotations()
-                .iter()
-                .map(|(key, value)| (*key, value.display_value(heap)))
-                .collect(),
-        )
-        .with_type_argument(self.type_argument)
-        .shared()
     }
 
     fn byte_size(&self) -> usize {

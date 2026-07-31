@@ -953,10 +953,18 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 .executor
                 .to_wire(&message)
                 .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
-            for subscriber in wakeups {
+            // As above: the last subscriber takes the message rather than a copy of it.
+            let mut wire_message = wire_message;
+            let mut wakeups = wakeups.into_iter().peekable();
+            while let Some(subscriber) = wakeups.next() {
+                let message = if wakeups.peek().is_some() {
+                    wire_message.clone()
+                } else {
+                    std::mem::replace(&mut wire_message, WireValue::nil())
+                };
                 self.sender.send(Event::DeliverAction {
                     target: subscriber,
-                    message: wire_message.clone(),
+                    message,
                 })?;
             }
         }
@@ -988,10 +996,20 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 } else {
                     None
                 };
-                for (request_id, _) in requests {
+                // Move the result into the final response rather than copying it for every
+                // one: a clone is a full deep copy of the value, and there is normally exactly
+                // one requester.
+                let mut result = result;
+                let mut requests = requests.into_iter().peekable();
+                while let Some((request_id, _)) = requests.next() {
+                    let result = if requests.peek().is_some() {
+                        result.clone()
+                    } else {
+                        std::mem::replace(&mut result, Ok(WireValue::nil()))
+                    };
                     self.sender.send(Event::ResultResponse {
                         request_id,
-                        result: result.clone(),
+                        result,
                         stats: stats.clone(),
                     })?;
                 }

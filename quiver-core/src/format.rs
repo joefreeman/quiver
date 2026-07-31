@@ -23,6 +23,10 @@ fn try_format_as_string(bytes: &[u8]) -> Option<String> {
         return None;
     }
 
+    // NOT truncated, unlike `format_binary`: a `Str` is text meant to be read, and this
+    // rendering is what test assertions and `%data` round trips compare against — HTTP
+    // responses and rendered HTML routinely run to hundreds of characters. Bounding the
+    // display belongs at the display layer, not here.
     let escaped = s
         .chars()
         .map(|ch| match ch {
@@ -352,96 +356,135 @@ pub fn describe_origin<T: TypeLookup, B: BinaryLookup>(
     Some(format!("{describe_kind} at {module}:{line}:{column}"))
 }
 
+/// One step of an iterative value render: a value still to format, or literal text to emit.
+enum Emit<'a> {
+    Value(&'a Value),
+    Text(&'a str),
+}
+
+/// Render a value.
+///
+/// **Iterative.** A value nests arbitrarily deep — a cons list is nested once per element — and
+/// a recursive render aborted the process on a 200,000-element list. Displaying a value is the
+/// last thing that should be able to kill it, and an abort cannot be caught. The work-list holds
+/// pending sub-values and the punctuation between them, so depth costs heap rather than stack.
 pub fn format_value<T: TypeLookup, B: BinaryLookup>(
     value: &Value,
     type_lookup: &T,
     binary_lookup: &B,
 ) -> String {
-    match value {
-        Value::Function(function, _) => format!("#{}", function),
-        Value::Builtin(name, _) => format!("__{}__", name),
-        Value::Int(n) => n.to_string(),
-        Value::BigInt(n) => n.to_string(),
-        Value::Binary(binary) => {
-            if let Some(bytes) = binary_lookup.get_bytes(binary) {
-                format_binary(&bytes)
-            } else {
-                "<binary>".to_string()
+    let mut out = String::new();
+    let mut pending = vec![Emit::Value(value)];
+    while let Some(emit) = pending.pop() {
+        match emit {
+            Emit::Text(text) => out.push_str(text),
+            Emit::Value(value) => {
+                format_step(value, type_lookup, binary_lookup, &mut out, &mut pending)
             }
         }
-        Value::Process(process_id, _) => format!("@{}", process_id),
-        Value::Resource(resource_id, _) => format!("\\#{}", resource_id),
+    }
+    out
+}
+
+/// Emit one value: leaves render straight into `out`, a composite emits its opening bracket and
+/// pushes its fields (and the punctuation between them) onto `pending` in reverse, so they pop
+/// in reading order.
+fn format_step<'a, T: TypeLookup, B: BinaryLookup>(
+    value: &'a Value,
+    type_lookup: &'a T,
+    binary_lookup: &B,
+    out: &mut String,
+    pending: &mut Vec<Emit<'a>>,
+) {
+    match value {
+        Value::Function(function, _) => out.push_str(&format!("#{}", function)),
+        Value::Builtin(name, _) => out.push_str(&format!("__{}__", name)),
+        Value::Int(n) => out.push_str(&n.to_string()),
+        Value::BigInt(n) => out.push_str(&n.to_string()),
+        Value::Binary(binary) => match binary_lookup.get_bytes(binary) {
+            Some(bytes) => out.push_str(&format_binary(&bytes)),
+            None => out.push_str("<binary>"),
+        },
+        Value::Process(process_id, _) => out.push_str(&format!("@{}", process_id)),
+        Value::Resource(resource_id, _) => out.push_str(&format!("\\#{}", resource_id)),
         Value::Reference(r) => {
             let worker_id = r >> 48;
             let counter = r & 0xFFFFFFFFFFFF;
-            format!("&{}:{}", worker_id, counter)
+            out.push_str(&format!("&{}:{}", worker_id, counter));
         }
         Value::Tuple(tuple_id, elements) => {
-            if let Some(tuple_info) = type_lookup.lookup_tuple(*tuple_id) {
-                // Check for Str type and format as string if possible
-                if tuple_info.name.as_deref() == Some("Str")
-                    && let [Value::Binary(binary)] = &elements[..]
-                    && let Some(bytes) = binary_lookup.get_bytes(binary)
-                    && let Some(s) = try_format_as_string(&bytes)
-                {
-                    return s;
-                }
-
-                // Check for Rational type and format as an `X/Y` literal (the form the
-                // compiler desugars into a `Rational` tuple).
-                if tuple_info.name.as_deref() == Some("Rational")
-                    && let [numer, denom] = &elements[..]
-                    && let (Some(numer), Some(denom)) = (numer.as_int(), denom.as_int())
-                {
-                    return format!("{}/{}", numer, denom);
-                }
-
-                // Check for a single-radical surd `Surd[a, b, n]` (`a + b√n`) and render it in
-                // mathematical notation rather than as a raw tuple.
-                if tuple_info.name.as_deref() == Some("Surd")
-                    && let [a_val, b_val, radicand] = &elements[..]
-                    && let Some(radicand) = radicand.as_int()
-                    && let Some((an, ad)) = coeff_ratio(a_val, type_lookup)
-                    && let Some((bn, bd)) = coeff_ratio(b_val, type_lookup)
-                {
-                    return format_surd(&an, &ad, &bn, &bd, &radicand.to_bigint());
-                }
-
-                let name = tuple_info.name.as_deref();
-                let field_strs: Vec<String> = elements
-                    .iter()
-                    .enumerate()
-                    .map(|(i, elem)| {
-                        let formatted = format_value(elem, type_lookup, binary_lookup);
-                        if let Some((Some(field_name), _)) = tuple_info.fields.get(i) {
-                            format!("{}: {}", field_name, formatted)
-                        } else {
-                            formatted
-                        }
-                    })
-                    .collect();
-
-                if let Some(name) = name {
-                    if field_strs.is_empty() {
-                        name.to_string()
-                    } else {
-                        format!("{}[{}]", name, field_strs.join(", "))
-                    }
-                } else {
-                    format!("[{}]", field_strs.join(", "))
-                }
-            } else {
-                // Fallback to simple format
+            let Some(tuple_info) = type_lookup.lookup_tuple(*tuple_id) else {
+                // Fallback: the tuple's type is not in this program's tables.
                 if elements.is_empty() {
-                    format!("T{}", tuple_id)
+                    out.push_str(&format!("T{}", tuple_id));
                 } else {
-                    let formatted_elements: Vec<String> = elements
-                        .iter()
-                        .map(|e| format_value(e, type_lookup, binary_lookup))
-                        .collect();
-                    format!("T{}[{}]", tuple_id, formatted_elements.join(", "))
+                    out.push_str(&format!("T{}[", tuple_id));
+                    push_fields(elements, None, pending);
                 }
+                return;
+            };
+
+            // Shapes with their own notation render whole, and are leaves as far as the
+            // work-list is concerned.
+            if tuple_info.name.as_deref() == Some("Str")
+                && let [Value::Binary(binary)] = &elements[..]
+                && let Some(bytes) = binary_lookup.get_bytes(binary)
+                && let Some(s) = try_format_as_string(&bytes)
+            {
+                out.push_str(&s);
+                return;
             }
+            if tuple_info.name.as_deref() == Some("Rational")
+                && let [numer, denom] = &elements[..]
+                && let (Some(numer), Some(denom)) = (numer.as_int(), denom.as_int())
+            {
+                out.push_str(&format!("{}/{}", numer, denom));
+                return;
+            }
+            if tuple_info.name.as_deref() == Some("Surd")
+                && let [a_val, b_val, radicand] = &elements[..]
+                && let Some(radicand) = radicand.as_int()
+                && let Some((an, ad)) = coeff_ratio(a_val, type_lookup)
+                && let Some((bn, bd)) = coeff_ratio(b_val, type_lookup)
+            {
+                out.push_str(&format_surd(&an, &ad, &bn, &bd, &radicand.to_bigint()));
+                return;
+            }
+
+            let name = tuple_info.name.as_deref();
+            if elements.is_empty() {
+                out.push_str(name.unwrap_or("[]"));
+                return;
+            }
+            if let Some(name) = name {
+                out.push_str(name);
+            }
+            out.push('[');
+            push_fields(elements, Some(tuple_info), pending);
+        }
+    }
+}
+
+/// Push a composite's fields onto the work-list in reverse, with `, ` between them, each
+/// field's label (if any) ahead of it, and the closing bracket last — so popping yields
+/// `a: 1, b: 2]`.
+fn push_fields<'a>(
+    elements: &'a [Value],
+    tuple_info: Option<&'a TupleTypeInfo>,
+    pending: &mut Vec<Emit<'a>>,
+) {
+    pending.push(Emit::Text("]"));
+    for (index, element) in elements.iter().enumerate().rev() {
+        pending.push(Emit::Value(element));
+        if let Some(Some(field_name)) = tuple_info
+            .and_then(|info| info.fields.get(index))
+            .map(|(name, _)| name.as_ref())
+        {
+            pending.push(Emit::Text(": "));
+            pending.push(Emit::Text(field_name));
+        }
+        if index > 0 {
+            pending.push(Emit::Text(", "));
         }
     }
 }

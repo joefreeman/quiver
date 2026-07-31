@@ -907,24 +907,28 @@ impl<E: Effect> Environment<E> {
         Ok(())
     }
 
-    /// Check if a request has completed (non-blocking)
-    /// Automatically removes the request from pending_requests when returning a final result
+    /// Check if a request has completed (non-blocking). Removes the request from
+    /// `pending_requests` when returning a final result.
+    ///
+    /// The ready result is **taken, not cloned**. It used to be `.get(..).cloned()`, which deep
+    /// copied the whole result — including an arbitrarily large value — on the poll that found
+    /// it, and did so *recursively*: a 200,000-element list overflowed `main`'s stack and
+    /// aborted. Taking it is both bounded and free, and the entry is removed either way.
     pub fn poll_request(
         &mut self,
         request_id: u64,
     ) -> Result<Option<RequestResult>, EnvironmentError> {
-        match self.pending_requests.get(&request_id).cloned() {
+        match self.pending_requests.get_mut(&request_id) {
             None => {
                 self.pending_requests.remove(&request_id);
                 Err(EnvironmentError::RequestNotFound(request_id))
             }
-            Some(None) => {
-                // No response from worker yet
-                Ok(None)
-            }
-            Some(Some(result)) => {
+            // No response from the worker yet; leave the entry in place.
+            Some(None) => Ok(None),
+            Some(slot) => {
+                let result = slot.take();
                 self.pending_requests.remove(&request_id);
-                Ok(Some(result))
+                Ok(result)
             }
         }
     }
@@ -1626,26 +1630,32 @@ impl<E: Effect> Environment<E> {
         Ok(())
     }
 
-    /// Recursively transfer ownership of all resources in a transferred value to its new
-    /// owner. Walks the wire form: the environment owns no heap, so an executor's `Value`
-    /// is not its to inspect.
+    /// Transfer ownership of every resource in a transferred value to its new owner. Walks the
+    /// wire form: the environment owns no heap, so an executor's `Value` is not its to inspect.
+    ///
+    /// **Iterative**, and that is not decoration. This runs on the environment thread, which is
+    /// `main` with the default 8 MiB stack — not a worker, so `WORKER_STACK_SIZE` does not
+    /// cover it. A recursive version aborted the whole process on a message carrying a
+    /// 200k-element list, which is ordinary code: build a list, send it to a process. An abort
+    /// is uncatchable, so this has to be bounded rather than merely deep.
     fn transfer_wire_resource_ownership(&mut self, value: &WireValue, new_owner: ProcessId) {
-        match value {
-            WireValue::Resource(resource_id, _) => {
-                self.resource_ownership.insert(*resource_id, new_owner);
-            }
-            // `all_values`, not `elements`: an annotation carries a value like any other
-            // field, so a handle attached as one crosses with the message and must move with
-            // it. A builtin's elements are always empty — its payload exists only to carry
-            // annotations — so that arm is about annotations alone.
-            WireValue::Tuple(_, payload)
-            | WireValue::Function(_, payload)
-            | WireValue::Builtin(_, Some(payload)) => {
-                for value in payload.all_values() {
-                    self.transfer_wire_resource_ownership(value, new_owner);
+        // Lazily allocated: a message with no nesting never pushes, so never allocates.
+        let mut pending: Vec<&WireValue> = Vec::new();
+        let mut next = Some(value);
+        while let Some(value) = next.take().or_else(|| pending.pop()) {
+            match value {
+                WireValue::Resource(resource_id, _) => {
+                    self.resource_ownership.insert(*resource_id, new_owner);
                 }
+                // `all_values`, not `elements`: an annotation carries a value like any other
+                // field, so a handle attached as one crosses with the message and must move
+                // with it. A builtin's elements are always empty — its payload exists only to
+                // carry annotations — so that arm is about annotations alone.
+                WireValue::Tuple(_, payload)
+                | WireValue::Function(_, payload)
+                | WireValue::Builtin(_, Some(payload)) => pending.extend(payload.all_values()),
+                _ => {} // Other value types don't contain resources
             }
-            _ => {} // Other value types don't contain resources
         }
     }
 

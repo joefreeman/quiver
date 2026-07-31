@@ -305,8 +305,34 @@ impl std::ops::Deref for Payload {
 // annotations are deliberately invisible — values differing only in annotations are
 // equal, and annotated nil still matches `=[]`.
 impl PartialEq for Payload {
+    /// Compare element trees **iteratively**. `Value`'s `PartialEq` delegates a composite to
+    /// this, so without a work-list here the pair would recurse once per level of nesting and
+    /// abort on a long enough list. On `Payload` rather than `Value` for the same reason as
+    /// [`Clone`] and [`Drop`] on the wire types: the delegation bottoms out after one step.
+    ///
+    /// Annotations are invisible to equality, as everywhere else.
     fn eq(&self, other: &Self) -> bool {
-        self.elements == other.elements
+        let mut pending: Vec<(&Value, &Value)> = Vec::new();
+        if self.elements.len() != other.elements.len() {
+            return false;
+        }
+        pending.extend(self.elements.iter().zip(other.elements.iter()));
+        while let Some((a, b)) = pending.pop() {
+            match (a, b) {
+                (Value::Tuple(ta, pa), Value::Tuple(tb, pb))
+                | (Value::Function(ta, pa), Value::Function(tb, pb)) => {
+                    if ta != tb || pa.elements.len() != pb.elements.len() {
+                        return false;
+                    }
+                    pending.extend(pa.elements.iter().zip(pb.elements.iter()));
+                }
+                // Leaves, and `Builtin` (whose payload carries no elements), compare directly:
+                // this cannot re-enter, because every composite is handled above.
+                (a, b) if a == b => {}
+                _ => return false,
+            }
+        }
+        true
     }
 }
 
@@ -448,50 +474,126 @@ impl Value {
     /// Heap binary references are execution-local, not table references, and pass
     /// through untouched, as do process/resource/ref identities (which cannot occur
     /// in compile-time values anyway).
+    /// The same value with every table reference rewritten through `remaps` — for
+    /// transplanting a compile-time value (a cached module value) between programs.
+    /// Heap binary references are execution-local, not table references, and pass
+    /// through untouched, as do process/resource/ref identities (which cannot occur
+    /// in compile-time values anyway).
+    ///
+    /// **Iterative**, like every other walk over value structure: a module value is normally
+    /// shallow, but nothing enforces that, and the failure mode is an uncatchable abort.
     pub fn remap_ids(&self, remaps: &crate::bytecode::IdRemaps) -> Value {
-        fn remap_payload(payload: &Payload, remaps: &crate::bytecode::IdRemaps) -> Payload {
-            let elements = payload
-                .elements
-                .iter()
-                .map(|value| value.remap_ids(remaps))
-                .collect();
-            let annotations = payload
+        /// Which composite a frame rebuilds once its children are remapped.
+        enum Node {
+            Tuple(usize),
+            Function(usize),
+            Builtin(usize),
+        }
+
+        struct Frame<'a> {
+            node: Node,
+            src: &'a Payload,
+            done: Vec<Value>,
+        }
+
+        fn child(payload: &Payload, index: usize) -> Option<&Value> {
+            payload.elements.get(index).or_else(|| {
+                payload
+                    .annotations()
+                    .get(index - payload.elements.len())
+                    .map(|(_, value)| value)
+            })
+        }
+
+        fn assemble(frame: Frame, remaps: &crate::bytecode::IdRemaps) -> Value {
+            let Frame {
+                node,
+                src,
+                mut done,
+            } = frame;
+            let annotations = src
                 .annotations()
                 .iter()
-                .map(|(key, value)| {
-                    (
-                        *remaps.annotation_keys.get(key).unwrap_or(key),
-                        value.remap_ids(remaps),
-                    )
-                })
+                .map(|(key, _)| *remaps.annotation_keys.get(key).unwrap_or(key))
+                .zip(done.split_off(src.elements.len()))
                 .collect();
-            Payload::with_annotations(elements, annotations).with_type_argument(
-                payload
-                    .type_argument()
-                    .map(|type_id| *remaps.types.get(&type_id).unwrap_or(&type_id)),
-            )
-        }
-        match self {
-            Value::Int(_) | Value::BigInt(_) | Value::Reference(_) => self.clone(),
-            Value::Binary(Binary::Constant(idx)) => {
-                Value::Binary(Binary::Constant(*remaps.constants.get(idx).unwrap_or(idx)))
+            let payload = Payload::with_annotations(done, annotations)
+                .with_type_argument(
+                    src.type_argument()
+                        .map(|type_id| *remaps.types.get(&type_id).unwrap_or(&type_id)),
+                )
+                .shared();
+            match node {
+                Node::Tuple(id) => Value::Tuple(id, payload),
+                Node::Function(id) => Value::Function(id, payload),
+                Node::Builtin(id) => Value::Builtin(id, Some(payload)),
             }
-            Value::Binary(Binary::Data(_)) => self.clone(),
-            Value::Tuple(tuple_id, payload) => Value::Tuple(
-                *remaps.tuples.get(tuple_id).unwrap_or(tuple_id),
-                remap_payload(payload, remaps).shared(),
-            ),
-            Value::Function(function_id, payload) => Value::Function(
-                *remaps.functions.get(function_id).unwrap_or(function_id),
-                remap_payload(payload, remaps).shared(),
-            ),
-            Value::Builtin(builtin_id, payload) => Value::Builtin(
-                *remaps.builtins.get(builtin_id).unwrap_or(builtin_id),
-                payload
-                    .as_ref()
-                    .map(|payload| remap_payload(payload, remaps).shared()),
-            ),
-            Value::Process(..) | Value::Resource(..) => self.clone(),
+        }
+
+        fn leaf(value: &Value, remaps: &crate::bytecode::IdRemaps) -> Value {
+            match value {
+                Value::Binary(Binary::Constant(idx)) => {
+                    Value::Binary(Binary::Constant(*remaps.constants.get(idx).unwrap_or(idx)))
+                }
+                Value::Builtin(id, None) => {
+                    Value::Builtin(*remaps.builtins.get(id).unwrap_or(id), None)
+                }
+                other => other.clone(),
+            }
+        }
+
+        fn node_of<'a>(
+            value: &'a Value,
+            remaps: &crate::bytecode::IdRemaps,
+        ) -> Option<(Node, &'a Payload)> {
+            match value {
+                Value::Tuple(id, payload) => {
+                    Some((Node::Tuple(*remaps.tuples.get(id).unwrap_or(id)), payload))
+                }
+                Value::Function(id, payload) => Some((
+                    Node::Function(*remaps.functions.get(id).unwrap_or(id)),
+                    payload,
+                )),
+                Value::Builtin(id, Some(payload)) => Some((
+                    Node::Builtin(*remaps.builtins.get(id).unwrap_or(id)),
+                    payload,
+                )),
+                _ => None,
+            }
+        }
+
+        let mut stack: Vec<Frame<'_>> = Vec::new();
+        let mut value = self;
+
+        'descend: loop {
+            let mut converted = loop {
+                let Some((node, payload)) = node_of(value, remaps) else {
+                    break leaf(value, remaps);
+                };
+                stack.push(Frame {
+                    node,
+                    src: payload,
+                    done: Vec::with_capacity(payload.elements.len()),
+                });
+                match child(payload, 0) {
+                    Some(next) => value = next,
+                    None => break assemble(stack.pop().expect("just pushed"), remaps),
+                }
+            };
+
+            loop {
+                let Some(frame) = stack.last_mut() else {
+                    return converted;
+                };
+                frame.done.push(converted);
+                match child(frame.src, frame.done.len()) {
+                    Some(next) => {
+                        value = next;
+                        continue 'descend;
+                    }
+                    None => converted = assemble(stack.pop().expect("just borrowed"), remaps),
+                }
+            }
         }
     }
 

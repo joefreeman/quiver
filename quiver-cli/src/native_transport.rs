@@ -5,10 +5,6 @@ use quiver_io::NativeEffect;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
-/// Stack size for worker threads (256 MiB). Lazily committed by the OS, so this large
-/// reservation is virtually free unless deep recursion actually uses it.
-const WORKER_STACK_SIZE: usize = 256 * 1024 * 1024;
-
 /// Command receiver using mpsc::Receiver
 pub struct NativeCommandReceiver {
     receiver: Receiver<Command<NativeEffect>>,
@@ -73,13 +69,12 @@ where
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (evt_tx, evt_rx) = mpsc::channel();
 
-    // Worker threads get a large stack. Many value traversals (drop, formatting, equality,
-    // module codegen) recurse on the depth of nested tuple values, so a deep data structure
-    // (e.g. a long Cons list) needs proportional stack. The stack is lazily committed, so a
-    // generous reservation costs nothing unless actually used.
+    // Workers take the default stack. They used to reserve 256 MiB, because the runtime walked
+    // value structure recursively — dropping, converting, comparing or rendering a value cost
+    // stack proportional to its *nesting*, and a Cons list nests once per element. Those walks
+    // are all iterative now, so depth costs heap and an ordinary stack is enough.
     let thread_handle = thread::Builder::new()
         .name(format!("quiver-worker-{worker_id}"))
-        .stack_size(WORKER_STACK_SIZE)
         .spawn(move || {
             let cmd_receiver = NativeCommandReceiver { receiver: cmd_rx };
 
