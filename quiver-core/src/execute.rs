@@ -110,7 +110,7 @@ pub fn execute_bytecode_sync_with<E: Effect>(
                     let value = value.clone();
                     return Ok((value, executor));
                 }
-                Err(e) => return Err(e.clone()),
+                Err(e) => return Err((**e).clone()),
             }
         }
 

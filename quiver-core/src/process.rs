@@ -1,7 +1,7 @@
 use crate::effects::Effect;
 use crate::value::{ResourceId, Value};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 
 /// An evaluation context in which routing and side-effecting operations are rejected,
@@ -208,6 +208,17 @@ pub struct SelectState {
     pub start_time: Option<u64>,
     /// The receive function being executed (index, message value), if any
     pub receiving: Option<(usize, Value)>,
+    /// Results delivered for this select's process sources: `None` while an await is in
+    /// flight, `Some(result)` once it answers.
+    ///
+    /// It lives *here*, not on the process, because that is exactly its lifetime — a result
+    /// is carried from the environment to the select that asked for it, and nothing may read
+    /// one afterwards (`initialize_select` overwrites each target's slot before every await,
+    /// and a repeat `!p` re-fetches from the target's tombstone). Hanging it off `Process`
+    /// instead meant entries outlived their select, which both leaked every completed await's
+    /// result and left the map unbounded; here `complete_select`'s `take()` disposes of them
+    /// and the invariant needs no upkeep.
+    pub awaited: AwaitedResults,
 }
 
 /// A party to notify when the carrying process terminates. Registered on the *target*
@@ -266,6 +277,122 @@ pub struct TrackingState {
     pub boundary_len: usize,
 }
 
+/// Delivered await results, keyed by the process they came from — an association list.
+///
+/// Bounded by the *active select's* process sources, which is one for a plain `!p` and a
+/// handful for a race: entries are created only for a select that is waiting on that target,
+/// and cleared when the select completes. (They were once left behind, which both leaked the
+/// result values and made this unbounded — a linear scan would have been a quadratic then.)
+#[derive(Debug, Default, Clone)]
+pub struct AwaitedResults(Vec<(ProcessId, Option<Value>)>);
+
+impl AwaitedResults {
+    /// Register or deliver a result for `process`, returning what it displaces.
+    pub fn insert(&mut self, process: ProcessId, result: Option<Value>) -> Option<Option<Value>> {
+        match self.0.iter_mut().find(|(id, _)| *id == process) {
+            Some((_, slot)) => Some(std::mem::replace(slot, result)),
+            None => {
+                self.0.push((process, result));
+                None
+            }
+        }
+    }
+
+    pub fn get(&self, process: &ProcessId) -> Option<&Option<Value>> {
+        self.0.iter().find(|(id, _)| id == process).map(|(_, r)| r)
+    }
+
+    pub fn contains_key(&self, process: &ProcessId) -> bool {
+        self.0.iter().any(|(id, _)| id == process)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &Option<Value>> {
+        self.0.iter().map(|(_, result)| result)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+/// Stashed stream events, keyed by resource — an association list, not a map.
+///
+/// A process holds at most one entry per resource it owns, and owning more than a handful is
+/// already unusual, so a linear scan beats hashing outright at this size. The reason it is
+/// worth the swap is `Process`'s footprint rather than speed: a `HashMap` is 48 bytes inline
+/// and a `Vec` 24, on a struct every live process pays for.
+#[derive(Debug, Default)]
+pub struct ResourceEvents(Vec<(ResourceId, Value)>);
+
+impl ResourceEvents {
+    /// Stash `value` for `resource`, returning any event it displaces.
+    pub fn insert(&mut self, resource: ResourceId, value: Value) -> Option<Value> {
+        match self.0.iter_mut().find(|(id, _)| *id == resource) {
+            Some((_, slot)) => Some(std::mem::replace(slot, value)),
+            None => {
+                self.0.push((resource, value));
+                None
+            }
+        }
+    }
+
+    pub fn remove(&mut self, resource: &ResourceId) -> Option<Value> {
+        let index = self.0.iter().position(|(id, _)| id == resource)?;
+        Some(self.0.swap_remove(index).1)
+    }
+
+    pub fn contains_key(&self, resource: &ResourceId) -> bool {
+        self.0.iter().any(|(id, _)| id == resource)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        self.0.iter().map(|(_, value)| value)
+    }
+}
+
+/// The resources with a next-event read armed, as an association list. Same size argument as
+/// [`ResourceEvents`], and bounded by the same thing — the resources one process owns.
+#[derive(Debug, Default)]
+pub struct ArmedResources(Vec<ResourceId>);
+
+impl ArmedResources {
+    /// Arm `resource`, answering whether it was newly armed (as `HashSet::insert` does) — the
+    /// caller uses that to avoid double-arming across select re-entries.
+    pub fn insert(&mut self, resource: ResourceId) -> bool {
+        if self.0.contains(&resource) {
+            return false;
+        }
+        self.0.push(resource);
+        true
+    }
+
+    pub fn remove(&mut self, resource: &ResourceId) -> bool {
+        match self.0.iter().position(|id| id == resource) {
+            Some(index) => {
+                self.0.swap_remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn contains(&self, resource: &ResourceId) -> bool {
+        self.0.contains(resource)
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
 #[derive(Debug)]
 pub struct Process {
     pub stack: Vec<Value>,
@@ -273,12 +400,14 @@ pub struct Process {
     pub frames: Vec<Frame>,
     pub mailbox: VecDeque<Value>,
     pub persistent: bool,
-    pub result: Option<Result<Value, crate::error::Error>>,
+    /// The completed process's outcome. The error arm is **boxed**: `Error` is 48 bytes and a
+    /// crash is the rare case, so inline it made `result` tie for the largest field in a struct
+    /// every live process pays for.
+    pub result: Option<Result<Value, Box<crate::error::Error>>>,
     /// Boxed: `SelectState` is 112 bytes and almost every process is `None` here, so inline
     /// it would be the single largest field in `Process` and paid by every process that never
     /// selects.
     pub select_state: Option<Box<SelectState>>,
-    pub awaiting: HashMap<ProcessId, Option<Value>>,
     /// Who to notify when this process terminates (see [`Watcher`]). Taken (emptied)
     /// exactly once, when the process completes.
     pub watchers: Vec<Watcher>,
@@ -304,10 +433,10 @@ pub struct Process {
     /// one slot per resource, since at most one read is armed per stream. Consumed
     /// (in preference to arming) by the next select naming the resource, or by a
     /// plain read builtin.
-    pub resource_events: HashMap<ResourceId, Value>,
+    pub resource_events: ResourceEvents,
     /// Stream resources with a next-event read armed at the io backend. Prevents
     /// double-arming across select re-entries; cleared as each event arrives.
-    pub armed_resources: HashSet<ResourceId>,
+    pub armed_resources: ArmedResources,
 }
 
 impl Process {
@@ -329,14 +458,13 @@ impl Process {
             persistent,
             result: None,
             select_state: None,
-            awaiting: HashMap::new(),
             watchers: Vec::new(),
             state: Value::nil(),
             subscriber_count: 0,
             subscriptions: Vec::new(),
             tracking: None,
-            resource_events: HashMap::new(),
-            armed_resources: HashSet::new(),
+            resource_events: ResourceEvents::default(),
+            armed_resources: ArmedResources::default(),
         }
     }
 

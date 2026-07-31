@@ -415,7 +415,6 @@ impl<E: Effect> Executor<E> {
             process.armed_resources.clear();
             process.stack = Vec::new();
             process.mailbox = Default::default();
-            process.awaiting = Default::default();
             process.select_state = None;
             process.resource_events = Default::default();
             Some(())
@@ -560,7 +559,7 @@ impl<E: Effect> Executor<E> {
     pub fn kill(&mut self, pid: ProcessId, error: Error) {
         match self.get_process_mut(pid) {
             Some(process) if process.result.is_none() && !process.persistent => {
-                process.result = Some(Err(error));
+                process.result = Some(Err(Box::new(error)));
                 process.frames.clear();
             }
             _ => return,
@@ -692,13 +691,11 @@ impl<E: Effect> Executor<E> {
                     if let Some((_, value)) = &state.receiving {
                         collect_process_refs(value, &mut outgoing);
                     }
-                }
-                // Only the delivered *results* are live edges — not the keys. `awaiting` is
-                // not cleared on `complete_select`, so a key lingers as a stale entry after
-                // the await finishes; and an *active* await already keeps its target in
-                // `select_state.sources` above, making the key redundant when live.
-                for value in process.awaiting.values().flatten() {
-                    collect_process_refs(value, &mut outgoing);
+                    // Only the delivered *results* are live edges — not the keys, which the
+                    // sources above already cover.
+                    for value in state.awaited.values().flatten() {
+                        collect_process_refs(value, &mut outgoing);
+                    }
                 }
                 ProcessAdjacency {
                     pid,
@@ -912,17 +909,32 @@ impl<E: Effect> Executor<E> {
         // Rebuild the result on this worker's heap.
         let injected_result = self.from_wire(result)?;
 
-        // Store the result in the process's awaiting map (retaining as it enters storage,
-        // releasing any stale result the insert displaces). A terminated awaiter (e.g.
-        // killed while parked on this very select) is skipped, like a dead message
-        // target — its watcher entry on the source dangles harmlessly.
-        if self
-            .get_process(awaiter)
-            .is_some_and(|p| p.persistent || p.result.is_none())
-        {
+        // Store the result in the process's awaiting map (releasing any stale result the
+        // insert displaces). A terminated awaiter (e.g. killed while parked on this very
+        // select) is skipped, like a dead message target — its watcher entry on the source
+        // dangles harmlessly.
+        //
+        // Only if a select is actually waiting on this target. Losing a race is the case that
+        // matters: in `![p1, p2]`, p2's result can arrive after p1 already completed the
+        // select, and storing it then would strand it for the awaiter's whole life. Nothing is
+        // lost by dropping it — every `Action::Await` is derived from `select_state.sources`,
+        // which survives until `complete_select`, so an in-flight await always finds its target
+        // here; and a later `!p2` re-fetches from p2's tombstone, as a repeat await always has.
+        if self.get_process(awaiter).is_some_and(|p| {
+            (p.persistent || p.result.is_none())
+                && p.select_state.as_ref().is_some_and(|state| {
+                    state
+                        .sources
+                        .iter()
+                        .any(|source| matches!(source, Value::Process(p, _) if *p == awaited))
+                })
+        }) {
             self.get_process_mut(awaiter)
                 .unwrap()
-                .awaiting
+                .select_state
+                .as_mut()
+                .expect("guarded above")
+                .awaited
                 .insert(awaited, Some(injected_result));
         }
 
@@ -969,7 +981,7 @@ impl<E: Effect> Executor<E> {
             }
             Err(error) => {
                 // Error: set error and terminate the process
-                process.result = Some(Err(error));
+                process.result = Some(Err(Box::new(error)));
                 process.frames.clear();
                 killed = true;
             }
@@ -1200,9 +1212,9 @@ impl<E: Effect> Executor<E> {
             if let Some((_, value)) = &state.receiving {
                 collect_binaries(value, &mut total);
             }
-        }
-        for value in process.awaiting.values().flatten() {
-            collect_binaries(value, &mut total);
+            for value in state.awaited.values().flatten() {
+                collect_binaries(value, &mut total);
+            }
         }
         for value in process.resource_events.values() {
             collect_binaries(value, &mut total);
@@ -1266,7 +1278,9 @@ impl<E: Effect> Executor<E> {
                 Some(Ok(value)) => {
                     Some(Ok(self.to_wire(value).unwrap_or_else(|_| WireValue::nil())))
                 }
-                Some(Err(e)) => Some(Err(e.clone())),
+                // Unboxed on the way out: `ProcessResult` is the reported (wire) form, not
+                // per-process storage, so it has no reason to carry the box.
+                Some(Err(e)) => Some(Err((**e).clone())),
                 None => None,
             };
 
@@ -1455,7 +1469,7 @@ impl<E: Effect> Executor<E> {
                     pending_request = request;
                 }
                 Err(error) => {
-                    proc.result = Some(Err(error.clone()));
+                    proc.result = Some(Err(Box::new(error.clone())));
                     proc.frames.clear();
                 }
             }
@@ -1506,7 +1520,7 @@ impl<E: Effect> Executor<E> {
                 // The popped stack slot's retained count transfers into `result`.
                 process.result = Some(match process.stack.pop() {
                     Some(result) => Ok(result),
-                    None => Err(Error::StackUnderflow),
+                    None => Err(Box::new(Error::StackUnderflow)),
                 });
             }
 
@@ -2859,6 +2873,7 @@ impl<E: Effect> Executor<E> {
             cursors: vec![0; receive_count],
             start_time,
             receiving: None,
+            awaited: crate::process::AwaitedResults::default(),
         }));
 
         // If we found PIDs or resources to arm, register/route before processing
@@ -2869,7 +2884,13 @@ impl<E: Effect> Executor<E> {
         if !pid_targets.is_empty() || !arm.is_empty() {
             let mut displaced = Vec::new();
             for target in &pid_targets {
-                if let Some(Some(old)) = process.awaiting.insert(*target, None) {
+                if let Some(Some(old)) = process
+                    .select_state
+                    .as_mut()
+                    .expect("select state was just installed")
+                    .awaited
+                    .insert(*target, None)
+                {
                     displaced.push(old);
                 }
             }
@@ -3029,7 +3050,10 @@ impl<E: Effect> Executor<E> {
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         // Check if result is available (we've already awaited upfront)
-        if let Some(result_opt) = process.awaiting.get(&target_pid)
+        if let Some(result_opt) = process
+            .select_state
+            .as_ref()
+            .and_then(|state| state.awaited.get(&target_pid))
             && let Some(result) = result_opt
         {
             return Ok(Some(result.clone()));
@@ -3277,6 +3301,7 @@ impl<E: Effect> Executor<E> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+
         process.stack.push(result);
 
         // Increment frame counter
@@ -3787,7 +3812,7 @@ impl<E: Effect> Executor<E> {
 mod process_adjacency_tests {
     use super::*;
     use crate::builtins::BuiltinRegistry;
-    use crate::process::{ProcessCategory, SelectState};
+    use crate::process::{AwaitedResults, ProcessCategory, SelectState};
     use crate::value::ResourceId;
     use serde::{Deserialize, Serialize};
 
@@ -3846,10 +3871,15 @@ mod process_adjacency_tests {
             cursors: vec![],
             start_time: None,
             receiving: Some((0, pid(15))),
+            awaited: AwaitedResults::default(),
         }));
         // A delivered await *result* is an edge; the key (16, the awaited pid) is not — it
         // can linger stale, and a live await is covered by select_state.sources above.
-        p.awaiting.insert(16, Some(pid(17)));
+        p.select_state
+            .as_mut()
+            .unwrap()
+            .awaited
+            .insert(16, Some(pid(17)));
         ex.processes.insert(0, p);
 
         let a = adjacency_of(&ex, 0);
@@ -3888,12 +3918,154 @@ mod process_adjacency_tests {
     fn error_result_contributes_no_edges() {
         let mut ex = executor();
         let mut p = Process::new(false);
-        p.result = Some(Err(Error::Killed)); // Error carries no Value
+        p.result = Some(Err(Box::new(Error::Killed))); // Error carries no Value
         ex.processes.insert(0, p);
 
         let a = adjacency_of(&ex, 0);
         assert_eq!(a.category, ProcessCategory::Tombstone);
         assert!(a.outgoing.is_empty());
+    }
+}
+
+/// `awaiting` holds delivered await results, and its entries are the *select's*, not the
+/// process's: they exist to carry a result from the environment to the select that asked for
+/// it, and nothing may read one afterwards (`initialize_select` overwrites each target's slot
+/// before every await, and a repeat `!p` re-fetches from the target's tombstone).
+///
+/// Left unbounded it was a leak proportional to the results' size — measured at ~4.1 KB per
+/// completed await with a 4 KiB result, for the awaiter's entire life. These lock the two
+/// halves of the fix.
+#[cfg(test)]
+mod awaiting_lifecycle_tests {
+    use super::*;
+    use crate::builtins::BuiltinRegistry;
+    use crate::process::{AwaitedResults, SelectState};
+    use crate::value::ResourceId;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestEffect;
+    impl Effect for TestEffect {
+        fn resource_id(&self) -> Option<ResourceId> {
+            None
+        }
+    }
+
+    fn executor() -> Executor<TestEffect> {
+        Executor::new(BuiltinRegistry::new(), false, 0)
+    }
+
+    fn adjacency(ex: &Executor<TestEffect>, pid: ProcessId) -> ProcessAdjacency {
+        ex.process_adjacency()
+            .into_iter()
+            .find(|a| a.pid == pid)
+            .expect("process present in adjacency")
+    }
+
+    fn awaited(ex: &Executor<TestEffect>, pid: ProcessId) -> &AwaitedResults {
+        &ex.get_process(pid)
+            .unwrap()
+            .select_state
+            .as_ref()
+            .expect("a select is running")
+            .awaited
+    }
+
+    /// Whether nothing is stored — including the case where the select is over, which is the
+    /// point: the results go with it, so there is nowhere for one to linger.
+    fn awaited_is_empty(ex: &Executor<TestEffect>, pid: ProcessId) -> bool {
+        ex.get_process(pid)
+            .unwrap()
+            .select_state
+            .as_ref()
+            .is_none_or(|state| state.awaited.is_empty())
+    }
+
+    /// A process parked on a select that names `targets` as process sources.
+    fn selecting_on(targets: &[ProcessId]) -> Process {
+        let mut process = Process::new(false);
+        process.frames.push(Frame::new(0, 0, 0));
+        process.select_state = Some(Box::new(SelectState {
+            frame: 0,
+            instruction: 0,
+            sources: targets.iter().map(|p| Value::Process(*p, 0)).collect(),
+            cursors: vec![],
+            start_time: None,
+            receiving: None,
+            awaited: AwaitedResults::default(),
+        }));
+        process
+    }
+
+    #[test]
+    fn a_result_the_active_select_awaits_is_stored() {
+        let mut ex = executor();
+        ex.processes.insert(0, selecting_on(&[5]));
+
+        ex.notify_result(0, 5, WireValue::nil()).unwrap();
+
+        assert!(
+            awaited(&ex, 0).contains_key(&5),
+            "the select is waiting on 5, so its result must be delivered"
+        );
+    }
+
+    #[test]
+    fn a_result_no_select_awaits_is_dropped() {
+        let mut ex = executor();
+        // The losing racer's case: `![p1, p2]` completed on p1, and p2 answers afterwards.
+        let mut process = selecting_on(&[5]);
+        process.select_state = None;
+        ex.processes.insert(0, process);
+
+        ex.notify_result(0, 5, WireValue::nil()).unwrap();
+
+        assert!(
+            awaited_is_empty(&ex, 0),
+            "nothing is waiting for this result, so storing it would strand it"
+        );
+    }
+
+    #[test]
+    fn a_result_for_a_target_outside_the_active_select_is_dropped() {
+        let mut ex = executor();
+        // A later select is running, but it does not name 5 — an old await answering late.
+        ex.processes.insert(0, selecting_on(&[9]));
+
+        ex.notify_result(0, 5, WireValue::nil()).unwrap();
+
+        assert!(
+            awaited_is_empty(&ex, 0),
+            "only the active select's own targets may be delivered"
+        );
+    }
+
+    #[test]
+    fn completing_a_select_drops_the_awaited_results() {
+        let mut ex = executor();
+        ex.processes.insert(0, selecting_on(&[5, 6]));
+        // Both racers answer before the select runs again. The results reference processes, so
+        // whether they are still retained is *observable* — as reclamation edges.
+        ex.notify_result(0, 5, WireValue::Process(70, 0)).unwrap();
+        ex.notify_result(0, 6, WireValue::Process(71, 0)).unwrap();
+        assert_eq!(awaited(&ex, 0).len(), 2);
+        let held: HashSet<ProcessId> = adjacency(&ex, 0).outgoing.into_iter().collect();
+        assert!(
+            held.contains(&70) && held.contains(&71),
+            "held while awaiting"
+        );
+
+        // Complete with an unrelated value, so neither result is the one pushed and both must
+        // become unreachable. Asserting on the edges rather than on the map is deliberate: the
+        // map now lives *inside* the select state, so checking it is empty afterwards would
+        // only restate that the select is over.
+        ex.complete_select(0, Value::nil()).unwrap();
+
+        let held: HashSet<ProcessId> = adjacency(&ex, 0).outgoing.into_iter().collect();
+        assert!(
+            !held.contains(&70) && !held.contains(&71),
+            "the results go with the select that asked for them — the loser's included"
+        );
     }
 }
 

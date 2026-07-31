@@ -748,7 +748,8 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 .executor
                 .to_wire(value)
                 .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?),
-            Err(error) => Err(error.clone()),
+            // Unboxed on the way out: the reported form carries the error by value.
+            Err(error) => Err((**error).clone()),
         };
         self.sender.send(Event::ResultResponse {
             request_id,
@@ -887,7 +888,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                         .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
                     Ok(extracted_value)
                 }
-                Err(error) => Err(error.clone()),
+                Err(error) => Err((**error).clone()),
             };
             return Ok(Some(extracted));
         }
