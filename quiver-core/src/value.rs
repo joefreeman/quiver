@@ -36,7 +36,11 @@ pub enum Binary {
 #[derive(Debug, Deserialize)]
 #[serde(from = "PayloadData")]
 pub struct Payload {
-    elements: Vec<Value>,
+    /// Boxed rather than a `Vec`: a payload is immutable once built, so the spare capacity and
+    /// the capacity word a `Vec` carries are both dead weight — 8 bytes on every tuple in the
+    /// system. Elements are still mutated *in place* (the iterative drop vacates them), which a
+    /// boxed slice supports; only growth is given up, and nothing grows one.
+    elements: Box<[Value]>,
     /// Everything a payload only *sometimes* carries, in one box, so an ordinary tuple pays a
     /// single pointer-sized `None` for all of it. Both parts are rare and neither is on a read
     /// path, which is what makes the shared indirection the right trade: `type_argument` in
@@ -125,7 +129,10 @@ impl From<PayloadData> for Payload {
 impl Payload {
     pub fn new(elements: Vec<Value>) -> Self {
         Payload {
-            elements,
+            // Free when capacity equals length, which the runtime's construction sites
+            // guarantee (`handle_tuple`/`handle_function` size their vectors exactly). A
+            // caller that over-allocates pays one shrink here, on a cold path.
+            elements: elements.into_boxed_slice(),
             extras: None,
         }
     }
@@ -141,7 +148,7 @@ impl Payload {
             "duplicate annotation key"
         );
         Payload {
-            elements,
+            elements: elements.into_boxed_slice(),
             extras: Some(Box::new(Extras {
                 annotations,
                 type_argument: None,
@@ -742,7 +749,11 @@ impl Value {
             .cloned()
             .collect();
         annotations.push((key, annotation));
-        let elements = payload.map(|p| p.elements.clone()).unwrap_or_default();
+        // `into_vec` on the clone is free (a boxed slice is already exactly sized), and
+        // `with_annotations` re-boxes it.
+        let elements = payload
+            .map(|p| p.elements.clone().into_vec())
+            .unwrap_or_default();
         // Re-attach preserves a builtin's type argument — it is operational, not metadata.
         let type_argument = payload.and_then(Payload::type_argument);
         let payload = Payload::with_annotations(elements, annotations)
