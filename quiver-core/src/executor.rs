@@ -293,7 +293,14 @@ impl<E: Effect> Executor<E> {
     /// A constant is materialised on first use and cached (see `cached_constant_binary`), so
     /// this only meets `Binary::Constant` on values the runtime never allocated for — the
     /// module-name binaries in failure-provenance sites, which the formatter reads directly.
-    pub fn get_binary_data<'a>(&'a self, binary: &'a Binary) -> Result<&'a BinaryData, Error> {
+    ///
+    /// Returns the *handle*, not the node. A reader is unaffected (`Rc` derefs, so
+    /// `data.len()` and friends read through it), but a builder needs the handle: `concat`,
+    /// `slice` and `tiled` take `Rc` operands, so a caller holding only a `&BinaryData` had to
+    /// `Rc::new(data.clone())` — allocating a fresh node for an operand that was already
+    /// refcounted, at every rope operation. Structural sharing is the point of the rope, and
+    /// borrowing here was quietly paying to opt out of it.
+    pub fn get_binary_data<'a>(&'a self, binary: &'a Binary) -> Result<&'a Rc<BinaryData>, Error> {
         match binary {
             Binary::Data(data) => Ok(data),
             Binary::Constant(index) => Err(Error::InvalidArgument(format!(

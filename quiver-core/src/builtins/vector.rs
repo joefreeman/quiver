@@ -293,11 +293,12 @@ pub fn builtin_vector_push<E: Effect>(
     let lane = BinaryData::new(lane_bytes);
 
     // Empty buffer: the lane *is* the new buffer (avoids a degenerate `Concat` over nil).
-    // Otherwise share `old` (O(1) clone) as the left of a fresh `Concat`.
+    // Otherwise share `old` — a refcount bump on the existing node — as the left of a fresh
+    // `Concat`.
     let appended = if old_len == 0 {
         lane
     } else {
-        BinaryData::concat(Rc::new(old.clone()), Rc::new(lane))
+        BinaryData::concat(old.clone(), Rc::new(lane))
     };
     Ok(Completion::Value(Value::Binary(
         ctx.executor.allocate_binary_data(appended)?,

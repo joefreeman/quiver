@@ -18,7 +18,7 @@ pub fn builtin_binary_repeat<E: Effect>(
             (Value::Binary(binary), count) => {
                 let count = value_to_usize(count)?;
                 let unit = ctx.executor.get_binary_data(binary)?.clone();
-                let tiled = BinaryData::tiled(Rc::new(unit), count);
+                let tiled = BinaryData::tiled(unit, count);
                 // allocate_binary_data enforces MAX_BINARY_SIZE against the realized length.
                 let binary = ctx.executor.allocate_binary_data(tiled)?;
                 Ok(Completion::Value(Value::Binary(binary)))
@@ -104,12 +104,9 @@ pub fn builtin_binary_concat<E: Effect>(
                     )));
                 }
 
-                // O(1) concatenation through structural sharing
-                // Clone the BinaryData and wrap in Rc for concat
-                let concat = BinaryData::concat(
-                    Rc::new(binary_data_a.clone()),
-                    Rc::new(binary_data_b.clone()),
-                );
+                // O(1) concatenation through structural sharing: both operands are already
+                // refcounted nodes, so this is two bumps and one new node.
+                let concat = BinaryData::concat(binary_data_a.clone(), binary_data_b.clone());
                 let binary = ctx.executor.allocate_binary_data(concat)?;
                 Ok(Completion::Value(Value::Binary(binary)))
             }
@@ -648,7 +645,7 @@ pub fn builtin_binary_set<E: Effect>(
                     } else if byte_offset == 0 {
                         // Modified bytes at start
                         let right = BinaryData::slice(
-                            Rc::new(binary_data.clone()),
+                            binary_data.clone(),
                             last_byte_needed,
                             len - last_byte_needed,
                         )
@@ -656,15 +653,13 @@ pub fn builtin_binary_set<E: Effect>(
                         BinaryData::concat(Rc::new(BinaryData::new(new_bytes)), Rc::new(right))
                     } else if last_byte_needed == len {
                         // Modified bytes at end
-                        let left = BinaryData::slice(Rc::new(binary_data.clone()), 0, byte_offset)
-                            .unwrap();
+                        let left = BinaryData::slice(binary_data.clone(), 0, byte_offset).unwrap();
                         BinaryData::concat(Rc::new(left), Rc::new(BinaryData::new(new_bytes)))
                     } else {
                         // Modified bytes in middle
-                        let left = BinaryData::slice(Rc::new(binary_data.clone()), 0, byte_offset)
-                            .unwrap();
+                        let left = BinaryData::slice(binary_data.clone(), 0, byte_offset).unwrap();
                         let right = BinaryData::slice(
-                            Rc::new(binary_data.clone()),
+                            binary_data.clone(),
                             last_byte_needed,
                             len - last_byte_needed,
                         )
@@ -721,11 +716,10 @@ pub fn builtin_binary_slice<E: Effect>(
                     }
 
                     // Use O(1) structural slicing instead of materializing
-                    let sliced =
-                        BinaryData::slice(Rc::new(binary_data.clone()), start, end - start)
-                            .ok_or_else(|| {
-                                Error::InvalidArgument("Failed to create slice".to_string())
-                            })?;
+                    let sliced = BinaryData::slice(binary_data.clone(), start, end - start)
+                        .ok_or_else(|| {
+                            Error::InvalidArgument("Failed to create slice".to_string())
+                        })?;
                     let binary = ctx.executor.allocate_binary_data(sliced)?;
                     Ok(Completion::Value(Value::Binary(binary)))
                 }
@@ -848,8 +842,7 @@ pub fn builtin_binary_append<E: Effect>(
                     // Append using efficient concat
                     let binary_data = ctx.executor.get_binary_data(binary)?;
                     let new_data = BinaryData::new(new_bytes);
-                    let result =
-                        BinaryData::concat(Rc::new(binary_data.clone()), Rc::new(new_data));
+                    let result = BinaryData::concat(binary_data.clone(), Rc::new(new_data));
 
                     let binary = ctx.executor.allocate_binary_data(result)?;
                     Ok(Completion::Value(Value::Binary(binary)))
