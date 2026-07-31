@@ -9,7 +9,7 @@ use quiver_core::compatibility::{
     CompatibilityInput, CompatibilityTables, compute_canonical_tuples, compute_field_offsets,
 };
 use quiver_core::effects::{Effect, EffectBackend, ResultTupleInfo};
-use quiver_core::executor::ProgramUpdate;
+use quiver_core::executor::{ProgramUpdate, TableUpdate};
 use quiver_core::process::{
     ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo, ProcessStatus,
 };
@@ -1139,12 +1139,19 @@ impl<E: Effect> Environment<E> {
                 self.program.get_tuples(),
             ));
 
+            // Shape the growing tables to the transport. Where the workers are threads, each
+            // takes the whole merged table by pointer and they all reference one allocation —
+            // the duplication this removes was the largest single cost in the runtime's
+            // footprint. Where a command has to be serialized, a delta is the only affordable
+            // form: the whole program would otherwise be re-encoded, per worker, per update.
+            let shared = self.workers.iter().all(|worker| worker.shares_memory());
+
             let update = ProgramUpdate {
-                constants: new_constants,
-                functions: new_functions,
-                tuples: new_tuples,
-                types: new_types,
-                builtins: new_builtins,
+                constants: table(shared, self.program.get_constants(), new_constants),
+                functions: table(shared, self.program.get_functions(), new_functions),
+                tuples: table(shared, self.program.get_tuples(), new_tuples),
+                types: table(shared, self.program.get_types(), new_types),
+                builtins: table(shared, self.program.get_builtins(), new_builtins),
                 resources: resource_names,
                 type_compatibility,
                 function_param_compatibility,
@@ -2669,5 +2676,18 @@ mod reclamation_tests {
         // Root holds live process 1; 1 holds tombstone 2 (awaiting/sampling 1 would expose it).
         let adj = [root(0, &[1]), root(1, &[2]), tombstone(2, &[])];
         assert!(sweep_set(&adj).is_empty());
+    }
+}
+
+/// Shape one growing table for the transport: the whole merged table (shared by pointer) when
+/// the workers are threads, or just the new entries when a command has to be serialized.
+///
+/// Copying `whole` once here is the point — it replaces one copy *per worker*, and on the
+/// native transport that copy is then shared rather than duplicated.
+fn table<T: Clone>(shared: bool, whole: &[T], delta: Vec<T>) -> TableUpdate<T> {
+    if shared {
+        TableUpdate::Shared(Arc::new(whole.to_vec()))
+    } else {
+        TableUpdate::Appended(delta)
     }
 }

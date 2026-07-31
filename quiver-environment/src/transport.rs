@@ -29,4 +29,17 @@ pub trait EventSender<E: Effect> {
 pub trait WorkerHandle<E: Effect>: Send {
     fn send(&mut self, command: Command<E>) -> Result<(), EnvironmentError>;
     fn try_recv(&mut self) -> Result<Option<Event<E>>, EnvironmentError>;
+
+    /// Whether this worker shares an address space with the environment, so a command can hand
+    /// it a pointer rather than a copy.
+    ///
+    /// It decides the shape of a program update: a shared-memory worker takes the whole merged
+    /// table by `Arc` and every worker references one allocation, while a serializing one takes
+    /// a delta, because sending it the whole program per REPL line would be far worse than
+    /// holding its own copy. See [`TableUpdate`](quiver_core::executor::TableUpdate).
+    ///
+    /// Defaults to `false` — the answer that is always *correct*, merely not always cheapest.
+    fn shares_memory(&self) -> bool {
+        false
+    }
 }

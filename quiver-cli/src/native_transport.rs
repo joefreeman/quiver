@@ -72,6 +72,11 @@ impl WorkerHandle<NativeEffect> for NativeWorkerHandle {
         })
     }
 
+    /// Worker threads, so a table crosses as a pointer.
+    fn shares_memory(&self) -> bool {
+        true
+    }
+
     fn try_recv(&mut self) -> Result<Option<Event<NativeEffect>>, EnvironmentError> {
         match self.evt_receiver.try_recv() {
             Ok(event) => Ok(Some(event)),

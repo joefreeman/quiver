@@ -17,18 +17,49 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// How one of the program's growing tables reaches a worker.
+///
+/// These tables only ever gain entries, so a delta is the natural message — and on a transport
+/// that *serializes* it is the only affordable one, since a REPL line would otherwise re-encode
+/// the whole program per worker. But where workers share an address space a delta is exactly
+/// wrong: each applies it to its own copy, and N workers end up holding N identical tables. That
+/// duplication was the largest single cost in this runtime's footprint.
+///
+/// So the shape of the message follows the transport (`WorkerHandle::shares_memory`), while the
+/// executor's own type does not: it holds an `Arc` either way, and merely swaps handles or
+/// appends in place.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TableUpdate<T> {
+    /// The complete merged table. Every worker replaces its handle with this one, so they all
+    /// reference a single allocation.
+    Shared(Arc<Vec<T>>),
+    /// Only the new entries, to append to what the worker already holds.
+    Appended(Vec<T>),
+}
+
+impl<T: Clone> TableUpdate<T> {
+    /// Apply to a worker's handle. `Appended` uses `make_mut`, which is in place while the
+    /// handle is unique — the case on a serializing transport, where nothing else holds it.
+    fn apply(self, table: &mut Arc<Vec<T>>) {
+        match self {
+            TableUpdate::Shared(shared) => *table = shared,
+            TableUpdate::Appended(items) => Arc::make_mut(table).extend(items),
+        }
+    }
+}
+
 /// Bundled program update data for incremental compilation.
 /// Contains full tuple type information for merging with Environment's Program state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramUpdate {
-    pub constants: Vec<Constant>,
-    pub functions: Vec<Function>,
+    pub constants: TableUpdate<Constant>,
+    pub functions: TableUpdate<Function>,
     /// Full tuple type information (name, fields, is_partial)
-    pub tuples: Vec<TupleTypeInfo>,
+    pub tuples: TableUpdate<TupleTypeInfo>,
     /// Types used by IsType instructions for pattern matching
-    pub types: Vec<Type>,
+    pub types: TableUpdate<Type>,
     /// Builtin information (name and resolved types)
-    pub builtins: Vec<BuiltinInfo>,
+    pub builtins: TableUpdate<BuiltinInfo>,
     pub resources: Vec<String>,
     /// For each type_id, the set of concrete types compatible with it (for IsType checks).
     /// Shared rather than copied: these tables are replaced wholesale on every update and are
@@ -220,9 +251,12 @@ pub struct Executor<E: Effect> {
     /// `(target, subscriber)` pairs the runtime above routes as `UnsubscribeState` to the
     /// target's worker. Drained via `take_unsubscribes`.
     pending_unsubscribes: Vec<(ProcessId, ProcessId)>,
-    // Program data owned by executor
-    constants: Vec<Constant>,
-    functions: Vec<Function>,
+    // Program data owned by executor. The growing tables are `Arc`-held so that on a
+    // shared-memory transport every worker can reference one copy instead of its own (see
+    // [`TableUpdate`]); the derived tables beside them stay private, being small and built from
+    // this worker's own builtin registry.
+    constants: Arc<Vec<Constant>>,
+    functions: Arc<Vec<Function>>,
     builtins: Vec<String>, // Builtin names (for effect dispatch)
     // Resolved builtin implementations, indexed by builtin_id (parallel to `builtins`).
     // Resolved once at update_program time to avoid a String clone + HashMap lookup per call.
@@ -238,8 +272,8 @@ pub struct Executor<E: Effect> {
     /// The full type and tuple tables (what the program serializes), so type-consuming
     /// builtins (`__type_name__<'t>`) can read their type argument's structure at
     /// runtime — exposed to implementations through the executor's `TypeLookup`.
-    types: Vec<Type>,
-    tuple_infos: Vec<TupleTypeInfo>,
+    types: Arc<Vec<Type>>,
+    tuple_infos: Arc<Vec<TupleTypeInfo>>,
     resources: Vec<String>, // Resource type names
     /// For each tuple_id, a canonical value-shape id (same name + field labels) — used by `==`
     /// so structurally-identical tuples built via different paths compare equal.
@@ -724,8 +758,8 @@ impl<E: Effect> Executor<E> {
             pending_watcher_events: Vec::new(),
             pending_state_wakeups: HashSet::new(),
             pending_unsubscribes: Vec::new(),
-            constants: vec![],
-            functions: vec![],
+            constants: Arc::new(vec![]),
+            functions: Arc::new(vec![]),
             builtins: vec![],
             builtin_impls: vec![],
             builtin_purities: vec![],
@@ -733,7 +767,7 @@ impl<E: Effect> Executor<E> {
             tuples: vec![0, 0], // NIL and OK have 0 fields
             // Full infos for the same two pre-seeded tuples (updates skip them), keeping
             // `tuple_infos` index-aligned with the arity table.
-            tuple_infos: vec![
+            tuple_infos: Arc::new(vec![
                 TupleTypeInfo {
                     name: None,
                     fields: vec![],
@@ -742,8 +776,8 @@ impl<E: Effect> Executor<E> {
                     name: Some("Ok".to_string()),
                     fields: vec![],
                 },
-            ],
-            types: vec![],
+            ]),
+            types: Arc::new(vec![]),
             // NIL (id 0) and OK (id 1) are each their own canonical shape; replaced on first update.
             canonical_tuples: Arc::new(vec![0, 1]),
             resources: vec![],
@@ -1334,15 +1368,36 @@ impl<E: Effect> Executor<E> {
     ///
     /// On a fresh executor (empty state), this is equivalent to initializing with complete data.
     pub fn update_program(&mut self, update: ProgramUpdate) {
-        self.constants.extend(update.constants);
-        self.functions.extend(update.functions);
-        // Extract arities from TupleTypeInfo (the hot-path table), and keep the full
-        // type/tuple info for type-consuming builtins' `TypeLookup`.
-        self.tuples
-            .extend(update.tuples.iter().map(|t| t.fields.len()));
-        self.tuple_infos.extend(update.tuples);
-        self.types.extend(update.types);
-        for b in &update.builtins {
+        update.constants.apply(&mut self.constants);
+        update.functions.apply(&mut self.functions);
+        update.types.apply(&mut self.types);
+
+        // `tuples` (arities) is the hot-path projection of `tuple_infos`; the full infos stay
+        // for type-consuming builtins' `TypeLookup`. A replacement rebuilds the projection so
+        // the two can never drift apart.
+        if matches!(update.tuples, TableUpdate::Shared(_)) {
+            self.tuples.clear();
+        }
+        update.tuples.apply(&mut self.tuple_infos);
+        let arities_done = self.tuples.len();
+        self.tuples.extend(
+            self.tuple_infos[arities_done..]
+                .iter()
+                .map(|t| t.fields.len()),
+        );
+
+        // Builtins resolve through *this worker's* own registry, so what is derived from them
+        // stays private — only the names and implementations are rebuilt, never shared.
+        let (rebuild, infos) = match update.builtins {
+            TableUpdate::Shared(all) => (true, all),
+            TableUpdate::Appended(new) => (false, Arc::new(new)),
+        };
+        if rebuild {
+            self.builtins.clear();
+            self.builtin_impls.clear();
+            self.builtin_purities.clear();
+        }
+        for b in infos.iter() {
             self.builtin_impls
                 .push(self.builtins_registry.get_implementation(&b.name));
             // An unknown builtin errors at call time; Pure keeps the gate out of its way.

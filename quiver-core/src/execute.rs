@@ -6,7 +6,7 @@ use crate::compatibility::{
 use crate::effects::Effect;
 use crate::error::{Error, Operation};
 use crate::executor::Executor;
-use crate::executor::ProgramUpdate;
+use crate::executor::{ProgramUpdate, TableUpdate};
 use crate::process::Action;
 use crate::value::Value;
 use crate::wire::WireValue;
@@ -70,12 +70,15 @@ pub fn execute_bytecode_sync_with<E: Effect>(
     };
 
     let program_update = ProgramUpdate {
-        constants: bytecode.constants,
-        functions: bytecode.functions,
+        // Appended, not shared: this drives one executor that is already pre-seeded with the
+        // NIL and OK tuples, so it takes what is new rather than a whole table. Sharing buys
+        // nothing here — there is no second worker to share with.
+        constants: TableUpdate::Appended(bytecode.constants),
+        functions: TableUpdate::Appended(bytecode.functions),
         // Skip first two tuples (NIL and OK) since Executor is pre-initialized with them
-        tuples: bytecode.tuples[2..].to_vec(),
-        types: bytecode.types,
-        builtins: bytecode.builtins,
+        tuples: TableUpdate::Appended(bytecode.tuples[2..].to_vec()),
+        types: TableUpdate::Appended(bytecode.types),
+        builtins: TableUpdate::Appended(bytecode.builtins),
         resources: bytecode.resources,
         type_compatibility: Arc::new(type_compatibility),
         function_param_compatibility: Arc::new(function_param_compatibility),
