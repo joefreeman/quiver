@@ -7,8 +7,9 @@ use num_traits::{One, Signed, Zero};
 
 /// Trait for looking up binary data from Binary references
 pub trait BinaryLookup {
-    /// Get the bytes for a binary reference, or None if not found
-    fn get_bytes(&self, binary: &Binary) -> Option<&[u8]>;
+    /// The bytes for a binary reference, or `None` if it cannot be resolved. Owned, because a
+    /// binary that owns its bytes may be a rope with no contiguous slice to lend.
+    fn get_bytes(&self, binary: &Binary) -> Option<Vec<u8>>;
 }
 
 /// Helper function to format bytes as a string if they represent valid UTF-8 text
@@ -279,16 +280,13 @@ pub struct HeapAndProgramLookup<'a> {
 }
 
 impl BinaryLookup for HeapAndProgramLookup<'_> {
-    fn get_bytes(&self, binary: &Binary) -> Option<&[u8]> {
+    fn get_bytes(&self, binary: &Binary) -> Option<Vec<u8>> {
         match binary {
-            Binary::Constant(idx) => {
-                if let Some(Constant::Binary(bytes)) = self.program.get_constant(*idx) {
-                    Some(bytes.as_slice())
-                } else {
-                    None
-                }
-            }
-            Binary::Heap(idx) => self.heap.get(*idx).map(|v| v.as_slice()),
+            Binary::Constant(idx) => match self.program.get_constant(*idx) {
+                Some(Constant::Binary(bytes)) => Some(bytes.clone()),
+                _ => None,
+            },
+            Binary::Data(data) => Some(data.to_vec()),
         }
     }
 }
@@ -300,13 +298,13 @@ pub struct BytecodeBinaryLookup<'a> {
 }
 
 impl BinaryLookup for BytecodeBinaryLookup<'_> {
-    fn get_bytes(&self, binary: &Binary) -> Option<&[u8]> {
+    fn get_bytes(&self, binary: &Binary) -> Option<Vec<u8>> {
         match binary {
             Binary::Constant(idx) => self.constants.get(*idx).and_then(|c| match c {
-                Constant::Binary(bytes) => Some(bytes.as_slice()),
+                Constant::Binary(bytes) => Some(bytes.clone()),
                 _ => None,
             }),
-            Binary::Heap(idx) => self.heap.get(*idx).map(|v| v.as_slice()),
+            Binary::Data(data) => Some(data.to_vec()),
         }
     }
 }
@@ -332,7 +330,7 @@ pub fn describe_origin<T: TypeLookup, B: BinaryLookup>(
         Value::Tuple(_, str_fields) => match str_fields.first() {
             Some(Value::Binary(binary)) => binary_lookup
                 .get_bytes(binary)
-                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())?,
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?,
             _ => return None,
         },
         _ => return None,
@@ -366,7 +364,7 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
         Value::BigInt(n) => n.to_string(),
         Value::Binary(binary) => {
             if let Some(bytes) = binary_lookup.get_bytes(binary) {
-                format_binary(bytes)
+                format_binary(&bytes)
             } else {
                 "<binary>".to_string()
             }
@@ -384,7 +382,7 @@ pub fn format_value<T: TypeLookup, B: BinaryLookup>(
                 if tuple_info.name.as_deref() == Some("Str")
                     && let [Value::Binary(binary)] = &elements[..]
                     && let Some(bytes) = binary_lookup.get_bytes(binary)
-                    && let Some(s) = try_format_as_string(bytes)
+                    && let Some(s) = try_format_as_string(&bytes)
                 {
                     return s;
                 }

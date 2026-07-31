@@ -220,7 +220,6 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
         // Deferred reclamation makes the ordering safe: releasing the event may zero
         // the chunk's refcount, but the dispatch site re-retains it (push) within the
         // same step, before any reclamation point.
-        self.executor.release(&event);
         Ok(Some(bytes))
     }
 

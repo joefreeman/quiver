@@ -27,7 +27,7 @@ pub fn builtin_file_open(
 
     // Get path binary
     let path_binary = match &fields[0] {
-        Value::Binary(binary) => *binary,
+        Value::Binary(binary) => binary.clone(),
         _ => {
             return Err(Error::TypeMismatch {
                 expected: "binary".to_string(),
@@ -59,11 +59,7 @@ pub fn builtin_file_open(
                 }
             }
         }
-        Binary::Heap(idx) => ctx
-            .executor
-            .get_heap_binary(*idx)
-            .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
-            .to_vec(),
+        Binary::Data(data) => data.to_vec(),
     };
 
     // Return Action to request file opening from Environment
@@ -166,7 +162,7 @@ pub fn builtin_file_write(
 
     // Get data binary
     let data_binary = match &fields[2] {
-        Value::Binary(binary) => *binary,
+        Value::Binary(binary) => binary.clone(),
         _ => {
             return Err(Error::TypeMismatch {
                 expected: "binary".to_string(),
@@ -199,11 +195,7 @@ pub fn builtin_file_write(
                 }
             }
         }
-        Binary::Heap(idx) => ctx
-            .executor
-            .get_heap_binary(*idx)
-            .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
-            .to_vec(),
+        Binary::Data(data) => data.to_vec(),
     };
 
     // Return Action to request write operation from Environment
@@ -245,7 +237,7 @@ pub fn builtin_directory_read(
     ctx: &mut BuiltinContext<NativeEffect>,
 ) -> Result<Completion<NativeEffect>, Error> {
     let path_binary = match value {
-        Value::Binary(binary) => *binary,
+        Value::Binary(binary) => binary.clone(),
         _ => {
             return Err(Error::TypeMismatch {
                 expected: "binary".to_string(),
@@ -270,11 +262,7 @@ pub fn builtin_directory_read(
                 }
             }
         }
-        Binary::Heap(idx) => ctx
-            .executor
-            .get_heap_binary(*idx)
-            .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
-            .to_vec(),
+        Binary::Data(data) => data.to_vec(),
     };
 
     Ok(Completion::Effect(NativeEffect::ReadDirOpen {
@@ -289,7 +277,7 @@ pub fn builtin_filesystem_stat(
     ctx: &mut BuiltinContext<NativeEffect>,
 ) -> Result<Completion<NativeEffect>, Error> {
     let path_binary = match value {
-        Value::Binary(binary) => *binary,
+        Value::Binary(binary) => binary.clone(),
         _ => {
             return Err(Error::TypeMismatch {
                 expected: "binary".to_string(),
@@ -314,11 +302,7 @@ pub fn builtin_filesystem_stat(
                 }
             }
         }
-        Binary::Heap(idx) => ctx
-            .executor
-            .get_heap_binary(*idx)
-            .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
-            .to_vec(),
+        Binary::Data(data) => data.to_vec(),
     };
 
     Ok(Completion::Effect(NativeEffect::Stat { path: path_bytes }))

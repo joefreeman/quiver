@@ -573,7 +573,7 @@ impl NativeEffectBackend {
                 // side-channel slot the value pointed at by index.
                 Ok(Some(Ok(WireValue::tuple(
                     info.tuple_id,
-                    vec![WireValue::Binary(name_bytes), kind],
+                    vec![WireValue::Binary(name_bytes.into()), kind],
                 ))))
             }
             Some(Err(e)) => Err(Error::InvalidArgument(format!(
@@ -662,7 +662,7 @@ impl NativeEffectBackend {
         if *position < addresses.len() {
             let ip_bytes = addresses[*position].clone();
             *position += 1;
-            Ok(Some(Ok(WireValue::Binary(ip_bytes))))
+            Ok(Some(Ok(WireValue::Binary(ip_bytes.into()))))
         } else {
             // No more addresses - return Nil
             Ok(Some(Ok(WireValue::nil())))
@@ -1095,7 +1095,7 @@ impl NativeEffectBackend {
         let bytes_read = result_code as usize;
         buffer.truncate(bytes_read);
 
-        Ok(WireValue::Binary(buffer))
+        Ok(WireValue::Binary(buffer.into()))
     }
 
     fn handle_write_completion(&self, result_code: i32, _buffer_len: usize) -> EffectResult {

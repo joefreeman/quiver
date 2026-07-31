@@ -81,7 +81,7 @@ fn process_info_changed(old: &Option<ProcessInfo>, new: &Option<ProcessInfo>) ->
                 || a.mailbox_size != b.mailbox_size
                 || a.persistent != b.persistent
                 || result_discriminant(&a.result) != result_discriminant(&b.result)
-                || a.heap.total.slots != b.heap.total.slots
+                || a.heap.total.binaries != b.heap.total.binaries
                 || a.heap.total.bytes != b.heap.total.bytes
         }
         _ => true,
@@ -381,7 +381,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             }
             Command::NotifyState { process_id, state } => {
                 self.executor
-                    .notify_state(process_id, &state)
+                    .notify_state(process_id, state)
                     .map_err(EnvironmentError::Executor)?;
             }
             Command::BeginCollection { request_id } => {
@@ -664,7 +664,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         match result {
             Ok(value) => {
                 self.executor
-                    .notify_result(awaiter, awaited, &value)
+                    .notify_result(awaiter, awaited, value)
                     .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
             }
             // `!` is never lethal: a crashed target is delivered to awaiters as a
@@ -701,7 +701,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         message: WireValue,
     ) -> Result<(), EnvironmentError> {
         self.executor
-            .notify_message(target, &message)
+            .notify_message(target, message)
             .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))
     }
 

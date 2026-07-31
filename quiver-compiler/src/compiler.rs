@@ -4400,13 +4400,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Resolve accessor chain on the cached value
         let module_type_id = self.program.register_type(cached.module_type.clone());
-        let (resolved_value, resolved_type) = self.resolve_accessors(
-            &cached.value,
-            &module_type_id,
-            accessors,
-            &module_name,
-            &cached.binary_data,
-        )?;
+        let (resolved_value, resolved_type) =
+            self.resolve_accessors(&cached.value, &module_type_id, accessors, &module_name)?;
 
         Ok((cached, resolved_value, resolved_type, origin))
     }
@@ -4421,14 +4416,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         accessors: &[ast::AccessPath],
         type_arguments: &[ast::Type],
     ) -> Result<(usize, ModuleOrigin), Error> {
-        let (cached, resolved_value, resolved_type, origin) =
+        let (_cached, resolved_value, resolved_type, origin) =
             self.resolve_import(module, accessors)?;
         let resolved_value =
             self.instantiate_builtin_member(resolved_value, type_arguments, false)?;
 
         // Emit instructions for just the resolved value
-        let (instructions, _) =
-            self.value_to_instructions_from_cache(&resolved_value, &cached.binary_data)?;
+        let (instructions, _) = self.value_to_instructions_from_cache(&resolved_value)?;
 
         for instruction in instructions {
             self.codegen.add_instruction(instruction);
@@ -4624,7 +4618,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Execute the module to get the result value
         // Modules are executed at compile time only to produce their value; they don't
         // receive messages, so skip the (expensive) parameter-compatibility tables.
-        let (module_value, executor) =
+        let (module_value, _executor) =
             match quiver_core::execute_bytecode_sync_with(bytecode, self.builtins, false, false) {
                 Ok(result) => result,
                 Err(e) => {
@@ -4637,8 +4631,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             };
 
         // Extract binary data from the executor
-        let mut binary_data = HashMap::new();
-        modules::extract_binary_data(&module_value, &executor, &mut binary_data);
 
         // Capture the dispatch-table entries this module added (new or changed since the
         // snapshot), so a later cache hit can restore them without recompiling the module.
@@ -4682,7 +4674,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let cached = modules::CachedModule {
             value: module_value,
             module_type,
-            binary_data,
             fn_case_tables,
             case_tables,
             callable_type_params,
@@ -4754,7 +4745,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let module_name = format!("%{}", dialect.path.join("/"));
         let (content, escapes) = dialect::unescape_content(&dialect.raw);
 
-        let (cached, module_value, _module_type, _origin) =
+        let (_cached, module_value, _module_type, _origin) =
             self.resolve_import(&dialect.path, &[])?;
         // Compiling the module (on a cache miss) leaves `current_span` pointing into the
         // module's source; point it back at the invocation for expansion errors.
@@ -4776,7 +4767,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // `[content: Str['bin], term: <fn>, chain: <fn>]` (a partial parameter type
         // naming only the fields the dialect uses also works).
         let (function_instructions, function_type) =
-            self.value_to_instructions_from_cache(&function, &cached.binary_data)?;
+            self.value_to_instructions_from_cache(&function)?;
         let Some((parameter, result)) = self.callable_signature(function_type) else {
             return Err(Error::DialectFailed {
                 module: module_name,
@@ -4897,7 +4888,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     None if *index == constant => Some(content.clone().into_bytes()),
                     _ => None,
                 },
-                Binary::Heap(index) => executor.get_heap_binary(*index).map(|data| data.to_vec()),
+                Binary::Data(data) => Some(data.to_vec()),
             }
         };
         let splicer = dialect::Splicer {
@@ -5024,7 +5015,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         error_key: usize,
         dialect: &ast::Dialect,
         escapes: &[usize],
-        executor: &quiver_core::executor::Executor<E>,
+        _executor: &quiver_core::executor::Executor<E>,
         content_constant: (usize, &str),
     ) -> String {
         let Some(payload) = value.get_annotation(error_key) else {
@@ -5063,9 +5054,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         }
                         _ => None,
                     },
-                    Binary::Heap(index) => {
-                        executor.get_heap_binary(*index).map(|data| data.to_vec())
-                    }
+                    Binary::Data(data) => Some(data.to_vec()),
                 };
                 message = bytes.map(|b| String::from_utf8_lossy(&b).into_owned());
             }
@@ -5089,11 +5078,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         instructions: &mut Vec<Instruction>,
         payload: &quiver_core::value::Payload,
-        binary_data: &HashMap<usize, Vec<u8>>,
     ) -> Result<(), Error> {
         for (key, value) in payload.annotations() {
-            let (value_instructions, _) =
-                self.value_to_instructions_from_cache(value, binary_data)?;
+            let (value_instructions, _) = self.value_to_instructions_from_cache(value)?;
             instructions.extend(value_instructions);
             instructions.push(Instruction::Annotate(*key as Id));
         }
@@ -5105,7 +5092,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn value_to_instructions_from_cache(
         &mut self,
         value: &Value,
-        binary_data: &HashMap<usize, Vec<u8>>,
     ) -> Result<(Vec<Instruction>, usize), Error> {
         match value {
             Value::Int(int_value) => {
@@ -5134,18 +5120,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         self.program.register_type(Type::Binary),
                     ))
                 }
-                Binary::Heap(heap_idx) => {
-                    // Use pre-extracted binary data from cache
-                    let bytes = binary_data
-                        .get(heap_idx)
-                        .ok_or_else(|| {
-                            Error::FeatureUnsupported(format!(
-                                "Missing cached binary data for heap index {}",
-                                heap_idx
-                            ))
-                        })?
-                        .clone();
-                    let constant = Constant::Binary(bytes);
+                Binary::Data(data) => {
+                    // The value carries its own bytes; nothing to look up.
+                    let constant = Constant::Binary(data.to_vec());
                     let index = self.program.register_constant(constant);
                     Ok((
                         vec![Instruction::Constant(index as Id)],
@@ -5156,16 +5133,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Value::Tuple(tuple_id, fields) => {
                 let mut instructions = Vec::new();
                 for field in fields.iter() {
-                    let (field_instructions, _) =
-                        self.value_to_instructions_from_cache(field, binary_data)?;
+                    let (field_instructions, _) = self.value_to_instructions_from_cache(field)?;
                     instructions.extend(field_instructions);
                 }
                 instructions.push(Instruction::Tuple(*tuple_id as Id));
-                self.annotations_to_instructions_from_cache(
-                    &mut instructions,
-                    fields,
-                    binary_data,
-                )?;
+                self.annotations_to_instructions_from_cache(&mut instructions, fields)?;
                 Ok((
                     instructions,
                     self.program.register_type(Type::Tuple(*tuple_id)),
@@ -5184,17 +5156,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Push capture values to stack (will be popped by Function instruction)
                 for capture_value in captures.iter() {
                     let (capture_instructions, _) =
-                        self.value_to_instructions_from_cache(capture_value, binary_data)?;
+                        self.value_to_instructions_from_cache(capture_value)?;
                     instructions.extend(capture_instructions);
                 }
 
                 // Reuse the same function index - no re-registration needed!
                 instructions.push(Instruction::Function(*function as Id));
-                self.annotations_to_instructions_from_cache(
-                    &mut instructions,
-                    captures,
-                    binary_data,
-                )?;
+                self.annotations_to_instructions_from_cache(&mut instructions, captures)?;
 
                 Ok((instructions, callable_type_id))
             }
@@ -5226,11 +5194,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     type_argument.map(|id| id as Id),
                 )];
                 if let Some(payload) = payload {
-                    self.annotations_to_instructions_from_cache(
-                        &mut instructions,
-                        payload,
-                        binary_data,
-                    )?;
+                    self.annotations_to_instructions_from_cache(&mut instructions, payload)?;
                 }
 
                 Ok((instructions, callable_type_id))
@@ -5255,7 +5219,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_type: &usize,
         accessors: &[ast::AccessPath],
         module_name: &str,
-        binary_data: &HashMap<usize, Vec<u8>>,
     ) -> Result<(Value, usize), Error> {
         let mut current_value = value.clone();
         let mut current_type = *value_type;
@@ -5288,8 +5251,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         // Apply the gate now: the entry is a compile-time value, so its
                         // precise type is reconstructible and the shape test is static.
                         if let Some(entry) = current_value.get_annotation(key_id).cloned() {
-                            let (_, entry_type) =
-                                self.value_to_instructions_from_cache(&entry, binary_data)?;
+                            let (_, entry_type) = self.value_to_instructions_from_cache(&entry)?;
                             if !quiver_core::types::is_compatible(entry_type, asked, &*self.program)
                             {
                                 current_value = Value::nil();
@@ -5979,7 +5941,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Some(ast::AccessSource::Import(module)) => {
                 // Resolve the import type first (no code emission yet) to check if callable. Hover
                 // / go-to-definition entries are recorded per component by `record_access_components`.
-                let (cached, resolved_value, accessed_type, _origin) =
+                let (_cached, resolved_value, accessed_type, _origin) =
                     self.resolve_import(&module, &access.accessors)?;
                 let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
                 // A member holding a type-consuming builtin instantiates here
@@ -5996,8 +5958,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 if !is_applicable && value_type.is_some() {
                     self.codegen.add_instruction(Instruction::Pop);
                 }
-                let (instructions, _) =
-                    self.value_to_instructions_from_cache(&resolved_value, &cached.binary_data)?;
+                let (instructions, _) = self.value_to_instructions_from_cache(&resolved_value)?;
                 for instruction in instructions {
                     self.codegen.add_instruction(instruction);
                 }

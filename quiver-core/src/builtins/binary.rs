@@ -337,7 +337,7 @@ pub fn builtin_binary_shift<E: Effect>(
                     let shift_amount = value_to_i64(shift_amount)?;
                     if shift_amount == 0 {
                         // No shift needed
-                        return Ok(Completion::Value(Value::Binary(*binary)));
+                        return Ok(Completion::Value(Value::Binary(binary.clone())));
                     }
 
                     let binary_data = ctx.executor.get_binary_data(binary)?;

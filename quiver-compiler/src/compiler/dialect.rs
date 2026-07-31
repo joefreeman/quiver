@@ -709,7 +709,7 @@ fn prefix_callback<E: Effect>(
                 )));
             }
         },
-        Binary::Heap(_) => executor.get_binary_data(binary)?.to_vec(),
+        Binary::Data(data) => data.to_vec(),
     };
     let offset = quiver_core::builtins::value_to_usize(offset_value)?;
     let end = std::str::from_utf8(&bytes)

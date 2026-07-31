@@ -459,9 +459,8 @@ impl ReplCli {
                 println!(
                     "{}",
                     format!(
-                        "  Heap: {} slot{} · {}",
-                        info.heap.total.slots,
-                        if info.heap.total.slots == 1 { "" } else { "s" },
+                        "  Binaries: {} · {}",
+                        info.heap.total.binaries,
                         format_bytes(info.heap.total.bytes)
                     )
                     .bright_black()
@@ -512,19 +511,20 @@ impl ReplCli {
                 for worker in workers {
                     let proc_count = worker.process_ids.len();
                     let mut line = format!(
-                        "  Worker {}: {} proc{} · heap {}/{} live",
+                        "  Worker {}: {} proc{} · {} binar{} · {}",
                         worker.worker_id,
                         proc_count,
                         if proc_count == 1 { "" } else { "s" },
-                        worker.live_slots,
-                        worker.heap_slots
+                        worker.live_binaries,
+                        if worker.live_binaries == 1 {
+                            "y"
+                        } else {
+                            "ies"
+                        },
+                        format_bytes(worker.live_bytes)
                     );
-                    if worker.free_slots > 0 {
-                        line.push_str(&format!(" ({} free)", worker.free_slots));
-                    }
-                    line.push_str(&format!(" · {}", format_bytes(worker.live_bytes)));
-                    if worker.reclaimed > 0 {
-                        line.push_str(&format!(" · {} reclaimed", worker.reclaimed));
+                    if worker.shared_bytes > 0 {
+                        line.push_str(&format!(" ({} shared)", format_bytes(worker.shared_bytes)));
                     }
                     println!("{}", line.bright_black());
                 }
@@ -559,32 +559,44 @@ impl ReplCli {
                             )
                             .bright_black()
                         );
+                        // Distinct buffers, counted by identity: one shared between two
+                        // processes — or two workers — appears once.
                         println!(
                             "{}",
                             format!(
-                                "  Heap: {} slots ({} live, {} free, {} pending) · {} live / {} total",
-                                worker.heap_slots,
-                                worker.live_slots,
-                                worker.free_slots,
-                                worker.pending_free,
-                                format_bytes(worker.live_bytes),
-                                format_bytes(worker.total_bytes)
+                                "  Binaries: {} · {}",
+                                worker.live_binaries,
+                                format_bytes(worker.live_bytes)
                             )
                             .bright_black()
                         );
+                        // Bytes whose allocation has another holder — another value here, or
+                        // one on another worker, since a send passes the handle.
+                        println!(
+                            "{}",
+                            format!("  Shared: {}", format_bytes(worker.shared_bytes))
+                                .bright_black()
+                        );
+                        // Unrealised ropes. Every read realises one and nothing caches the
+                        // result, so a deep rope read repeatedly redoes the work each time.
+                        if worker.rope_binaries > 0 {
+                            println!(
+                                "{}",
+                                format!(
+                                    "  Ropes: {} unrealised · max depth {}",
+                                    worker.rope_binaries, worker.max_rope_depth
+                                )
+                                .bright_black()
+                            );
+                        }
                         println!(
                             "{}",
                             format!(
-                                "  Constants: {} slots · {}",
-                                worker.constant_slots,
+                                "  Constants: {} · {}",
+                                worker.constant_binaries,
                                 format_bytes(worker.constant_bytes)
                             )
                             .bright_black()
-                        );
-                        println!(
-                            "{}",
-                            format!("  Reclaimed: {} slots this session", worker.reclaimed)
-                                .bright_black()
                         );
                     }
                     None => {

@@ -89,8 +89,6 @@ pub struct ModuleArtifact {
     /// The evaluated module value, in artifact space.
     pub value: Value,
     pub module_type: Type,
-    /// Extracted heap binaries backing `value`, keyed by heap index (sorted).
-    pub binary_data: Vec<(usize, Vec<u8>)>,
     /// Return-type dispatch tables (see `CachedModule`), in artifact space:
     /// function id → `(guard type, result type)` branches.
     pub fn_case_tables: Vec<(usize, Vec<(usize, usize)>)>,
@@ -918,15 +916,6 @@ pub(crate) fn extract(
             .collect(),
         value: cached.value.remap_ids(&remaps),
         module_type: cached.module_type.remap_ids(&remaps),
-        binary_data: {
-            let mut entries: Vec<(usize, Vec<u8>)> = cached
-                .binary_data
-                .iter()
-                .map(|(&heap, bytes)| (heap, bytes.clone()))
-                .collect();
-            entries.sort_by_key(|(heap, _)| *heap);
-            entries
-        },
         fn_case_tables: {
             let mut entries: Vec<(usize, Vec<(usize, usize)>)> = cached
                 .fn_case_tables
@@ -1073,7 +1062,7 @@ fn collect_value(value: &Value, closure: &mut Closure, queue: &mut Vec<Item>) {
         Value::Binary(quiver_core::value::Binary::Constant(constant_id)) => {
             closure.constants.insert(*constant_id);
         }
-        Value::Binary(quiver_core::value::Binary::Heap(_)) => {}
+        Value::Binary(quiver_core::value::Binary::Data(_)) => {}
         Value::Tuple(tuple_id, payload) => {
             add_tuple(*tuple_id, closure, queue);
             collect_payload(payload, closure, queue);
@@ -1388,7 +1377,6 @@ pub(crate) fn link_module<E: Effect>(
     let cached = CachedModule {
         value: artifact.value.remap_ids(&remaps),
         module_type: artifact.module_type.remap_ids(&remaps),
-        binary_data: artifact.binary_data.iter().cloned().collect(),
         fn_case_tables: artifact
             .fn_case_tables
             .iter()

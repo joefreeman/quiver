@@ -1,17 +1,28 @@
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Maximum size of a binary value in bytes (16MB)
 pub const MAX_BINARY_SIZE: usize = 16 * 1024 * 1024;
 
 /// Rope-like structure for efficient binary operations.
 /// Supports O(1) slicing and concatenation through structural sharing.
+///
+/// Serialized as its flat bytes: the rope is an internal representation of *how* a binary was
+/// built, not part of the value it denotes, so a round trip through disk or a JSON transport
+/// yields a flat `Owned` with the same contents.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinaryData {
-    /// Raw bytes. `Rc`-wrapped so cloning a `BinaryData` is always O(1) (a refcount bump) —
-    /// in particular `concat(Owned, _)` shares the buffer rather than copying it. The bytes are
-    /// never mutated through this `Rc` (values are immutable; the heap-slot refcount, not the
-    /// inner `Rc` count, is the uniqueness signal), so sharing is sound.
-    Owned(Rc<Vec<u8>>),
+    /// Raw bytes, refcounted so cloning a `BinaryData` is always O(1) — in particular
+    /// `concat(Owned, _)` shares the buffer rather than copying it. The bytes are never mutated
+    /// through this handle (values are immutable), so sharing is sound.
+    ///
+    /// `Arc<[u8]>`, not `Rc<Vec<u8>>`, for two reasons. It is one allocation rather than
+    /// two: the old form was doubly indirect, an `Rc` box holding a `Vec` header that pointed
+    /// at the bytes. And it is *atomic*, which is what lets a leaf cross a worker boundary —
+    /// [`WireValue::Binary`](crate::wire::WireValue) carries this handle, so a send shares the
+    /// bytes rather than copying them. The rope spine above it stays `Rc`: it is
+    /// process-local and never crosses, so it pays no atomics.
+    Owned(Arc<[u8]>),
 
     /// Zero-filled binary of given length (no allocation until materialized)
     Zeroed(usize),
@@ -36,10 +47,23 @@ pub enum BinaryData {
     Tiled { unit: Rc<BinaryData>, count: usize },
 }
 
+impl serde::Serialize for BinaryData {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.to_vec())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for BinaryData {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes = <Vec<u8> as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(BinaryData::new(bytes))
+    }
+}
+
 impl BinaryData {
     /// Create a new owned binary from a Vec<u8>
     pub fn new(bytes: Vec<u8>) -> Self {
-        BinaryData::Owned(Rc::new(bytes))
+        BinaryData::Owned(bytes.into())
     }
 
     /// Create a zero-filled binary of the given length without allocating
@@ -161,7 +185,7 @@ impl BinaryData {
         let mut stack: Vec<&BinaryData> = vec![self];
         while let Some(node) = stack.pop() {
             match node {
-                BinaryData::Owned(bytes) => out.extend_from_slice(bytes.as_slice()),
+                BinaryData::Owned(bytes) => out.extend_from_slice(bytes),
                 BinaryData::Zeroed(len) => out.resize(out.len() + len, 0),
                 BinaryData::Slice {
                     parent,
@@ -249,6 +273,16 @@ impl BinaryData {
         }
     }
 
+    /// The bytes as a shareable handle: the leaf itself when this is already flat (O(1), no
+    /// copy — the handle a cross-worker send passes instead of the bytes), otherwise the rope
+    /// realised into a fresh one.
+    pub fn shared_bytes(&self) -> Arc<[u8]> {
+        match self {
+            BinaryData::Owned(bytes) => bytes.clone(),
+            _ => self.to_vec().into(),
+        }
+    }
+
     /// Find the index of the first occurrence of `byte` at or after `offset`.
     ///
     /// Walks the rope structure directly without materializing it, so a search from an
@@ -313,6 +347,17 @@ impl BinaryData {
         }
     }
 
+    /// Whether these bytes are shared with another holder: for a flat leaf, whether its `Arc`
+    /// has more than one owner — another value on this worker, or one on another worker, since
+    /// a send passes the handle. A rope answers `false`; the question is about whole buffers,
+    /// and a rope's own node is what a value holds.
+    pub fn bytes_shared(&self) -> bool {
+        match self {
+            BinaryData::Owned(bytes) => Arc::strong_count(bytes) > 1,
+            _ => false,
+        }
+    }
+
     /// Get the depth of the tree structure (useful for compaction heuristics later)
     pub fn depth(&self) -> usize {
         match self {
@@ -343,7 +388,13 @@ impl Drop for BinaryData {
             _ => {}
         }
 
-        let empty = EMPTY_RC.with(|e| e.clone());
+        // `try_with`: a rope can now be dropped during thread teardown — a compile-time
+        // module value owns its binaries, and those values live in a thread-local artifact
+        // store — and TLS destruction order is unspecified. Falling back to a private empty
+        // leaf costs one allocation on a path that runs at most once per thread exit.
+        let empty = EMPTY_RC
+            .try_with(Rc::clone)
+            .unwrap_or_else(|_| Rc::new(BinaryData::Zeroed(0)));
         let mut stack: Vec<Rc<BinaryData>> = Vec::new();
         take_children(self, &empty, &mut stack);
         while let Some(rc) = stack.pop() {

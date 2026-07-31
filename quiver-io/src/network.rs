@@ -35,11 +35,7 @@ pub fn builtin_dns_resolve(
                 }
             }
         }
-        Binary::Heap(idx) => ctx
-            .executor
-            .get_heap_binary(*idx)
-            .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
-            .to_vec(),
+        Binary::Data(data) => data.to_vec(),
     };
 
     // Return Action to request DNS resolution from Environment
@@ -93,7 +89,7 @@ pub fn builtin_tcp_connect(
 
     // Get IP binary
     let ip_binary = match &fields[0] {
-        Value::Binary(binary) => *binary,
+        Value::Binary(binary) => binary.clone(),
         _ => {
             return Err(Error::TypeMismatch {
                 expected: "binary".to_string(),
@@ -129,11 +125,7 @@ pub fn builtin_tcp_connect(
                 }
             }
         }
-        Binary::Heap(idx) => ctx
-            .executor
-            .get_heap_binary(*idx)
-            .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
-            .to_vec(),
+        Binary::Data(data) => data.to_vec(),
     };
 
     // Validate IP address length (4 for IPv4, 16 for IPv6)
@@ -284,7 +276,7 @@ pub fn builtin_tcp_socket_write(
 
     // Get data binary
     let data_binary = match &fields[1] {
-        Value::Binary(binary) => *binary,
+        Value::Binary(binary) => binary.clone(),
         _ => {
             return Err(Error::TypeMismatch {
                 expected: "binary".to_string(),
@@ -310,11 +302,7 @@ pub fn builtin_tcp_socket_write(
                 }
             }
         }
-        Binary::Heap(idx) => ctx
-            .executor
-            .get_heap_binary(*idx)
-            .ok_or_else(|| Error::InvalidArgument(format!("Heap binary index {} not found", idx)))?
-            .to_vec(),
+        Binary::Data(data) => data.to_vec(),
     };
 
     // Return Action to request write operation from Environment

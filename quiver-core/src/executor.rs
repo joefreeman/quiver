@@ -187,32 +187,6 @@ impl ExecutionStats {
     }
 }
 
-/// A snapshot of binary-heap occupancy, for leak detection and REPL/test introspection.
-///
-/// `slots` counts every heap slot allocated so far (the heap is currently append-only, so this
-/// includes dead slots); `reachable` counts those still referenced from a live root — any
-/// process's stack/locals/mailbox/result/select state, plus the constant-binary cache. The
-/// gap, [`HeapStats::dead`], is garbage: the binaries a future reclamation pass will collect,
-/// and the quantity a manual refcount must drive to zero.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeapStats {
-    /// Total heap slots allocated (live + dead).
-    pub slots: usize,
-    /// Slots reachable from a live root.
-    pub reachable: usize,
-    /// Total bytes across all slots.
-    pub total_bytes: usize,
-    /// Bytes across reachable slots only.
-    pub reachable_bytes: usize,
-}
-
-impl HeapStats {
-    /// Slots allocated but no longer reachable — the leak a reclamation pass would collect.
-    pub fn dead(&self) -> usize {
-        self.slots - self.reachable
-    }
-}
-
 /// Result of processing a select source
 enum SelectResult {
     /// Select should complete with this value
@@ -278,24 +252,6 @@ pub struct Executor<E: Effect> {
     builtin_param_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
     /// For each field-name id, each tuple_id's offset for that field — GetNamed's table.
     field_offsets: Arc<Vec<Vec<Option<usize>>>>,
-    // Heap for runtime-allocated binaries (using BinaryData for O(1) operations)
-    heap: Vec<BinaryData>,
-    // Reference count per heap slot, parallel to `heap`. A freshly allocated slot starts at 0
-    // ("floating" — held only in a transient Rust local); it gains a count as it enters rooted
-    // storage (stack/locals/tuple/etc.) via `retain` and loses it via `release`. The invariant
-    // (validated by `check_refcounts`) is `refcounts[i] > 0  <=>  slot i is reachable`.
-    refcounts: Vec<u32>,
-    // Reclamation (a slot reaching count 0 is reusable). `pending_free` queues slots whose count
-    // hit 0; `process_pending_free` (at the start of `step`, a quiescent point) actually frees
-    // those still at 0 — deferred so that moves (release-then-retain) and in-flight Actions
-    // carrying a value out of `step` don't reclaim a slot still in use. `free` is the reuse pool;
-    // `freed[i]` marks a slot currently free (guards double-free and powers debug use-after-free
-    // assertions in `retain`/`release`/`get_binary_data`).
-    free: Vec<usize>,
-    pending_free: Vec<usize>,
-    freed: Vec<bool>,
-    // Cumulative count of slots reclaimed (for the worker inspector's "reclaimed this session").
-    reclaimed: usize,
     // Cumulative count of tombstone process entries reclaimed (see `reclaim_process`).
     reclaimed_processes: usize,
     // Cache of constant binaries already materialised on the heap, keyed by constant index,
@@ -332,46 +288,22 @@ impl<E: Effect> Executor<E> {
         self.constants.get(index)
     }
 
-    /// Get BinaryData from heap by index
-    pub fn get_heap_binary(&self, index: usize) -> Option<&BinaryData> {
-        self.heap.get(index)
-    }
-
-    /// Get BinaryData from either constants or heap
-    pub fn get_binary_data(&self, binary: &Binary) -> Result<&BinaryData, Error> {
+    /// The `BinaryData` behind a binary value: its own bytes, or a constant's.
+    ///
+    /// A constant is materialised on first use and cached (see `cached_constant_binary`), so
+    /// this only meets `Binary::Constant` on values the runtime never allocated for — the
+    /// module-name binaries in failure-provenance sites, which the formatter reads directly.
+    pub fn get_binary_data<'a>(&'a self, binary: &'a Binary) -> Result<&'a BinaryData, Error> {
         match binary {
-            Binary::Constant(index) => {
-                let constant = self
-                    .get_constant(*index)
-                    .ok_or(Error::ConstantUndefined(*index))?;
-                match constant {
-                    Constant::Binary(_bytes) => {
-                        // For constants, we need to return a reference, but we only have Vec<u8>
-                        // This is a limitation - we'll need to handle this differently
-                        // For now, return an error - we'll fix this properly
-                        Err(Error::InvalidArgument(
-                            "Getting BinaryData from constant not yet implemented".to_string(),
-                        ))
-                    }
-                    _ => Err(Error::TypeMismatch {
-                        expected: "binary".to_string(),
-                        found: "integer".to_string(),
-                    }),
-                }
-            }
-            Binary::Heap(index) => {
-                debug_assert!(
-                    !self.freed.get(*index).copied().unwrap_or(false),
-                    "access of freed heap slot {index} (use-after-free)"
-                );
-                self.heap.get(*index).ok_or_else(|| {
-                    Error::InvalidArgument(format!("Heap binary index {} not found", index))
-                })
-            }
+            Binary::Data(data) => Ok(data),
+            Binary::Constant(index) => Err(Error::InvalidArgument(format!(
+                "constant binary {index} is not materialised"
+            ))),
         }
     }
 
-    /// Allocate BinaryData on the heap and return a Binary reference
+    /// Wrap `data` as a binary value. Owning the bytes is the whole allocation — there is no
+    /// slot to claim and no count to initialise; the `Rc` is the accounting.
     pub fn allocate_binary_data(&mut self, data: BinaryData) -> Result<Binary, Error> {
         if data.len() > MAX_BINARY_SIZE {
             return Err(Error::InvalidArgument(format!(
@@ -380,198 +312,68 @@ impl<E: Effect> Executor<E> {
                 MAX_BINARY_SIZE
             )));
         }
-        // Reuse a reclaimed slot if one is available, else grow the heap. Either way the slot
-        // starts floating at count 0 until it enters rooted storage (see `retain`).
-        if let Some(index) = self.free.pop() {
-            self.heap[index] = data;
-            self.refcounts[index] = 0;
-            self.freed[index] = false;
-            Ok(Binary::Heap(index))
-        } else {
-            let index = self.heap.len();
-            self.heap.push(data);
-            self.refcounts.push(0);
-            self.freed.push(false);
-            Ok(Binary::Heap(index))
-        }
+        Ok(Binary::Data(Rc::new(data)))
     }
 
-    /// Reclaim slots whose count has settled at 0. Called at a safe point (the start of `step`),
-    /// where no transient Rust-local Value handle or in-flight Action references a slot — so a
-    /// slot still at 0 here is genuinely unreferenced. A slot re-retained since being queued
-    /// (count > 0) is skipped; `freed` guards against double-freeing a duplicate queue entry.
-    fn process_pending_free(&mut self) {
-        while let Some(index) = self.pending_free.pop() {
-            if self.refcounts[index] == 0 && !self.freed[index] {
-                // `Zeroed(0)` rather than `new(Vec::new())`: the latter is `Rc::new`, which
-                // allocates a 40-byte control block for an empty buffer — so freeing a slot
-                // would itself allocate. `binary.rs` uses the same payload-free filler.
-                self.heap[index] = BinaryData::Zeroed(0); // drop the data, reclaim memory
-                self.freed[index] = true;
-                self.free.push(index);
-                self.reclaimed += 1;
-            }
-        }
-    }
+    // --- Choke points for storage. These used to keep hand-maintained reference counts in
+    // step with what is reachable; a binary now owns its bytes, so dropping a value releases
+    // them and these are plain stack/locals operations. They stay as choke points because the
+    // REPL's compaction entry points below still address storage deliberately.
 
-    /// Account for a value entering rooted storage: increment the count of every heap slot it
-    /// references, recursing through tuples/functions. Deep and symmetric with [`release`];
-    /// each `retain` must be matched by exactly one `release` when the reference leaves storage.
-    ///
-    pub(crate) fn retain(&mut self, value: &Value) {
-        match value {
-            Value::Binary(Binary::Heap(idx)) => {
-                debug_assert!(
-                    !self.freed[*idx],
-                    "retain of freed heap slot {idx} (use-after-free)"
-                );
-                self.refcounts[*idx] += 1;
-            }
-            // The cached flag prunes the walk: a composite with no (transitive) heap
-            // references has nothing to account for, so data movement stays O(1).
-            Value::Tuple(_, elements) | Value::Function(_, elements)
-                if elements.has_heap_refs() =>
-            {
-                for element in elements.all_values() {
-                    self.retain(element);
-                }
-            }
-            Value::Builtin(_, Some(payload)) if payload.has_heap_refs() => {
-                for element in payload.all_values() {
-                    self.retain(element);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Account for a value leaving rooted storage: the inverse of [`retain`]. A debug build
-    /// panics on underflow — a `release` without a matching `retain`, i.e. an unwired insertion
-    /// site. A count reaching 0 queues the slot for `process_pending_free`, which frees it at
-    /// the next safe point.
-    pub(crate) fn release(&mut self, value: &Value) {
-        match value {
-            Value::Binary(Binary::Heap(idx)) => {
-                debug_assert!(
-                    !self.freed[*idx],
-                    "release of freed heap slot {idx} (use-after-free)"
-                );
-                debug_assert!(
-                    self.refcounts[*idx] > 0,
-                    "release underflow on heap slot {idx} (release without a matching retain)"
-                );
-                self.refcounts[*idx] = self.refcounts[*idx].saturating_sub(1);
-                if self.refcounts[*idx] == 0 {
-                    // Defer the actual free to the next safe point (see `process_pending_free`).
-                    self.pending_free.push(*idx);
-                }
-            }
-            Value::Tuple(_, elements) | Value::Function(_, elements)
-                if elements.has_heap_refs() =>
-            {
-                for element in elements.all_values() {
-                    self.release(element);
-                }
-            }
-            Value::Builtin(_, Some(payload)) if payload.has_heap_refs() => {
-                for element in payload.all_values() {
-                    self.release(element);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // --- Choke points for rooted storage. The interpreter routes stack/locals mutations through
-    // these so the reference counts stay in step with what is reachable. `proc` is the running
-    // process, which during a `step` is owned separately from `self`, so retaining/releasing
-    // against `self` alongside a `proc` borrow is conflict-free. Pure reordering (rotate/swap)
-    // does not change the stored multiset and is left as a raw `proc.stack` call.
-
-    /// Push a value onto the process stack, retaining its heap references.
+    /// Push a value onto the process stack.
     fn push_value(&mut self, proc: &mut Process, value: Value) {
-        self.retain(&value);
         proc.stack.push(value);
     }
 
-    /// Pop a value off the process stack, releasing its heap references. The returned handle is
-    /// still valid because reclamation is deferred (a slot at 0 is freed only at the next safe
-    /// point, in `process_pending_free`); re-inserting it via another `push_*` re-retains it
-    /// before then, so a pop-then-push "move" nets to zero and the slot is never reclaimed.
+    /// Pop a value off the process stack.
     fn pop_value(&mut self, proc: &mut Process) -> Option<Value> {
-        let value = proc.stack.pop();
-        if let Some(value) = &value {
-            self.release(value);
-        }
-        value
+        proc.stack.pop()
     }
 
-    /// Push a value into the process's locals, retaining its heap references.
+    /// Push a value into the process's locals.
     fn push_local(&mut self, proc: &mut Process, value: Value) {
-        self.retain(&value);
         proc.locals.push(value);
     }
 
-    /// Truncate the process's locals to `len`, releasing every dropped binding.
+    /// Truncate the process's locals to `len`, dropping every discarded binding.
     fn truncate_locals(&mut self, proc: &mut Process, len: usize) {
-        if proc.locals.len() > len {
-            let dropped = proc.locals.split_off(len);
-            for value in &dropped {
-                self.release(value);
-            }
-        }
+        proc.locals.truncate(len);
     }
 
-    /// Like [`truncate_locals`] but addresses the process by id, for callers (e.g. frame teardown
-    /// in the step loop) that hold only `&mut self`, not a separate `&mut Process`.
+    /// Like [`truncate_locals`] but addresses the process by id, for callers (e.g. frame
+    /// teardown in the step loop) that hold only `&mut self`, not a separate `&mut Process`.
     fn truncate_locals_pid(&mut self, pid: ProcessId, len: usize) {
-        let dropped = match self.get_process_mut(pid) {
-            Some(process) if process.locals.len() > len => process.locals.split_off(len),
-            _ => return,
-        };
-        for value in &dropped {
-            self.release(value);
+        if let Some(process) = self.get_process_mut(pid) {
+            process.locals.truncate(len);
         }
     }
 
-    /// Replace a process's locals wholesale, retaining the incoming bindings and releasing the
-    /// outgoing ones so the reference counts stay correct. Returns `false` if the process is gone.
-    /// Used by the REPL's between-evaluation compaction (the caller selects which bindings to keep).
+    /// Replace a process's locals wholesale. Returns `false` if the process is gone. Used by
+    /// the REPL's between-evaluation compaction (the caller selects which bindings to keep).
     pub fn replace_locals(&mut self, process_id: ProcessId, new_locals: Vec<Value>) -> bool {
-        if self.get_process(process_id).is_none() {
-            return false;
+        match self.get_process_mut(process_id) {
+            Some(process) => {
+                process.locals = new_locals;
+                true
+            }
+            None => false,
         }
-        for value in &new_locals {
-            self.retain(value);
-        }
-        let old = std::mem::replace(
-            &mut self.get_process_mut(process_id).unwrap().locals,
-            new_locals,
-        );
-        for value in &old {
-            self.release(value);
-        }
-        true
     }
 
-    /// Release the locals at every index *not* in `keep`, overwriting each with nil so its heap
-    /// references are dropped. Unlike [`replace_locals`], indices are left in place (no re-indexing),
-    /// so binding indices stay valid. Used by the REPL to reclaim a finished line's orphaned
-    /// parameter and temporaries at the moment its result is delivered, without disturbing the
-    /// host's binding map. Returns `false` if the process is gone.
+    /// Drop the locals at every index *not* in `keep`, overwriting each with nil. Unlike
+    /// [`replace_locals`] the indices stay in place (no re-indexing), so binding indices stay
+    /// valid. Used by the REPL to reclaim a finished line's orphaned parameter and temporaries
+    /// at the moment its result is delivered, without disturbing the host's binding map.
+    /// Returns `false` if the process is gone.
     pub fn release_orphan_locals(&mut self, process_id: ProcessId, keep: &[usize]) -> bool {
         let keep: HashSet<usize> = keep.iter().copied().collect();
         let Some(process) = self.get_process_mut(process_id) else {
             return false;
         };
-        let mut orphans = Vec::new();
         for (index, slot) in process.locals.iter_mut().enumerate() {
             if !keep.contains(&index) {
-                orphans.push(std::mem::replace(slot, Value::nil()));
+                *slot = Value::nil();
             }
-        }
-        for value in &orphans {
-            self.release(value);
         }
         true
     }
@@ -600,37 +402,19 @@ impl<E: Effect> Executor<E> {
             // `prune_watchers` when this process is reclaimed.
             process.subscriptions.clear();
             process.tracking = None;
-            // A dead process reads no more stream events: drop the stash (releasing
-            // its values below) and the armed set (an in-flight completion for a
-            // tombstone is dropped at delivery).
+            // A dead process reads no more stream events: drop the stash and the armed
+            // set (an in-flight completion for a tombstone is dropped at delivery). Dropping
+            // the storage releases whatever its values held.
             process.armed_resources.clear();
-            Some((
-                std::mem::take(&mut process.stack),
-                std::mem::take(&mut process.mailbox),
-                std::mem::take(&mut process.awaiting),
-                process.select_state.take(),
-                std::mem::take(&mut process.resource_events),
-            ))
+            process.stack = Vec::new();
+            process.mailbox = Default::default();
+            process.awaiting = Default::default();
+            process.select_state = None;
+            process.resource_events = Default::default();
+            Some(())
         });
-        let Some((stack, mailbox, awaiting, select_state, resource_events)) = taken else {
+        if taken.is_none() {
             return;
-        };
-        for value in stack.iter().chain(mailbox.iter()) {
-            self.release(value);
-        }
-        for value in awaiting.values().flatten() {
-            self.release(value);
-        }
-        for value in resource_events.values() {
-            self.release(value);
-        }
-        if let Some(state) = select_state {
-            for source in &state.sources {
-                self.release(source);
-            }
-            if let Some((_, message)) = &state.receiving {
-                self.release(message);
-            }
         }
         self.truncate_locals_pid(pid, 0);
     }
@@ -648,10 +432,6 @@ impl<E: Effect> Executor<E> {
             process.result.is_some() && !process.persistent,
             "reclaim of a live or persistent process {pid}",
         );
-        if let Some(Ok(value)) = &process.result {
-            self.release(value);
-        }
-        self.release(&process.state);
         self.reclaimed_processes += 1;
     }
 
@@ -840,31 +620,7 @@ impl<E: Effect> Executor<E> {
             NIL,
             Payload::with_annotations(vec![], vec![(table.crash_key, payload)]).shared(),
         );
-        // Root → convert → release, so the freshly allocated message binary goes
-        // through the refcount lifecycle and its slot is reclaimable afterwards.
-        self.retain(&stamped);
-        let converted = self.to_wire(&stamped);
-        self.release(&stamped);
-        converted
-    }
-
-    /// Validate the reference-count invariant against the tracing oracle: every heap slot must
-    /// have a positive count exactly when it is reachable from a root ([`reachable_heap_indices`]).
-    /// Returns the first violating slot, so it doubles as a debug assertion (the wiring is
-    /// correct iff this stays `Ok` at every quiescent point) and a test oracle.
-    pub fn check_refcounts(&self) -> Result<(), String> {
-        let reachable = self.reachable_heap_indices();
-        for index in 0..self.heap.len() {
-            let counted = self.refcounts[index] > 0;
-            let live = reachable.contains(&index);
-            if counted != live {
-                return Err(format!(
-                    "heap slot {index}: refcount={} but reachable={live}",
-                    self.refcounts[index]
-                ));
-            }
-        }
-        Ok(())
+        self.to_wire(&stamped)
     }
 
     /// Create a binary from Vec<u8>
@@ -872,77 +628,15 @@ impl<E: Effect> Executor<E> {
         self.allocate_binary_data(BinaryData::new(bytes))
     }
 
-    /// Read a binary's bytes, compacting a heap-stored rope to a flat `Owned` in place as a
-    /// side effect. Flattening is content-preserving, so it is sound no matter how many
-    /// references share the slot — a rope's children are internal `Rc`s, not heap slots, so no
-    /// heap refcount changes and compaction is invisible to [`check_refcounts`]. After the first
-    /// materialize, a vector built up by repeated push is contiguous, so subsequent reads and
-    /// random access are cheap. Returns the bytes as a shared `Rc<Vec<u8>>`: the same allocation
-    /// is stored in the slot and returned, so there is no extra copy.
-    pub fn materialize(&mut self, binary: &Binary) -> Result<Rc<Vec<u8>>, Error> {
-        if let Binary::Heap(index) = binary {
-            debug_assert!(
-                !self.freed.get(*index).copied().unwrap_or(false),
-                "materialize of freed heap slot {index} (use-after-free)"
-            );
-            if let BinaryData::Owned(rc) = &self.heap[*index] {
-                return Ok(rc.clone()); // already flat — O(1) share
-            }
-            // Flatten once; storing and returning the same `Rc` keeps the peak at ~2× (the
-            // rope is dropped as the slot is overwritten), with no further copy.
-            let rc = Rc::new(self.heap[*index].to_vec());
-            self.heap[*index] = BinaryData::Owned(rc.clone());
-            return Ok(rc);
-        }
-        // Non-heap (constant): flatten without write-back.
-        Ok(Rc::new(self.get_binary_data(binary)?.to_vec()))
-    }
-
-    /// The set of heap-slot indices reachable from any live root: every process's
-    /// Value-bearing state (stack, locals, mailbox, result, select sources/receiving, awaited
-    /// results) plus the constant-binary cache (which pins its materialised slots for the
-    /// program's lifetime). This is the tracing *oracle* against which incremental refcounts
-    /// will be validated — a slot is correctly live iff it appears here.
+    /// A binary's bytes as a shared handle. Flat already (the common case — anything a read
+    /// produced): O(1), the leaf itself. A rope is realised into a fresh handle.
     ///
-    /// Meaningful at a quiescent point (between steps); during a `step` the running process is
-    /// temporarily removed from the table and would be missed.
-    pub fn reachable_heap_indices(&self) -> HashSet<usize> {
-        let mut indices = HashSet::new();
-        for process in self.processes.values() {
-            for value in &process.stack {
-                collect_heap_indices(value, &mut indices);
-            }
-            for value in &process.locals {
-                collect_heap_indices(value, &mut indices);
-            }
-            for value in &process.mailbox {
-                collect_heap_indices(value, &mut indices);
-            }
-            if let Some(Ok(value)) = &process.result {
-                collect_heap_indices(value, &mut indices);
-            }
-            collect_heap_indices(&process.state, &mut indices);
-            if let Some(state) = &process.select_state {
-                for value in &state.sources {
-                    collect_heap_indices(value, &mut indices);
-                }
-                if let Some((_, value)) = &state.receiving {
-                    collect_heap_indices(value, &mut indices);
-                }
-            }
-            for value in process.awaiting.values().flatten() {
-                collect_heap_indices(value, &mut indices);
-            }
-            for value in process.resource_events.values() {
-                collect_heap_indices(value, &mut indices);
-            }
-        }
-        for binary in self.constant_binaries.iter().flatten() {
-            if let Binary::Heap(idx) = binary {
-                indices.insert(*idx);
-            }
-        }
-        indices
+    /// Unlike the heap-table version this cannot write the flat form back, because there is no
+    /// slot to write it to and the rope node may be shared. A repeatedly-read rope therefore
+    /// re-realises. If that shows up, the fix is a `OnceCell<Arc<[u8]>>` memo on the composite
+    /// variants of `BinaryData`, not a return to the table.
+    pub fn materialize(&mut self, binary: &Binary) -> Result<Arc<[u8]>, Error> {
+        Ok(self.get_binary_data(binary)?.shared_bytes())
     }
 
     /// This worker's contribution to the reclamation graph: one [`ProcessAdjacency`] per
@@ -1008,23 +702,6 @@ impl<E: Effect> Executor<E> {
             .collect()
     }
 
-    /// Snapshot heap occupancy (see [`HeapStats`]). Read-only; call at a quiescent point.
-    pub fn heap_stats(&self) -> HeapStats {
-        let reachable = self.reachable_heap_indices();
-        let total_bytes = self.heap.iter().map(BinaryData::len).sum();
-        let reachable_bytes = reachable
-            .iter()
-            .filter_map(|&idx| self.heap.get(idx))
-            .map(BinaryData::len)
-            .sum();
-        HeapStats {
-            slots: self.heap.len(),
-            reachable: reachable.len(),
-            total_bytes,
-            reachable_bytes,
-        }
-    }
-
     pub fn new(
         builtins_registry: crate::builtins::BuiltinRegistry<E>,
         profile: bool,
@@ -1070,12 +747,6 @@ impl<E: Effect> Executor<E> {
             function_param_compatibility: Arc::default(),
             builtin_param_compatibility: Arc::default(),
             field_offsets: Arc::default(),
-            heap: vec![],
-            refcounts: vec![],
-            free: vec![],
-            pending_free: vec![],
-            freed: vec![],
-            reclaimed: 0,
             reclaimed_processes: 0,
             constant_binaries: vec![],
             site_nils: vec![],
@@ -1125,9 +796,8 @@ impl<E: Effect> Executor<E> {
         // Rebuild the captures on this worker's heap and populate locals with them.
         let captures_count = captures.len();
         for value in captures {
-            let injected = self.from_wire(&value)?;
+            let injected = self.from_wire(value)?;
             // Injected into rooted storage (the new frame's locals).
-            self.retain(&injected);
             let process = self
                 .get_process_mut(id)
                 .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -1136,9 +806,7 @@ impl<E: Effect> Executor<E> {
 
         // Push argument onto stack; it is also the process's initial observable state
         // (one retain per storage location).
-        let injected_arg = self.from_wire(&argument)?;
-        self.retain(&injected_arg);
-        self.retain(&injected_arg);
+        let injected_arg = self.from_wire(argument)?;
         let process = self
             .get_process_mut(id)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -1212,22 +880,17 @@ impl<E: Effect> Executor<E> {
 
     /// Deliver a remote `?` state sample to the process that requested it: push the
     /// sample and wake the caller. No gate — the state type is statically known.
-    pub fn notify_state(&mut self, id: ProcessId, state: &WireValue) -> Result<(), Error> {
+    pub fn notify_state(&mut self, id: ProcessId, state: WireValue) -> Result<(), Error> {
         let sample = self.from_wire(state)?;
-        self.retain(&sample);
 
-        match self.get_process_mut(id) {
-            Some(process) => {
-                // Already retained above; push raw.
-                process.stack.push(sample);
-                if let Some(frame) = process.frames.last_mut() {
-                    frame.counter += 1;
-                }
-                if self.sampling.remove(&id) {
-                    self.queue.push_back(id);
-                }
+        if let Some(process) = self.get_process_mut(id) {
+            process.stack.push(sample);
+            if let Some(frame) = process.frames.last_mut() {
+                frame.counter += 1;
             }
-            None => self.release(&sample),
+            if self.sampling.remove(&id) {
+                self.queue.push_back(id);
+            }
         }
         Ok(())
     }
@@ -1237,7 +900,7 @@ impl<E: Effect> Executor<E> {
         &mut self,
         awaiter: ProcessId,
         awaited: ProcessId,
-        result: &WireValue,
+        result: WireValue,
     ) -> Result<(), Error> {
         // Rebuild the result on this worker's heap.
         let injected_result = self.from_wire(result)?;
@@ -1250,15 +913,10 @@ impl<E: Effect> Executor<E> {
             .get_process(awaiter)
             .is_some_and(|p| p.persistent || p.result.is_none())
         {
-            self.retain(&injected_result);
-            let displaced = self
-                .get_process_mut(awaiter)
+            self.get_process_mut(awaiter)
                 .unwrap()
                 .awaiting
                 .insert(awaited, Some(injected_result));
-            if let Some(Some(old)) = displaced {
-                self.release(&old);
-            }
         }
 
         // Re-queue awaiter to retry its Select instruction
@@ -1279,7 +937,7 @@ impl<E: Effect> Executor<E> {
 
         // Convert result to either Ok(Value) or Err(Error)
         let value_result = match result {
-            Ok(v) => Ok(self.from_wire(&v)?),
+            Ok(v) => Ok(self.from_wire(v)?),
             Err(err_msg) => Err(Error::InvalidArgument(format!(
                 "Effect operation failed: {}",
                 err_msg
@@ -1287,9 +945,6 @@ impl<E: Effect> Executor<E> {
         };
 
         // Retain the success value as it enters the stack (below).
-        if let Ok(value) = &value_result {
-            self.retain(value);
-        }
 
         // Get process and update based on result
         let process = self
@@ -1324,7 +979,7 @@ impl<E: Effect> Executor<E> {
         Ok(())
     }
 
-    pub fn notify_message(&mut self, id: ProcessId, message: &WireValue) -> Result<(), Error> {
+    pub fn notify_message(&mut self, id: ProcessId, message: WireValue) -> Result<(), Error> {
         // A completed process can never receive again — drop the message (rather than
         // queueing it forever on the tombstone). Persistent (REPL) processes complete
         // between submissions but stay addressable, so they still queue. Never rebuilding
@@ -1336,7 +991,6 @@ impl<E: Effect> Executor<E> {
 
         if deliverable {
             let injected_message = self.from_wire(message)?;
-            self.retain(&injected_message);
             self.get_process_mut(id)
                 .unwrap()
                 .mailbox
@@ -1405,7 +1059,6 @@ impl<E: Effect> Executor<E> {
             }
             StreamEvent::End => Value::tuple(info.end_tuple, vec![source]),
         };
-        self.retain(&value);
 
         let process = self.get_process_mut(id).unwrap();
         process.armed_resources.remove(&resource_id);
@@ -1414,9 +1067,6 @@ impl<E: Effect> Executor<E> {
             displaced.is_none(),
             "a stream resource may have at most one event in flight"
         );
-        if let Some(old) = displaced {
-            self.release(&old);
-        }
 
         if self.selecting.remove(&id) {
             self.queue.push_back(id);
@@ -1501,56 +1151,54 @@ impl<E: Effect> Executor<E> {
         self.process_function_indices.insert(id, function_index);
     }
 
-    /// Distinct heap-slot indices reachable from a set of values.
-    fn heap_set<'a>(&self, values: impl Iterator<Item = &'a Value>) -> HashSet<usize> {
-        let mut set = HashSet::new();
+    /// The distinct binary buffers reachable from a set of roots.
+    fn binary_set<'a>(
+        &self,
+        values: impl Iterator<Item = &'a Value>,
+    ) -> HashMap<*const BinaryData, BinaryStat> {
+        let mut set = HashMap::new();
         for value in values {
-            collect_heap_indices(value, &mut set);
+            collect_binaries(value, &mut set);
         }
         set
     }
 
-    /// Total bytes occupied by a set of heap slots.
-    fn heap_bytes(&self, indices: &HashSet<usize>) -> usize {
-        indices
-            .iter()
-            .filter_map(|&i| self.heap.get(i))
-            .map(BinaryData::len)
-            .sum()
-    }
-
-    fn usage(&self, indices: &HashSet<usize>) -> crate::process::HeapUsage {
+    fn usage(
+        &self,
+        binaries: &HashMap<*const BinaryData, BinaryStat>,
+    ) -> crate::process::HeapUsage {
         crate::process::HeapUsage {
-            slots: indices.len(),
-            bytes: self.heap_bytes(indices),
+            binaries: binaries.len(),
+            bytes: binaries.values().map(|stat| stat.bytes).sum(),
         }
     }
 
-    /// A process's per-root binary-heap footprint (see [`crate::process::ProcessHeapUsage`]).
+    /// A process's per-root binary footprint (see [`crate::process::ProcessHeapUsage`]).
     fn process_heap_usage(&self, process: &Process) -> crate::process::ProcessHeapUsage {
-        let stack = self.heap_set(process.stack.iter());
-        let locals = self.heap_set(process.locals.iter());
-        let mailbox = self.heap_set(process.mailbox.iter());
+        let stack = self.binary_set(process.stack.iter());
+        let locals = self.binary_set(process.locals.iter());
+        let mailbox = self.binary_set(process.mailbox.iter());
 
-        // The total is the union across every root, deduplicated.
-        let mut total = &stack | &locals;
-        total.extend(&mailbox);
+        // The total is the union across every root, deduplicated by buffer identity.
+        let mut total = stack.clone();
+        total.extend(locals.iter());
+        total.extend(mailbox.iter());
         if let Some(Ok(value)) = &process.result {
-            collect_heap_indices(value, &mut total);
+            collect_binaries(value, &mut total);
         }
         if let Some(state) = &process.select_state {
             for value in &state.sources {
-                collect_heap_indices(value, &mut total);
+                collect_binaries(value, &mut total);
             }
             if let Some((_, value)) = &state.receiving {
-                collect_heap_indices(value, &mut total);
+                collect_binaries(value, &mut total);
             }
         }
         for value in process.awaiting.values().flatten() {
-            collect_heap_indices(value, &mut total);
+            collect_binaries(value, &mut total);
         }
         for value in process.resource_events.values() {
-            collect_heap_indices(value, &mut total);
+            collect_binaries(value, &mut total);
         }
 
         crate::process::ProcessHeapUsage {
@@ -1563,36 +1211,49 @@ impl<E: Effect> Executor<E> {
 
     /// A snapshot of this worker's executor for the `\w` inspector (see
     /// [`crate::process::WorkerInfo`]).
+    ///
+    /// Reports *bytes held*, not slots: with binaries owned by the values that reference them
+    /// there is no slot table to occupy, and no free list or reclamation queue to report. A
+    /// buffer shared between processes — or between workers — is counted once here, by
+    /// identity.
     pub fn worker_info(&self) -> crate::process::WorkerInfo {
-        let reachable = self.reachable_heap_indices();
-        let constant_indices: HashSet<usize> = self
-            .constant_binaries
-            .iter()
-            .flatten()
-            .filter_map(|b| match b {
-                Binary::Heap(i) => Some(*i),
-                _ => None,
-            })
-            .collect();
+        let mut live = HashMap::new();
+        for process in self.processes.values() {
+            for value in process.stack.iter().chain(process.locals.iter()) {
+                collect_binaries(value, &mut live);
+            }
+            for value in process.mailbox.iter() {
+                collect_binaries(value, &mut live);
+            }
+            if let Some(Ok(value)) = &process.result {
+                collect_binaries(value, &mut live);
+            }
+        }
+        let mut constants = HashMap::new();
+        for binary in self.constant_binaries.iter().flatten() {
+            collect_binaries(&Value::Binary(binary.clone()), &mut constants);
+        }
         crate::process::WorkerInfo {
             worker_id: self.worker_id,
             process_ids: self.processes.keys().copied().collect(),
-            heap_slots: self.heap.len(),
-            live_slots: reachable.len(),
-            free_slots: self.free.len(),
-            pending_free: self.pending_free.len(),
-            reclaimed: self.reclaimed,
-            live_bytes: self.heap_bytes(&reachable),
-            total_bytes: self.heap.iter().map(BinaryData::len).sum(),
-            constant_slots: constant_indices.len(),
-            constant_bytes: self.heap_bytes(&constant_indices),
+            live_binaries: live.len(),
+            live_bytes: live.values().map(|stat| stat.bytes).sum(),
+            rope_binaries: live.values().filter(|stat| stat.depth > 0).count(),
+            max_rope_depth: live.values().map(|stat| stat.depth).max().unwrap_or(0),
+            shared_bytes: live
+                .values()
+                .filter(|stat| stat.shared)
+                .map(|stat| stat.bytes)
+                .sum(),
+            constant_binaries: constants.len(),
+            constant_bytes: constants.values().map(|stat| stat.bytes).sum(),
         }
     }
 
     pub fn get_process_info(&self, id: ProcessId) -> Option<ProcessInfo> {
         self.processes.get(&id).map(|process| {
             // The reported result leaves this worker, so it takes the wire form. A value
-            // that fails to convert (a dangling heap slot — a bug, not a program state) is
+            // that fails to convert (a bug, not a program state) is
             // reported as nil rather than failing the whole inspection.
             let result = match &process.result {
                 Some(Ok(value)) => {
@@ -1728,10 +1389,6 @@ impl<E: Effect> Executor<E> {
     /// Execute up to max_units instruction units for a single process.
     /// Returns (did_work, optional_action) where did_work indicates if any instructions were executed.
     pub fn step(&mut self, max_units: usize, current_time_ms: u64) -> (bool, Option<Action<E>>) {
-        // Reclaim slots that settled at count 0 since the last step. Doing it here (a quiescent
-        // point — any Action returned by the previous step has been handled by the Environment,
-        // and no Rust-local Value handles are live) is what makes deferred reclamation safe.
-        self.process_pending_free();
         // Check for expired timeouts before processing
         self.check_expired_timeouts(current_time_ms);
         // Pop process from queue
@@ -1856,10 +1513,6 @@ impl<E: Effect> Executor<E> {
             // Validate the refcount invariant at this quiescent point (debug only) — the
             // worker/concurrency-path counterpart of the check in `execute_bytecode_sync`. This
             // catches *leaks* (missing releases) that the `release` underflow assert cannot.
-            #[cfg(debug_assertions)]
-            if let Err(e) = self.check_refcounts() {
-                panic!("refcount invariant violated at process {current_pid} completion: {e}");
-            }
         } else {
             let should_requeue = !self.spawning.contains(&current_pid)
                 && !self.selecting.contains(&current_pid)
@@ -2070,10 +1723,12 @@ impl<E: Effect> Executor<E> {
         result
     }
 
-    /// Resolve a binary constant to a heap reference, materialising and caching it on first use.
+    /// Resolve a binary constant to owned bytes, materialising and caching them on first use so
+    /// a literal in a loop allocates once rather than per iteration. The cache holds a handle
+    /// like any other holder; every value carrying the constant shares that one allocation.
     fn cached_constant_binary(&mut self, index: usize) -> Result<Binary, Error> {
         if let Some(Some(binary)) = self.constant_binaries.get(index) {
-            return Ok(*binary);
+            return Ok(binary.clone());
         }
         let bytes = match self.get_constant(index) {
             Some(Constant::Binary(bytes)) => bytes.clone(),
@@ -2083,9 +1738,7 @@ impl<E: Effect> Executor<E> {
         if self.constant_binaries.len() <= index {
             self.constant_binaries.resize(index + 1, None);
         }
-        self.constant_binaries[index] = Some(binary);
-        // The constant cache is itself a root, so it holds a reference to the materialised slot.
-        self.retain(&Value::Binary(binary));
+        self.constant_binaries[index] = Some(binary.clone());
         Ok(binary)
     }
 
@@ -2668,9 +2321,7 @@ impl<E: Effect> Executor<E> {
         // cached count so a never-watched process (the common case) pays one integer
         // branch and never runs the structural compare.
         let changed = proc.subscriber_count > 0 && !self.values_equal(&proc.state, argument);
-        self.retain(argument);
-        let old = std::mem::replace(&mut proc.state, argument.clone());
-        self.release(&old);
+        proc.state = argument.clone();
         if changed {
             self.enqueue_state_wakeups(proc);
         }
@@ -2924,8 +2575,6 @@ impl<E: Effect> Executor<E> {
         };
         // Both leave this process's stack — carried by the Spawn action and re-injected into the
         // new process by `spawn_process`. Release here so the caller's counts drop.
-        self.release(&function_value);
-        self.release(&argument);
 
         let (function_index, captures) = match function_value {
             Value::Function(idx, caps) => (idx, caps),
@@ -2964,7 +2613,6 @@ impl<E: Effect> Executor<E> {
         // The message leaves this process's stack (carried by the Deliver action, or dropped on a
         // type error); release it. `target_value` is a process/resource handle (no heap
         // references) — it is pushed back or dropped, needing no accounting.
-        self.release(&message);
 
         match target_value {
             Value::Process(target_pid, _) => {
@@ -3046,7 +2694,6 @@ impl<E: Effect> Executor<E> {
                 .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
             process.stack.pop().ok_or(Error::StackUnderflow)?
         };
-        self.release(&target_value);
 
         let Value::Process(target, _) = target_value else {
             return Err(Error::TypeMismatch {
@@ -3066,7 +2713,6 @@ impl<E: Effect> Executor<E> {
         if let Some(target_process) = self.get_process(target) {
             // Local: snapshot the state cell.
             let sample = target_process.state.clone();
-            self.retain(&sample);
             // Subscribe atomically with the read (idempotent; no-op on a terminated target).
             if tracking {
                 self.add_subscriber(target, pid);
@@ -3124,7 +2770,6 @@ impl<E: Effect> Executor<E> {
                     .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
                 process.stack.pop().ok_or(Error::StackUnderflow)?
             };
-            self.release(&verdict);
             Ok(Some(verdict))
         } else {
             Ok(None)
@@ -3220,9 +2865,6 @@ impl<E: Effect> Executor<E> {
                 if let Some(Some(old)) = process.awaiting.insert(*target, None) {
                     displaced.push(old);
                 }
-            }
-            for old in &displaced {
-                self.release(old);
             }
 
             self.mark_selecting(pid);
@@ -3328,7 +2970,6 @@ impl<E: Effect> Executor<E> {
                     if let Some(event) = stashed {
                         let completed = self.complete_select(pid, event.clone());
                         // The stash held one retain; complete_select retained again.
-                        self.release(&event);
                         return completed;
                     }
                 }
@@ -3446,23 +3087,16 @@ impl<E: Effect> Executor<E> {
                 .ok_or(Error::InvalidArgument("Select state missing".to_string()))?;
             let msg_idx = select_state.cursors.get(receive_idx).copied().unwrap_or(0);
 
-            let removed = {
-                let process = self
-                    .get_process_mut(pid)
-                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-                if msg_idx < process.mailbox.len() {
-                    process.mailbox.remove(msg_idx)
-                } else {
-                    None
-                }
-            };
-            if let Some(removed) = &removed {
-                self.release(removed); // accepted message leaves the mailbox
+            let process = self
+                .get_process_mut(pid)
+                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
+            if msg_idx < process.mailbox.len() {
+                process.mailbox.remove(msg_idx); // the accepted message leaves the mailbox
             }
             Ok(Some(message_value.clone()))
         } else {
             // Nil result - increment cursor and reset receiving (releasing the held message).
-            let dropped = {
+            let _dropped = {
                 let process = self
                     .get_process_mut(pid)
                     .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -3474,9 +3108,6 @@ impl<E: Effect> Executor<E> {
                     None => None,
                 }
             };
-            if let Some(message) = &dropped {
-                self.release(message);
-            }
             Ok(None)
         }
     }
@@ -3525,7 +3156,7 @@ impl<E: Effect> Executor<E> {
 
                 if is_type_only {
                     // Type-only receiver - skip calling, just complete with the message
-                    let removed = {
+                    let _removed = {
                         let process = self
                             .get_process_mut(pid)
                             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -3535,9 +3166,6 @@ impl<E: Effect> Executor<E> {
                             None
                         }
                     };
-                    if let Some(removed) = &removed {
-                        self.release(removed); // message leaves the mailbox
-                    }
                     return Ok(SelectResult::Complete(message));
                 } else {
                     // Function has a body - set receiving state and call it
@@ -3582,7 +3210,6 @@ impl<E: Effect> Executor<E> {
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         // The message clone enters the select_state.receiving slot.
-        self.retain(&message);
         if let Some(state) = &mut proc.select_state {
             state.receiving = Some((receive_idx, message.clone()));
             state.cursors[receive_idx] = msg_idx;
@@ -3633,23 +3260,13 @@ impl<E: Effect> Executor<E> {
         pid: ProcessId,
         result: Value,
     ) -> Result<Option<Action<E>>, Error> {
-        // Tear down the select state, releasing the references it held (the source list and any
-        // in-flight received message), then push the result (retaining it on the stack).
-        let state = self
-            .get_process_mut(pid)
+        // Tear down the select state — dropping it releases the source list and any in-flight
+        // received message — then push the result.
+        self.get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?
             .select_state
             .take();
-        if let Some(state) = state {
-            for source in &state.sources {
-                self.release(source);
-            }
-            if let Some((_, message)) = &state.receiving {
-                self.release(message);
-            }
-        }
 
-        self.retain(&result);
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -3738,44 +3355,20 @@ impl<E: Effect> Executor<E> {
             // Mixed small/big pairs are unequal by the canonical-form invariant.
             (Value::BigInt(a), Value::BigInt(b)) => a == b,
             (Value::Binary(a), Value::Binary(b)) => {
-                // Compare binary data content
-                match (a, b) {
-                    (Binary::Constant(idx_a), Binary::Constant(idx_b)) => {
-                        // Both are constants - compare the constant data
-                        if let (Some(Constant::Binary(bytes_a)), Some(Constant::Binary(bytes_b))) =
-                            (self.get_constant(*idx_a), self.get_constant(*idx_b))
-                        {
-                            bytes_a == bytes_b
-                        } else {
-                            false
-                        }
+                // Compare contents, whichever side owns its bytes. `to_vec` realises a rope,
+                // which a byte-wise walk would have to do anyway.
+                let bytes = |binary: &Binary| -> Option<Vec<u8>> {
+                    match binary {
+                        Binary::Data(data) => Some(data.to_vec()),
+                        Binary::Constant(index) => match self.get_constant(*index) {
+                            Some(Constant::Binary(bytes)) => Some(bytes.clone()),
+                            _ => None,
+                        },
                     }
-                    (Binary::Heap(idx_a), Binary::Heap(idx_b)) => {
-                        // Both are heap - compare the heap data
-                        if let (Some(data_a), Some(data_b)) =
-                            (self.heap.get(*idx_a), self.heap.get(*idx_b))
-                        {
-                            // Compare lengths first (fast path)
-                            if data_a.len() != data_b.len() {
-                                return false;
-                            }
-                            // Compare bytes
-                            data_a.to_vec() == data_b.to_vec()
-                        } else {
-                            false
-                        }
-                    }
-                    (Binary::Constant(idx_c), Binary::Heap(idx_h))
-                    | (Binary::Heap(idx_h), Binary::Constant(idx_c)) => {
-                        // One is constant, one is heap - compare bytes
-                        if let (Some(Constant::Binary(bytes_c)), Some(data_h)) =
-                            (self.get_constant(*idx_c), self.heap.get(*idx_h))
-                        {
-                            bytes_c.as_slice() == data_h.to_vec().as_slice()
-                        } else {
-                            false
-                        }
-                    }
+                };
+                match (bytes(a), bytes(b)) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
                 }
             }
             (Value::Tuple(type_a, elements_a), Value::Tuple(type_b, elements_b)) => {
@@ -3832,20 +3425,43 @@ fn collect_process_refs(value: &Value, pids: &mut Vec<ProcessId>) {
     }
 }
 
-/// Recursively collect all heap indices referenced by a value
-fn collect_heap_indices(value: &Value, indices: &mut HashSet<usize>) {
+/// What the inspector records about one distinct binary buffer.
+#[derive(Clone, Copy)]
+struct BinaryStat {
+    bytes: usize,
+    /// Rope depth; 0 for a flat leaf. Non-zero means the bytes are not contiguous, so every
+    /// read realises them — see [`Executor::materialize`], which (unlike the heap-table
+    /// version it replaced) cannot write the flat form back for other holders to reuse. A
+    /// climbing depth here is the signal that a memo on the rope would be worth building.
+    depth: usize,
+    /// Whether the bytes are shared with another holder — see
+    /// [`BinaryData::bytes_shared`](crate::binary::BinaryData::bytes_shared). Only knowable
+    /// now that a value owns its bytes; the slot table counted references to a *slot*.
+    shared: bool,
+}
+
+/// Every distinct binary buffer a value references, keyed by identity so a buffer shared
+/// between roots is counted once.
+fn collect_binaries(value: &Value, out: &mut HashMap<*const BinaryData, BinaryStat>) {
     match value {
-        Value::Binary(Binary::Heap(idx)) => {
-            indices.insert(*idx);
+        Value::Binary(Binary::Data(data)) => {
+            out.insert(
+                Rc::as_ptr(data),
+                BinaryStat {
+                    bytes: data.len(),
+                    depth: data.depth(),
+                    shared: data.bytes_shared(),
+                },
+            );
         }
         Value::Tuple(_, elements) | Value::Function(_, elements) => {
-            for elem in elements.all_values() {
-                collect_heap_indices(elem, indices);
+            for element in elements.all_values() {
+                collect_binaries(element, out);
             }
         }
         Value::Builtin(_, Some(payload)) => {
-            for elem in payload.all_values() {
-                collect_heap_indices(elem, indices);
+            for value in payload.all_values() {
+                collect_binaries(value, out);
             }
         }
         _ => {}
@@ -3877,7 +3493,9 @@ impl<E: Effect> Executor<E> {
             Value::Int(n) => WireValue::Int(*n),
             Value::BigInt(n) => WireValue::BigInt((**n).clone()),
             Value::Binary(Binary::Constant(index)) => WireValue::Constant(*index),
-            Value::Binary(binary) => WireValue::Binary(self.get_binary_data(binary)?.to_vec()),
+            Value::Binary(binary) => {
+                WireValue::Binary(self.get_binary_data(binary)?.shared_bytes())
+            }
             Value::Reference(id) => WireValue::Reference(*id),
             Value::Tuple(type_id, payload) => {
                 WireValue::Tuple(*type_id, self.payload_to_wire(payload)?)
@@ -3914,293 +3532,50 @@ impl<E: Effect> Executor<E> {
     /// The inverse of [`to_wire`](Self::to_wire): rebuild a value in *this* executor, so its
     /// binaries land on this worker's heap. Fresh slots start floating at refcount 0; the
     /// receiving process's placement site retains them, as for any freshly built value.
-    pub fn from_wire(&mut self, wire: &WireValue) -> Result<Value, Error> {
+    ///
+    /// Takes the wire value **by value**: the receiver owns it and drops it immediately
+    /// after, so a binary's handle is adopted rather than its bytes copied.
+    pub fn from_wire(&mut self, wire: WireValue) -> Result<Value, Error> {
         Ok(match wire {
-            WireValue::Int(n) => Value::Int(*n),
-            WireValue::BigInt(n) => Value::integer(n.clone()),
-            WireValue::Binary(bytes) => Value::Binary(self.allocate_binary(bytes.clone())?),
-            WireValue::Constant(index) => Value::Binary(Binary::Constant(*index)),
-            WireValue::Reference(id) => Value::Reference(*id),
+            WireValue::Int(n) => Value::Int(n),
+            WireValue::BigInt(n) => Value::integer(n),
+            // The handle is adopted, not copied: the receiver's slot points at the sender's
+            // allocation.
+            WireValue::Binary(bytes) => {
+                Value::Binary(self.allocate_binary_data(BinaryData::Owned(bytes))?)
+            }
+            WireValue::Constant(index) => Value::Binary(Binary::Constant(index)),
+            WireValue::Reference(id) => Value::Reference(id),
             WireValue::Tuple(type_id, payload) => {
-                Value::Tuple(*type_id, self.payload_from_wire(payload)?)
+                Value::Tuple(type_id, self.payload_from_wire(payload)?)
             }
             WireValue::Function(index, payload) => {
-                Value::Function(*index, self.payload_from_wire(payload)?)
+                Value::Function(index, self.payload_from_wire(payload)?)
             }
             WireValue::Builtin(id, payload) => Value::Builtin(
-                *id,
+                id,
                 payload
-                    .as_ref()
                     .map(|payload| self.payload_from_wire(payload))
                     .transpose()?,
             ),
-            WireValue::Process(pid, function_index) => Value::Process(*pid, *function_index),
-            WireValue::Resource(id, type_id) => Value::Resource(*id, *type_id),
+            WireValue::Process(pid, function_index) => Value::Process(pid, function_index),
+            WireValue::Resource(id, type_id) => Value::Resource(id, type_id),
         })
     }
 
-    fn payload_from_wire(&mut self, wire: &WirePayload) -> Result<Rc<Payload>, Error> {
-        let mut elements = Vec::with_capacity(wire.elements.len());
-        for element in &wire.elements {
+    fn payload_from_wire(&mut self, wire: WirePayload) -> Result<Rc<Payload>, Error> {
+        let (wire_elements, wire_annotations, type_argument) = wire.into_parts();
+        let mut elements = Vec::with_capacity(wire_elements.len());
+        for element in wire_elements {
             elements.push(self.from_wire(element)?);
         }
-        let mut annotations = Vec::with_capacity(wire.annotations().len());
-        for (key, value) in wire.annotations() {
-            annotations.push((*key, self.from_wire(value)?));
+        let mut annotations = Vec::with_capacity(wire_annotations.len());
+        for (key, value) in wire_annotations {
+            annotations.push((key, self.from_wire(value)?));
         }
         Ok(Payload::with_annotations(elements, annotations)
-            .with_type_argument(wire.type_argument)
+            .with_type_argument(type_argument)
             .shared())
-    }
-}
-
-#[cfg(test)]
-mod heap_stats_tests {
-    use super::*;
-    use crate::builtins::BuiltinRegistry;
-    use crate::process::SelectState;
-    use crate::value::ResourceId;
-    use serde::{Deserialize, Serialize};
-
-    // A do-nothing effect so we can build a bare Executor without a host backend.
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    struct TestEffect;
-    impl Effect for TestEffect {
-        fn resource_id(&self) -> Option<ResourceId> {
-            None
-        }
-    }
-
-    fn executor() -> Executor<TestEffect> {
-        Executor::new(BuiltinRegistry::new(), false, 0)
-    }
-
-    fn bin(value: &Binary) -> Value {
-        Value::Binary(*value)
-    }
-
-    #[test]
-    fn counts_slots_bytes_and_reachable() {
-        let mut ex = executor();
-        let b0 = ex.allocate_binary(vec![1, 2, 3]).unwrap(); // Heap(0), reachable
-        let b1 = ex.allocate_binary(vec![4, 5]).unwrap(); // Heap(1), reachable
-        let _b2 = ex.allocate_binary(vec![6]).unwrap(); // Heap(2), dead
-
-        let mut p = Process::new(false);
-        p.stack.push(bin(&b0));
-        p.locals.push(bin(&b1));
-        ex.processes.insert(0, p);
-
-        let stats = ex.heap_stats();
-        assert_eq!(stats.slots, 3);
-        assert_eq!(stats.reachable, 2);
-        assert_eq!(stats.dead(), 1); // the unreferenced b2 is garbage
-        assert_eq!(stats.total_bytes, 3 + 2 + 1);
-        assert_eq!(stats.reachable_bytes, 3 + 2);
-    }
-
-    #[test]
-    fn finds_binaries_nested_in_tuples() {
-        let mut ex = executor();
-        let b = ex.allocate_binary(vec![7, 7]).unwrap();
-
-        let mut p = Process::new(false);
-        // A binary buried two tuples deep must still be reached.
-        let inner = Value::tuple(0, vec![bin(&b)]);
-        p.locals.push(Value::tuple(0, vec![Value::nil(), inner]));
-        ex.processes.insert(0, p);
-
-        assert_eq!(ex.reachable_heap_indices(), HashSet::from([0]));
-    }
-
-    #[test]
-    fn sweeps_every_root_kind() {
-        let mut ex = executor();
-        let in_stack = ex.allocate_binary(vec![0]).unwrap();
-        let in_locals = ex.allocate_binary(vec![1]).unwrap();
-        let in_mailbox = ex.allocate_binary(vec![2]).unwrap();
-        let in_result = ex.allocate_binary(vec![3]).unwrap();
-        let in_select = ex.allocate_binary(vec![4]).unwrap();
-        let in_receiving = ex.allocate_binary(vec![5]).unwrap();
-        let in_awaiting = ex.allocate_binary(vec![6]).unwrap();
-        let dead = ex.allocate_binary(vec![9]).unwrap();
-
-        let mut p = Process::new(false);
-        p.stack.push(bin(&in_stack));
-        p.locals.push(bin(&in_locals));
-        p.mailbox.push_back(bin(&in_mailbox));
-        p.result = Some(Ok(bin(&in_result)));
-        p.select_state = Some(Box::new(SelectState {
-            frame: 0,
-            instruction: 0,
-            sources: vec![bin(&in_select)],
-            cursors: vec![],
-            start_time: None,
-            receiving: Some((0, bin(&in_receiving))),
-        }));
-        p.awaiting.insert(1, Some(bin(&in_awaiting)));
-        ex.processes.insert(0, p);
-
-        let reachable = ex.reachable_heap_indices();
-        // Every root kind contributes; only `dead` is missing.
-        assert_eq!(reachable.len(), 7);
-        for b in [
-            in_stack,
-            in_locals,
-            in_mailbox,
-            in_result,
-            in_select,
-            in_receiving,
-            in_awaiting,
-        ] {
-            let Binary::Heap(i) = b else { unreachable!() };
-            assert!(reachable.contains(&i));
-        }
-        let Binary::Heap(d) = dead else {
-            unreachable!()
-        };
-        assert!(!reachable.contains(&d));
-    }
-
-    #[test]
-    fn constant_cache_pins_slots() {
-        let mut ex = executor();
-        let pinned = ex.allocate_binary(vec![1, 2, 3, 4]).unwrap();
-        // No process references it, but the constant cache does, so it stays reachable.
-        ex.constant_binaries.push(Some(pinned));
-
-        let stats = ex.heap_stats();
-        assert_eq!(stats.slots, 1);
-        assert_eq!(stats.reachable, 1);
-        assert_eq!(stats.dead(), 0);
-    }
-
-    // --- refcount engine (the value-movement bookkeeping the interpreter will drive) ---
-
-    #[test]
-    fn retain_release_round_trip_keeps_invariant() {
-        let mut ex = executor();
-        let b = ex.allocate_binary(vec![1, 2, 3]).unwrap();
-        // Floating: count 0, not reachable — consistent.
-        assert_eq!(ex.refcounts[0], 0);
-        assert!(ex.check_refcounts().is_ok());
-
-        // Enter rooted storage (a process's stack) -> retain.
-        let value = bin(&b);
-        ex.retain(&value);
-        let mut p = Process::new(false);
-        p.stack.push(value);
-        ex.processes.insert(0, p);
-        assert_eq!(ex.refcounts[0], 1);
-        assert!(ex.check_refcounts().is_ok());
-
-        // Leave storage -> release. Back to floating/consistent.
-        let value = ex.get_process_mut(0).unwrap().stack.pop().unwrap();
-        ex.release(&value);
-        assert_eq!(ex.refcounts[0], 0);
-        assert!(ex.check_refcounts().is_ok());
-    }
-
-    #[test]
-    fn retain_recurses_into_nested_tuples() {
-        let mut ex = executor();
-        let b = ex.allocate_binary(vec![9]).unwrap();
-        let tuple = Value::tuple(0, vec![Value::nil(), bin(&b)]);
-
-        ex.retain(&tuple); // deep: bumps the nested binary
-        let mut p = Process::new(false);
-        p.locals.push(tuple);
-        ex.processes.insert(0, p);
-
-        assert_eq!(ex.refcounts[0], 1);
-        assert!(ex.check_refcounts().is_ok());
-    }
-
-    #[test]
-    fn shared_references_count_each_path() {
-        let mut ex = executor();
-        let b = ex.allocate_binary(vec![1]).unwrap();
-        let tuple = Value::tuple(0, vec![bin(&b)]);
-
-        // Two stack slots each hold the tuple -> two reference paths to the binary.
-        let mut p = Process::new(false);
-        ex.retain(&tuple);
-        p.stack.push(tuple.clone());
-        ex.retain(&tuple);
-        p.stack.push(tuple);
-        ex.processes.insert(0, p);
-        assert_eq!(ex.refcounts[0], 2);
-        assert!(ex.check_refcounts().is_ok());
-
-        // Drop one path: still reachable via the other slot (presence-consistent).
-        let value = ex.get_process_mut(0).unwrap().stack.pop().unwrap();
-        ex.release(&value);
-        assert_eq!(ex.refcounts[0], 1);
-        assert!(ex.check_refcounts().is_ok());
-    }
-
-    #[test]
-    fn check_catches_missing_retain() {
-        // A binary rooted on the stack but never retained: reachable yet count 0.
-        let mut ex = executor();
-        let b = ex.allocate_binary(vec![1]).unwrap();
-        let mut p = Process::new(false);
-        p.stack.push(bin(&b));
-        ex.processes.insert(0, p);
-        assert!(ex.check_refcounts().is_err());
-    }
-
-    #[test]
-    fn check_catches_missing_release() {
-        // A binary retained but never rooted (a leak): count 1 yet unreachable.
-        let mut ex = executor();
-        let b = ex.allocate_binary(vec![1]).unwrap();
-        ex.retain(&bin(&b));
-        assert!(ex.check_refcounts().is_err());
-    }
-
-    // --- reclamation (deferred free + slot reuse) ---
-
-    #[test]
-    fn reclaims_and_reuses_slots() {
-        let mut ex = executor();
-        let b0 = ex.allocate_binary(vec![1, 2, 3]).unwrap(); // Heap(0)
-        let Binary::Heap(i0) = b0 else { unreachable!() };
-        ex.retain(&bin(&b0)); // rooted (count 1)
-        ex.release(&bin(&b0)); // count 0 -> queued, but not yet freed (deferred)
-        assert!(!ex.freed[i0]);
-        assert_eq!(ex.heap.len(), 1);
-
-        ex.process_pending_free(); // what `step` does at a safe point
-        assert!(ex.freed[i0]);
-        assert_eq!(ex.free, vec![i0]);
-
-        // The next allocation reuses the slot instead of growing the heap.
-        let b1 = ex.allocate_binary(vec![9]).unwrap();
-        let Binary::Heap(i1) = b1 else { unreachable!() };
-        assert_eq!(i1, i0, "freed slot should be reused");
-        assert_eq!(
-            ex.heap.len(),
-            1,
-            "heap must not grow while a free slot exists"
-        );
-        assert!(!ex.freed[i1]);
-    }
-
-    #[test]
-    fn deferral_protects_a_move() {
-        // A release-then-retain "move" must NOT reclaim the slot: by the time the deferred free
-        // runs, the count is back above zero, so the slot is kept.
-        let mut ex = executor();
-        let b = ex.allocate_binary(vec![1]).unwrap();
-        let Binary::Heap(i) = b else { unreachable!() };
-        ex.retain(&bin(&b)); // on the stack (count 1)
-        ex.release(&bin(&b)); // pop: count 0 -> queued
-        ex.retain(&bin(&b)); // re-push (the move): count 1
-
-        ex.process_pending_free();
-        assert!(!ex.freed[i], "a re-retained slot must not be reclaimed");
-        assert!(ex.free.is_empty());
     }
 }
 
@@ -4371,36 +3746,12 @@ mod annotation_tests {
     }
 
     #[test]
-    fn retain_release_walk_annotation_values() {
-        let mut ex = executor();
-        let b = ex.allocate_binary(vec![1, 2, 3]).unwrap();
-        let Binary::Heap(idx) = b else { unreachable!() };
-
-        let carrier = Value::tuple(3, vec![Value::int(1)]);
-        let annotated = carrier.annotated(0, Value::Binary(b)).unwrap();
-        assert!(
-            annotated.has_heap_refs(),
-            "heap ref inside an annotation must set the cached flag"
-        );
-
-        ex.retain(&annotated);
-        assert_eq!(ex.refcounts[idx], 1);
-        ex.release(&annotated);
-        assert_eq!(ex.refcounts[idx], 0);
-    }
-
-    #[test]
     fn annotated_builtin_walks_and_stays_equal() {
         let mut ex = executor();
         let b = ex.allocate_binary(vec![4, 5]).unwrap();
-        let Binary::Heap(idx) = b else { unreachable!() };
 
         let bare = Value::builtin(7);
         let annotated = bare.annotated(0, Value::Binary(b)).unwrap();
-        assert!(
-            annotated.has_heap_refs(),
-            "heap ref inside a builtin annotation must be visible to accounting"
-        );
         assert_eq!(bare, annotated, "derived equality ignores annotations");
         assert!(
             ex.values_equal(&bare, &annotated),
@@ -4411,11 +3762,6 @@ mod annotation_tests {
             ex.get_concrete_type(&annotated),
             "type checks see the same concrete type"
         );
-
-        ex.retain(&annotated);
-        assert_eq!(ex.refcounts[idx], 1);
-        ex.release(&annotated);
-        assert_eq!(ex.refcounts[idx], 0);
     }
 
     /// Every shape a message can carry survives `to_wire` -> `from_wire` between two
@@ -4454,7 +3800,7 @@ mod annotation_tests {
         ));
 
         let mut target = executor();
-        let received = target.from_wire(&wire).unwrap();
+        let received = target.from_wire(wire).unwrap();
 
         // Structural equality ignores annotations and heap placement, so compare the parts
         // that must survive explicitly as well.

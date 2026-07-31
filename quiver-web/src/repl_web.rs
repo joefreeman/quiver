@@ -667,7 +667,7 @@ impl Environment {
                 // The JS bridge speaks `(Value, heap)`; a wire value renders to that pair.
                 let (core, heap) = value.for_display();
                 callback.invoke(crate::types::Result::ok(Some(EvaluationResult {
-                    value: crate::types::Value::from_core_value(&core, &heap, env.get_program()),
+                    value: crate::types::Value::from_core_value(&core, env.get_program()),
                     heap,
                 })));
             }
@@ -703,7 +703,6 @@ impl Environment {
                                 EvaluationResult {
                                     value: crate::types::Value::from_core_value(
                                         &core,
-                                        &heap,
                                         env.get_program(),
                                     ),
                                     heap,

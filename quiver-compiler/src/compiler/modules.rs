@@ -4,20 +4,18 @@ use crate::{
     ast, parser,
     resolver::{ModuleId, ModuleResolver, PackageId},
 };
-use quiver_core::effects::Effect;
 use quiver_core::program::Program;
 use quiver_core::types::Type;
-use quiver_core::value::{Binary, Value};
+use quiver_core::value::Value;
 
 use super::{Error, Scope, ScopeKind, scopes, typing, typing::TypeAliasDef};
 
-/// Cached module value with extracted binary data
+/// A cached module value. The value carries its own binary bytes, so nothing has to be
+/// extracted alongside it.
 #[derive(Clone)]
 pub struct CachedModule {
     pub value: Value,
     pub module_type: Type,
-    /// Binary data extracted from executor heap, keyed by heap index
-    pub binary_data: HashMap<usize, Vec<u8>>,
     /// Return-type dispatch tables produced while compiling this module (and its nested imports),
     /// keyed by function index. A value-cached module is not recompiled when reused, so these are
     /// restored into the compiler on a cache hit — otherwise a freshly-compiled caller couldn't
@@ -199,45 +197,6 @@ impl ModuleCache {
         self.ast_cache.insert(id.clone(), parsed.clone());
 
         Ok(parsed)
-    }
-}
-
-/// Extract all binary data from a Value tree that references the executor heap.
-/// Populates the provided map from heap index to the actual bytes.
-pub fn extract_binary_data<E: Effect>(
-    value: &Value,
-    executor: &quiver_core::executor::Executor<E>,
-    binary_data: &mut HashMap<usize, Vec<u8>>,
-) {
-    match value {
-        Value::Binary(Binary::Heap(heap_idx)) => {
-            if !binary_data.contains_key(heap_idx)
-                && let Some(data) = executor.get_heap_binary(*heap_idx)
-            {
-                binary_data.insert(*heap_idx, data.to_vec());
-            }
-        }
-        Value::Binary(Binary::Constant(_)) => {
-            // Constant binaries reference Program.constants which persists - no extraction needed
-        }
-        Value::Tuple(_, fields) | Value::Function(_, fields) => {
-            // `all_values` includes annotation values, so e.g. a `:doc` string on a
-            // module member survives into the cache.
-            for field in fields.all_values() {
-                extract_binary_data(field, executor, binary_data);
-            }
-        }
-        Value::Builtin(_, Some(payload)) => {
-            for field in payload.all_values() {
-                extract_binary_data(field, executor, binary_data);
-            }
-        }
-        Value::Int(_)
-        | Value::BigInt(_)
-        | Value::Builtin(_, None)
-        | Value::Process(..)
-        | Value::Resource(..)
-        | Value::Reference(_) => {}
     }
 }
 

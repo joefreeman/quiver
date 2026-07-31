@@ -40,10 +40,10 @@ pub enum ProcessStatus {
     Completed,
 }
 
-/// Distinct heap slots (and their total bytes) reachable from some set of values.
+/// Distinct binary buffers (and their total bytes) reachable from some set of values.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct HeapUsage {
-    pub slots: usize,
+    pub binaries: usize,
     pub bytes: usize,
 }
 
@@ -59,21 +59,26 @@ pub struct ProcessHeapUsage {
     pub total: HeapUsage,
 }
 
-/// A worker's executor snapshot, for the `\w` inspector. Heap slots are `live + free`; `live` is
-/// reachable from a root, `free` are reclaimed-and-reusable, `pending` await the next reclamation.
-/// `constant_*` is the share of the live heap pinned by the constant-binary cache.
+/// A worker's executor snapshot, for the `\w` inspector. Everything here is measured by walking
+/// this worker's processes: a binary is owned by the values that reference it, so there is no
+/// table to report occupancy of, and figures are deduplicated by buffer identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerInfo {
     pub worker_id: u16,
     pub process_ids: Vec<ProcessId>,
-    pub heap_slots: usize,
-    pub live_slots: usize,
-    pub free_slots: usize,
-    pub pending_free: usize,
-    pub reclaimed: usize,
+    /// Distinct binary buffers reachable from this worker's processes, and their total bytes.
+    /// Counted by identity, so a buffer shared between processes appears once.
+    pub live_binaries: usize,
     pub live_bytes: usize,
-    pub total_bytes: usize,
-    pub constant_slots: usize,
+    /// How many of those are unrealised ropes, and the deepest. Every read of a rope realises
+    /// it, and nothing caches the result, so a rising depth is the cue that a binary is being
+    /// built by repeated append and read repeatedly.
+    pub rope_binaries: usize,
+    pub max_rope_depth: usize,
+    /// Bytes in buffers whose allocation has more than one holder — another value here, or one
+    /// on another worker, since a send passes the handle rather than the bytes.
+    pub shared_bytes: usize,
+    pub constant_binaries: usize,
     pub constant_bytes: usize,
 }
 

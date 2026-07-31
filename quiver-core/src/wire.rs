@@ -1,30 +1,38 @@
 //! The form a value takes between processes.
 //!
-//! A [`Value`](crate::value::Value) is meaningful only inside the worker that owns it: a
-//! binary is an index into that worker's heap, and a tuple's payload is a refcounted handle
-//! into that worker's memory. Neither survives a process boundary.
+//! A [`Value`](crate::value::Value) is meaningful only inside the worker that owns it: its
+//! payloads, and a binary's rope spine, are `Rc` handles into that worker's memory, and `Rc`
+//! is not `Send`. So a value cannot cross a process boundary — which the type system enforces
+//! rather than a convention.
 //!
-//! [`WireValue`] is the self-contained form — binaries carry their bytes — so it depends on
-//! no executor state and can cross a worker, and eventually a node, boundary. It makes
-//! explicit what the transfer already did: Quiver's message semantics have always been
-//! *copy* (only resources move; see the spec's "Resource ownership"), and every send already
-//! materialised its binaries. What it replaces is the `(Value, Vec<Vec<u8>>)` pair, where the
-//! value's heap indices pointed into a side-channel vec that had to be remapped on both
+//! [`WireValue`] is the form that can: `Send`, self-contained, and carrying a binary's bytes as
+//! an `Arc` handle. What it replaces is the `(Value, Vec<Vec<u8>>)` pair, where the value's
+//! binary references were indices into a side-channel vec that had to be remapped on both
 //! sides — a representation that was only ever a wire format wearing a `Value`'s clothes.
+//!
+//! Tuple structure is copied and binary *bytes* are shared, which is the split BEAM makes
+//! for the same reason: a message's shape is small and process-local, while its buffers are
+//! large and immutable. Quiver's semantics are unaffected either way — values are immutable
+//! and a send is a copy (only resources move; see the spec's "Resource ownership") — so
+//! whether the bytes are copied or shared is not observable to a program.
 
 use crate::process::ProcessId;
 use crate::value::ResourceId;
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
-/// A value in transit between processes. Mirrors [`Value`](crate::value::Value) except for
-/// binaries, which carry bytes rather than a heap index.
+/// A value in transit between processes. Mirrors [`Value`](crate::value::Value), except that
+/// its binaries carry a `Send` handle to their bytes rather than the process-local rope.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WireValue {
     Int(i64),
     BigInt(BigInt),
-    /// A heap binary, materialised. This is the copy a send has always performed.
-    Binary(Vec<u8>),
+    /// A heap binary, as a shared handle. `Arc`, so the bytes cross a worker boundary by
+    /// pointer rather than by copy — the sender's leaf and the receiver's are the same
+    /// allocation. (A rope is realised into a fresh handle at the boundary; only its spine
+    /// is process-local.)
+    Binary(Arc<[u8]>),
     /// A constant binary. Every worker loads the same constants table, so this crosses as a
     /// reference rather than as bytes — a program's literals are never copied per message.
     Constant(usize),
@@ -36,9 +44,7 @@ pub enum WireValue {
     Resource(ResourceId, usize),
 }
 
-/// The wire form of a tuple's or function's payload. Unlike
-/// [`Payload`](crate::value::Payload) this carries no `has_heap_refs` cache — that is a
-/// property of a value's placement in a particular heap, so it is recomputed on arrival.
+/// The wire form of a tuple's or function's payload.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct WirePayload {
     pub elements: Vec<WireValue>,
@@ -107,10 +113,9 @@ impl WireValue {
         match self {
             WireValue::Int(n) => Value::Int(*n),
             WireValue::BigInt(n) => Value::integer(n.clone()),
-            WireValue::Binary(bytes) => {
-                heap.push(bytes.clone());
-                Value::Binary(Binary::Heap(heap.len() - 1))
-            }
+            WireValue::Binary(bytes) => Value::Binary(Binary::Data(std::rc::Rc::new(
+                crate::binary::BinaryData::Owned(bytes.clone()),
+            ))),
             WireValue::Constant(index) => Value::Binary(Binary::Constant(*index)),
             WireValue::Reference(id) => Value::Reference(*id),
             WireValue::Tuple(type_id, payload) => {
@@ -165,6 +170,17 @@ impl WirePayload {
     /// The annotations attached to the owning value (empty if none).
     pub fn annotations(&self) -> &[(usize, WireValue)] {
         self.annotations.as_deref().map_or(&[], |a| a.as_slice())
+    }
+
+    /// Consume this payload into its parts, for a receiver rebuilding a `Payload` from it —
+    /// which owns the wire form and is about to drop it, so its buffers should move rather
+    /// than be copied.
+    pub fn into_parts(self) -> (Vec<WireValue>, Vec<(usize, WireValue)>, Option<usize>) {
+        (
+            self.elements,
+            self.annotations.map(|a| *a).unwrap_or_default(),
+            self.type_argument,
+        )
     }
 
     /// All values reachable from this payload: elements, then annotation values. The twin of

@@ -11,29 +11,30 @@ pub const MAX_BINARY_SIZE: usize = 16 * 1024 * 1024;
 /// Resource identifier
 pub type ResourceId = usize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// A binary value's bytes, or a reference to a program constant's.
+///
+/// `Data` owns its bytes through an `Rc`, so a binary's lifetime is Rust's to manage: it dies
+/// when the last value referring to it does. This replaced an index into a per-worker heap
+/// table whose slots were refcounted by hand, which made *copying* a value O(size of the value)
+/// — every heap slot under it had to be counted again — and so made building a list of binaries
+/// quadratic. A refcount on the value graph makes the same copy O(1).
+///
+/// Not `Copy`, necessarily: cloning one is now a refcount bump rather than a 16-byte memcpy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Binary {
-    /// Reference to a binary stored in the constants table
+    /// Reference to a binary stored in the constants table. Constants outlive every value and
+    /// are identical on every worker, so they stay references — a literal costs nothing to
+    /// carry and crosses a process boundary as an index rather than as bytes.
     Constant(usize),
-    /// Reference to a binary stored in the executor's heap
-    Heap(usize),
+    /// Bytes owned by the value.
+    Data(Rc<crate::binary::BinaryData>),
 }
 
-/// The shared payload of a tuple or function value: its elements, plus a cached
-/// over-approximation of whether any element (transitively) references an executor-heap
-/// binary. The flag lets the executor's retain/release accounting skip the recursive
-/// walk for the (common) values that own no heap binaries, keeping stack/locals traffic
-/// O(1) instead of O(size of value). Computed once at construction from the elements'
-/// own cached flags, so it costs O(arity), not a deep walk.
+/// The shared payload of a tuple or function value: its elements, and its annotations if
+/// any. Reference-counted, so cloning a value is O(1) whatever it contains.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(from = "PayloadData")]
 pub struct Payload {
-    /// Never serialized: the flag is a cache, so it is derived — not trusted — when
-    /// a payload is deserialized (see [`PayloadData`]). A stored flag would be the
-    /// one path an inconsistent value could enter by: every in-process construction
-    /// goes through the computing constructors.
-    #[serde(skip)]
-    has_heap_refs: bool,
     elements: Vec<Value>,
     /// Annotations attached to the owning value: `(key id, value)` pairs, sorted by key id.
     /// Invisible to equality and pattern matching — only `GetAnnotation` observes them.
@@ -51,9 +52,9 @@ pub struct Payload {
     type_argument: Option<usize>,
 }
 
-/// The serialized shape of [`Payload`]: the data without the cached `has_heap_refs`
-/// flag. Deserialization routes through the ordinary constructors, so the flag is
-/// recomputed by the same code that computes it everywhere else.
+/// The serialized shape of [`Payload`]. Deserialization routes through the ordinary
+/// constructors rather than building the struct directly, so a deserialized payload is
+/// indistinguishable from a constructed one.
 #[derive(Deserialize)]
 struct PayloadData {
     elements: Vec<Value>,
@@ -77,9 +78,7 @@ impl From<PayloadData> for Payload {
 
 impl Payload {
     pub fn new(elements: Vec<Value>) -> Self {
-        let has_heap_refs = elements.iter().any(Value::has_heap_refs);
         Payload {
-            has_heap_refs,
             elements,
             annotations: None,
             type_argument: None,
@@ -96,12 +95,7 @@ impl Payload {
             annotations.windows(2).all(|w| w[0].0 != w[1].0),
             "duplicate annotation key"
         );
-        let has_heap_refs = elements
-            .iter()
-            .chain(annotations.iter().map(|(_, value)| value))
-            .any(Value::has_heap_refs);
         Payload {
-            has_heap_refs,
             elements,
             annotations: Some(Box::new(annotations)),
             type_argument: None,
@@ -121,11 +115,6 @@ impl Payload {
         self.type_argument
     }
 
-    /// True if any element or annotation may (transitively) reference an executor-heap binary.
-    pub fn has_heap_refs(&self) -> bool {
-        self.has_heap_refs
-    }
-
     /// The annotations attached to the owning value (empty if none).
     pub fn annotations(&self) -> &[(usize, Value)] {
         self.annotations.as_deref().map_or(&[], |a| a.as_slice())
@@ -140,9 +129,10 @@ impl Payload {
             .map(|i| &annotations[i].1)
     }
 
-    /// All values reachable from this payload: elements, then annotation values. This is the
-    /// iterator retain/release and the heap-transfer walks must use, so annotations are
-    /// accounted exactly like elements.
+    /// All values reachable from this payload: elements, then annotation values. Any walk over
+    /// a value must use this rather than the elements alone — an annotation carries a value like
+    /// any other field, so it can carry a binary, a resource handle or a pid like any other
+    /// field. (The environment's resource-ownership walk was the one place that forgot.)
     pub fn all_values(&self) -> impl Iterator<Item = &Value> {
         self.elements
             .iter()
@@ -486,7 +476,7 @@ impl Value {
             Value::Binary(Binary::Constant(idx)) => {
                 Value::Binary(Binary::Constant(*remaps.constants.get(idx).unwrap_or(idx)))
             }
-            Value::Binary(Binary::Heap(_)) => self.clone(),
+            Value::Binary(Binary::Data(_)) => self.clone(),
             Value::Tuple(tuple_id, payload) => Value::Tuple(
                 *remaps.tuples.get(tuple_id).unwrap_or(tuple_id),
                 remap_payload(payload, remaps).shared(),
@@ -562,17 +552,6 @@ impl Value {
             self,
             Value::Tuple(..) | Value::Function(..) | Value::Builtin(_, Some(_))
         )
-    }
-
-    /// True if this value may (transitively) reference an executor-heap binary and thus
-    /// needs retain/release accounting. O(1): composite values cache the answer.
-    pub fn has_heap_refs(&self) -> bool {
-        match self {
-            Value::Binary(Binary::Heap(_)) => true,
-            Value::Tuple(_, fields) | Value::Function(_, fields) => fields.has_heap_refs,
-            Value::Builtin(_, Some(payload)) => payload.has_heap_refs,
-            _ => false,
-        }
     }
 
     /// Attach (or replace) an annotation on a tuple, function or builtin value,
