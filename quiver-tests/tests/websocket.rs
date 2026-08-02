@@ -99,14 +99,14 @@ fn test_upgraded_echo_end_to_end() {
             };
             @{ [port: 4183, handler: &handler] ~> %http/server.serve };
             { ![50] | Ok };
-            sock = [0x7f000001, 4183] ~> __tcp_connect__;
+            [0x7f000001, 4183] ~> __tcp_connect__ ~> =(\TcpSocket)sock;
             req = "GET /ws HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
             __tcp_socket_write__ [sock, req ~> .0];
-            r1 = __tcp_socket_read__ [sock, 4096];
+            __tcp_socket_read__ [sock, 4096] ~> =('bin)r1;
             __tcp_socket_write__ [sock, %http/websocket.encode_masked_frame [1, "Hello" ~> .0, 0x37fa213d]];
-            r2 = __tcp_socket_read__ [sock, 4096];
+            __tcp_socket_read__ [sock, 4096] ~> =('bin)r2;
             __tcp_socket_write__ [sock, %http/websocket.encode_masked_frame [8, 0x03e8, 0x00000000]];
-            r3 = __tcp_socket_read__ [sock, 4096];
+            __tcp_socket_read__ [sock, 4096] ~> =('bin)r3;
             sock ~> __tcp_socket_close__;
             [Str[r1], %bin.to_hex r2, %bin.to_hex r3]
             "#,
@@ -136,18 +136,18 @@ fn test_upgrade_pings_and_fragments_end_to_end() {
             };
             @{ [port: 4184, handler: &handler] ~> %http/server.serve };
             { ![50] | Ok };
-            sock = [0x7f000001, 4184] ~> __tcp_connect__;
+            [0x7f000001, 4184] ~> __tcp_connect__ ~> =(\TcpSocket)sock;
             req = "GET /ws HTTP/1.1\r\nHost: t\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
             __tcp_socket_write__ [sock, req ~> .0];
-            r1 = __tcp_socket_read__ [sock, 4096];
+            __tcp_socket_read__ [sock, 4096] ~> =('bin)r1;
             // A ping (masked, zero key: payload rides verbatim) → an unmasked pong.
             __tcp_socket_write__ [sock, 0x898400000000abcdef01];
-            r2 = __tcp_socket_read__ [sock, 4096];
+            __tcp_socket_read__ [sock, 4096] ~> =('bin)r2;
             // Text "Hel" without FIN, then a continuation "lo" with FIN — echoed whole.
             f1 = 0x018300000000 ~> %bin.concat [~, "Hel" ~> .0];
             f2 = 0x808200000000 ~> %bin.concat [~, "lo" ~> .0];
             __tcp_socket_write__ [sock, %bin.concat [f1, f2]];
-            r3 = __tcp_socket_read__ [sock, 4096];
+            __tcp_socket_read__ [sock, 4096] ~> =('bin)r3;
             sock ~> __tcp_socket_close__;
             [%bin.length r1, %bin.to_hex r2, %bin.to_hex r3]
             "#,
@@ -164,9 +164,9 @@ fn test_upgrade_without_key_answers_400() {
             handler = #'%http { Upgrade[handler: #'%http/websocket { Ok }] };
             @{ [port: 4185, handler: &handler] ~> %http/server.serve };
             { ![50] | Ok };
-            sock = [0x7f000001, 4185] ~> __tcp_connect__;
+            [0x7f000001, 4185] ~> __tcp_connect__ ~> =(\TcpSocket)sock;
             __tcp_socket_write__ [sock, "GET /ws HTTP/1.1\r\n\r\n" ~> .0];
-            r = __tcp_socket_read__ [sock, 4096];
+            __tcp_socket_read__ [sock, 4096] ~> =('bin)r;
             sock ~> __tcp_socket_close__;
             [Str[r]]
             "#,

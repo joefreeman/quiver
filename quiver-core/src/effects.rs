@@ -46,6 +46,95 @@ impl std::fmt::Display for EffectError {
 
 impl std::error::Error for EffectError {}
 
+impl EffectError {
+    /// The kind tags a failure's `:error` payload can carry, in table order. `InvalidArgument`
+    /// is absent deliberately: it is an argument-domain failure, so it stays a fault rather
+    /// than becoming a value (see [`EffectFailure`]).
+    pub const KINDS: [&'static str; 7] = [
+        "NotFound",
+        "PermissionDenied",
+        "AlreadyExists",
+        "ConnectionRefused",
+        "WouldBlock",
+        "Interrupted",
+        "Other",
+    ];
+
+    /// This error's index into [`KINDS`](Self::KINDS). `IO` folds into `Other`: the
+    /// distinction is in the message, and a program branching on the kind has nothing
+    /// different to do about it.
+    pub fn kind_index(&self) -> usize {
+        match self {
+            EffectError::NotFound(_) => 0,
+            EffectError::PermissionDenied(_) => 1,
+            EffectError::AlreadyExists(_) => 2,
+            EffectError::ConnectionRefused(_) => 3,
+            EffectError::WouldBlock => 4,
+            EffectError::Interrupted => 5,
+            EffectError::InvalidArgument(_) | EffectError::IO(_) | EffectError::Other(_) => 6,
+        }
+    }
+
+    /// The host's description, without the kind prefix `Display` adds — the payload carries
+    /// the kind as a tag, so repeating it in the message reads as stutter.
+    pub fn message(&self) -> String {
+        match self {
+            EffectError::NotFound(msg)
+            | EffectError::PermissionDenied(msg)
+            | EffectError::AlreadyExists(msg)
+            | EffectError::ConnectionRefused(msg)
+            | EffectError::InvalidArgument(msg)
+            | EffectError::IO(msg)
+            | EffectError::Other(msg) => msg.clone(),
+            EffectError::WouldBlock => "operation would block".to_string(),
+            EffectError::Interrupted => "operation interrupted".to_string(),
+        }
+    }
+
+    /// Whether this failure is an *outcome* (answered as a nil carrying `:error`) rather
+    /// than a *fault* (which terminates the process). Argument-domain failures are faults:
+    /// no guard could have avoided a refused connection, but a malformed argument is a bug
+    /// the caller could have prevented, so it keeps failing loudly.
+    pub fn is_expected(&self) -> bool {
+        !matches!(self, EffectError::InvalidArgument(_))
+    }
+}
+
+/// Why an effect did not produce a value.
+///
+/// The split is what lets ordinary I/O outcomes be data while genuine bugs stay loud.
+/// `Expected` becomes a nil stamped `:error` on the requesting process; `Fault` terminates
+/// it, exactly as every effect failure used to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EffectFailure {
+    /// A world outcome the caller must be able to act on: not found, refused, denied.
+    Expected(EffectError),
+    /// A program bug or host defect: an ownership violation, a missing backend, a
+    /// malformed argument. Nothing useful can be done with it at the call site.
+    Fault(String),
+}
+
+impl EffectFailure {
+    /// Classify a backend error. Argument-domain errors become faults; everything else is
+    /// an outcome.
+    pub fn from_effect_error(error: EffectError) -> Self {
+        if error.is_expected() {
+            EffectFailure::Expected(error)
+        } else {
+            EffectFailure::Fault(error.to_string())
+        }
+    }
+}
+
+impl std::fmt::Display for EffectFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EffectFailure::Expected(error) => write!(f, "{error}"),
+            EffectFailure::Fault(message) => write!(f, "{message}"),
+        }
+    }
+}
+
 /// Result of an effect execution: either (Value, heap_data) or an error
 /// The Vec<Vec<u8>> contains heap-allocated binary data that needs to be transferred to the worker
 /// What an effect backend hands back. The value is already detached from any executor

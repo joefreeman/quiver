@@ -151,10 +151,12 @@ pub enum Command<E: Effect> {
     /// immediately; a normally-completed one makes this a no-op.
     LinkProcess { target: ProcessId, peer: ProcessId },
 
-    /// Effect operation completed
+    /// Effect operation completed. A failure is classified rather than stringly typed: an
+    /// `Expected` outcome resumes the process with a `:error`-stamped nil, a `Fault`
+    /// terminates it.
     EffectCompletion {
         process_id: ProcessId,
-        result: Result<WireValue, String>,
+        result: Result<WireValue, quiver_core::effects::EffectFailure>,
     },
 
     /// A stream resource's next event (the completion of a select-armed read):

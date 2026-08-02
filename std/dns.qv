@@ -1,16 +1,23 @@
 'ip = IPv4['bin] | IPv6['bin]
 
+// The lookup's state: the open resolver, or the nil an *open* failure produced — passed
+// straight through, so a failed resolve yields an iterator that terminates with the failure
+// rather than one that is merely empty.
+'lookup = \DnsResolver | []
+
+lookup_step = #'lookup {
+  | =(\DnsResolver)r => __dns_next__ r ~> {
+    | =('bin)b => __binary_length__ b ~> { =4 => IPv4[b] | =16 => IPv6[b] } ~> [~, r]
+    // Any terminator ends the lookup — exhaustion, or a failure carrying `:error`. Passing
+    // it through unchanged is what lets `%list.try_collect` tell the two apart.
+    | =e => { __dns_close__ r; e }
+  }
+  | =e => e
+}
+
 [
   resolve: #'%str {
-    :doc "Resolves a hostname, lazily yielding its addresses as IPv4 or IPv6 values."
-    .0 ~> __dns_resolve__ ~> %iter.unfold [
-      ~,
-      #\DnsResolver {
-        __dns_next__ $ ~> {
-          | =[] => { __dns_close__ $; [] }
-          | =b; __binary_length__ b ~> { =4 => IPv4[b] | =16 => IPv6[b] } ~> [~, $]
-        }
-      },
-    ]
+    :doc "Lazily resolves a hostname, yielding its addresses as IPv4 or IPv6 values. A failure ends the iteration carrying its :error — collect with %list.try_collect to see it rather than a short list."
+    .0 ~> __dns_resolve__ ~> %iter.unfold [~, &lookup_step]
   },
 ]

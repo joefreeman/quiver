@@ -455,6 +455,34 @@ impl Program {
             None => None,
         };
 
+        let error = match &declarations.error {
+            Some(decl) => {
+                let error_key = self.register_annotation_key(&decl.error_key);
+                let str_tuple = self.vocabulary_tuple(&decl.str)?;
+                let io_error_tuple = self.vocabulary_tuple(&decl.io_error)?;
+                let kind_tuples = decl
+                    .kinds
+                    .iter()
+                    .map(|kind| self.vocabulary_tuple(kind))
+                    .collect::<Result<Vec<_>, _>>()?;
+                // Type-table presence, so a checked retrieval (`x:('%io.error)error`) can
+                // enumerate the payload — and so a match on a single kind resolves.
+                self.register_type(Type::Tuple(io_error_tuple));
+                let kind_types: Vec<usize> = kind_tuples
+                    .iter()
+                    .map(|tuple_id| self.register_type(Type::Tuple(*tuple_id)))
+                    .collect();
+                self.register_type(Type::Union(kind_types));
+                Some(crate::bytecode::ErrorTable {
+                    error_key,
+                    io_error_tuple,
+                    kind_tuples,
+                    str_tuple,
+                })
+            }
+            None => None,
+        };
+
         let changed = match &declarations.changed {
             Some(decl) if self.references_builtin(&decl.demand_builtin) => {
                 let tuple = self.vocabulary_tuple(&decl.tuple)?;
@@ -470,6 +498,7 @@ impl Program {
         Ok(crate::bytecode::RuntimeTables {
             crash,
             changed,
+            error,
             streams,
         })
     }

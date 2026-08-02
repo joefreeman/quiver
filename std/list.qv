@@ -103,6 +103,16 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
     from_iter
   },
 
+  // The counterpart for a source that can fail (`%fs.list`, `%dns.resolve`): `collect` cannot
+  // tell a broken walk from a finished one, so it would answer a short list; this answers nil
+  // carrying the failure's `:error`, short-circuiting the caller's sequence like any other
+  // failure. Over a pure source it is `collect` with a wider result type.
+  try_collect: #<'t>'%iter<'t> {
+    :doc "Collects an iterator that may fail into a list, or nil (carrying :error) if the source broke part-way."
+    %iter.try_fold [$, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }] ~> =('<'t>)xs
+    reverse [xs, Nil]
+  },
+
   map: #<'t, 'u>[(list): '<'t>, (f): #'t -> 'u] {
     :doc "The list with each element transformed by a function."
     to_iter $list ~> %iter.map [~, &$f] ~> from_iter

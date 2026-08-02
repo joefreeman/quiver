@@ -411,6 +411,24 @@ pub struct CrashDecl {
     pub timeout_key: String,
 }
 
+/// The io-failure vocabulary: the payload a failed effect's nil is stamped with. Declared
+/// by the io capability groups (a host without them can never produce one), resolved per
+/// merged program by `Program::runtime_tables`.
+#[derive(Clone, Debug)]
+pub struct ErrorDecl {
+    /// `IoError[kind: (NotFound | …), message: Str['bin]]`.
+    pub io_error: TypeSpec,
+    /// The nullary kind tags, in [`EffectError::KINDS`](crate::effects::EffectError::KINDS)
+    /// order — the executor indexes this by `EffectError::kind_index`.
+    pub kinds: Vec<TypeSpec>,
+    /// `Str['bin]` — the message wrapper.
+    pub str: TypeSpec,
+    /// The annotation key a failure's nil is stamped under. This is the *program-owned*
+    /// `error` key: one key keeps "did this fail?" a single test, and the payload type
+    /// discriminates an io failure from a program's own.
+    pub error_key: String,
+}
+
 /// The reactive-wakeup vocabulary: the `Changed` message a subscriber receives.
 /// Demand-scoped — resolved only when the gating builtin (`track`) is referenced by
 /// the program, since subscriptions cannot exist without it.
@@ -431,6 +449,7 @@ pub struct ChangedDecl {
 pub struct RuntimeDeclarations {
     pub crash: Option<CrashDecl>,
     pub changed: Option<ChangedDecl>,
+    pub error: Option<ErrorDecl>,
     pub streams: HashMap<String, StreamSpec>,
 }
 
@@ -572,6 +591,11 @@ impl<E: Effect> BuiltinRegistry<E> {
     /// Declare the reactive-wakeup vocabulary, gated on its demanding builtin.
     pub fn declare_changed(&mut self, decl: ChangedDecl) {
         self.runtime.changed = Some(decl);
+    }
+
+    /// Declare the io-failure vocabulary (the io capability groups do this).
+    pub fn declare_error(&mut self, decl: ErrorDecl) {
+        self.runtime.error = Some(decl);
     }
 
     /// The stream declaration for a resource kind, if it is one.

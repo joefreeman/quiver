@@ -2262,10 +2262,12 @@ impl<E: Effect> Environment<E> {
         Ok(())
     }
 
-    /// Report an effect failure back to the requesting process as a runtime error.
+    /// Report an environment-side effect failure back to the requesting process as a fault.
     ///
-    /// The process is suspended waiting for its effect to complete; delivering an error
-    /// completion lets it resume and fail, rather than hanging indefinitely.
+    /// The process is suspended waiting for its effect to complete; delivering a failure
+    /// completion lets it resume and fail, rather than hanging indefinitely. These are always
+    /// faults, never outcomes — an ownership violation or a missing backend is a bug, not
+    /// something a caller can branch on.
     fn report_effect_error(
         &mut self,
         process_id: ProcessId,
@@ -2278,7 +2280,7 @@ impl<E: Effect> Environment<E> {
         self.workers[*worker_id]
             .send(Command::EffectCompletion {
                 process_id,
-                result: Err(message),
+                result: Err(quiver_core::effects::EffectFailure::Fault(message)),
             })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
         Ok(())
@@ -2295,10 +2297,9 @@ impl<E: Effect> Environment<E> {
             self.resource_ownership.insert(*rid, process_id);
         }
 
-        let result = match result {
-            Ok(value) => Ok(value),
-            Err(err) => Err(format!("{}", err)),
-        };
+        // A backend error is classified: world outcomes become values on the process,
+        // argument-domain ones stay faults.
+        let result = result.map_err(quiver_core::effects::EffectFailure::from_effect_error);
 
         // Send completion to the worker
         let worker_id = self
@@ -2375,11 +2376,10 @@ impl<E: Effect> Environment<E> {
 /// directly. A result with zero or several top-level tuple variants is skipped (the latter would
 /// need per-variant outer selection, which no current builtin requires).
 fn composite_result_infos(program: &Program) -> Vec<(String, ResultTupleInfo)> {
-    let types = program.get_types();
     let mut out = Vec::new();
     for builtin in program.get_builtins() {
         let mut tuple_ids = Vec::new();
-        collect_result_tuple_ids(types, builtin.result_type, &mut tuple_ids);
+        collect_result_tuple_ids(program, builtin.result_type, &mut tuple_ids);
         if let [tuple_id] = tuple_ids[..] {
             let mut variants = HashMap::new();
             collect_named_variants(
@@ -2396,12 +2396,21 @@ fn composite_result_infos(program: &Program) -> Vec<(String, ResultTupleInfo)> {
 
 /// Collect the top-level non-trivial (non-`NIL`/`OK`) tuple ids of `type_id`, descending through
 /// unions but *not* into tuple fields (those are the nested variants — see below).
-fn collect_result_tuple_ids(types: &[Type], type_id: usize, out: &mut Vec<usize>) {
-    match types.get(type_id) {
-        Some(Type::Tuple(tuple_id)) if *tuple_id != NIL && *tuple_id != OK => out.push(*tuple_id),
+/// The *composite* tuples of a result type — the ones a backend has to build field by field.
+/// Nullary tuples are skipped: they are tags, and `collect_named_variants` gathers them by name
+/// so the backend can pick one (`Missing`, a `kind`) without knowing the union's shape.
+fn collect_result_tuple_ids(program: &Program, type_id: usize, out: &mut Vec<usize>) {
+    match program.get_types().get(type_id) {
+        Some(Type::Tuple(tuple_id))
+            if *tuple_id != NIL
+                && *tuple_id != OK
+                && !program.get_tuples()[*tuple_id].fields.is_empty() =>
+        {
+            out.push(*tuple_id)
+        }
         Some(Type::Union(members)) => {
-            for &member in members {
-                collect_result_tuple_ids(types, member, out);
+            for member in members.clone() {
+                collect_result_tuple_ids(program, member, out);
             }
         }
         _ => {}

@@ -1,0 +1,45 @@
+// The failure vocabulary every io operation shares.
+//
+// An io builtin whose failure depends on the world — a refused connection, a missing file
+// — answers nil rather than terminating the process, because no caller-side guard could
+// have avoided it. The reason travels with that nil as an `:error` annotation, so it
+// survives short-circuiting and a caller several frames up can still read why:
+//
+//     sock = %tcp.connect [ip, port]        // nil short-circuits the sequence
+//     ...
+//     result ~> :('%io)error ~> =IoError(kind: ConnectionRefused) => retry
+//
+// The kind is a tag to branch on. The message is the host's description: useful in a log,
+// but it varies by platform, so don't make logic depend on it.
+//
+// An ordinary nil — an exhausted iterator, a legitimate absence — carries no `:error`, so
+// a checked retrieval answers nil for it. That is how a consumer tells "nothing left" from
+// "it broke".
+
+'kind =
+  | NotFound
+  | PermissionDenied
+  | AlreadyExists
+  | ConnectionRefused
+  | WouldBlock
+  | Interrupted
+  | Other
+
+' = IoError[kind: 'kind, message: '%str]
+
+[
+  describe: #' {
+    :doc "An io failure rendered for a log, e.g. \"ConnectionRefused: connection refused to 127.0.0.1:9\"."
+    =IoError(kind: k, message: m)
+    name = k ~> {
+      | =NotFound => "NotFound"
+      | =PermissionDenied => "PermissionDenied"
+      | =AlreadyExists => "AlreadyExists"
+      | =ConnectionRefused => "ConnectionRefused"
+      | =WouldBlock => "WouldBlock"
+      | =Interrupted => "Interrupted"
+      | "Other"
+    }
+    "{name}: {m}"
+  },
+]

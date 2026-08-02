@@ -85,23 +85,41 @@ fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
         // directory_close(Dir) -> Ok
         ("directory_close", dir, ok),
         // filesystem_stat(path) -> [kind, size, modified, mode] | nil
+        // A path that is not there answers nil, like any other lookup that finds nothing;
+        // `fallible` folds a *failed* lookup onto the same nil, told apart by its `:error`.
         (
             "filesystem_stat",
             bin,
-            TypeSpec::Union(vec![
-                TypeSpec::Tuple(
-                    None,
-                    vec![
-                        (None, kind),
-                        (None, int.clone()),
-                        (None, int.clone()),
-                        (None, int),
-                    ],
-                ),
-                nil,
-            ]),
+            TypeSpec::Tuple(
+                None,
+                vec![
+                    (None, kind),
+                    (None, int.clone()),
+                    (None, int.clone()),
+                    (None, int),
+                ],
+            ),
         ),
     ]
+}
+
+/// A result widened with the failure nil. Every effect builtin is fallible: its failure
+/// depends on the world, so no caller-side guard could avoid it and the only place a value
+/// can come from is the builtin (see `EffectFailure`). Flattens, so a result that already
+/// admits nil — `directory_next`'s end-of-iteration, say — gains nothing: exhaustion and
+/// failure *are* the same nil, told apart by the `:error` stamp.
+fn fallible(result: TypeSpec) -> TypeSpec {
+    let mut members = match result {
+        TypeSpec::Union(members) => members,
+        other => vec![other],
+    };
+    let has_nil = members
+        .iter()
+        .any(|member| matches!(member, TypeSpec::Tuple(None, fields) if fields.is_empty()));
+    if !has_nil {
+        members.push(TypeSpec::Tuple(None, vec![]));
+    }
+    TypeSpec::Union(members)
 }
 
 /// The network builtins' contract: `(name, parameter, result)` for each.
@@ -215,9 +233,38 @@ fn register_network_streams<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 pub fn register_io_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     let placeholder: BuiltinFn<E> = unimplemented_builtin::<E>;
     for (name, param, result) in file_signatures().into_iter().chain(network_signatures()) {
-        registry.register(name.to_string(), placeholder, Purity::Effect, param, result);
+        registry.register(
+            name.to_string(),
+            placeholder,
+            Purity::Effect,
+            param,
+            fallible(result),
+        );
     }
     register_network_streams(registry);
+    register_error_vocabulary(registry);
+}
+
+/// The io-failure vocabulary: what a failed effect's nil carries under `:error`. Declared
+/// alongside the builtins that can produce one, so a host without io never resolves it.
+pub fn register_error_vocabulary<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let str_spec = TypeSpec::Tuple(Some("Str"), vec![(None, TypeSpec::Binary)]);
+    let kinds: Vec<TypeSpec> = crate::effects::EffectError::KINDS
+        .iter()
+        .map(|name| TypeSpec::Tuple(Some(name), vec![]))
+        .collect();
+    registry.declare_error(crate::builtins::ErrorDecl {
+        io_error: TypeSpec::Tuple(
+            Some("IoError"),
+            vec![
+                (Some("kind"), TypeSpec::Union(kinds.clone())),
+                (Some("message"), str_spec.clone()),
+            ],
+        ),
+        kinds,
+        str: str_spec,
+        error_key: "error".to_string(),
+    });
 }
 
 /// Register the system builtins' type signatures (no implementations): entropy and clocks. These

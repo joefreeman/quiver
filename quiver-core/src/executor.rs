@@ -301,6 +301,9 @@ pub struct Executor<E: Effect> {
     // Crash delivery (both build modes): the ids for building `:crash`/`:timeout`
     // stamped nils (see `crash_result` / `handle_select_timeout`).
     crash_table: Option<crate::bytecode::CrashTable>,
+    /// The ids for building a failed effect's `:error`-stamped nil (see `io_error_result`).
+    /// Present iff the host declared the io vocabulary.
+    error_table: Option<crate::bytecode::ErrorTable>,
     /// The `Changed` wakeup tuple id — present iff the program demanded it (`track`).
     changed_tuple: Option<usize>,
     /// Stream event vocabulary by resource type id (see `ProgramUpdate::runtime`).
@@ -663,6 +666,26 @@ impl<E: Effect> Executor<E> {
         self.to_wire(&stamped)
     }
 
+    /// Build the `:error`-stamped nil a failed effect answers with: nil annotated under the
+    /// `error` key with `IoError[kind, message]`. The stamp rides the nil through
+    /// short-circuiting, so a caller several frames up can still read why — while an
+    /// ordinary recovering branch discards it along with the nil it replaces.
+    ///
+    /// A host that never declared the io vocabulary cannot reach this, but degrade to a bare
+    /// nil rather than failing: the value is still a correct failure, just unexplained.
+    fn io_error_result(&mut self, error: &crate::effects::EffectError) -> Result<Value, Error> {
+        let Some(table) = self.error_table.clone() else {
+            return Ok(Value::nil());
+        };
+        let message_binary = self.allocate_binary(error.message().into_bytes())?;
+        let message = Value::tuple(table.str_tuple, vec![Value::Binary(message_binary)]);
+        let kind = Value::tuple(table.kind_tuples[error.kind_index()], vec![]);
+        let payload = Value::tuple(table.io_error_tuple, vec![kind, message]);
+        Value::nil()
+            .annotated(table.error_key, payload)
+            .ok_or_else(|| Error::InvalidArgument("nil carries annotations".to_string()))
+    }
+
     /// Create a binary from Vec<u8>
     pub fn allocate_binary(&mut self, bytes: Vec<u8>) -> Result<Binary, Error> {
         self.allocate_binary_data(BinaryData::new(bytes))
@@ -791,6 +814,7 @@ impl<E: Effect> Executor<E> {
             site_origins: vec![],
             origin_key: None,
             crash_table: None,
+            error_table: None,
             changed_tuple: None,
             stream_table: None,
             builtins_registry,
@@ -980,21 +1004,27 @@ impl<E: Effect> Executor<E> {
         Ok(())
     }
 
-    /// Notify a process that an effect operation completed
+    /// Notify a process that an effect operation completed.
+    ///
+    /// An `Expected` failure resumes the process with a `:error`-stamped nil, exactly as a
+    /// success resumes it with a value: an ordinary I/O outcome is data the caller can branch
+    /// on, and nil-propagation carries it outward for free. Only a `Fault` — a bug the caller
+    /// could not have avoided or acted on — still terminates.
     pub fn notify_effect_completion(
         &mut self,
         process_id: ProcessId,
-        result: Result<WireValue, String>,
+        result: Result<WireValue, crate::effects::EffectFailure>,
     ) -> Result<(), Error> {
         let was_effecting = self.effecting.remove(&process_id);
 
-        // Convert result to either Ok(Value) or Err(Error)
         let value_result = match result {
             Ok(v) => Ok(self.from_wire(v)?),
-            Err(err_msg) => Err(Error::InvalidArgument(format!(
-                "Effect operation failed: {}",
-                err_msg
-            ))),
+            Err(crate::effects::EffectFailure::Expected(error)) => {
+                Ok(self.io_error_result(&error)?)
+            }
+            Err(crate::effects::EffectFailure::Fault(message)) => Err(Error::InvalidArgument(
+                format!("Effect operation failed: {message}"),
+            )),
         };
 
         // Retain the success value as it enters the stack (below).
@@ -1007,14 +1037,14 @@ impl<E: Effect> Executor<E> {
         let mut killed = false;
         match value_result {
             Ok(value) => {
-                // Success: push value and increment counter
+                // A value, or a failure nil: either way the process resumes.
                 process.stack.push(value);
                 if let Some(frame) = process.frames.last_mut() {
                     frame.counter += 1;
                 }
             }
             Err(error) => {
-                // Error: set error and terminate the process
+                // Fault: set error and terminate the process
                 process.result = Some(Err(Box::new(error)));
                 process.frames.clear();
                 killed = true;
@@ -1419,6 +1449,7 @@ impl<E: Effect> Executor<E> {
         }
         if let Some(tables) = update.runtime {
             self.crash_table = tables.crash;
+            self.error_table = tables.error;
             self.changed_tuple = tables.changed;
             self.stream_table = Some(tables.streams);
         }

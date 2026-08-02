@@ -6,44 +6,54 @@
 // A single directory entry: its name and its kind.
 'entry = Entry[name: '%str, kind: 'kind]
 
+// The walk's state: the open handle, or the nil an *open* failure produced — passed straight
+// through, so an unopenable directory yields an iterator that terminates with the failure
+// rather than one that is merely empty.
+'walk = \Dir | []
+
+walk_step = #'walk {
+  | =(\Dir)dir => __directory_next__ dir ~> {
+    | =[name, kind] => [Entry[name: Str[name], kind: kind], dir]
+    // Any terminator ends the walk — exhaustion, or a failure carrying `:error`. Passing it
+    // through unchanged is what lets `%list.try_collect` tell the two apart; `%list.collect`
+    // cannot, and answers a short list.
+    | =e => { __directory_close__ dir; e }
+  }
+  | =e => e
+}
+
 // Metadata about a path. `size` is in bytes, `modified` is the mtime in nanoseconds since the Unix
 // epoch, and `mode` is the permission bits (e.g. 0o644 == 420).
 'stat = Stat[kind: 'kind, size: 'int, modified: 'int, mode: 'int]
 
-// Look up metadata for a path, following symlinks. Yields nil if the path does not exist; other
-// failures (e.g. permission denied) are runtime errors. The builtin returns a transient
-// `[kind, size, modified, mode]` tuple read by index, with `kind` already a `'kind` tag.
+// Look up metadata for a path, following symlinks. A path that is not there answers nil, like
+// any other lookup that finds nothing; a *failed* lookup answers nil too, carrying an
+// `:error`. The builtin returns a transient `[kind, size, modified, mode]` tuple read by
+// index, with `kind` already a `'kind` tag; both nils fall through the match below, the
+// failure keeping its payload on the way out.
 stat = #'%str {
-  .0 ~> __filesystem_stat__ ~> {
-    | =[] => []
-    | =s ~> Stat[kind: s.0, size: s.1, modified: s.2, mode: s.3]
-  }
+  .0
+  ~> __filesystem_stat__
+  ~> =[k, size, modified, mode]
+
+  Stat[kind: k, size: size, modified: modified, mode: mode]
 }
 
 [
   // Entries come in the order the filesystem returns them (unsorted, excluding `.` and `..`).
   // The underlying directory handle is closed automatically once the iterator is exhausted.
   list: #'%str {
-    :doc "Lazily iterates the entries of a directory, yielding an Entry (name and kind) each."
-    // Each step yields an `Entry` or nil at the end, with `kind` already a `'kind` tag.
-    .0 ~> __directory_read__ ~> %iter.unfold [
-      ~,
-      #\Dir {
-        __directory_next__ $ ~> {
-          | =[] => { __directory_close__ $; [] }
-          | =e ~> [Entry[name: Str[e.0], kind: e.1], $]
-        }
-      },
-    ]
+    :doc "Lazily iterates the entries of a directory, yielding an Entry (name and kind) each. A failure ends the iteration carrying its :error — collect with %list.try_collect to see it rather than a short list."
+    .0 ~> __directory_read__ ~> %iter.unfold [~, &walk_step]
   },
 
   stat: #'%str {
-    :doc "Metadata for a path, following symlinks, or nil when the path does not exist."
+    :doc "Metadata for a path, following symlinks, or nil when it does not exist — or when the lookup failed, which the nil's :error payload distinguishes."
     stat
   },
 
   exists?: #'%str {
-    :doc "Whether a path exists."
+    :doc "Whether a path exists. Nil both when it does not and when the lookup failed; probe the :error payload to tell them apart."
     stat => Ok
   },
 

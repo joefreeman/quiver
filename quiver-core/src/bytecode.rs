@@ -182,6 +182,20 @@ pub struct CrashTable {
     pub str_tuple: usize,
 }
 
+/// The io-failure table: the ids the executor needs to build a failed effect's stamped nil.
+/// Present only when the program's host declared the io vocabulary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ErrorTable {
+    /// Annotation key id of `error`.
+    pub error_key: usize,
+    /// Tuple id of `IoError[kind: …, message: Str['bin]]`.
+    pub io_error_tuple: usize,
+    /// Tuple ids of the nullary kind tags, indexed by `EffectError::kind_index`.
+    pub kind_tuples: Vec<usize>,
+    /// Tuple id of `Str['bin]`.
+    pub str_tuple: usize,
+}
+
 /// One stream resource kind's event-tuple ids — how the executor turns a generic
 /// [`crate::process::StreamEvent`] into the kind's declared tuples. Derived from the
 /// registry's stream declarations for the resource kinds a program actually names
@@ -215,6 +229,8 @@ pub struct RuntimeTables {
     pub crash: Option<CrashTable>,
     /// The `Changed` wakeup tuple id, when demanded.
     pub changed: Option<usize>,
+    /// The io-failure payload ids, when the host declared io.
+    pub error: Option<ErrorTable>,
     pub streams: StreamTable,
 }
 

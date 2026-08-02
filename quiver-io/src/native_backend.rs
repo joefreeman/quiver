@@ -16,6 +16,35 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, RawFd};
 
+/// Classify an OS error as an effect outcome. The distinction matters now that outcomes are
+/// values: an `EffectError` returned *in* a completion resumes the process with a
+/// `:error`-stamped nil, whereas an `Error` returned from `execute` is a submit failure and
+/// kills it. Anything the world can do to us — a missing path, a refused connection — belongs
+/// on this side.
+fn effect_error(context: &str, error: &std::io::Error) -> EffectError {
+    let message = format!("{context}: {error}");
+    match error.kind() {
+        ErrorKind::NotFound => EffectError::NotFound(message),
+        ErrorKind::PermissionDenied => EffectError::PermissionDenied(message),
+        ErrorKind::AlreadyExists => EffectError::AlreadyExists(message),
+        ErrorKind::ConnectionRefused => EffectError::ConnectionRefused(message),
+        ErrorKind::WouldBlock => EffectError::WouldBlock,
+        ErrorKind::Interrupted => EffectError::Interrupted,
+        _ => EffectError::IO(message),
+    }
+}
+
+/// Unwrap an OS result, or return early with an effect *outcome* (a value the caller can
+/// branch on) rather than a submit failure (which kills the process).
+macro_rules! try_io {
+    ($expr:expr, $context:expr) => {
+        match $expr {
+            Ok(value) => value,
+            Err(error) => return Ok(Some(Err(effect_error($context, &error)))),
+        }
+    };
+}
+
 /// Resource metadata stored by the io_uring backend
 #[derive(Debug)]
 pub enum Resource {
@@ -454,9 +483,15 @@ impl NativeEffectBackend {
 
         options.mode(mode);
 
-        let file = options
-            .open(&path_str)
-            .map_err(|e| Error::InvalidArgument(format!("Failed to open file: {}", e)))?;
+        let file = match options.open(&path_str) {
+            Ok(file) => file,
+            Err(e) => {
+                return Ok(Some(Err(effect_error(
+                    &format!("cannot open '{path_str}'"),
+                    &e,
+                ))));
+            }
+        };
 
         // Allocate a new resource ID for this file
         let resource_id = self.next_resource_id;
@@ -478,18 +513,19 @@ impl NativeEffectBackend {
         let path_str = String::from_utf8(path)
             .map_err(|_| Error::InvalidArgument("Invalid UTF-8 in path".to_string()))?;
 
-        // Follows symlinks (like the conventional `stat`); a path that does not exist maps to nil,
-        // while other failures (permission denied, I/O error) propagate as runtime errors.
+        // Follows symlinks (like the conventional `stat`). A path that is not there answers
+        // nil — the ordinary "found nothing"; a *failed* lookup also answers nil, but carrying
+        // an `:error` payload, so a caller that cares can tell them apart.
         let metadata = match std::fs::metadata(&path_str) {
             Ok(md) => md,
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 return Ok(Some(Ok(WireValue::nil())));
             }
             Err(e) => {
-                return Err(Error::InvalidArgument(format!(
-                    "Failed to stat '{}': {}",
-                    path_str, e
-                )));
+                return Ok(Some(Err(effect_error(
+                    &format!("cannot stat '{path_str}'"),
+                    &e,
+                ))));
             }
         };
 
@@ -532,9 +568,15 @@ impl NativeEffectBackend {
         let path_str = String::from_utf8(path)
             .map_err(|_| Error::InvalidArgument("Invalid UTF-8 in path".to_string()))?;
 
-        let entries = std::fs::read_dir(&path_str).map_err(|e| {
-            Error::InvalidArgument(format!("Failed to read directory '{}': {}", path_str, e))
-        })?;
+        let entries = match std::fs::read_dir(&path_str) {
+            Ok(entries) => entries,
+            Err(e) => {
+                return Ok(Some(Err(effect_error(
+                    &format!("cannot read directory '{path_str}'"),
+                    &e,
+                ))));
+            }
+        };
 
         // Allocate a new resource ID for this directory iterator.
         let resource_id = self.next_resource_id;
@@ -584,10 +626,7 @@ impl NativeEffectBackend {
                     vec![WireValue::Binary(name_bytes.into()), kind],
                 ))))
             }
-            Some(Err(e)) => Err(Error::InvalidArgument(format!(
-                "Failed to read directory entry: {}",
-                e
-            ))),
+            Some(Err(e)) => Ok(Some(Err(effect_error("cannot read directory entry", &e)))),
             // Iterator exhausted - return Nil.
             None => Ok(Some(Ok(WireValue::nil()))),
         }
@@ -619,16 +658,15 @@ impl NativeEffectBackend {
                 })
                 .collect(),
             Err(e) => {
-                // Distinguish between "not found" and other errors
+                // A host with no addresses is an empty resolver, not a failure; anything else
+                // is an outcome the caller can act on (retry, fall back).
                 match e.kind() {
-                    // Host not found - create empty resolver
                     ErrorKind::NotFound | ErrorKind::InvalidInput => vec![],
-                    // Other errors - return error
                     _ => {
-                        return Err(Error::InvalidArgument(format!(
-                            "DNS resolution failed: {}",
-                            e
-                        )));
+                        return Ok(Some(Err(effect_error(
+                            &format!("cannot resolve '{hostname_str}'"),
+                            &e,
+                        ))));
                     }
                 }
             }
@@ -718,13 +756,13 @@ impl NativeEffectBackend {
         } else {
             socket2::Domain::IPV6
         };
-        let socket = Socket::new(domain, socket2::Type::STREAM, None)
-            .map_err(|e| Error::InvalidArgument(format!("Failed to create socket: {}", e)))?;
+        let socket = try_io!(
+            Socket::new(domain, socket2::Type::STREAM, None),
+            "cannot create socket"
+        );
 
         // Set socket to non-blocking mode for async connect
-        socket
-            .set_nonblocking(true)
-            .map_err(|e| Error::InvalidArgument(format!("Failed to set non-blocking: {}", e)))?;
+        try_io!(socket.set_nonblocking(true), "cannot set non-blocking");
 
         // Submit async connect operation
         let completion_id = self.next_completion_id;
@@ -770,25 +808,19 @@ impl NativeEffectBackend {
         port: u16,
         backlog: i32,
     ) -> Result<Option<EffectResult>, Error> {
-        // Create socket using socket2
-        let socket = Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
-            .map_err(|e| Error::InvalidArgument(format!("Failed to create socket: {}", e)))?;
-
-        // Set SO_REUSEADDR
-        socket
-            .set_reuse_address(true)
-            .map_err(|e| Error::InvalidArgument(format!("Failed to set SO_REUSEADDR: {}", e)))?;
-
-        // Bind to address
+        // Every step here can fail on the world's terms — a port already in use, an exhausted
+        // descriptor table — so each is an outcome the caller can act on.
+        let socket = try_io!(
+            Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None),
+            "cannot create socket"
+        );
+        try_io!(socket.set_reuse_address(true), "cannot set SO_REUSEADDR");
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
-        socket
-            .bind(&addr.into())
-            .map_err(|e| Error::InvalidArgument(format!("Failed to bind: {}", e)))?;
-
-        // Listen
-        socket
-            .listen(backlog)
-            .map_err(|e| Error::InvalidArgument(format!("Failed to listen: {}", e)))?;
+        try_io!(
+            socket.bind(&addr.into()),
+            &format!("cannot bind port {port}")
+        );
+        try_io!(socket.listen(backlog), &format!("cannot listen on {port}"));
 
         // Allocate a new resource ID for this listener
         let resource_id = self.next_resource_id;

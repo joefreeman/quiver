@@ -16,12 +16,12 @@ fn test_file_write_and_read() {
             // O_RDONLY = 0
             // Mode 0o644 = 420
 
-            write_file = ["{}" ~> .0, 577, 420] ~> __file_open__;
+            ["{}" ~> .0, 577, 420] ~> __file_open__ ~> =(\File)write_file;
             [write_file, 0, "Hello, World!" ~> .0] ~> __file_write__;
             write_file ~> __file_close__;
 
-            read_file = ["{}" ~> .0, 0, 0] ~> __file_open__;
-            data = [read_file, 0, 4096] ~> __file_read__;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~> =(\File)read_file;
+            [read_file, 0, 4096] ~> __file_read__ ~> =('bin)data;
             read_file ~> __file_close__;
 
             Str[data]
@@ -46,18 +46,18 @@ fn test_file_append() {
         .evaluate(&format!(
             r#"
             // O_WRONLY | O_CREAT | O_TRUNC = 577
-            write_file = ["{}" ~> .0, 577, 420] ~> __file_open__;
+            ["{}" ~> .0, 577, 420] ~> __file_open__ ~> =(\File)write_file;
             [write_file, 0, "First line\n" ~> .0] ~> __file_write__;
             write_file ~> __file_close__;
 
             // Write at offset 11 (length of "First line\n")
-            append_file = ["{}" ~> .0, 1, 420] ~> __file_open__;
+            ["{}" ~> .0, 1, 420] ~> __file_open__ ~> =(\File)append_file;
             [append_file, 11, "Second line\n" ~> .0] ~> __file_write__;
             append_file ~> __file_close__;
 
             // Read everything
-            read_file = ["{}" ~> .0, 0, 0] ~> __file_open__;
-            data = [read_file, 0, 4096] ~> __file_read__;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~> =(\File)read_file;
+            [read_file, 0, 4096] ~> __file_read__ ~> =('bin)data;
             read_file ~> __file_close__;
 
             Str[data]
@@ -80,7 +80,7 @@ fn test_file_type_checking() {
             // Function that takes a file and returns data
             read_from_file = #\File {
                 =f;
-                data = [f, 0, 1024] ~> __file_read__;
+                [f, 0, 1024] ~> __file_read__ ~> =('bin)data;
                 data
             };
 
@@ -96,7 +96,7 @@ fn test_file_resource_type() {
     quiver()
         .with_io()
         .evaluate(r#"["/tmp/foo" ~> .0, 577, 420] ~> __file_open__"#)
-        .expect_type("\\File");
+        .expect_type("[] | \\File");
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn test_file_flush() {
         .with_io()
         .evaluate(&format!(
             r#"
-            file = ["{}" ~> .0, 577, 420] ~> __file_open__;
+            ["{}" ~> .0, 577, 420] ~> __file_open__ ~> =(\File)file;
             [file, 0, "Flushed data" ~> .0] ~> __file_write__;
             file ~> __file_flush__;
             file ~> __file_close__;
@@ -139,14 +139,14 @@ fn test_multiple_writes() {
         .with_io()
         .evaluate(&format!(
             r#"
-            file = ["{}" ~> .0, 577, 420] ~> __file_open__;
+            ["{}" ~> .0, 577, 420] ~> __file_open__ ~> =(\File)file;
             [file, 0, "Line 1\n" ~> .0] ~> __file_write__;
             [file, 7, "Line 2\n" ~> .0] ~> __file_write__;
             [file, 14, "Line 3\n" ~> .0] ~> __file_write__;
             file ~> __file_close__;
 
-            read_file = ["{}" ~> .0, 0, 0] ~> __file_open__;
-            data = [read_file, 0, 4096] ~> __file_read__;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~> =(\File)read_file;
+            [read_file, 0, 4096] ~> __file_read__ ~> =('bin)data;
             read_file ~> __file_close__;
 
             Str[data]
@@ -173,7 +173,7 @@ fn test_read_from_closed_file() {
         .with_io()
         .evaluate(&format!(
             r#"
-            file = ["{}" ~> .0, 0, 0] ~> __file_open__;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~> =(\File)file;
             file ~> __file_close__;
             [file, 0, 1024] ~> __file_read__
         "#,
@@ -206,7 +206,7 @@ fn test_resource_ownership_transfers_on_send() {
             r = @{{
                 !#'reader ~> {{ =Read[f] => [f, 0, 5] ~> __file_read__ ~> Str[~] }}
             }};
-            file = ["{}" ~> .0, 0, 0] ~> __file_open__;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~> =(\File)file;
             Read[file] ~> r;
             !r
         "#,
@@ -240,7 +240,7 @@ fn test_resource_ownership_transfers_in_an_annotation() {
                     [f, 0, 5] ~> __file_read__ ~> Str[~]
                 }}
             }};
-            file = ["{}" ~> .0, 0, 0] ~> __file_open__;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~> =(\File)file;
             Go ~> {{ :handle file }} ~> r;
             !r
         "#,
@@ -270,7 +270,7 @@ fn test_resource_ownership_enforced_after_transfer() {
             h = @{{
                 !#'holder ~> {{ =Hold[_] => [] ~> ^ }}
             }};
-            file = ["{}" ~> .0, 0, 0] ~> __file_open__;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~> =(\File)file;
             Hold[file] ~> h;
             [file, 0, 5] ~> __file_read__
         "#,
@@ -301,7 +301,7 @@ fn test_resource_cleanup_on_owner_completion() {
             r = @{{
                 !#'reader ~> {{ =Read[f] => [f, 0, 5] ~> __file_read__ ~> Str[~] }}
             }};
-            file = ["{}" ~> .0, 0, 0] ~> __file_open__;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~> =(\File)file;
             Read[file] ~> r;
             !r;
             [file, 0, 5] ~> __file_read__
@@ -330,10 +330,10 @@ fn test_std_file_write_then_read() {
             r#"
             file = %file;
             p = "{}" ~> %path.parse;
-            w = [p, mode: W] ~> file.open;
+            [p, mode: W] ~> file.open ~> =('%file)w;
             [w, 0, "Hello, write!" ~> .0] ~> file.write;
             w ~> file.close;
-            r = [p] ~> file.open;
+            [p] ~> file.open ~> =('%file)r;
             data = [r, 0, 4096] ~> file.read;
             r ~> file.close;
             Str[data]
@@ -359,7 +359,7 @@ fn test_std_file_sequential_reads() {
             r#"
             file = %file;
             p = "{}" ~> %path.parse;
-            r = [p] ~> file.open;
+            [p] ~> file.open ~> =('%file)r;
             a = [r, 0, 3] ~> file.read;
             b = [r, 3, 3] ~> file.read;
             c = [r, 6, 4] ~> file.read;
@@ -387,7 +387,7 @@ fn test_std_file_write_returns_byte_count() {
             r#"
             file = %file;
             p = "{}" ~> %path.parse;
-            w = [p, mode: W] ~> file.open;
+            [p, mode: W] ~> file.open ~> =('%file)w;
             n = [w, 0, "Hello, write!" ~> .0] ~> file.write;
             w ~> file.close;
             n
@@ -414,8 +414,8 @@ fn test_std_file_read_all() {
             r#"
             file = %file;
             p = "{}" ~> %path.parse;
-            r = [p] ~> file.open;
-            all = r ~> file.read_all;
+            [p] ~> file.open ~> =('%file)r;
+            r ~> file.read_all ~> =('bin)all;
             r ~> file.close;
             all ~> %bin.length
         "#,
@@ -440,7 +440,7 @@ fn test_std_file_lines() {
         .evaluate(&format!(
             r#"
             file = %file;
-            r = "{}" ~> %path.parse ~> [~] ~> file.open;
+            "{}" ~> %path.parse ~> [~] ~> file.open ~> =('%file)r;
             ls = r ~> file.lines ~> %list.collect;
             r ~> file.close;
             ls
@@ -467,7 +467,7 @@ fn test_std_file_lines_no_trailing_newline() {
         .evaluate(&format!(
             r#"
             file = %file;
-            r = "{}" ~> %path.parse ~> [~] ~> file.open;
+            "{}" ~> %path.parse ~> [~] ~> file.open ~> =('%file)r;
             ls = r ~> file.lines ~> %list.collect;
             r ~> file.close;
             ls
@@ -496,7 +496,7 @@ fn test_std_file_lines_spanning_chunks() {
         .evaluate(&format!(
             r#"
             file = %file;
-            r = "{}" ~> %path.parse ~> [~] ~> file.open;
+            "{}" ~> %path.parse ~> [~] ~> file.open ~> =('%file)r;
             lengths = r ~> file.lines ~> [~, #Str['bin] {{ .0 ~> %bin.length }}] ~> %iter.map ~> %list.collect;
             r ~> file.close;
             lengths
@@ -682,25 +682,33 @@ fn test_stat_file_kind_and_size() {
 }
 
 #[test]
-fn test_stat_missing_is_nil() {
+fn test_stat_absent_and_failed_are_both_nil_told_apart_by_the_payload() {
+    // Absence is an ordinary "found nothing", so it is nil like any other lookup. A failed
+    // lookup is nil too — the `:error` payload is what distinguishes them, and a caller that
+    // does not care (`exists?`) gets to treat them alike for free.
     let path = std::env::temp_dir().join(format!("quiver_stat_missing_{}", std::process::id()));
     let path = path.to_str().unwrap();
 
     quiver()
         .with_io()
         .evaluate(&format!(
-            r#""{}" ~> %fs.stat ~> {{ =[] => Absent | Present }}"#,
+            r#""{}" ~> %fs.stat ~> {{ | =Stat() => Present | ~:()error => Failed | Absent }}"#,
             path
         ))
         .expect("Absent");
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(r#""{}" ~> %fs.exists?"#, path))
+        .expect("[]");
+
+    // A path that exists still answers its metadata.
+    quiver()
+        .with_io()
+        .evaluate(r#""/etc/hostname" ~> %fs.stat ~> =Stat(kind: k); k"#)
+        .expect("File");
 }
 
-// Regression: the composite tuples returned by the filesystem builtins must carry their *real*
-// declared result type — including the nested `File`/`Dir`/… kind tag. The backend has no type
-// registry of its own, so the environment pushes it each builtin's result type ids (outer tuple +
-// named variants, see `set_type_ids`/`ResultTupleInfo`), and the backend stamps them directly. A
-// regular file's stat result must therefore match `[File, 'int, 'int, 'int]` as a type, and *not*
-// the old all-int `['int, 'int, 'int, 'int]` shape.
 #[test]
 fn test_stat_result_has_its_real_declared_type() {
     let dir = std::env::temp_dir().join(format!("quiver_stat_shape_{}", std::process::id()));
@@ -743,7 +751,7 @@ fn test_directory_entry_has_its_real_declared_type() {
         .evaluate(&format!(
             r#"
             warm = [1, 2] ~> =['int, 'int];
-            d = "{dir_str}" ~> .0 ~> __directory_read__;
+            "{dir_str}" ~> .0 ~> __directory_read__ ~> =(\Dir)d;
             e = d ~> __directory_next__;
             [
               e ~> {{ | =['bin, File] => Yes | No }},
@@ -803,4 +811,72 @@ fn test_read_dir_lazy_take() {
         .expect("1");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_failed_walk_is_distinguishable_from_a_finished_one() {
+    // The guard for the exhaustion-vs-failure ambiguity. Both end the iteration with a nil,
+    // so `collect` cannot tell them apart and answers a short list — the known cost of
+    // keeping the terminator a nil. `try_collect` checks the `:error` before recovering, so
+    // it propagates the failure instead of quietly returning what it managed to read.
+    quiver()
+        .with_io()
+        .evaluate(r#""/nonexistent-quiver-dir" ~> %fs.list ~> %list.collect ~> %list.count"#)
+        .expect("0");
+
+    quiver()
+        .with_io()
+        .evaluate(r#""/nonexistent-quiver-dir" ~> %fs.list ~> %list.try_collect"#)
+        .expect("[]");
+
+    quiver()
+        .with_io()
+        .evaluate(
+            r#""/nonexistent-quiver-dir" ~> %fs.list ~> %list.try_collect
+               ~> :('%io)error ~> =IoError(kind: NotFound); Ok"#,
+        )
+        .expect("Ok");
+
+    // A directory that really is empty answers an empty list, not a failure.
+    let dir = std::env::temp_dir().join(format!("quiver_empty_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#""{}" ~> %fs.list ~> %list.try_collect ~> =('%list<'%fs.entry>)xs; %list.count xs"#,
+            dir.to_str().unwrap()
+        ))
+        .expect("0");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_try_fold_leaves_pure_folds_alone() {
+    // `try_fold` is a sibling, not a change to `fold`: a fold over a pure source keeps its
+    // exact accumulator type, which is what stops the fallible case cascading through every
+    // container operation in the standard library.
+    quiver()
+        .evaluate(r#"%list{ 1, 2, 3 } ~> %list.fold [~, 0, #{ %num.add [$0, $1] }]"#)
+        .expect_type("'int");
+}
+
+#[test]
+fn test_io_failure_is_recoverable_without_a_process() {
+    // The point of Phase 0: an expected io outcome is a value, so an ordinary branch catches
+    // it. Before, this killed the process and only a process boundary could recover.
+    quiver()
+        .with_io()
+        .evaluate(
+            r#"{ ["/nonexistent-quiver-file" ~> .0, 0, 0] ~> __file_open__; Opened | Recovered }"#,
+        )
+        .expect("Recovered");
+
+    // ... and an argument-domain failure is still a fault, because no guard could have helped
+    // with the world but the caller could have avoided this.
+    quiver()
+        .with_io()
+        .evaluate(r#"__random_bytes__ -1"#)
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "random_bytes requires a non-negative count".to_string(),
+        ));
 }

@@ -1,10 +1,13 @@
 // A file is backed by a process that owns the underlying file descriptor. Clients hold the
 // process and interact with it by sending commands; each request carries the client's own
 // process (to reply to) and a unique ref (to correlate the reply).
+// A reply carries the operation's own result, failure included: an io failure answers nil
+// with an `:error` payload, and annotations cross a process boundary intact, so the caller
+// reads the reason exactly as if it had called the builtin itself.
 'command =
-  | Read['int, 'int, @Reply['ref, 'bin], 'ref]
-  | Write['int, 'bin, @Reply['ref, 'int], 'ref]
-  | Flush[@Reply['ref, Ok], 'ref]
+  | Read['int, 'int, @Reply['ref, ('bin | [])], 'ref]
+  | Write['int, 'bin, @Reply['ref, ('int | [])], 'ref]
+  | Flush[@Reply['ref, (Ok | [])], 'ref]
   | Close
 
 ' = File[@'command]
@@ -32,12 +35,12 @@ serve = #\File {
 do_read = #[(f): ', (offset): 'int, (length): 'int] {
   id = %ref
   Read[$offset, $length, &., id] ~> $f.0
-  !Reply['ref, 'bin] { =Reply[&id, _]; Ok } ~> { =Reply[_, data] => data }
+  !Reply['ref, ('bin | [])] { =Reply[&id, _]; Ok } ~> { =Reply[_, data] => data }
 }
 
 // Read the file in chunks from `offset`, accumulating until a read returns no bytes (EOF).
 read_all = #[(f): ', (offset): 'int, (acc): 'bin] {
-  chunk = do_read [$f, $offset, 65536]
+  do_read [$f, $offset, 65536] ~> =('bin)chunk
   %bin.length chunk ~> {
     | =0 => $acc
     | =n => %bin.concat [$acc, chunk] ~> ^ [$f, %num.add [$offset, n], ~]
@@ -57,7 +60,7 @@ lines_step = #[', 'int, 'bin, 'int] {
     | =[] => {
       // No newline in the remaining buffer: keep the unconsumed tail and read more.
       leftover = %bin.slice [buf, pos, len]
-      chunk = do_read [f, offset, 65536]
+      do_read [f, offset, 65536] ~> =('bin)chunk
       %bin.length chunk ~> {
         | =0 => {
           // EOF: emit the final unterminated line if there is one, otherwise stop.
@@ -86,7 +89,9 @@ lines_step = #[', 'int, 'bin, 'int] {
     }
     name = %path.to_string $path ~> .0
     // 420 = 0o644, the permission mode used when the file is created (O_CREAT).
-    File[__file_open__ [name, flags, 420] ~> @serve]
+    // A failed open answers nil carrying its `:error`, so the caller's sequence stops here.
+    __file_open__ [name, flags, 420] ~> =(\File)fd
+    File[fd ~> @serve]
   },
 
   read: #[(file): ', (offset): 'int, (len): 'int] {
@@ -108,7 +113,7 @@ lines_step = #[', 'int, 'bin, 'int] {
     :doc "Writes data at the given offset, returning the number of bytes written."
     id = %ref
     Write[$offset, $data, &., id] ~> $file.0
-    !Reply['ref, 'int] { =Reply[&id, _]; Ok } ~> { =Reply[_, written] => written }
+    !Reply['ref, ('int | [])] { =Reply[&id, _]; Ok } ~> { =Reply[_, written] => written }
   },
 
   flush: #' {
@@ -116,7 +121,7 @@ lines_step = #[', 'int, 'bin, 'int] {
     =f
     id = %ref
     Flush[&., id] ~> f.0
-    !Reply['ref, Ok] { =Reply[&id, _]; Ok } ~> { =Reply[_, ok] => ok }
+    !Reply['ref, (Ok | [])] { =Reply[&id, _]; Ok } ~> { =Reply[_, ok] => ok }
   },
 
   close: #' {
