@@ -1,0 +1,75 @@
+// The native HTTP transport: `%http/client`'s way onto the network, built on the TCP
+// builtins.
+//
+// This is the *unsuffixed* variant — the fallback a host with no more specific one resolves
+// to. A browser cannot open a socket, so it will supply `transport.web.qv` over `fetch`
+// instead, and this file becomes `transport.native.qv`. Nothing above here changes: the
+// client sees the same `'%http.transport` either way.
+//
+// It runs inside the client's per-request process, so the socket it opens is owned there and
+// released by teardown even when a failure short-circuits past the explicit close.
+//
+// **`http://` only.** TLS needs a resource kind this runtime does not have yet, so an
+// `https://` URL fails with a pointed error rather than silently talking plaintext to port
+// 443.
+
+// The first address a hostname resolves to. A lookup failure ends the iterator carrying its
+// `:error`, which is passed straight out; a host with no addresses at all gets one made for
+// it, since a bare nil would tell the caller nothing.
+resolve_host = #'%str {
+  host = $
+  %dns.resolve host ~> %iter.nth [~, 0] ~> {
+    | =IPv4[b] => b
+    | =IPv6[b] => b
+    // A lookup that broke — propagate the reason it already carries.
+    | ~:()error => ~
+    | [] ~> {
+      :error IoError[kind: NotFound, message: "no addresses for {host}"]
+    }
+  }
+}
+
+// Read until the buffer holds a whole response. An empty read is end-of-connection, which is
+// what terminates a response framed by neither Content-Length nor chunking — and, if the
+// response is still incomplete at that point, what makes it a truncation rather than a wait.
+read_loop = #[(sock): \TcpSocket, (buf): 'bin] {
+  %tcp.read [$sock, 8192] ~> =('bin)chunk
+  eof = { %bin.length chunk ~> =0 => Ok | [] }
+  buffer = %bin.concat [$buf, chunk]
+  %http.parse_response [buffer, eof] ~> {
+    | =[response, _] => response
+    | =Bad[reason: r] => [] ~> { :error IoError[kind: Other, message: r] }
+    | =Incomplete => {
+      | eof ~> =Ok => [] ~> {
+        :error IoError[kind: Other, message: "connection closed mid-response"]
+      }
+      | ^ [$sock, buffer]
+    }
+  }
+}
+
+exchange = #[(url): '%url, (request): '%http] {
+  {
+    | $url.scheme ~> ="http" => Ok
+    | [] ~> {
+      :error IoError[kind: Other, message: "only http:// is supported by this transport"]
+    }
+  }
+  resolve_host $url.host ~> =('bin)ip
+  %tcp.connect [ip, $url.port] ~> =(\TcpSocket)sock
+  %tcp.write [sock, %http.serialize_request $request]
+
+  // Bound with a bare binder rather than a narrowing one: a failed read must still reach the
+  // close below, and the annotated nil is what this answers.
+  response = read_loop [sock, 0x]
+  // Discard the close's own result — a close failure must not lose a response we already
+  // have, and teardown is the backstop either way.
+  %tcp.close sock ~> Ok
+  response
+}
+
+[
+  request: &exchange ~> {
+    :doc "Performs one HTTP/1.1 exchange over TCP: resolve, connect, send, read the response, close. Nil (carrying :error) on any failure; http:// only."
+  },
+]

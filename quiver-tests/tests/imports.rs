@@ -457,3 +457,83 @@ fn instantiated_members_never_share_a_cse_slot() {
         )
         .expect("[42, 0x0a, 7]");
 }
+
+// --- host-variant resolution --------------------------------------------------------------
+
+/// A package with a module in two host variants, and one with none. Addressed by file path,
+/// since `greet.web` as a *module name* would resolve to `greet.qv`.
+const VARIANTS: &[(&str, &str)] = &[
+    ("greet.native.qv", r#"[hello: #{ "from native" }]"#),
+    ("greet.web.qv", r#"[hello: #{ "from web" }]"#),
+    ("plain.qv", r#"[hello: #{ "shared" }]"#),
+];
+
+#[test]
+fn test_a_host_variant_is_picked_by_the_hosts_tag() {
+    // `%greet` names the module; which file backs it is the resolver's business, so the same
+    // source means different things on different hosts — which is the whole point.
+    quiver()
+        .with_files(VARIANTS)
+        .evaluate(r#"%greet.hello"#)
+        .expect(r#""from native""#);
+    quiver()
+        .with_files(VARIANTS)
+        .with_host_tags(&["web"])
+        .evaluate(r#"%greet.hello"#)
+        .expect(r#""from web""#);
+}
+
+#[test]
+fn test_a_module_with_no_variants_resolves_on_every_host() {
+    for tags in [vec!["native"], vec!["web"], vec![]] {
+        quiver()
+            .with_files(VARIANTS)
+            .with_host_tags(&tags)
+            .evaluate(r#"%plain.hello"#)
+            .expect(r#""shared""#);
+    }
+}
+
+#[test]
+fn test_an_unsatisfiable_variant_is_not_found_rather_than_mis_resolved() {
+    // A host claiming no tag gets no variant: better a plain "not found" than silently
+    // compiling another host's file.
+    quiver()
+        .with_files(VARIANTS)
+        .with_host_tags(&[])
+        .evaluate(r#"%greet.hello"#)
+        .expect_error_containing("NotFound(\"greet\")");
+}
+
+#[test]
+fn test_the_unsuffixed_file_is_the_fallback_for_an_unclaimed_tag() {
+    const MIXED: &[(&str, &str)] = &[
+        ("thing.web.qv", r#"[v: #{ "web" }]"#),
+        ("thing.qv", r#"[v: #{ "fallback" }]"#),
+    ];
+    quiver()
+        .with_files(MIXED)
+        .with_host_tags(&["web"])
+        .evaluate(r#"%thing.v"#)
+        .expect(r#""web""#);
+    quiver()
+        .with_files(MIXED)
+        .evaluate(r#"%thing.v"#)
+        .expect(r#""fallback""#);
+}
+
+#[test]
+fn test_variants_collapse_to_one_name_in_the_std_listing() {
+    // `std_module_names` feeds StdImage, which compiles each name once against the building
+    // host's resolution. Listing variants separately would make it compile another host's file.
+    let names = quiver_compiler::resolver::std_module_names();
+    assert!(names.contains(&"http/transport".to_string()));
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.ends_with(".native") || n.ends_with(".web"))
+    );
+    let mut deduped = names.clone();
+    deduped.dedup();
+    assert_eq!(names, deduped, "std module names must be unique");
+}

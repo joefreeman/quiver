@@ -1,0 +1,200 @@
+// Absolute URLs: parsing, rendering, and reference resolution.
+//
+// A URL is not HTTP-specific — `ws://` and `wss://` want the same shape — so this module
+// knows nothing about requests or headers. It works on bytes throughout (`%str.slice` and
+// `%str.index_of` count *characters*, which is the wrong unit for a wire format).
+//
+// The parse is deliberately narrow: `scheme://host[:port][/path][?query][#fragment]`, which
+// is what a client needs and nothing more. There is no userinfo (`user:pass@host`) — it is
+// obsolete and a credential-leaking hazard — and no percent-decoding, since the pieces are
+// re-emitted onto the wire as written; decode a query with `%http.form_decode`.
+//
+// `port` is always concrete: an absent one is filled from the scheme, or 0 for a scheme with
+// no default. `query` and `fragment` are empty when absent (the delimiters are not part of
+// them), and `path` is at least "/".
+
+' = Url[scheme: '%str, host: '%str, port: 'int, path: '%str, query: '%str, fragment: '%str]
+
+// Schemes are ASCII by definition, so a local fold keeps this module free of `%http`.
+lower_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
+  {
+    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
+    | {
+      b = %bin.get_byte [$data, $pos]
+      b2 = {
+        | __integer_compare__ [b, 65] ~> =(0 | 1); __integer_compare__ [b, 90] ~> =(-1 | 0) => __integer_add__ [
+          b,
+          32,
+        ]
+        | b
+      }
+      ^ [$data, __integer_add__ [$pos, 1], $len, %bin.append [$acc, b2, 1]]
+    }
+  }
+}
+
+// The index of the first byte of `set` at or after `pos`, or `end` when there is none.
+scan_to = #[(data): 'bin, (pos): 'int, (end): 'int, (set): 'bin] {
+  {
+    | __integer_compare__ [$pos, $end] ~> =(0 | 1) => $end
+    | %bin.index [$set, %bin.get_byte [$data, $pos], 0] => $pos
+    | ^ [$data, __integer_add__ [$pos, 1], $end, $set]
+  }
+}
+
+// The index of the last `byte` at or before `from`, or nil.
+last_index = #[(data): 'bin, (byte): 'int, (from): 'int] {
+  {
+    | __integer_compare__ [$from, 0] ~> =-1 => []
+    | %bin.get_byte [$data, $from] ~> =&$byte => $from
+    | ^ [$data, $byte, __integer_subtract__ [$from, 1]]
+  }
+}
+
+// Whether `data` begins with the bytes of `prefix`.
+starts_with? = #[(data): 'bin, (prefix): 'bin] {
+  n = %bin.length $prefix
+  __integer_compare__ [n, %bin.length $data] ~> =(-1 | 0)
+  %bin.slice [$data, 0, n] ~> =&$prefix
+  Ok
+}
+
+default_port = #'%str {
+  | =("https" | "wss") => 443
+  | =("http" | "ws") => 80
+  | 0
+}
+
+// `host` or `host:port`, with `[…]` bracketing an IPv6 literal (whose colons are not the
+// port separator). Yields `[host, port]`, the port 0 when absent.
+split_authority = #[(data): 'bin, (start): 'int, (end): 'int] {
+  ci = {
+    // A bracketed host: the port colon, if any, is the one after the closing bracket.
+    | [$data, $start] ~> %bin.get_byte ~> =91
+      %bin.index [$data, 93, $start] ~> =('int)rb
+      __integer_compare__ [__integer_add__ [rb, 1], $end] ~> =-1 => __integer_add__ [rb, 1]
+    | [$data, $start] ~> %bin.get_byte ~> =91 => $end
+    | scan_to [$data, $start, $end, 0x3a]
+  }
+  host = %bin.slice [$data, $start, ci] ~> Str[~]
+  {
+    | __integer_compare__ [ci, $end] ~> =(0 | 1) => [host, 0]
+    | {
+      %bin.slice [$data, __integer_add__ [ci, 1], $end] ~> Str[~] ~> %str.parse_int
+      ~> =('int)p
+
+      __integer_compare__ [p, 0] ~> =(0 | 1)
+      [host, p]
+    }
+  }
+}
+
+parse = #'%str {
+  =Str[u]
+  len = %bin.length u
+
+  // `scheme://`
+  %bin.index [u, 58, 0] ~> =('int)ci
+  __integer_compare__ [ci, 0] ~> =1
+  __integer_compare__ [__integer_add__ [ci, 2], len] ~> =-1
+  %bin.get_byte [u, __integer_add__ [ci, 1]] ~> =47
+  %bin.get_byte [u, __integer_add__ [ci, 2]] ~> =47
+  scheme = lower_loop [u, 0, ci, 0x] ~> Str[~]
+
+  // authority, up to the first `/`, `?` or `#`
+  astart = __integer_add__ [ci, 3]
+  aend = scan_to [u, astart, len, 0x2f3f23]
+  __integer_compare__ [astart, aend] ~> =-1
+  split_authority [u, astart, aend] ~> =[host, p]
+  port = { p ~> =0 => default_port scheme | p }
+
+  // path, up to the first `?` or `#`
+  pend = scan_to [u, aend, len, 0x3f23]
+  path = {
+    | __integer_compare__ [aend, pend] ~> =0 => "/"
+    | %bin.slice [u, aend, pend] ~> Str[~]
+  }
+
+  // query (after `?`, up to `#`) and fragment (after `#`)
+  qend = scan_to [u, pend, len, 0x23]
+  query = {
+    | __integer_compare__ [pend, len] ~> =-1; [u, pend] ~> %bin.get_byte ~> =63 => %bin.slice [u, __integer_add__ [pend, 1], qend] ~> Str[
+      ~,
+    ]
+    | ""
+  }
+  fragment = {
+    | __integer_compare__ [qend, len] ~> =-1; [u, qend] ~> %bin.get_byte ~> =35 => %bin.slice [u, __integer_add__ [qend, 1], len] ~> Str[
+      ~,
+    ]
+    | ""
+  }
+
+  Url(scheme, host, port, path, query, fragment)
+}
+
+// `host` or `host:port`, the port shown only when it is not the scheme's default.
+authority = #' {
+  =Url(scheme, host, port)
+  {
+    | default_port scheme ~> =&port => "{host}"
+    | "{host}:{%str.from_int port}"
+  }
+}
+
+// The path up to and including its last `/` — the directory a relative reference resolves
+// against.
+directory = #'%str {
+  =Str[p]
+  {
+    | last_index [
+        p,
+        47,
+        __integer_subtract__ [%bin.length p, 1],
+      ] ~> =('int)i => %bin.slice [p, 0, __integer_add__ [i, 1]] ~> Str[~]
+    | "/"
+  }
+}
+
+[
+  parse: &parse ~> {
+    :doc "Parses an absolute URL, or nil when it is malformed. The port is filled from the scheme when absent; query and fragment are empty when absent."
+  },
+
+  format: #' {
+    :doc "The URL as a string. The port is omitted when it is the scheme's default."
+    =Url(path, query, fragment)
+    q = { query ~> =""; "" | "?{query}" }
+    f = { fragment ~> =""; "" | "#{fragment}" }
+    "{$scheme}://{authority $}{path}{q}{f}"
+  },
+
+  authority: &authority ~> {
+    :doc "The `host` or `host:port` of a URL — what a Host header carries. The port is omitted when it is the scheme's default."
+  },
+
+  target: #' {
+    :doc "The request-target for this URL — path and query, without scheme, host or fragment. This is what goes in an HTTP request line."
+    =Url(path, query); { query ~> =""; path | "{path}?{query}" }
+  },
+
+  resolve: #[(base): ', (ref): '%str] {
+    :doc "Resolves a reference against a base URL — absolute, scheme-relative (//host/p), absolute-path (/p), fragment-only (#f) or relative (p) — as a redirect's Location is resolved. Nil when the result is not a well-formed URL."
+    $ref ~> =Str[r]
+    {
+      // An absolute reference stands alone.
+      | parse $ref
+      // `//host/path` — inherit only the scheme.
+      | starts_with? [r, 0x2f2f] => parse "{$base.scheme}:{$ref}"
+      // `/path` — inherit the authority.
+      | starts_with? [r, 0x2f] => parse "{$base.scheme}://{authority $base}{$ref}"
+      // `#fragment` (and the empty reference) — the base, re-fragmented.
+      | starts_with? [r, 0x23] => $base[..., fragment: %bin.slice [r, 1, %bin.length r] ~> Str[~]]
+      | %bin.length r ~> =0 => $base
+      // Anything else is relative to the base path's directory.
+      | {
+        parse "{$base.scheme}://{authority $base}{directory $base.path}{$ref}"
+      }
+    }
+  },
+]

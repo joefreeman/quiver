@@ -167,18 +167,26 @@ fn create_resolver(
     files: HashMap<String, String>,
 ) -> std::result::Result<Box<PackageResolver>, JsValue> {
     PackageResolver::memory_files(files)
-        .map(Box::new)
+        // The browser's tag: `%http/transport` resolves to `transport.web.qv` (over `fetch`)
+        // rather than `transport.native.qv` (over sockets, which do not exist here).
+        .map(|resolver| Box::new(resolver.with_host_tags(vec!["web".to_string()])))
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Callback wrapper to store JS callbacks
 struct CallbackHandle {
     callback: js_sys::Function,
+    /// The formatted static result type, captured at dispatch — the compiler knows it then,
+    /// and by the time the value arrives the request is just an id.
+    result_type: Option<String>,
 }
 
 impl CallbackHandle {
     fn new(callback: js_sys::Function) -> Self {
-        Self { callback }
+        Self {
+            callback,
+            result_type: None,
+        }
     }
 
     fn invoke<T: serde::Serialize>(&self, result: crate::types::Result<T>) {
@@ -192,7 +200,7 @@ use crate::effects::WebEffect;
 /// Shared handle to the main-thread event-driven loop. Held by `Environment`, the per-worker
 /// `onmessage` handlers, and each `Repl`, so any of them can `wake()` the loop when they queue
 /// work. Wrapped in `Option` because the worker handlers are created before the pump exists.
-type PumpHandle = Rc<RefCell<Option<Pump>>>;
+pub type PumpHandle = Rc<RefCell<Option<Pump>>>;
 type SharedEnvironment = Rc<RefCell<quiver_environment::Environment<WebEffect>>>;
 type SharedCallbacks = Rc<RefCell<HashMap<u64, CallbackHandle>>>;
 type SharedProcessTypes = Rc<RefCell<HashMap<usize, (quiver_core::types::Type, usize)>>>;
@@ -208,7 +216,7 @@ type SharedPendingEvaluations = Rc<
 
 /// Wake the main-thread loop if it exists yet. A no-op before `Environment::new` installs the
 /// pump, which is fine: nothing queues work against the environment before then.
-fn wake(handle: &PumpHandle) {
+pub fn wake(handle: &PumpHandle) {
     if let Some(pump) = handle.borrow().as_ref() {
         pump.wake();
     }
@@ -310,9 +318,12 @@ impl Environment {
             workers.push(Box::new(handle));
         }
 
-        // Create environment. No effect backend: the web host's only capability is the system
-        // builtins, which are synchronous host reads served in the worker, so nothing parks.
+        // Create environment, with the browser's effect backend: `fetch` parks its process
+        // while a promise runs, and the backend wakes this loop when the completion lands.
         let mut environment = quiver_environment::Environment::new(workers);
+        environment.set_effect_backend(Box::new(crate::backend::WebEffectBackend::new(
+            pump.clone(),
+        )));
         // The scoped (always-set) registry still declares the crash and Changed
         // vocabulary; it declares no streams, matching the absent io capability.
         let web_builtins = crate::builtins::web_builtins();
@@ -405,7 +416,15 @@ impl Environment {
         pending_evaluations: &SharedPendingEvaluations,
     ) -> bool {
         // Step the environment
-        let mut did_work = environment.borrow_mut().step().unwrap_or(false);
+        let mut did_work = match environment.borrow_mut().step() {
+            Ok(did_work) => did_work,
+            // A step failure used to vanish here, leaving a process parked on an effect that
+            // would never complete and no sign of why.
+            Err(error) => {
+                web_sys::console::error_1(&format!("Quiver environment error: {error}").into());
+                false
+            }
+        };
 
         // Deliver any standing-subscription updates produced by this step. Unlike one-shot
         // requests, the callback stays registered (re-invoked on each future update); it is only
@@ -482,6 +501,14 @@ impl Environment {
                     .evaluate(&mut environment.borrow_mut(), &source, process_types);
             match outcome {
                 Ok(Some(request_id)) => {
+                    // Capture the inferred type now: the compiler has just produced it, and
+                    // the completion that arrives later carries only a value.
+                    let mut callback = callback;
+                    callback.result_type = Some(
+                        environment
+                            .borrow()
+                            .format_type(repl.borrow().get_last_result_type()),
+                    );
                     pending_callbacks.borrow_mut().insert(request_id, callback);
                 }
                 Ok(None) => {
@@ -667,6 +694,7 @@ impl Environment {
                 callback.invoke(crate::types::Result::ok(Some(EvaluationResult {
                     value: crate::types::Value::from_core_value(&core, env.get_program()),
                     heap,
+                    result_type: callback.result_type.clone(),
                 })));
             }
             RequestResult::Result(Err(e), _) => {
@@ -704,6 +732,7 @@ impl Environment {
                                         env.get_program(),
                                     ),
                                     heap,
+                                    result_type: None,
                                 }
                             },
                         },

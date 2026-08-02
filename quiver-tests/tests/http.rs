@@ -292,3 +292,145 @@ fn test_session_clear() {
         )
         .expect(r#""session=; Path=/; Max-Age=0""#);
 }
+
+// --- the client half: serialize_request and parse_response ------------------------------
+
+#[test]
+fn test_request_round_trips_through_the_server_parser() {
+    // The point of one shared vocabulary: a client-built request and a server-parsed one are
+    // the same value, so `request` → `serialize_request` → `parse_request` is a round trip.
+    quiver()
+        .evaluate(
+            r#"req = %http.request [
+                 method: POST,
+                 target: "/submit?a=1",
+                 headers: %list{ ["host", "x"] },
+                 body: "hello" ~> .0,
+               ]
+               %http.serialize_request req ~> %http.parse_request ~> =[r, _]
+               [r.method, r.target, r.path, r.query, Str[r.body]]"#,
+        )
+        .expect(r#"[POST, "/submit?a=1", Cons["submit", Nil], Cons[["a", "1"], Nil], "hello"]"#);
+}
+
+#[test]
+fn test_serialize_request_adds_content_length_only_when_needed() {
+    quiver()
+        .evaluate(
+            r#"%http.request [method: GET, target: "/"] ~> %http.serialize_request ~> Str[~]"#,
+        )
+        .expect(r#""GET / HTTP/1.1\r\n\r\n""#);
+    quiver()
+        .evaluate(
+            r#"%http.request [
+                 method: PUT,
+                 target: "/x",
+                 headers: %list{ ["content-length", "99"] },
+                 body: "hi" ~> .0,
+               ] ~> %http.serialize_request ~> Str[~]"#,
+        )
+        .expect(r#""PUT /x HTTP/1.1\r\ncontent-length: 99\r\n\r\nhi""#);
+}
+
+#[test]
+fn test_parse_response_framing() {
+    let show = r#"show = #[(data): '%str, (eof): (Ok | [])] {
+          %http.parse_response [$data.0, $eof] ~> {
+            | =[Response(status: s, body: b), rest] => Got[s, Str[b], Str[rest]]
+            | ~
+          }
+        }
+        "#;
+
+    // Content-Length: the body is exactly that many bytes, the rest is the next response.
+    quiver()
+        .evaluate(&format!(
+            r#"{show}show ["HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello!!", []]"#
+        ))
+        .expect(r#"Got[200, "hello", "!!"]"#);
+
+    // Chunked, with a chunk extension and a trailer section.
+    quiver()
+        .evaluate(&format!(
+            r#"{show}show [
+                 "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5;x=1\r\nhello\r\n6\r\n world\r\n0\r\nx-t: 1\r\n\r\nNEXT",
+                 [],
+               ]"#
+        ))
+        .expect(r#"Got[200, "hello world", "NEXT"]"#);
+
+    // 204 has no body however it is framed.
+    quiver()
+        .evaluate(&format!(
+            r#"{show}show ["HTTP/1.1 204 No Content\r\n\r\n", []]"#
+        ))
+        .expect(r#"Got[204, "", ""]"#);
+
+    // Neither framing header: the body runs to end-of-connection, so it is Incomplete until
+    // the caller says the peer hung up. This is why `parse_response` takes `eof` at all.
+    quiver()
+        .evaluate(&format!(
+            r#"{show}show ["HTTP/1.1 200 OK\r\n\r\nbody bytes", []]"#
+        ))
+        .expect("Incomplete");
+    quiver()
+        .evaluate(&format!(
+            r#"{show}show ["HTTP/1.1 200 OK\r\n\r\nbody bytes", Ok]"#
+        ))
+        .expect(r#"Got[200, "body bytes", ""]"#);
+
+    // A short read is Incomplete, not a truncated body.
+    quiver()
+        .evaluate(&format!(
+            r#"{show}show ["HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nshort", []]"#
+        ))
+        .expect("Incomplete");
+    quiver()
+        .evaluate(&format!(
+            r#"{show}show ["HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhel", []]"#
+        ))
+        .expect("Incomplete");
+
+    // Malformed input is reported, not guessed at.
+    quiver()
+        .evaluate(&format!(r#"{show}show ["XYZ\r\n\r\n", []]"#))
+        .expect(r#"Bad[reason: "malformed status line"]"#);
+    quiver()
+        .evaluate(&format!(
+            r#"{show}show ["HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nzz\r\n", []]"#
+        ))
+        .expect(r#"Bad[reason: "malformed chunk size"]"#);
+    quiver()
+        .evaluate(&format!(
+            r#"{show}show ["HTTP/1.1 200 OK\r\ncontent-length: nope\r\n\r\n", []]"#
+        ))
+        .expect(r#"Bad[reason: "invalid content-length"]"#);
+}
+
+#[test]
+fn test_parse_response_is_incremental_across_arbitrary_reads() {
+    // Reads arrive in whatever sizes the network chooses, so feeding the buffer one byte at a
+    // time must answer Incomplete until the last byte and then the whole response.
+    quiver()
+        .evaluate(
+            r#"full = "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n" ~> .0
+               n = %bin.length full
+               step = #[(i): 'int, (seen): 'int] {
+                 {
+                   | __integer_compare__ [$i, n] ~> =1 => $seen
+                   | {
+                     r = %http.parse_response [%bin.slice [full, 0, $i], []]
+                     seen2 = {
+                       | r ~> =[Response(body: b), _]; Str[b] ~> ="hello" => __integer_add__ [$seen, 1]
+                       | r ~> =Incomplete => $seen
+                       | -1000
+                     }
+                     ^ [__integer_add__ [$i, 1], seen2]
+                   }
+                 }
+               }
+               step [0, 0]"#,
+        )
+        // Only the complete buffer parses; every prefix is Incomplete and nothing is Bad.
+        .expect("1");
+}

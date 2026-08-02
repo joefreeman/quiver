@@ -2292,9 +2292,17 @@ impl<E: Effect> Environment<E> {
         process_id: ProcessId,
         result: Result<WireValue, quiver_core::effects::EffectError>,
     ) -> Result<(), EnvironmentError> {
-        // If this was a resource-creating operation, register ownership
-        if let Ok(WireValue::Resource(rid, _)) = &result {
-            self.resource_ownership.insert(*rid, process_id);
+        // Register ownership of every resource the completion carries — not just a bare one.
+        // An effect may answer a *composite* (fetch's `[status, headers, body]` carries the
+        // body stream), and an unregistered resource is worse than it looks: the ownership
+        // check treats "no owner recorded" as "no violation", so it would pass every check
+        // and never be auto-closed when its process ends.
+        if let Ok(value) = &result {
+            let mut found = Vec::new();
+            collect_resources(value, &mut found);
+            for rid in found {
+                self.resource_ownership.insert(rid, process_id);
+            }
         }
 
         // A backend error is classified: world outcomes become values on the process,
@@ -2399,6 +2407,24 @@ fn composite_result_infos(program: &Program) -> Vec<(String, ResultTupleInfo)> {
 /// The *composite* tuples of a result type — the ones a backend has to build field by field.
 /// Nullary tuples are skipped: they are tags, and `collect_named_variants` gathers them by name
 /// so the backend can pick one (`Missing`, a `kind`) without knowing the union's shape.
+/// Every resource handle inside a wire value, however deeply nested.
+fn collect_resources(value: &WireValue, out: &mut Vec<quiver_core::value::ResourceId>) {
+    match value {
+        WireValue::Resource(rid, _) => out.push(*rid),
+        WireValue::Tuple(_, payload) | WireValue::Function(_, payload) => {
+            for element in &payload.elements {
+                collect_resources(element, out);
+            }
+        }
+        WireValue::Builtin(_, Some(payload)) => {
+            for element in &payload.elements {
+                collect_resources(element, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_result_tuple_ids(program: &Program, type_id: usize, out: &mut Vec<usize>) {
     match program.get_types().get(type_id) {
         Some(Type::Tuple(tuple_id))

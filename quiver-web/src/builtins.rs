@@ -1,11 +1,12 @@
 //! The web host's builtin capability set, and the browser implementations backing it.
 //!
-//! The capability is the system builtins: entropy and clocks. Their signatures are part of the
+//! The capability is `fetch` plus the system builtins: entropy and clocks. Their signatures are part of the
 //! universal contract (`register_system_signatures`); this backs them for an executing web host.
 //! Like the native ones these are immediate (synchronous) builtins — `Purity::HostRead`, no effect
 //! round-trip — which is why they need no effect backend and run directly in the worker. The
 //! file and network groups stay out: a browser has no filesystem or sockets, so a program naming
-//! `__tcp_connect__` should fail to compile rather than fail to run.
+//! `__tcp_connect__` should fail to compile rather than fail to run. `fetch` takes their place —
+//! it is the browser's io floor, and the reason `%http/client` works here at all.
 //!
 //! Each host object is fetched off the global scope by name rather than through `window` or
 //! `DedicatedWorkerGlobalScope`, so the same code serves the worker and the main thread.
@@ -14,7 +15,7 @@ use crate::effects::WebEffect;
 use quiver_core::binary::BinaryData;
 use quiver_core::builtins::{BuiltinContext, BuiltinFn, BuiltinRegistry, Completion};
 use quiver_core::error::Error;
-use quiver_core::value::Value;
+use quiver_core::value::{Binary, Value};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
@@ -109,9 +110,77 @@ fn attach_system_builtins(registry: &mut BuiltinRegistry<WebEffect>) {
 /// that compiles and then cannot run (or the reverse).
 pub fn web_builtins() -> BuiltinRegistry<WebEffect> {
     let mut registry = BuiltinRegistry::with_modules(&quiver_core::builtins::core_modules());
-    for module in quiver_core::builtins::system_modules() {
+    for module in quiver_core::builtins::system_modules()
+        .into_iter()
+        .chain(quiver_core::builtins::fetch_modules())
+    {
         module(&mut registry);
     }
     attach_system_builtins(&mut registry);
+    attach_fetch_builtin(&mut registry);
     registry
+}
+
+/// `fetch` parks its process while the backend performs the request; the implementation only
+/// unpacks the four binaries into the effect.
+fn attach_fetch_builtin(registry: &mut BuiltinRegistry<WebEffect>) {
+    registry.attach_implementation("fetch", builtin_fetch);
+}
+
+/// The bytes of a binary field, resolving a constant through the executor's table.
+fn field_bytes(
+    fields: &[Value],
+    index: usize,
+    ctx: &mut BuiltinContext<WebEffect>,
+) -> Result<Vec<u8>, Error> {
+    let Some(Value::Binary(binary)) = fields.get(index) else {
+        return Err(Error::TypeMismatch {
+            expected: "binary".to_string(),
+            found: fields
+                .get(index)
+                .map(|f| f.type_name().to_string())
+                .unwrap_or_else(|| "nothing".to_string()),
+        });
+    };
+    match binary {
+        Binary::Constant(index) => {
+            match ctx
+                .executor
+                .get_constant(*index)
+                .ok_or(Error::ConstantUndefined(*index))?
+            {
+                quiver_core::bytecode::Constant::Binary(bytes) => Ok(bytes.clone()),
+                _ => Err(Error::TypeMismatch {
+                    expected: "binary".to_string(),
+                    found: "integer".to_string(),
+                }),
+            }
+        }
+        Binary::Data(data) => Ok(data.to_vec()),
+    }
+}
+
+pub fn builtin_fetch(
+    value: &Value,
+    ctx: &mut BuiltinContext<WebEffect>,
+) -> Result<Completion<WebEffect>, Error> {
+    let Value::Tuple(_, fields) = value else {
+        return Err(Error::TypeMismatch {
+            expected: "tuple".to_string(),
+            found: value.type_name().to_string(),
+        });
+    };
+    if fields.len() != 4 {
+        return Err(Error::ArityMismatch {
+            expected: 4,
+            found: fields.len(),
+        });
+    }
+    let fields = fields.clone();
+    Ok(Completion::Effect(WebEffect::Fetch {
+        method: field_bytes(&fields, 0, ctx)?,
+        url: field_bytes(&fields, 1, ctx)?,
+        headers: field_bytes(&fields, 2, ctx)?,
+        body: field_bytes(&fields, 3, ctx)?,
+    }))
 }

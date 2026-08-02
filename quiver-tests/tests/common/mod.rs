@@ -98,6 +98,9 @@ fn evaluate(
     }
 }
 
+pub mod mock_io;
+pub use mock_io::MockIo;
+
 // The standard library is a built-in package (embedded in quiver-compiler), so tests start
 // with no in-memory modules — only those a test adds via `with_modules`.
 /// Which IO signature groups the host registers — a host's capability set, mirroring the real
@@ -110,6 +113,8 @@ pub enum Capabilities {
     #[default]
     Full,
     SystemOnly,
+    /// The browser's: the system builtins plus `fetch`, and no sockets or filesystem.
+    Web,
     None,
 }
 
@@ -118,6 +123,9 @@ pub enum Capabilities {
 pub struct TestBuilder {
     modules: HashMap<Vec<String>, String>,
     with_io: bool,
+    mock_io: Option<MockIo>,
+    host_tags: Option<Vec<String>>,
+    files: Option<HashMap<String, String>>,
     capabilities: Capabilities,
     debug: bool,
     collection_threshold: Option<usize>,
@@ -141,10 +149,49 @@ impl TestBuilder {
         self
     }
 
+    /// Real io builtins over a *faked OS*: the client, the transport, the codecs and the
+    /// effect plumbing all run for real, and only the syscalls are canned. This is how the
+    /// cases a live socket cannot reach reliably get tested — awkward read boundaries, a peer
+    /// that never answers, a refused connect, an aborting operation.
+    pub fn with_mock_io(mut self, behaviour: MockIo) -> Self {
+        self.with_io = true;
+        self.mock_io = Some(behaviour);
+        self
+    }
+
+    /// An in-memory package addressed by *file path* rather than module name — the shape the
+    /// web host uses. Needed for host variants, since a module name cannot express the
+    /// `foo.web.qv` spelling (the `.web` would be read as part of the name).
+    pub fn with_files(mut self, files: &[(&str, &str)]) -> Self {
+        self.files = Some(
+            files
+                .iter()
+                .map(|(path, source)| (path.to_string(), source.to_string()))
+                .collect(),
+        );
+        self
+    }
+
+    /// Claim a different host's tags, so `foo.<tag>.qv` variants resolve as they would there.
+    pub fn with_host_tags(mut self, tags: &[&str]) -> Self {
+        self.host_tags = Some(tags.iter().map(|t| t.to_string()).collect());
+        self
+    }
+
     /// A capability-scoped host with no io signatures at all — io-referencing code fails at
     /// compile time.
     pub fn scoped_no_io(mut self) -> Self {
         self.capabilities = Capabilities::None;
+        self
+    }
+
+    /// The browser's capability set — system builtins plus `fetch`, no sockets or filesystem
+    /// — with the web host's module tags, so `foo.web.qv` variants resolve. Signatures only
+    /// for `fetch`: this type-checks browser code from a native build, which is the whole
+    /// point (nothing else compiles the web variants).
+    pub fn scoped_web(mut self) -> Self {
+        self.capabilities = Capabilities::Web;
+        self.host_tags = Some(vec!["web".to_string()]);
         self
     }
 
@@ -210,6 +257,15 @@ impl TestBuilder {
                 // The point of the group: implementations alone make it runnable.
                 quiver_io::attach_system_builtins(&mut builtins);
             }
+            Capabilities::Web => {
+                for module in quiver_core::builtins::system_modules()
+                    .into_iter()
+                    .chain(quiver_core::builtins::fetch_modules())
+                {
+                    module(&mut builtins);
+                }
+                quiver_io::attach_system_builtins(&mut builtins);
+            }
             Capabilities::None => {}
         }
 
@@ -249,16 +305,16 @@ impl TestBuilder {
         }
 
         // Create shared effect backend if enabled
-        let effect_backend = if self.with_io {
-            quiver_io::NativeEffectBackend::new(256)
-                .ok()
-                .map(|backend| {
-                    Box::new(backend)
-                        as Box<dyn quiver_core::effects::EffectBackend<E = NativeEffect>>
-                })
-        } else {
-            None
-        };
+        let effect_backend: Option<Box<dyn quiver_core::effects::EffectBackend<E = NativeEffect>>> =
+            match (&self.mock_io, self.with_io) {
+                (Some(behaviour), _) => {
+                    Some(Box::new(mock_io::MockBackend::new(behaviour.clone())))
+                }
+                (None, true) => quiver_io::NativeEffectBackend::new(256)
+                    .ok()
+                    .map(|backend| Box::new(backend) as Box<_>),
+                (None, false) => None,
+            };
 
         // Create environment and REPL
         let mut environment = Environment::<NativeEffect>::new(workers);
@@ -272,7 +328,16 @@ impl TestBuilder {
         if let Some(backend) = effect_backend {
             environment.set_effect_backend(backend);
         }
-        let resolver = Box::new(PackageResolver::memory(self.modules));
+        let resolver = match self.files {
+            Some(files) => {
+                PackageResolver::memory_files(files).expect("in-memory files must be valid")
+            }
+            None => PackageResolver::memory(self.modules),
+        };
+        let resolver = Box::new(match self.host_tags {
+            Some(tags) => resolver.with_host_tags(tags),
+            None => resolver,
+        });
         let mut repl =
             Repl::new(&mut environment, resolver, builtins).expect("Failed to create REPL");
         // The shared store is keyed on a fingerprint that doesn't cover the registry, so only the
@@ -306,6 +371,16 @@ pub struct TestResult {
 
 #[allow(dead_code)]
 impl TestResult {
+    /// The formatted result, for comparing two evaluations against each other rather than
+    /// against a literal — e.g. asserting two hosts agree.
+    pub fn value_string(&self) -> String {
+        match &self.result {
+            Ok(Some(value)) => self.environment.format_value(value),
+            Ok(None) => String::new(),
+            Err(e) => panic!("expected a value, got {:?} for source: {}", e, self.source),
+        }
+    }
+
     /// Expect a value matching the given Quiver syntax string representation
     pub fn expect(self, expected: &str) -> Self {
         match self.result {

@@ -388,6 +388,13 @@ impl From<quiver_core::process::WorkerInfo> for WorkerInfo {
 pub struct EvaluationResult {
     pub value: Value,
     pub heap: Vec<Vec<u8>>,
+    /// The *static* type the compiler inferred, not one derived from the value. The two
+    /// differ exactly where it matters: a call that can fail is `T | []` however the one
+    /// value in hand happens to have turned out, and showing the narrower derived type is
+    /// what makes the next line's `r.status` a surprise. `None` for a result with no
+    /// compiled expression behind it (a process's own result, say).
+    #[serde(rename = "type")]
+    pub result_type: Option<String>,
 }
 
 #[cfg(test)]

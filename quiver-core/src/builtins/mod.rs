@@ -1063,3 +1063,11 @@ pub fn io_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
 pub fn system_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
     vec![io::register_system_signatures]
 }
+
+/// The `fetch` builtin — a browser's whole io capability, since it cannot open a socket.
+/// Deliberately *not* part of [`io_modules`]: a host with sockets builds HTTP over them in
+/// Quiver, and registering both would let a program compile against `fetch` on a host where
+/// it means something else.
+pub fn fetch_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
+    vec![io::register_fetch_signatures]
+}

@@ -165,6 +165,79 @@ fn network_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     ]
 }
 
+/// The fetch builtin's contract: an HTTP exchange as a single primitive.
+///
+/// This is a *browser's* floor, not a general one. A host with sockets builds HTTP in Quiver
+/// over `__tcp_*__`; a browser cannot, so it gets the whole exchange as one effect. The two
+/// are deliberately separate capability groups — a host offering both would let a program
+/// compile against `fetch` and then run somewhere it means something different.
+///
+/// Method and headers cross as bytes (a raw CRLF block) rather than as structured values: the
+/// backend has no type registry, so a `'%http.pairs` would mean plumbing tuple ids for `Cons`,
+/// `Nil` and `Str` through `set_type_ids` — while `%http` already has the header codec both
+/// ways. The response body is a `\HttpBody` stream, the same shape as a socket's.
+fn fetch_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
+    let bin = TypeSpec::Binary;
+    let int = TypeSpec::Integer;
+    let body = TypeSpec::Resource("HttpBody".to_string());
+    vec![(
+        "fetch",
+        TypeSpec::Tuple(
+            None,
+            vec![
+                (Some("method"), bin.clone()),
+                (Some("url"), bin.clone()),
+                (Some("headers"), bin.clone()),
+                (Some("body"), bin),
+            ],
+        ),
+        TypeSpec::Tuple(
+            None,
+            vec![
+                (Some("status"), int),
+                (Some("headers"), TypeSpec::Binary),
+                (Some("body"), body),
+            ],
+        ),
+    )]
+}
+
+/// A fetch response body is a stream, exactly as a socket is: bytes arrive when they arrive,
+/// so it is selectable and yields the same `Data`/`Closed` shape.
+fn register_fetch_streams<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let body = TypeSpec::Resource("HttpBody".to_string());
+    registry.register_stream(
+        "HttpBody",
+        crate::builtins::StreamSpec {
+            data: Some(TypeSpec::Tuple(
+                Some("Data"),
+                vec![
+                    (Some("body"), body.clone()),
+                    (Some("data"), TypeSpec::Binary),
+                ],
+            )),
+            resource: None,
+            end: TypeSpec::Tuple(Some("Closed"), vec![(Some("body"), body)]),
+        },
+    );
+}
+
+/// Register the fetch builtin's signature (no implementation) — the browser's io capability.
+pub fn register_fetch_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let placeholder: BuiltinFn<E> = unimplemented_builtin::<E>;
+    for (name, param, result) in fetch_signatures() {
+        registry.register(
+            name.to_string(),
+            placeholder,
+            Purity::Effect,
+            param,
+            fallible(result),
+        );
+    }
+    register_fetch_streams(registry);
+    register_error_vocabulary(registry);
+}
+
 /// The system builtins' contract: host-provided entropy and clocks.
 fn system_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     let bin = TypeSpec::Binary;

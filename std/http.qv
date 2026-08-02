@@ -22,6 +22,14 @@
 
 'response = Response[status: 'int, headers: 'pairs, body: 'bin]
 
+// How a client reaches the network. The URL says where to connect and the request says what
+// to send — a transport needs both, since the request line carries only the target.
+//
+// This lives here, in the shared vocabulary, rather than in `%http/client`: every transport
+// implementation must name the type too, and a transport importing the client (which imports
+// the transport) would be a cycle.
+'transport = [request: #[(url): '%url, (request): '] -> ('response | [])]
+
 'parsed = Incomplete | Bad[status: 'int, reason: '%str] | [', 'bin]
 
 // ASCII-lowercased bytes (for case-insensitive names).
@@ -427,6 +435,210 @@ parse_request = #'bin {
   parse_request_with [$, 8192, 1048576]
 }
 
+// --- the response side (what a client parses) -------------------------------------------
+// The mirror of `parse_request`, and a bigger job: a *server* may reject a chunked request
+// body (this module does), but a client cannot dictate how the server frames its answer, and
+// HTTP/1.1 servers chunk routinely. A response with neither framing header runs to
+// end-of-connection, which no buffer can detect on its own — hence the `eof` argument.
+//
+// `'response` carries no version or reason phrase, so both are dropped: the phrase is
+// decoration, and a client that must know the version can read it off the wire itself.
+
+'parsed_response = Incomplete | Bad[reason: '%str] | ['response, 'bin]
+
+// A hex digit's value, or nil.
+hex_value = #'int {
+  | __integer_compare__ [$, 48] ~> =(0 | 1); __integer_compare__ [$, 57] ~> =(-1 | 0) => __integer_subtract__ [
+    $,
+    48,
+  ]
+  | __integer_compare__ [$, 97] ~> =(0 | 1); __integer_compare__ [$, 102] ~> =(-1 | 0) => __integer_subtract__ [
+    $,
+    87,
+  ]
+  | __integer_compare__ [$, 65] ~> =(0 | 1); __integer_compare__ [$, 70] ~> =(-1 | 0) => __integer_subtract__ [
+    $,
+    55,
+  ]
+}
+
+parse_hex = #[(data): 'bin, (pos): 'int, (end): 'int, (acc): 'int] {
+  {
+    | __integer_compare__ [$pos, $end] ~> =(0 | 1) => $acc
+    | %bin.get_byte [$data, $pos] ~> hex_value
+      ~> =('int)v => ^ [
+        $data,
+        __integer_add__ [$pos, 1],
+        $end,
+        __integer_add__ [__integer_multiply__ [$acc, 16], v],
+      ]
+    | $acc
+  }
+}
+
+// The position just past a chunked body's trailer section (zero or more header lines then a
+// blank one), or nil when the buffer does not reach it yet.
+trailer_end = #[(data): 'bin, (pos): 'int, (len): 'int] {
+  le = line_end [$data, $pos, $len]
+  {
+    | __integer_compare__ [le, $len] ~> =0 => []
+    | __integer_compare__ [le, $pos] ~> =0 => __integer_add__ [le, 2]
+    | ^ [$data, __integer_add__ [le, 2], $len]
+  }
+}
+
+// One pass of the chunked decoder: `[body, position-after]`, Incomplete, or Bad.
+chunk_step = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
+  le = line_end [$data, $pos, $len]
+  {
+    | __integer_compare__ [le, $len] ~> =0 => Incomplete
+    | {
+      // The size line ends at a chunk extension's `;` if there is one.
+      size_end = {
+        | %bin.index [$data, 59, $pos] ~> =('int)s; __integer_compare__ [s, le] ~> =-1 => s
+        | le
+      }
+      {
+        | __integer_compare__ [$pos, size_end] ~> =(0 | 1) => Bad[reason: "empty chunk size"]
+        | %bin.get_byte [$data, $pos] ~> hex_value ~> =[] => Bad[reason: "malformed chunk size"]
+        | {
+          n = parse_hex [$data, $pos, size_end, 0]
+          dstart = __integer_add__ [le, 2]
+          {
+            | n ~> =0 => {
+              | trailer_end [$data, dstart, $len] ~> =('int)e => [$acc, e]
+              | Incomplete
+            }
+            | {
+              dend = __integer_add__ [dstart, n]
+              {
+                | __integer_compare__ [__integer_add__ [dend, 2], $len] ~> =(-1 | 0) => {
+                    | %bin.get_byte [$data, dend] ~> =13
+                      %bin.get_byte [$data, __integer_add__ [dend, 1]] ~> =10 => ^ [
+                      $data,
+                      __integer_add__ [dend, 2],
+                      $len,
+                      %bin.concat [$acc, %bin.slice [$data, dstart, dend]],
+                    ]
+                    | Bad[reason: "chunk not terminated by CRLF"]
+                  }
+                | Incomplete
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// `HTTP/1.1 200 OK` — the reason phrase is optional.
+parse_status_line = #'bin {
+  =line
+  len = %bin.length line
+  %bin.index [line, 32, 0] ~> =('int)a
+  __integer_compare__ [a, 0] ~> =1
+  b = %bin.index [line, 32, __integer_add__ [a, 1]]
+  code_end = { b ~> =('int)i => i | len }
+
+  %bin.slice [line, __integer_add__ [a, 1], code_end] ~> Str[~] ~> %str.parse_int
+  ~> =('int)status
+
+  __integer_compare__ [status, 100] ~> =(0 | 1)
+  __integer_compare__ [status, 599] ~> =(-1 | 0)
+  status
+}
+
+// Statuses that carry no body however they are framed (RFC 9110 §6.4.1).
+bodyless? = #'int {
+  | =(204 | 304) => Ok
+  | __integer_compare__ [$, 100] ~> =(0 | 1); __integer_compare__ [$, 199] ~> =(-1 | 0) => Ok
+}
+
+parse_response_with = #[(data): 'bin, (eof): (Ok | []), (max_head): 'int, (max_body): 'int] {
+  :doc "Parses one response from a byte buffer with explicit head/body caps. `eof` says the connection has closed, which is what terminates a response framed by neither Content-Length nor chunked encoding."
+  len = %bin.length $data
+  head_end [$data, 0, len] ~> {
+    | =('int)h => {
+      | __integer_compare__ [h, $max_head] ~> =1 => Bad[reason: "response head too large"]
+      | {
+        sle = line_end [$data, 0, h]
+        {
+          | [$data, 0, sle] ~> parse_status_line %bin.slice ~> =('int)status => {
+              hstart = {
+                | __integer_compare__ [sle, h] ~> =-1 => __integer_add__ [sle, 2]
+                | h
+              }
+              parse_headers [$data, hstart, h, Nil] ~> {
+                | =Bad[status: _, reason: br] => Bad[reason: br]
+                | =hs => {
+                  bstart = __integer_add__ [h, 4]
+                  done = #[(body): 'bin, (rest): 'bin] {
+                    [Response[status: status, headers: hs, body: $body], $rest]
+                  }
+                  {
+                    | bodyless? status => done [0x, %bin.slice [$data, bstart, len]]
+                    | header [hs, "transfer-encoding"] ~> =Str[te]; lower Str[te] ~> ="chunked" => chunk_step [$data, bstart, len, 0x] ~> {
+                      | =Incomplete => Incomplete
+                      | =Bad[reason: r] => Bad[reason: r]
+                      | =[body, e] => {
+                        | %bin.length body ~> __integer_compare__ [
+                            ~,
+                            $max_body,
+                          ] ~> =1 => Bad[reason: "response body too large"]
+                        | done [body, %bin.slice [$data, e, len]]
+                      }
+                    }
+                    | header [hs, "transfer-encoding"] ~> =Str[_] => Bad[
+                      reason: "unsupported transfer encoding",
+                    ]
+                    | header [hs, "content-length"] ~> =Str[_] => {
+                      | content_length hs ~> =('int)cl => {
+                        | __integer_compare__ [cl, $max_body] ~> =1 => Bad[
+                          reason: "response body too large",
+                        ]
+                        | {
+                          bend = __integer_add__ [bstart, cl]
+                          {
+                            | __integer_compare__ [bend, len] ~> =(-1 | 0) => done [
+                              %bin.slice [$data, bstart, bend],
+                              %bin.slice [$data, bend, len],
+                            ]
+                            | Incomplete
+                          }
+                        }
+                      }
+                      | Bad[reason: "invalid content-length"]
+                    }
+                    // Neither header: the body is whatever arrives before the peer hangs up.
+                    | $eof ~> =Ok => {
+                      | __integer_compare__ [
+                          __integer_subtract__ [len, bstart],
+                          $max_body,
+                        ] ~> =1 => Bad[reason: "response body too large"]
+                      | done [%bin.slice [$data, bstart, len], 0x]
+                    }
+                    | Incomplete
+                  }
+                }
+              }
+            }
+          | Bad[reason: "malformed status line"]
+        }
+      }
+    }
+    | {
+      | __integer_compare__ [len, $max_head] ~> =1 => Bad[reason: "response head too large"]
+      | Incomplete
+    }
+  }
+}
+
+parse_response = #[(data): 'bin, (eof): (Ok | [])] {
+  :doc "Parses one response from a byte buffer with default caps (8 KiB head, 8 MiB body): Incomplete (read more), Bad[reason], or the response plus the leftover bytes."
+  parse_response_with [$data, $eof, 8192, 8388608]
+}
+
 reason = #'int {
   :doc "The conventional reason phrase for a status code (empty for unlisted codes)."
   | =200 => "OK"
@@ -462,6 +674,47 @@ serialize_response = #'response {
   }
   head = serialize_headers [hs2, status_line]
   %bin.concat ["{head}\r\n" ~> .0, b]
+}
+
+method_name = #'method {
+  | =GET => "GET"
+  | =HEAD => "HEAD"
+  | =POST => "POST"
+  | =PUT => "PUT"
+  | =DELETE => "DELETE"
+  | =PATCH => "PATCH"
+  | =OPTIONS => "OPTIONS"
+  | =Other[m] => m
+}
+
+serialize_request = #' {
+  :doc "The request as HTTP/1.1 bytes; a Content-Length header is added when a body is present and none is stated. Host is the caller's to supply — this module never sees the authority."
+  =Request(method: m, target: t, version: v, headers: hs, body: b)
+  request_line = "{method_name m} {t} {v}\r\n"
+  hs2 = {
+    | header [hs, "content-length"] ~> =Str[_] => hs
+    | %bin.length b ~> =0 => hs
+    | %list.prepend [hs, ["content-length", %bin.length b ~> %str.from_int]]
+  }
+  head = serialize_headers [hs2, request_line]
+  %bin.concat ["{head}\r\n" ~> .0, b]
+}
+
+request = #[(method): 'method, (target): '%str, headers: 'pairs = Nil, body: 'bin = 0x] {
+  :doc "Builds an HTTP/1.1 request, deriving `path` and `query` from the target the way the server's parser would — so a client-built request and a parsed one are the same value."
+  // Positional access rather than `=[path, query]`: `split_target` answers a union of two
+  // tuple shapes, and a destructure of that is not seen as total, which would make this
+  // constructor spuriously fallible.
+  split = split_target $target
+  Request[
+    method: $method,
+    target: $target,
+    path: split.0,
+    query: split.1,
+    version: "HTTP/1.1",
+    headers: $headers,
+    body: $body,
+  ]
 }
 
 // --- cookies and form encoding ---------------------------------------------------------
@@ -562,6 +815,19 @@ set_cookie = #[(name): '%str, (value): '%str, (attrs): 'attrs = Nil] {
   ["set-cookie", attrs_join [$attrs, "{$name}={$value}"]]
 }
 
+// A header block is the unit a host hands over when it has already done the framing: the
+// browser's fetch answers parsed headers, which the web transport re-emits as CRLF text so
+// this module — the one place that knows the grammar — turns it back into pairs.
+headers_of = #'bin {
+  :doc "Parses a CRLF-separated header block into ordered [name, value] pairs, or Bad on a malformed line."
+  parse_headers [$, 0, %bin.length $, Nil]
+}
+
+headers_to_bytes = #'pairs {
+  :doc "Ordered [name, value] pairs as a CRLF-separated block, each line terminated (no blank line follows)."
+  serialize_headers [$, ""] ~> .0
+}
+
 (
   header,
   get,
@@ -573,7 +839,14 @@ set_cookie = #[(name): '%str, (value): '%str, (attrs): 'attrs = Nil] {
   set_cookie,
   parse_request,
   parse_request_with,
+  parse_response,
+  parse_response_with,
+  request,
+  serialize_request,
+  method_name,
   split_target,
   serialize_response,
+  headers_of,
+  headers_to_bytes,
   reason,
 )
