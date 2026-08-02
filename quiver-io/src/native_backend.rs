@@ -15,6 +15,7 @@ use std::os::fd::FromRawFd;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::Arc;
 
 /// Classify an OS error as an effect outcome. The distinction matters now that outcomes are
 /// values: an `EffectError` returned *in* a completion resumes the process with a
@@ -46,11 +47,21 @@ macro_rules! try_io {
 }
 
 /// Resource metadata stored by the io_uring backend
-#[derive(Debug)]
 pub enum Resource {
     TcpSocket {
         socket: Socket,
         peer_addr: SocketAddr,
+    },
+    /// A socket with TLS over it. The connection is the rustls state machine; `plaintext` is
+    /// what it has decrypted but the program has not yet asked for, and `outgoing` the
+    /// ciphertext still to be written (with how much of it has gone).
+    TlsSocket {
+        socket: Socket,
+        connection: Box<rustls::ClientConnection>,
+        plaintext: Vec<u8>,
+        outgoing: Vec<u8>,
+        outgoing_sent: usize,
+        eof: bool,
     },
     TcpListener {
         socket: Socket,
@@ -76,6 +87,7 @@ impl Resource {
     fn fd(&self) -> RawFd {
         match self {
             Resource::TcpSocket { socket, .. } => socket.as_raw_fd(),
+            Resource::TlsSocket { socket, .. } => socket.as_raw_fd(),
             Resource::TcpListener { socket, .. } => socket.as_raw_fd(),
             Resource::File { file, .. } => file.as_raw_fd(),
             Resource::Dir { .. } => panic!("Dir does not have a file descriptor"),
@@ -100,6 +112,13 @@ pub enum IoOpType {
     Connect {
         socket: Socket,
         peer_addr: SocketAddr,
+    },
+    /// A socket operation serving a TLS goal. Unlike every other variant, its completion may
+    /// submit more work rather than finishing — see `tls_drive`.
+    Tls {
+        resource_id: ResourceId,
+        goal: TlsGoal,
+        io: TlsIo,
     },
 }
 
@@ -294,6 +313,21 @@ impl EffectBackend for NativeEffectBackend {
             NativeEffect::TcpSocketWrite { resource_id, data } => {
                 self.execute_tcp_socket_write(process_id, resource_id, data)
             }
+            NativeEffect::TlsAttach {
+                resource_id,
+                hostname,
+                roots,
+            } => self.execute_tls_attach(process_id, resource_id, hostname, roots),
+            NativeEffect::TlsRead {
+                resource_id,
+                length,
+            } => self.execute_tls_read(process_id, resource_id, length),
+            NativeEffect::TlsWrite { resource_id, data } => {
+                self.execute_tls_write(process_id, resource_id, data)
+            }
+            NativeEffect::TlsClose { resource_id } => {
+                self.execute_tls_close(process_id, resource_id)
+            }
             NativeEffect::TcpSocketClose { resource_id } => {
                 self.execute_tcp_socket_close(resource_id)
             }
@@ -350,6 +384,26 @@ impl EffectBackend for NativeEffectBackend {
                             process_id,
                             self.handle_connect_completion(result_code, socket, peer_addr),
                         ));
+                    }
+
+                    IoOpType::Tls {
+                        resource_id,
+                        goal,
+                        io,
+                    } => {
+                        // The one operation that may not be finished by its completion.
+                        match self.tls_drive(process_id, resource_id, goal, Some((io, result_code)))
+                        {
+                            Ok(Some(result)) => completions.push((process_id, result)),
+                            Ok(None) => {}
+                            // `InvalidArgument`, not `Other`: a driver error is a backend
+                            // defect, and must classify as a fault — as it would had
+                            // `execute` returned it — not as an outcome a caller handles.
+                            Err(e) => completions.push((
+                                process_id,
+                                Err(EffectError::InvalidArgument(format!("{e:?}"))),
+                            )),
+                        }
                     }
                 }
             }
@@ -1230,4 +1284,558 @@ impl NativeEffectBackend {
         let type_id = self.get_resource_type_id("TcpSocket");
         Ok(WireValue::Resource(new_resource_id, type_id))
     }
+}
+
+// --- TLS -----------------------------------------------------------------------------------
+//
+// rustls is sans-io: a `ClientConnection` is a state machine with four ports — feed it TLS
+// bytes (`read_tls`), let it process them, pull plaintext out (`reader`), push plaintext in
+// (`writer`) and drain the encrypted result (`write_tls`). It never touches a socket.
+//
+// That makes TLS the one place this backend's "one CQE finishes one operation" rule does not
+// hold. A single `__tls_read__` may need several socket reads (a record can arrive split), and
+// it may need a *write* first (handshake continuation, a key update, an alert). So a TLS
+// operation is a small state machine of its own: `drive` applies whatever completion just
+// arrived, then either submits the next socket op and waits, or answers.
+
+/// What a TLS resource is trying to do. Held across however many socket operations it takes.
+#[derive(Debug, Clone, Copy)]
+pub enum TlsGoal {
+    /// Handshaking, on the way to answering with the resource itself.
+    Attach,
+    /// Up to `want` bytes of plaintext.
+    Read { want: usize },
+    /// `len` bytes of plaintext, already handed to rustls; drain the ciphertext.
+    Write { len: usize },
+    /// A `close_notify`, then done.
+    Close,
+}
+
+/// Which socket operation is in flight for a TLS goal.
+#[derive(Debug)]
+pub enum TlsIo {
+    Read { buffer: Vec<u8> },
+    Write,
+}
+
+/// How far a goal got when the driver last looked at it.
+enum Step {
+    /// A socket operation was submitted; wait for its completion.
+    Waiting,
+    /// The goal is satisfied.
+    Done(EffectResult),
+}
+
+/// A TLS protocol failure — a bad certificate, a broken record, a peer that hung up mid
+/// handshake. All of them are outcomes the caller can act on rather than faults.
+fn tls_error(context: &str, detail: impl std::fmt::Display) -> EffectError {
+    EffectError::Other(format!("{context}: {detail}"))
+}
+
+impl NativeEffectBackend {
+    /// A client config trusting exactly the DER certificates handed in. Nothing is read from
+    /// the filesystem or the environment: the caller supplies the anchors, which is what makes
+    /// a locally-issued certificate testable and keeps the trust decision out of the runtime.
+    fn tls_config(roots_der: &[u8]) -> Result<Arc<rustls::ClientConfig>, EffectError> {
+        let mut roots = rustls::RootCertStore::empty();
+        if roots_der.is_empty() {
+            // Empty means the host's own defaults — the Mozilla set compiled in. Passing them
+            // through the builtin as bytes would mean a few hundred KB of certificate in a
+            // Quiver literal, for the case that wants no customisation at all.
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        } else {
+            let mut added = 0usize;
+            for certificate in der_certificates(roots_der) {
+                if roots.add(certificate.into()).is_ok() {
+                    added += 1;
+                }
+            }
+            if added == 0 {
+                return Err(tls_error(
+                    "tls",
+                    "no usable trust anchors in the supplied roots",
+                ));
+            }
+        }
+        Ok(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        ))
+    }
+
+    /// Submit a socket read for a TLS resource and record the goal it serves.
+    fn tls_submit_read(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        goal: TlsGoal,
+    ) -> Result<(), Error> {
+        let fd = self
+            .resources
+            .get(&resource_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {resource_id} not found")))?
+            .fd();
+        let mut buffer = vec![0u8; 16384];
+        let completion_id = self.next_completion_id;
+        self.next_completion_id += 1;
+        let op = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
+            .build()
+            .user_data(completion_id);
+        unsafe {
+            self.ring
+                .submission()
+                .push(&op)
+                .map_err(|e| Error::InvalidArgument(format!("Failed to submit TLS read: {e}")))?;
+        }
+        self.ring
+            .submit()
+            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {e}")))?;
+        self.pending.insert(
+            completion_id,
+            (
+                process_id,
+                IoOpType::Tls {
+                    resource_id,
+                    goal,
+                    io: TlsIo::Read { buffer },
+                },
+            ),
+        );
+        Ok(())
+    }
+
+    /// Submit a write of the resource's pending ciphertext, from wherever the last write got
+    /// to. Partial writes are the reason for the offset: a half-written TLS record would
+    /// corrupt the stream, so the remainder must go out before anything else.
+    fn tls_submit_write(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        goal: TlsGoal,
+    ) -> Result<(), Error> {
+        let (fd, ptr, len) = {
+            let resource = self.resources.get_mut(&resource_id).ok_or_else(|| {
+                Error::InvalidArgument(format!("Resource {resource_id} not found"))
+            })?;
+            let fd = resource.fd();
+            let Resource::TlsSocket {
+                outgoing,
+                outgoing_sent,
+                ..
+            } = resource
+            else {
+                return Err(Error::InvalidArgument("Resource is not a TlsSocket".into()));
+            };
+            (
+                fd,
+                unsafe { outgoing.as_ptr().add(*outgoing_sent) },
+                outgoing.len() - *outgoing_sent,
+            )
+        };
+        let completion_id = self.next_completion_id;
+        self.next_completion_id += 1;
+        let op = opcode::Write::new(types::Fd(fd), ptr, len as u32)
+            .build()
+            .user_data(completion_id);
+        unsafe {
+            self.ring
+                .submission()
+                .push(&op)
+                .map_err(|e| Error::InvalidArgument(format!("Failed to submit TLS write: {e}")))?;
+        }
+        self.ring
+            .submit()
+            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {e}")))?;
+        self.pending.insert(
+            completion_id,
+            (
+                process_id,
+                IoOpType::Tls {
+                    resource_id,
+                    goal,
+                    io: TlsIo::Write,
+                },
+            ),
+        );
+        Ok(())
+    }
+
+    /// Advance a TLS goal after a socket completion (or, with `io: None`, from a standing
+    /// start). Either submits the next socket operation and answers `Waiting`, or finishes.
+    fn tls_drive(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        goal: TlsGoal,
+        io: Option<(TlsIo, i32)>,
+    ) -> Result<Option<EffectResult>, Error> {
+        // 1. Fold in whatever just completed.
+        if let Some((io, result_code)) = io
+            && let Err(failure) = self.tls_apply(resource_id, io, result_code)
+        {
+            return Ok(Some(self.tls_finish(resource_id, goal, Err(failure))));
+        }
+
+        // 2. Let rustls decide what it wants next, then either satisfy the goal or wait.
+        match self.tls_step(resource_id, goal)? {
+            Step::Done(result) => Ok(Some(self.tls_finish(resource_id, goal, result))),
+            Step::Waiting => {
+                let wants_write = {
+                    let Some(Resource::TlsSocket {
+                        outgoing,
+                        outgoing_sent,
+                        ..
+                    }) = self.resources.get(&resource_id)
+                    else {
+                        return Err(Error::InvalidArgument(format!(
+                            "Resource {resource_id} is not a TlsSocket"
+                        )));
+                    };
+                    *outgoing_sent < outgoing.len()
+                };
+                if wants_write {
+                    self.tls_submit_write(process_id, resource_id, goal)?;
+                } else {
+                    self.tls_submit_read(process_id, resource_id, goal)?;
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// A goal's final answer, releasing the resource when that answer ends the handle's life:
+    /// a finished close (however it went), and a failed attach — whose caller never received
+    /// the handle, so nothing else could ever close it. Every goal finishes through here,
+    /// whether immediately or at a later socket completion; without that, either case would
+    /// hold the fd until process teardown.
+    fn tls_finish(
+        &mut self,
+        resource_id: ResourceId,
+        goal: TlsGoal,
+        result: EffectResult,
+    ) -> EffectResult {
+        let defunct = match goal {
+            TlsGoal::Close => true,
+            TlsGoal::Attach => result.is_err(),
+            TlsGoal::Read { .. } | TlsGoal::Write { .. } => false,
+        };
+        if defunct {
+            self.resources.remove(&resource_id);
+        }
+        result
+    }
+
+    /// Apply a completed socket operation to the connection.
+    fn tls_apply(
+        &mut self,
+        resource_id: ResourceId,
+        io: TlsIo,
+        result_code: i32,
+    ) -> Result<(), EffectError> {
+        let Some(Resource::TlsSocket {
+            connection,
+            plaintext,
+            outgoing,
+            outgoing_sent,
+            eof,
+            ..
+        }) = self.resources.get_mut(&resource_id)
+        else {
+            return Err(tls_error("tls", "connection is closed"));
+        };
+        match io {
+            TlsIo::Read { buffer } => {
+                if result_code < 0 {
+                    return Err(tls_error("tls read", format!("errno {}", -result_code)));
+                }
+                if result_code == 0 {
+                    *eof = true;
+                    // Tell rustls the stream is over: it is what lets its reader distinguish
+                    // a close_notify-terminated stream from a bare TCP close — the read goal
+                    // in `tls_step` turns on exactly that.
+                    connection
+                        .read_tls(&mut std::io::empty())
+                        .map_err(|e| tls_error("tls read", e))?;
+                    return Ok(());
+                }
+                // `read_tls` takes what fits in rustls's own buffer and no more, so a single
+                // call can leave part of the read behind. Dropping that remainder loses TLS
+                // records — which, when the lost record is the one carrying the server's
+                // certificate, means the handshake completes without it ever being checked.
+                let mut bytes = &buffer[..result_code as usize];
+                while !bytes.is_empty() {
+                    let consumed = connection
+                        .read_tls(&mut bytes)
+                        .map_err(|e| tls_error("tls read", e))?;
+                    if consumed == 0 {
+                        break;
+                    }
+                    connection
+                        .process_new_packets()
+                        .map_err(|e| tls_error("tls", e))?;
+                }
+                // Drain whatever plaintext that produced. `WouldBlock` just means "no more
+                // yet", which is the ordinary case for a partial record.
+                let mut chunk = [0u8; 16384];
+                loop {
+                    match std::io::Read::read(&mut connection.reader(), &mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => plaintext.extend_from_slice(&chunk[..n]),
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                        Err(e) => return Err(tls_error("tls read", e)),
+                    }
+                }
+            }
+            TlsIo::Write => {
+                if result_code < 0 {
+                    return Err(tls_error("tls write", format!("errno {}", -result_code)));
+                }
+                *outgoing_sent += result_code as usize;
+                if *outgoing_sent >= outgoing.len() {
+                    outgoing.clear();
+                    *outgoing_sent = 0;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the goal can be answered now, having first given rustls the chance to queue
+    /// anything it wants to send.
+    fn tls_step(&mut self, resource_id: ResourceId, goal: TlsGoal) -> Result<Step, Error> {
+        let body_type = self.get_resource_type_id("TlsSocket");
+        let Some(Resource::TlsSocket {
+            connection,
+            plaintext,
+            outgoing,
+            outgoing_sent,
+            eof,
+            ..
+        }) = self.resources.get_mut(&resource_id)
+        else {
+            return Err(Error::InvalidArgument(format!(
+                "Resource {resource_id} is not a TlsSocket"
+            )));
+        };
+
+        // Anything rustls wants to send goes out before we consider ourselves finished.
+        if *outgoing_sent >= outgoing.len() && connection.wants_write() {
+            outgoing.clear();
+            *outgoing_sent = 0;
+            connection
+                .write_tls(outgoing)
+                .map_err(|e| Error::InvalidArgument(format!("tls write: {e}")))?;
+        }
+        let flushed = *outgoing_sent >= outgoing.len();
+
+        // A goal that still needs bytes from a peer that has hung up can never be met, and
+        // waiting would submit read after read against a closed socket forever.
+        let truncated =
+            |what: &str| Step::Done(Err(tls_error("tls", format!("peer closed {what}"))));
+
+        Ok(match goal {
+            TlsGoal::Attach => {
+                if connection.is_handshaking() {
+                    if *eof {
+                        truncated("during the handshake")
+                    } else {
+                        Step::Waiting
+                    }
+                } else if flushed {
+                    Step::Done(Ok(WireValue::Resource(resource_id, body_type)))
+                } else if *eof {
+                    truncated("during the handshake")
+                } else {
+                    Step::Waiting
+                }
+            }
+            TlsGoal::Read { want } => {
+                if !plaintext.is_empty() {
+                    let n = want.min(plaintext.len());
+                    let bytes: Vec<u8> = plaintext.drain(..n).collect();
+                    Step::Done(Ok(WireValue::Binary(bytes.into())))
+                } else if *eof {
+                    // End of stream — if it was a *clean* one. Only a close_notify proves the
+                    // peer meant to stop; a bare TCP close may be a response cut short (the
+                    // classic truncation attack, when it isn't an accident), which a
+                    // close-delimited protocol cannot detect for itself. rustls's reader
+                    // knows the difference once it has seen our EOF (fed in `tls_apply`):
+                    // `Ok(0)` after a close_notify, `UnexpectedEof` after a bare close.
+                    match std::io::Read::read(&mut connection.reader(), &mut [0u8; 1]) {
+                        Ok(_) => Step::Done(Ok(WireValue::Binary(Vec::new().into()))),
+                        Err(e) => Step::Done(Err(tls_error("tls read", e))),
+                    }
+                } else {
+                    Step::Waiting
+                }
+            }
+            TlsGoal::Write { len } => {
+                if flushed {
+                    Step::Done(Ok(WireValue::Int(len as i64)))
+                } else if *eof {
+                    truncated("mid-write")
+                } else {
+                    Step::Waiting
+                }
+            }
+            // A close that cannot flush its `close_notify` is still a close: the peer has
+            // gone, which is what a close_notify would have told it.
+            TlsGoal::Close => {
+                if flushed || *eof {
+                    Step::Done(Ok(WireValue::ok()))
+                } else {
+                    Step::Waiting
+                }
+            }
+        })
+    }
+
+    fn execute_tls_attach(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        hostname: Vec<u8>,
+        roots: Vec<u8>,
+    ) -> Result<Option<EffectResult>, Error> {
+        let hostname = match String::from_utf8(hostname) {
+            Ok(name) => name,
+            Err(_) => return Ok(Some(Err(tls_error("tls", "hostname is not UTF-8")))),
+        };
+        let server_name = match rustls::pki_types::ServerName::try_from(hostname.clone()) {
+            Ok(name) => name,
+            Err(e) => return Ok(Some(Err(tls_error("tls", e)))),
+        };
+        let config = match Self::tls_config(&roots) {
+            Ok(config) => config,
+            Err(failure) => return Ok(Some(Err(failure))),
+        };
+        let connection = match rustls::ClientConnection::new(config, server_name) {
+            Ok(connection) => connection,
+            Err(e) => return Ok(Some(Err(tls_error("tls", e)))),
+        };
+
+        // The socket is consumed: from here only the TLS resource may be used, which is what
+        // keeps a caller from writing plaintext onto an encrypted connection. Consumed only on
+        // the match — a rejected resource must survive its rejection.
+        let socket = match self.resources.remove(&resource_id) {
+            Some(Resource::TcpSocket { socket, .. }) => socket,
+            Some(other) => {
+                self.resources.insert(resource_id, other);
+                return Err(Error::InvalidArgument(format!(
+                    "Resource {resource_id} is not a TcpSocket"
+                )));
+            }
+            None => {
+                return Err(Error::InvalidArgument(format!(
+                    "Resource {resource_id} not found"
+                )));
+            }
+        };
+        let tls_id = self.next_resource_id;
+        self.next_resource_id += 1;
+        self.resources.insert(
+            tls_id,
+            Resource::TlsSocket {
+                socket,
+                connection: Box::new(connection),
+                plaintext: Vec::new(),
+                outgoing: Vec::new(),
+                outgoing_sent: 0,
+                eof: false,
+            },
+        );
+        self.tls_drive(process_id, tls_id, TlsGoal::Attach, None)
+    }
+
+    fn execute_tls_read(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        length: usize,
+    ) -> Result<Option<EffectResult>, Error> {
+        self.tls_drive(
+            process_id,
+            resource_id,
+            TlsGoal::Read { want: length },
+            None,
+        )
+    }
+
+    fn execute_tls_write(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        data: Vec<u8>,
+    ) -> Result<Option<EffectResult>, Error> {
+        let len = data.len();
+        {
+            let Some(Resource::TlsSocket { connection, .. }) = self.resources.get_mut(&resource_id)
+            else {
+                return Err(Error::InvalidArgument(format!(
+                    "Resource {resource_id} is not a TlsSocket"
+                )));
+            };
+            if let Err(e) = std::io::Write::write_all(&mut connection.writer(), &data) {
+                return Ok(Some(Err(tls_error("tls write", e))));
+            }
+        }
+        self.tls_drive(process_id, resource_id, TlsGoal::Write { len }, None)
+    }
+
+    fn execute_tls_close(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+    ) -> Result<Option<EffectResult>, Error> {
+        {
+            let Some(Resource::TlsSocket { connection, .. }) = self.resources.get_mut(&resource_id)
+            else {
+                // Already gone; closing twice is not an error.
+                return Ok(Some(Ok(WireValue::ok())));
+            };
+            // A `close_notify` is what lets the peer tell a clean close from a truncated one.
+            // Process teardown cannot send it — that path just drops the socket — so this is
+            // best-effort on the explicit close only.
+            connection.send_close_notify();
+        }
+        // `tls_finish` releases the resource when the goal completes — which is usually not
+        // here but at a later completion, since the close_notify queued above still needs a
+        // socket write.
+        self.tls_drive(process_id, resource_id, TlsGoal::Close, None)
+    }
+}
+
+/// Split a concatenation of DER certificates into individual ones by walking their outer
+/// SEQUENCE headers. Trust anchors cross the builtin boundary as raw DER precisely so no PEM
+/// parser — and no file or environment access — is needed here.
+fn der_certificates(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos + 2 <= bytes.len() {
+        if bytes[pos] != 0x30 {
+            break; // not a SEQUENCE — the input is not a DER certificate chain
+        }
+        let first = bytes[pos + 1] as usize;
+        let (header, length) = if first < 0x80 {
+            (2, first)
+        } else {
+            let count = first & 0x7f;
+            if count == 0 || count > 4 || pos + 2 + count > bytes.len() {
+                break;
+            }
+            let mut length = 0usize;
+            for byte in &bytes[pos + 2..pos + 2 + count] {
+                length = (length << 8) | *byte as usize;
+            }
+            (2 + count, length)
+        };
+        let end = match pos.checked_add(header).and_then(|s| s.checked_add(length)) {
+            Some(end) if end <= bytes.len() => end,
+            _ => break,
+        };
+        out.push(bytes[pos..end].to_vec());
+        pos = end;
+    }
+    out
 }

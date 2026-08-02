@@ -81,6 +81,25 @@ pub enum NativeEffect {
     TcpSocketClose {
         resource_id: ResourceId,
     },
+
+    // TLS. `Attach` consumes a connected socket and performs the handshake; the rest mirror
+    // the socket operations, over plaintext.
+    TlsAttach {
+        resource_id: ResourceId,
+        hostname: Vec<u8>,
+        roots: Vec<u8>,
+    },
+    TlsRead {
+        resource_id: ResourceId,
+        length: usize,
+    },
+    TlsWrite {
+        resource_id: ResourceId,
+        data: Vec<u8>,
+    },
+    TlsClose {
+        resource_id: ResourceId,
+    },
 }
 
 impl Effect for NativeEffect {
@@ -107,7 +126,13 @@ impl Effect for NativeEffect {
             | NativeEffect::TcpListenerClose { resource_id }
             | NativeEffect::TcpSocketRead { resource_id, .. }
             | NativeEffect::TcpSocketWrite { resource_id, .. }
-            | NativeEffect::TcpSocketClose { resource_id } => Some(*resource_id),
+            | NativeEffect::TcpSocketClose { resource_id }
+            // Attach operates on the *socket* it consumes, so that is what the ownership
+            // check must see; the rest operate on the TLS resource itself.
+            | NativeEffect::TlsAttach { resource_id, .. }
+            | NativeEffect::TlsRead { resource_id, .. }
+            | NativeEffect::TlsWrite { resource_id, .. }
+            | NativeEffect::TlsClose { resource_id } => Some(*resource_id),
         }
     }
 }

@@ -37,7 +37,10 @@ fn builtins() -> &'static BuiltinRegistry<NoEffect> {
     // platform/capability declaration, this scopes per project instead.
     REGISTRY.get_or_init(|| {
         let mut registry = BuiltinRegistry::with_modules(&core_modules());
-        for module in quiver_core::builtins::io_modules() {
+        for module in quiver_core::builtins::io_modules()
+            .into_iter()
+            .chain(quiver_core::builtins::tls_modules())
+        {
             module(&mut registry);
         }
         registry

@@ -4,43 +4,38 @@ use quiver_core::builtins::{BuiltinContext, BuiltinFn, BuiltinRegistry, Completi
 use quiver_core::error::Error;
 use quiver_core::value::{Binary, Value};
 
+/// The bytes of a binary value, resolving a constant through the executor's table.
+fn binary_bytes(value: &Value, ctx: &mut BuiltinContext<NativeEffect>) -> Result<Vec<u8>, Error> {
+    let Value::Binary(binary) = value else {
+        return Err(Error::TypeMismatch {
+            expected: "binary".to_string(),
+            found: value.type_name().to_string(),
+        });
+    };
+    match binary {
+        Binary::Constant(index) => match ctx
+            .executor
+            .get_constant(*index)
+            .ok_or(Error::ConstantUndefined(*index))?
+        {
+            quiver_core::bytecode::Constant::Binary(bytes) => Ok(bytes.clone()),
+            _ => Err(Error::TypeMismatch {
+                expected: "binary".to_string(),
+                found: "integer".to_string(),
+            }),
+        },
+        Binary::Data(data) => Ok(data.to_vec()),
+    }
+}
+
 /// dns_resolve(hostname: bin) -> Resource<DnsResolver>
 /// Start DNS resolution for a hostname (UTF-8 bytes), returning an iterator resource
 pub fn builtin_dns_resolve(
     value: &Value,
     ctx: &mut BuiltinContext<NativeEffect>,
 ) -> Result<Completion<NativeEffect>, Error> {
-    // Get hostname binary
-    let Value::Binary(hostname_binary) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "binary".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-
-    // Get hostname bytes from binary
-    let hostname_bytes = match hostname_binary {
-        Binary::Constant(idx) => {
-            let constant = ctx
-                .executor
-                .get_constant(*idx)
-                .ok_or(Error::ConstantUndefined(*idx))?;
-            match constant {
-                quiver_core::bytecode::Constant::Binary(bytes) => bytes.clone(),
-                _ => {
-                    return Err(Error::TypeMismatch {
-                        expected: "binary".to_string(),
-                        found: "integer".to_string(),
-                    });
-                }
-            }
-        }
-        Binary::Data(data) => data.to_vec(),
-    };
-
-    // Return Action to request DNS resolution from Environment
     Ok(Completion::Effect(NativeEffect::DnsResolve {
-        hostname: hostname_bytes,
+        hostname: binary_bytes(value, ctx)?,
     }))
 }
 
@@ -87,16 +82,8 @@ pub fn builtin_tcp_connect(
         });
     }
 
-    // Get IP binary
-    let ip_binary = match &fields[0] {
-        Value::Binary(binary) => binary.clone(),
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "binary".to_string(),
-                found: fields[0].type_name().to_string(),
-            });
-        }
-    };
+    // Get IP bytes
+    let ip_bytes = binary_bytes(&fields[0], ctx)?;
 
     // Get port
     let port = value_to_i64(&fields[1])?;
@@ -107,26 +94,6 @@ pub fn builtin_tcp_connect(
             port
         )));
     }
-
-    // Get IP bytes from binary
-    let ip_bytes = match &ip_binary {
-        Binary::Constant(idx) => {
-            let constant = ctx
-                .executor
-                .get_constant(*idx)
-                .ok_or(Error::ConstantUndefined(*idx))?;
-            match constant {
-                quiver_core::bytecode::Constant::Binary(bytes) => bytes.clone(),
-                _ => {
-                    return Err(Error::TypeMismatch {
-                        expected: "binary".to_string(),
-                        found: "integer".to_string(),
-                    });
-                }
-            }
-        }
-        Binary::Data(data) => data.to_vec(),
-    };
 
     // Validate IP address length (4 for IPv4, 16 for IPv6)
     if ip_bytes.len() != 4 && ip_bytes.len() != 16 {
@@ -274,41 +241,10 @@ pub fn builtin_tcp_socket_write(
         }
     };
 
-    // Get data binary
-    let data_binary = match &fields[1] {
-        Value::Binary(binary) => binary.clone(),
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "binary".to_string(),
-                found: fields[1].type_name().to_string(),
-            });
-        }
-    };
-
-    // Get data bytes
-    let data = match &data_binary {
-        Binary::Constant(idx) => {
-            let constant = ctx
-                .executor
-                .get_constant(*idx)
-                .ok_or(Error::ConstantUndefined(*idx))?;
-            match constant {
-                quiver_core::bytecode::Constant::Binary(bytes) => bytes.clone(),
-                _ => {
-                    return Err(Error::TypeMismatch {
-                        expected: "binary".to_string(),
-                        found: "integer".to_string(),
-                    });
-                }
-            }
-        }
-        Binary::Data(data) => data.to_vec(),
-    };
-
     // Return Action to request write operation from Environment
     Ok(Completion::Effect(NativeEffect::TcpSocketWrite {
         resource_id,
-        data,
+        data: binary_bytes(&fields[1], ctx)?,
     }))
 }
 
@@ -370,6 +306,103 @@ pub fn attach_network_builtins(registry: &mut BuiltinRegistry<NativeEffect>) {
         ("tcp_socket_close", builtin_tcp_socket_close),
         ("tcp_listener_accept", builtin_tcp_listener_accept),
         ("tcp_listener_close", builtin_tcp_listener_close),
+    ];
+    for (name, impl_fn) in implementations {
+        registry.attach_implementation(name, impl_fn);
+    }
+}
+
+// --- TLS builtins ---------------------------------------------------------------------------
+//
+// Thin: each packages its arguments into an effect and parks. All the state-machine work is in
+// the backend, because that is what keeps the ciphertext out of Quiver's heap — see
+// `native_backend`'s TLS section.
+
+pub fn builtin_tls_attach(
+    value: &Value,
+    ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    let Value::Tuple(_, fields) = value else {
+        return Err(Error::TypeMismatch {
+            expected: "tuple".to_string(),
+            found: value.type_name().to_string(),
+        });
+    };
+    if fields.len() != 3 {
+        return Err(Error::ArityMismatch {
+            expected: 3,
+            found: fields.len(),
+        });
+    }
+    let resource_id = expect_resource(&fields[0])?;
+    Ok(Completion::Effect(NativeEffect::TlsAttach {
+        resource_id,
+        hostname: binary_bytes(&fields[1], ctx)?,
+        roots: binary_bytes(&fields[2], ctx)?,
+    }))
+}
+
+pub fn builtin_tls_read(
+    value: &Value,
+    _ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    let Value::Tuple(_, fields) = value else {
+        return Err(Error::TypeMismatch {
+            expected: "tuple".to_string(),
+            found: value.type_name().to_string(),
+        });
+    };
+    if fields.len() != 2 {
+        return Err(Error::ArityMismatch {
+            expected: 2,
+            found: fields.len(),
+        });
+    }
+    Ok(Completion::Effect(NativeEffect::TlsRead {
+        resource_id: expect_resource(&fields[0])?,
+        length: value_to_i64(&fields[1])?.max(0) as usize,
+    }))
+}
+
+pub fn builtin_tls_write(
+    value: &Value,
+    ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    let Value::Tuple(_, fields) = value else {
+        return Err(Error::TypeMismatch {
+            expected: "tuple".to_string(),
+            found: value.type_name().to_string(),
+        });
+    };
+    if fields.len() != 2 {
+        return Err(Error::ArityMismatch {
+            expected: 2,
+            found: fields.len(),
+        });
+    }
+    Ok(Completion::Effect(NativeEffect::TlsWrite {
+        resource_id: expect_resource(&fields[0])?,
+        data: binary_bytes(&fields[1], ctx)?,
+    }))
+}
+
+pub fn builtin_tls_close(
+    value: &Value,
+    _ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    Ok(Completion::Effect(NativeEffect::TlsClose {
+        resource_id: expect_resource(value)?,
+    }))
+}
+
+/// Attach the native TLS builtins. Registered separately from the network group: a host may
+/// have sockets without TLS.
+pub fn attach_tls_builtins(registry: &mut BuiltinRegistry<NativeEffect>) {
+    let implementations: [(&str, BuiltinFn<NativeEffect>); 4] = [
+        ("tls_attach", builtin_tls_attach),
+        ("tls_read", builtin_tls_read),
+        ("tls_write", builtin_tls_write),
+        ("tls_close", builtin_tls_close),
     ];
     for (name, impl_fn) in implementations {
         registry.attach_implementation(name, impl_fn);

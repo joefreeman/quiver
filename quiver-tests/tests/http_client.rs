@@ -124,15 +124,36 @@ fn test_a_malformed_url_fails_before_any_transport_call() {
 }
 
 #[test]
-fn test_https_is_refused_rather_than_sent_as_plaintext() {
-    // TLS needs a resource kind the runtime does not have. Failing pointedly beats connecting
-    // to port 443 and sending a plaintext request.
+fn test_https_reaches_a_real_server() {
+    // TLS end to end: resolve, connect, upgrade, request, decrypt, parse — the same
+    // `%http/client` call as plain HTTP, with only the scheme different.
     quiver()
         .with_io()
+        .with_real_time()
+        .with_timeout(std::time::Duration::from_secs(30))
         .evaluate(
-            r#"%http/client.get "https://example.com/" ~> :('%io)error ~> =IoError(message: m); m"#,
+            r#"%http/client.get "https://example.com/" ~> =Response(status: s, body: b)
+               [s, %str.contains? [Str[b], "Example Domain"]]"#,
         )
-        .expect(r#""only http:// is supported by this transport""#);
+        .expect("[200, Ok]");
+}
+
+#[test]
+fn test_an_untrusted_anchor_set_is_refused() {
+    // The `roots` parameter is what makes verification configurable — and testable. Bytes
+    // that are not certificates yield no anchors, and a connection that cannot be verified
+    // is refused rather than made.
+    quiver()
+        .with_io()
+        .with_real_time()
+        .evaluate(
+            r#""example.com" ~> %dns.resolve ~> %iter.nth [~, 0]
+               ~> { | =IPv4[b] => b | =IPv6[b] => b } ~> =('bin)ip
+               %tcp.connect [ip, 443] ~> =(\TcpSocket)s
+               %tls.attach [socket: s, hostname: "example.com", roots: 0xdeadbeef]
+               ~> :('%io)error ~> =IoError(message: m); m"#,
+        )
+        .expect(r#""tls: no usable trust anchors in the supplied roots""#);
 }
 
 // --- and the real thing ------------------------------------------------------------------

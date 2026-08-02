@@ -3016,7 +3016,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_type: usize,
         value_provenance: Provenance,
         on_no_match: Option<usize>,
-        return_ok: bool,
         mut narrowing: Option<&mut Narrowing>,
         // Whether the enclosing chain gates control flow on this match's verdict. In a
         // value chain (a tuple field, an argument) the surrounding code runs whether or
@@ -3197,11 +3196,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
-        // Success path: leave the value on the stack, or replace with Ok
-        if return_ok {
-            self.codegen.add_instruction(Instruction::Pop);
-            self.codegen.add_instruction(Instruction::Tuple(OK as Id));
-        }
+        // Success path: replace the matched value with the Ok verdict
+        self.codegen.add_instruction(Instruction::Pop);
+        self.codegen.add_instruction(Instruction::Tuple(OK as Id));
         let success_jump_addr = self.codegen.emit_jump_placeholder();
 
         // Only patch fail_jump_addr if we didn't use on_no_match
@@ -3223,7 +3220,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         self.codegen.patch_jump_to_here(success_jump_addr);
 
-        // Compute final type - if return_ok, replace the matched (success) type with Ok.
+        // Compute the final type — the verdict replacing the matched (success) type with Ok.
         // `result_type` is the matched portion, already widened with nil when the match can fail.
         // A `result_type` that is *exactly* nil has no success component: the match can never
         // succeed. When the value itself can't be nil this means the pattern is unsatisfiable, so
@@ -3240,20 +3237,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // nil-typed value *matches* the nil and binds it. A pattern is irrefutable when
         // some binding set has no runtime requirements — it types as plain `Ok`.
         let irrefutable = pattern::is_irrefutable(&binding_sets);
-        let final_type = if return_ok {
-            if self.is_nil(result_type) && !self.contains_nil(value_type) {
-                result_type
-            } else if self.contains_nil(result_type) && !irrefutable {
-                let closed_ok = annotations::closed_ok(self.program);
-                let closed_nil = annotations::closed_nil(self.program);
-                let mut members = vec![closed_ok, closed_nil];
-                members.extend(carried_nil);
-                typing::union_type_ids(self.program, members)
-            } else {
-                annotations::closed_ok(self.program)
-            }
-        } else {
+        let final_type = if self.is_nil(result_type) && !self.contains_nil(value_type) {
             result_type
+        } else if self.contains_nil(result_type) && !irrefutable {
+            let closed_ok = annotations::closed_ok(self.program);
+            let closed_nil = annotations::closed_nil(self.program);
+            let mut members = vec![closed_ok, closed_nil];
+            members.extend(carried_nil);
+            typing::union_type_ids(self.program, members)
+        } else {
+            annotations::closed_ok(self.program)
         };
 
         Ok(final_type)
@@ -4312,7 +4305,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 result_type,
                 current_prov.clone(),
                 on_no_match,
-                true, // Direct assignment returns Ok
                 narrowing,
                 gating,
             )?;
@@ -6602,7 +6594,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     val_type,
                     value_provenance.clone(),
                     on_no_match,
-                    true,
                     narrowing,
                     gating,
                 )?;

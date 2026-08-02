@@ -98,8 +98,14 @@ fn evaluate(
     }
 }
 
+// Dead-code allowances as for the builder itself: `common` is compiled into every test
+// binary, and each binary uses only a slice of it — most construct no MockIo variant and
+// start no TLS server.
+#[allow(dead_code)]
 pub mod mock_io;
 pub use mock_io::MockIo;
+#[allow(dead_code)]
+pub mod tls_server;
 
 // The standard library is a built-in package (embedded in quiver-compiler), so tests start
 // with no in-memory modules — only those a test adds via `with_modules`.
@@ -246,7 +252,10 @@ impl TestBuilder {
         );
         match self.capabilities {
             Capabilities::Full => {
-                for module in quiver_core::builtins::io_modules() {
+                for module in quiver_core::builtins::io_modules()
+                    .into_iter()
+                    .chain(quiver_core::builtins::tls_modules())
+                {
                     module(&mut builtins);
                 }
             }
@@ -274,6 +283,7 @@ impl TestBuilder {
             quiver_io::attach_network_builtins(&mut builtins);
             quiver_io::attach_file_builtins(&mut builtins);
             quiver_io::attach_system_builtins(&mut builtins);
+            quiver_io::attach_tls_builtins(&mut builtins);
         }
 
         // Create workers with virtual time function. The harness drives the environment itself

@@ -22,7 +22,10 @@ pub fn build_builtin_registry() -> quiver_core::builtins::BuiltinRegistry<quiver
     let mut registry = quiver_core::builtins::BuiltinRegistry::with_modules(
         &quiver_core::builtins::core_modules(),
     );
-    for module in quiver_core::builtins::io_modules() {
+    for module in quiver_core::builtins::io_modules()
+        .into_iter()
+        .chain(quiver_core::builtins::tls_modules())
+    {
         module(&mut registry);
     }
     // Add I/O builtins from quiver-io
@@ -30,6 +33,7 @@ pub fn build_builtin_registry() -> quiver_core::builtins::BuiltinRegistry<quiver
     quiver_io::attach_network_builtins(&mut registry);
     quiver_io::attach_file_builtins(&mut registry);
     quiver_io::attach_system_builtins(&mut registry);
+    quiver_io::attach_tls_builtins(&mut registry);
     registry
 }
 

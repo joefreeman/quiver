@@ -165,6 +165,73 @@ fn network_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     ]
 }
 
+/// The TLS builtins' contract: a connected socket, upgraded.
+///
+/// `attach` deliberately does *not* connect. It takes a socket somebody else made, which is
+/// what lets `%tls` compose resolve-then-connect-then-attach in Quiver, and what leaves room
+/// for STARTTLS and proxy `CONNECT` without a second builtin. The socket is consumed: after a
+/// successful attach only the `\TlsSocket` may be used.
+///
+/// `roots` is the trust anchors as concatenated DER certificates — no filesystem access, no
+/// environment variables, nothing library-specific. **Empty means the host's own defaults**,
+/// so the ordinary case carries no certificate data at all; supplying a set replaces them
+/// outright, which is the only way a locally-issued certificate can be trusted (and so the
+/// only way TLS is testable without the public internet).
+fn tls_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
+    let socket = TypeSpec::Resource("TcpSocket".to_string());
+    let tls = TypeSpec::Resource("TlsSocket".to_string());
+    let bin = TypeSpec::Binary;
+    let int = TypeSpec::Integer;
+    let ok = TypeSpec::Tuple(Some("Ok"), vec![]);
+    vec![
+        (
+            "tls_attach",
+            TypeSpec::Tuple(
+                None,
+                vec![
+                    (Some("socket"), socket),
+                    (Some("hostname"), bin.clone()),
+                    (Some("roots"), bin.clone()),
+                ],
+            ),
+            tls.clone(),
+        ),
+        (
+            "tls_read",
+            TypeSpec::Tuple(None, vec![(None, tls.clone()), (None, int.clone())]),
+            bin.clone(),
+        ),
+        (
+            "tls_write",
+            TypeSpec::Tuple(None, vec![(None, tls.clone()), (None, bin)]),
+            int,
+        ),
+        ("tls_close", tls, ok),
+    ]
+}
+
+/// Register the TLS builtins' signatures. Its own group: a host may have sockets without TLS,
+/// and a transport naming `__tls_attach__` should fail to compile there rather than at runtime.
+///
+/// Deliberately *no* stream registration: a `\TlsSocket` is not selectable yet. An armed read
+/// completes with ciphertext, so serving a select needs a decrypting completion path (plus
+/// buffered plaintext answering ahead of any socket read) that the backend does not have —
+/// registering the stream spec would compile `![sock]` against a runtime fault. Until it
+/// exists, `__tls_read__` blocks.
+pub fn register_tls_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let placeholder: BuiltinFn<E> = unimplemented_builtin::<E>;
+    for (name, param, result) in tls_signatures() {
+        registry.register(
+            name.to_string(),
+            placeholder,
+            Purity::Effect,
+            param,
+            fallible(result),
+        );
+    }
+    register_error_vocabulary(registry);
+}
+
 /// The fetch builtin's contract: an HTTP exchange as a single primitive.
 ///
 /// This is a *browser's* floor, not a general one. A host with sockets builds HTTP in Quiver

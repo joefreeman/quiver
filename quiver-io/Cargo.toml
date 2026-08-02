@@ -8,4 +8,9 @@ quiver-core = { path = "../quiver-core" }
 io-uring = "0.6"
 socket2 = "0.5"
 getrandom = "0.3"
+# `ring` rather than the default aws-lc-rs: it builds without cmake/nasm, which keeps the
+# toolchain requirement to a Rust compiler. `logging` off — rustls would otherwise pull `log`
+# in and emit through it, and this crate has no logging story.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
 serde.workspace = true

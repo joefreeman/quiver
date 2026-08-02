@@ -1,0 +1,40 @@
+// TLS over a TCP socket.
+//
+// The builtin does one thing: take a *connected* socket and upgrade it. That is deliberately
+// lower level than a caller wants — it does no DNS and no connecting — because it is what
+// leaves room for STARTTLS and proxy `CONNECT`, where the socket comes from somewhere else.
+// `connect` below composes the ordinary case.
+//
+// `attach` consumes the socket: after it succeeds only the `\TlsSocket` may be used, so there
+// is no way to write plaintext onto an encrypted connection by mistake.
+//
+// Trust anchors are passed in as concatenated DER certificates, and **empty means the host's
+// defaults** (the compiled-in Mozilla set). Supplying a set replaces them, which is how a
+// locally-issued certificate is trusted — and therefore how this is testable at all.
+
+[
+  attach: #[(socket): \TcpSocket, (hostname): '%str, roots: 'bin = 0x] {
+    :doc "Upgrades a connected socket to TLS, verifying the peer against the given DER trust anchors (empty for the host's defaults). Consumes the socket."
+    __tls_attach__ [socket: $socket, hostname: $hostname.0, roots: $roots]
+  },
+
+  connect: #[(host): '%str, (port): 'int, roots: 'bin = 0x] {
+    :doc "Resolves, connects and upgrades in one step: a TLS connection to host:port. Nil (with :error) if any stage fails."
+    %dns.resolve $host ~> %iter.nth [~, 0] ~> { =IPv4[b] => b | =IPv6[b] => b } ~> =('bin)ip
+
+    %tcp.connect [ip, $port] ~> =(\TcpSocket)socket
+    __tls_attach__ [socket: socket, hostname: $host.0, roots: $roots]
+  },
+
+  read: &__tls_read__ ~> {
+    :doc "Reads up to [sock, n] bytes of plaintext, blocking until some arrive; empty at a clean (close_notify) end of stream. A peer that vanished without one answers an error, not an end — a bare close may be a response cut short."
+  },
+
+  write: &__tls_write__ ~> {
+    :doc "Writes [sock, 'bin] as plaintext, yielding the byte count."
+  },
+
+  close: &__tls_close__ ~> {
+    :doc "Sends a close_notify and closes the connection. Teardown cannot send one, so a peer distinguishing a clean close from a truncated one needs this called explicitly."
+  },
+]

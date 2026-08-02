@@ -97,7 +97,10 @@ fn run_session(
     let mut builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
         &quiver_core::builtins::core_modules(),
     );
-    for module in quiver_core::builtins::io_modules() {
+    for module in quiver_core::builtins::io_modules()
+        .into_iter()
+        .chain(quiver_core::builtins::tls_modules())
+    {
         module(&mut builtins);
     }
 
@@ -198,7 +201,10 @@ fn builtins() -> quiver_core::builtins::BuiltinRegistry<NativeEffect> {
     let mut builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
         &quiver_core::builtins::core_modules(),
     );
-    for module in quiver_core::builtins::io_modules() {
+    for module in quiver_core::builtins::io_modules()
+        .into_iter()
+        .chain(quiver_core::builtins::tls_modules())
+    {
         module(&mut builtins);
     }
     builtins
