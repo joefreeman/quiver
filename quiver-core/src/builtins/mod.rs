@@ -1030,5 +1030,12 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
 /// clocks/entropy) — the capability vocabulary an executing host opts into, or a
 /// type-checking host (the LSP) registers in full as the permissive union.
 pub fn io_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
-    vec![io::register_io_signatures]
+    vec![io::register_io_signatures, io::register_system_signatures]
+}
+
+/// Just the system builtins (entropy, clocks) — the subset of [`io_modules`] that needs no
+/// effect backend, only implementations. A host with no filesystem or sockets (a browser) can
+/// serve these alone, and `%time`/`%random` then compile and run there unchanged.
+pub fn system_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
+    vec![io::register_system_signatures]
 }

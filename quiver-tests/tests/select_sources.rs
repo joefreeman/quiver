@@ -149,9 +149,8 @@ fn test_non_stream_resource_is_rejected() {
 
 #[test]
 fn test_scoped_host_rejects_io_builtins_at_compile_time() {
-    // A capability-scoped registry (the web host's shape): referencing an io builtin
-    // — directly or via a std module that uses one — is a pointed compile error, not
-    // a runtime trap.
+    // A capability-scoped registry: referencing an io builtin — directly or via a std
+    // module that uses one — is a pointed compile error, not a runtime trap.
     quiver()
         .scoped_no_io()
         .evaluate(r#"f = &__tcp_connect__; Ok"#)
@@ -174,4 +173,38 @@ fn test_scoped_host_still_compiles_pure_code() {
         .scoped_no_io()
         .evaluate(r#"'h = \TcpSocket; Ok"#)
         .expect("Ok");
+}
+
+#[test]
+fn test_system_only_host_runs_clocks_and_entropy() {
+    // The web host's capability set. The system builtins are `Purity::HostRead` — read
+    // synchronously in the worker — so attaching implementations is the whole of the host's
+    // job: no effect backend, nothing parks, and `%time`/`%random` run unchanged.
+    quiver()
+        .scoped_system_only()
+        .evaluate(r#"%time.now ~> %num.gt? [~, 1700000000000]"#)
+        .expect("Ok");
+    quiver()
+        .scoped_system_only()
+        .evaluate(r#"%random.hex 8 ~> =Str[b]; %bin.length b"#)
+        .expect("16");
+    // The pure half of the module composes over the host reading, as it does natively.
+    quiver()
+        .scoped_system_only()
+        .evaluate(r#"0 ~> %time.iso8601"#)
+        .expect(r#""1970-01-01T00:00:00.000Z""#);
+}
+
+#[test]
+fn test_system_only_host_still_rejects_file_and_network() {
+    // The groups are separable: granting clocks and entropy grants nothing else, so a browser
+    // program naming a socket or a file fails to compile rather than failing to run.
+    quiver()
+        .scoped_system_only()
+        .evaluate(r#"%tcp.connect [0x7f000001, 80]"#)
+        .expect_error_containing("not available on this host");
+    quiver()
+        .scoped_system_only()
+        .evaluate(r#"f = &__file_open__; Ok"#)
+        .expect_error_containing("not available on this host");
 }

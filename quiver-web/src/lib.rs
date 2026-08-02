@@ -1,3 +1,4 @@
+mod builtins;
 mod effects;
 mod pump;
 mod repl_web;

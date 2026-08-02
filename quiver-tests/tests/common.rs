@@ -100,13 +100,25 @@ fn evaluate(
 
 // The standard library is a built-in package (embedded in quiver-compiler), so tests start
 // with no in-memory modules — only those a test adds via `with_modules`.
+/// Which IO signature groups the host registers — a host's capability set, mirroring the real
+/// ones. `Full` is the native CLI's; `SystemOnly` is the browser's (clocks and entropy, which
+/// need no effect backend, but no filesystem or sockets); `None` is a host with no IO vocabulary
+/// at all. Referencing a builtin outside the set is a compile error.
+#[allow(dead_code)]
+#[derive(Default, Clone, Copy, PartialEq)]
+pub enum Capabilities {
+    #[default]
+    Full,
+    SystemOnly,
+    None,
+}
+
 #[allow(dead_code)]
 #[derive(Default)]
 pub struct TestBuilder {
     modules: HashMap<Vec<String>, String>,
     with_io: bool,
-    /// Register only the always-set (no io signatures) — the web host's shape.
-    scoped_no_io: bool,
+    capabilities: Capabilities,
     debug: bool,
     collection_threshold: Option<usize>,
     timeout: Option<std::time::Duration>,
@@ -129,10 +141,18 @@ impl TestBuilder {
         self
     }
 
-    /// A capability-scoped host: no io signatures registered, like the web host —
-    /// io-referencing code fails at compile time.
+    /// A capability-scoped host with no io signatures at all — io-referencing code fails at
+    /// compile time.
     pub fn scoped_no_io(mut self) -> Self {
-        self.scoped_no_io = true;
+        self.capabilities = Capabilities::None;
+        self
+    }
+
+    /// The web host's capability set: the system builtins (clocks, entropy) with real
+    /// implementations attached, and nothing else. They are synchronous host reads, so they need
+    /// no effect backend — which is exactly why a browser can serve them.
+    pub fn scoped_system_only(mut self) -> Self {
+        self.capabilities = Capabilities::SystemOnly;
         self
     }
 
@@ -177,10 +197,20 @@ impl TestBuilder {
         let mut builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
             &quiver_core::builtins::core_modules(),
         );
-        if !self.scoped_no_io {
-            for module in quiver_core::builtins::io_modules() {
-                module(&mut builtins);
+        match self.capabilities {
+            Capabilities::Full => {
+                for module in quiver_core::builtins::io_modules() {
+                    module(&mut builtins);
+                }
             }
+            Capabilities::SystemOnly => {
+                for module in quiver_core::builtins::system_modules() {
+                    module(&mut builtins);
+                }
+                // The point of the group: implementations alone make it runnable.
+                quiver_io::attach_system_builtins(&mut builtins);
+            }
+            Capabilities::None => {}
         }
 
         // Add I/O builtins if I/O is enabled
@@ -245,7 +275,9 @@ impl TestBuilder {
         let resolver = Box::new(PackageResolver::memory(self.modules));
         let mut repl =
             Repl::new(&mut environment, resolver, builtins).expect("Failed to create REPL");
-        if !self.scoped_no_io {
+        // The shared store is keyed on a fingerprint that doesn't cover the registry, so only the
+        // full-capability shape (what every other test builds) may use it.
+        if self.capabilities == Capabilities::Full {
             repl.set_artifact_store(ARTIFACTS.with(Rc::clone));
         }
         if self.debug {

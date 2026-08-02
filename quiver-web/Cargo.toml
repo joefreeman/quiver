@@ -33,5 +33,7 @@ features = [
     "MessageEvent",
     "MessagePort",
     "DedicatedWorkerGlobalScope",
+    "Crypto",
+    "Performance",
     "console",
 ]

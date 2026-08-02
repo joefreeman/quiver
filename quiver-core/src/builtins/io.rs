@@ -209,16 +209,23 @@ fn register_network_streams<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     );
 }
 
-/// Register the IO builtins' type signatures (no implementations) — so code using `__file_read__`,
-/// `%file`, `%dns`, etc. type-checks in a host that doesn't run effects. The purity classes are
-/// part of the contract: file/network builtins park for effects, and the system builtins
-/// (entropy, clocks) read host state synchronously.
+/// Register the file and network builtins' type signatures (no implementations) — so code using
+/// `__file_read__`, `%file`, `%dns`, etc. type-checks in a host that doesn't run effects. These
+/// are all `Purity::Effect`: they park the calling process while the host's backend works.
 pub fn register_io_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     let placeholder: BuiltinFn<E> = unimplemented_builtin::<E>;
     for (name, param, result) in file_signatures().into_iter().chain(network_signatures()) {
         registry.register(name.to_string(), placeholder, Purity::Effect, param, result);
     }
     register_network_streams(registry);
+}
+
+/// Register the system builtins' type signatures (no implementations): entropy and clocks. These
+/// are `Purity::HostRead` — read synchronously, in the calling worker, with no effect round-trip —
+/// so a host provides them by attaching implementations alone, with no effect backend. That makes
+/// them the one IO group a capability-poor host (a browser) can serve outright.
+pub fn register_system_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let placeholder: BuiltinFn<E> = unimplemented_builtin::<E>;
     for (name, param, result) in system_signatures() {
         registry.register(
             name.to_string(),

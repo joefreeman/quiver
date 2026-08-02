@@ -79,9 +79,7 @@ pub fn worker_main() {
 
                     // Create and initialize worker now that we have the ID
                     let cmd_receiver = WebCommandReceiver::new(command_queue_for_init.clone());
-                    let builtins = quiver_core::builtins::BuiltinRegistry::with_modules(
-                        &quiver_core::builtins::core_modules(), // capability-scoped: no io
-                    );
+                    let builtins = crate::builtins::web_builtins();
                     let evt_sender = evt_sender_for_closure.borrow_mut().take().unwrap();
                     let worker = Worker::new(cmd_receiver, evt_sender, builtins, false, worker_id);
 
