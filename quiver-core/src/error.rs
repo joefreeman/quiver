@@ -146,14 +146,14 @@ impl Error {
                     Operation::CreateRef => "creating a ref",
                 };
                 format!(
-                    "{doing} is not supported in compile-time execution (a program's top \
-                     level and module bodies run at compile time — move process and effect \
-                     work inside the entry function)"
+                    "{doing} is not supported in compile-time execution (module bodies \
+                     are evaluated at compile time — move process and effect work into a \
+                     function the module exports, or into the program that imports it)"
                 )
             }
             Error::StalledAtCompileTime => "waiting to receive a message that can never \
-                 arrive in compile-time execution (a program's top level and module bodies \
-                 run at compile time — receive inside the entry function instead)"
+                 arrive in compile-time execution (module bodies are evaluated at compile \
+                 time — receive inside a function instead)"
                 .to_string(),
             Error::VariableUndefined(name) => format!("undefined variable: {name}"),
             other => format!("internal error: {other:?}"),

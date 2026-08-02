@@ -1,6 +1,8 @@
-//! Integration tests for compile-time (sync) execution of the top level: process work
-//! there cannot be serviced (no action router at compile time) and must fail fast with
-//! a pointed error rather than hang.
+//! Integration tests for the program top level, which executes at boot in the root
+//! process (the entry runs the top-level sequence, then calls the function it evaluates
+//! to). Compilation never executes user code, so top-level process work, host reads, and
+//! ref minting behave exactly as they do in any function body. Modules keep their
+//! compile-time-evaluation restrictions — these tests cover the entry program only.
 
 use std::process::Command;
 
@@ -8,36 +10,33 @@ fn quiv() -> Command {
     Command::new(env!("CARGO_BIN_EXE_quiv"))
 }
 
-/// Assert `program` fails under `run` with the pointed compile-time-execution error
-/// naming `operation`.
-fn expect_rejected(program: &str, operation: &str) {
+/// Assert `program` runs successfully and prints `expected`.
+fn expect_output(program: &str, expected: &str) {
     let out = quiv().args(["run", "-e", program]).output().unwrap();
-    assert!(!out.status.success(), "expected failure for: {program}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains(operation) && stderr.contains("compile-time execution"),
-        "expected pointed '{operation}' error for {program}, got: {stderr}"
+        out.status.success(),
+        "expected success for: {program}, stderr: {stderr}"
     );
+    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), expected);
 }
 
 #[test]
-fn top_level_process_work_is_rejected_precisely_not_a_hang() {
-    // Each un-serviceable routing request is rejected at its source with the operation
-    // named. These used to spin forever at 100% CPU (and a top-level send was silently
-    // dropped).
-    expect_rejected("p = @#{ !'int }; #{ 5 }", "spawning a process");
-    expect_rejected("42 ~> .; !'int; #{ 5 }", "sending a message");
-    // A receive with no possible sender hits the backstop.
-    expect_rejected(
-        "!'int; #{ 5 }",
-        "waiting to receive a message that can never arrive",
-    );
+fn top_level_process_work_runs_at_boot() {
+    // The top level runs in the root process with the real runtime, so process work
+    // there is ordinary: a spawned child is owned by the root process and torn down
+    // with it, and the root's own mailbox services top-level sends and receives.
+    // (A receive no sender can ever satisfy blocks forever — exactly as it would
+    // inside the entry function.)
+    expect_output("p = @#{ !'int }; #{ 5 }", "5");
+    expect_output("42 ~> .; !'int; #{ 5 }", "5");
+    expect_output("p = @#{ 42 }; r = !p; #{ r }", "42");
 }
 
 #[test]
 fn compile_falls_back_without_an_entry_for_top_level_process_work() {
-    // `quiv compile` permits programs that don't evaluate to a function; a stalled
-    // top-level execution takes that fallback and still emits bytecode.
+    // `quiv compile` permits programs that don't evaluate to a function (checked
+    // statically); they take the no-entry fallback and still emit bytecode.
     let out = quiv()
         .args([
             "compile",
@@ -62,20 +61,18 @@ fn entry_function_spawns_are_unaffected() {
 }
 
 #[test]
-fn top_level_host_reads_are_rejected() {
-    // Compile-time execution must be deterministic: clock and entropy reads at the top
-    // level would bake the compile instant into the emitted program.
-    expect_rejected("t = %time.now; #{ t }", "reading host state");
-    expect_rejected("r = %random.bytes 8; #{ r }", "reading host state");
+fn top_level_host_reads_run_at_boot() {
+    // Host reads at the top level happen per program run, at boot — nothing is baked
+    // into the emitted bytecode, so determinism of compilation is preserved.
+    expect_output("t = %time.now; #{ t ~> { ='int => 1 | 2 } }", "1");
+    expect_output("r = %random.bytes 8; #{ %bin.length r }", "8");
 }
 
 #[test]
-fn top_level_ref_minting_is_rejected() {
-    // A compile-time value must be identity-free so compiled modules can be shared
-    // (and one day serialized) across the sessions that import them, so ref minting
-    // is rejected alongside host-state reads. Referencing the minting function is
-    // fine — the importer mints at runtime.
-    expect_rejected("a = %ref; #{ a }", "creating a ref");
+fn top_level_ref_minting_runs_at_boot() {
+    // Identity-freedom constrains *modules* (shared across importers); the program's
+    // top level runs at boot, so a top-level ref is minted fresh each run.
+    expect_output("a = %ref; #{ [a, 1] ~> =[&a, x]; x }", "1");
 
     let out = quiv()
         .args([

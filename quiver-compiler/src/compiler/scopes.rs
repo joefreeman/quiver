@@ -56,6 +56,51 @@ pub struct Parameter {
     pub provenance: Provenance,
 }
 
+/// The kind of value behind a reconstruction-CSE slot. Together with the table id it
+/// guards the (never-observed) case of two values of different shapes sharing one
+/// payload allocation, so the payload pointer alone is never trusted as identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CseKind {
+    Tuple,
+    Function,
+    Builtin,
+}
+
+/// Identity of a compile-time value for reconstruction CSE (`Compiler::emit_value_cse`):
+/// payload identity is the sharing witness — every clone of a cached module value shares
+/// its payload `Rc`. The key holds the `Rc` itself, not just its address: most emitted
+/// values live in the module cache, but an *instantiated* builtin member's payload is
+/// synthesized fresh per use site (`instantiate_builtin_member`) and would otherwise be
+/// freed with its address up for reuse while the slot still pointed there — a
+/// false-sharing miscompile. Owning the `Rc` pins the allocation for the slot's
+/// lifetime, so equality by pointer ([`Rc::ptr_eq`]) is sound. Never serialized or
+/// hashed into anything that outlives the compile.
+#[derive(Debug, Clone)]
+pub struct CseKey {
+    pub kind: CseKind,
+    /// The value's table id (tuple id, function index, or builtin id).
+    pub id: usize,
+    pub payload: std::rc::Rc<quiver_core::value::Payload>,
+}
+
+impl PartialEq for CseKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.id == other.id
+            && std::rc::Rc::ptr_eq(&self.payload, &other.payload)
+    }
+}
+
+impl Eq for CseKey {}
+
+impl std::hash::Hash for CseKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+        self.id.hash(state);
+        std::rc::Rc::as_ptr(&self.payload).hash(state);
+    }
+}
+
 /// Represents a scope in the compiler's variable environment.
 ///
 /// Each scope tracks bindings (variables and type aliases), an optional parameter,
@@ -69,6 +114,13 @@ pub struct Scope {
     pub parameter: Option<Parameter>,
     /// Kind of scope (root, function, or block).
     pub kind: ScopeKind,
+    /// Reconstruction-CSE slots: values this scope has already emitted, as
+    /// `key → (type id, local index)`. A side table rather than named bindings, so the
+    /// slots are invisible to everything that consumes `bindings` (exports, the REPL,
+    /// tooling); living on the scope gives them the one property that matters — a slot
+    /// dies with its scope, exactly when the compiler `Reset`s the scope's locals, so a
+    /// later occurrence can never load a slot the runtime has discarded.
+    pub cse_slots: HashMap<CseKey, (usize, usize)>,
 }
 
 impl Scope {
@@ -79,6 +131,7 @@ impl Scope {
             narrowings: Narrowings::default(),
             parameter,
             kind,
+            cse_slots: HashMap::new(),
         }
     }
 }
@@ -107,6 +160,32 @@ pub fn define_variable(
         );
     }
     Ok(index)
+}
+
+/// Look up a reconstruction-CSE slot, innermost scope first, yielding
+/// `(type id, local index)`. A slot registered in a since-popped scope is simply
+/// unreachable — the lifetime guarantee is the scope stack itself.
+pub fn lookup_cse_slot(scopes: &[Scope], key: &CseKey) -> Option<(usize, usize)> {
+    scopes
+        .iter()
+        .rev()
+        .find_map(|scope| scope.cse_slots.get(key).copied())
+}
+
+/// Register a reconstruction-CSE slot in the innermost scope, allocating its local
+/// index (the caller emits the `Store` that fills it, in allocation order).
+pub fn define_cse_slot(
+    scopes: &mut [Scope],
+    local_count: &mut usize,
+    key: CseKey,
+    type_id: usize,
+) -> usize {
+    let index = *local_count;
+    *local_count += 1;
+    if let Some(scope) = scopes.last_mut() {
+        scope.cse_slots.insert(key, (type_id, index));
+    }
+    index
 }
 
 /// Define a new type alias in the current scope

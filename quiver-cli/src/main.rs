@@ -2,10 +2,10 @@ use clap::{Parser, Subcommand};
 use quiver_compiler::compiler::ModuleCache;
 use quiver_compiler::{Compiler, ModuleResolver, PackageResolver, parse};
 use quiver_core::bytecode;
+use quiver_core::bytecode::{Id, Instruction};
 use quiver_core::format;
 use quiver_core::program::Program;
-use quiver_core::types::Type;
-use quiver_core::value::Value;
+use quiver_core::types::{Type, TypeLookup};
 use quiver_environment::{Environment, WorkerHandle};
 use std::collections::HashMap;
 use std::fs;
@@ -156,9 +156,6 @@ fn handle_parse_error(err: quiver_compiler::parser::Error, source: &str, source_
     std::process::exit(1);
 }
 
-/// Compile source code and extract the entry function, returning a Program and entry index.
-/// This handles the common pattern of compiling instructions, executing them to get a function value,
-/// and handling captures by injecting them into the program.
 /// Build a resolver for an entry program: discover the project from the file's location, or —
 /// for inline `--eval`/stdin with no path — the default (stdlib-only) package.
 fn entry_resolver(input_path: Option<&str>) -> PackageResolver {
@@ -168,6 +165,9 @@ fn entry_resolver(input_path: Option<&str>) -> PackageResolver {
     }
 }
 
+/// Compile source into a Program and a nilary entry function: the program's top level,
+/// followed by a call of the function it evaluates to. The top level thus runs at boot, in
+/// the root process — compilation never executes user code.
 fn compile_and_extract_entry(
     source: &str,
     resolver: &dyn ModuleResolver,
@@ -204,47 +204,116 @@ fn compile_and_extract_entry(
     let instructions = compilation_result.instructions;
     let receive_type = compilation_result.receive_type;
 
-    // Register the callable type for this wrapper function
-    // Use the receive type extracted from the program (allows top-level code to receive messages)
+    // The program must evaluate to a function; check the type rather than running it.
+    let Some((call_result, call_receive)) =
+        resolve_program_callable(&program, compilation_result.result_type)
+    else {
+        return Err("Program is not executable. Must evaluate to a function.".into());
+    };
+
+    // The entry runs the top level — leaving the program's function on the stack — then
+    // calls it with nil. Top-level bindings live in the entry frame below the call, so
+    // they persist for the program's lifetime, exactly as bindings do in any scope.
+    //
+    // Note the call pushes a frame: the program function runs at depth 2, so its tail
+    // calls no longer update the root process's observable state (`record_state` fires
+    // only in the root frame). Currently unobservable — `&.` in the entry types as a
+    // state-less process, so nothing can sample it — but if root-state sampling ever
+    // matters here, the call must become a tail call instead.
+    let mut entry_instructions = instructions;
+    // A fallible top level short-circuits with nil (carrying its debug `:origin` stamp).
+    // Guard the call so that nil becomes the program's *result* — reported like any
+    // other failure, stamp intact — instead of an opaque call-on-nil type error.
+    let fallible = type_contains_nil(&program, compilation_result.result_type);
+    if fallible {
+        entry_instructions.push(Instruction::Duplicate);
+        entry_instructions.push(Instruction::Not);
+        entry_instructions.push(Instruction::JumpIf(3));
+    }
+    entry_instructions.push(Instruction::Tuple(quiver_core::types::NIL as Id));
+    entry_instructions.push(Instruction::Rotate(2));
+    entry_instructions.push(Instruction::Call);
+
+    // Both the top level and the program's function execute in the root process, so the
+    // entry's receive covers both.
+    let receive = union_types(&mut program, vec![receive_type, call_receive]);
+
     let nil_type_id = program.register_type(Type::nil());
+    let result = if fallible {
+        union_types(&mut program, vec![call_result, nil_type_id])
+    } else {
+        call_result
+    };
     let callable_type_id = program.register_type(Type::Callable {
         parameter: nil_type_id,
-        result: compilation_result.result_type,
-        receive: receive_type,
-        // The top-level wrapper is never spawned; grant nothing.
+        result,
+        receive,
+        // The entry is never spawned; grant nothing.
         states: None,
     });
 
-    // Register the instructions as a temporary function
-    let function_index = program.register_function(quiver_core::bytecode::Function {
-        instructions,
+    let entry = program.register_function(quiver_core::bytecode::Function {
+        instructions: entry_instructions,
         captures: 0,
         type_id: callable_type_id,
     });
 
-    // Create bytecode with this function as entry
-    let bytecode = program.to_bytecode(Some(function_index));
-
-    // Execute to get the function value
-    let (result, executor) = quiver_core::execute_bytecode_sync(bytecode, builtins, false)
-        .map_err(|e| format!("Execution error: {}", e.crash_message()))?;
-
-    // Extract the entry function from the result
-    let entry = match result {
-        Value::Function(func_index, captures) => {
-            if !captures.is_empty() {
-                // Inject captures into the program to create a new function
-                program.inject_function_captures(func_index, captures.to_vec(), &executor)
-            } else {
-                func_index
-            }
-        }
-        _ => {
-            return Err("Program is not executable. Must evaluate to a function.".into());
-        }
-    };
-
     Ok((program, entry))
+}
+
+/// The callable the program's top level evaluates to: its (result, receive) type ids,
+/// looking through annotation rows and unions (a fallible top level unions with nil —
+/// the entry guards that case and yields the nil as the program's result). A union of
+/// several callables takes the FIRST member found: the entry's declared type is
+/// informational (nothing narrows against it), but note the receive may under-declare
+/// the other members'.
+fn resolve_program_callable(program: &Program, type_id: usize) -> Option<(usize, usize)> {
+    match program.lookup_type(type_id)? {
+        Type::Callable {
+            result, receive, ..
+        } => Some((*result, *receive)),
+        Type::Annotated { base, .. } => resolve_program_callable(program, *base),
+        Type::Union(members) => members
+            .clone()
+            .into_iter()
+            .find_map(|member| resolve_program_callable(program, member)),
+        _ => None,
+    }
+}
+
+/// Whether the type can be nil: nil itself, or a union with a nil member (looking
+/// through annotation rows) — the fallible-top-level test for the entry's nil guard.
+fn type_contains_nil(program: &Program, type_id: usize) -> bool {
+    match program.lookup_type(type_id) {
+        Some(Type::Tuple(id)) => *id == quiver_core::types::NIL,
+        Some(Type::Annotated { base, .. }) => type_contains_nil(program, *base),
+        Some(Type::Union(members)) => members
+            .clone()
+            .iter()
+            .any(|member| type_contains_nil(program, *member)),
+        _ => false,
+    }
+}
+
+/// Union of type ids for the entry's declared type, flattening one level of nesting,
+/// deduping, and dropping `never` (the empty union) — enough normalization for a type
+/// nothing narrows against (the compiler's full normalizer is module-private).
+fn union_types(program: &mut Program, ids: Vec<usize>) -> usize {
+    let mut members: Vec<usize> = Vec::new();
+    for id in ids {
+        match program.lookup_type(id) {
+            Some(Type::Union(inner)) => members.extend(inner.clone()),
+            _ => members.push(id),
+        }
+    }
+    members.dedup();
+    let mut seen = std::collections::HashSet::new();
+    members.retain(|id| seen.insert(*id));
+    match members.len() {
+        0 => program.never(),
+        1 => members[0],
+        _ => program.register_type(Type::Union(members)),
+    }
 }
 
 fn compile_command(

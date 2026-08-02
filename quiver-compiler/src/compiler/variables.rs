@@ -10,6 +10,12 @@ pub enum CaptureSource {
     /// parameter; deeper levels resolve to the parent's own outer-parameter capture, one
     /// level shallower, so a chain of closures relays the value inward.
     OuterParameter(usize),
+    /// A module reference (`%num`; `%num.sub` via the capture's accessors): the value is
+    /// compile-time-known, so the body loads a hoisted capture slot instead of rebuilding
+    /// the value at every use site (constant-build hoisting). The build is emitted where
+    /// the closure is built — through the enclosing function's own slot when it has one,
+    /// so builds bubble outward and run once at top level.
+    Import(Vec<String>),
 }
 
 impl CaptureSource {
@@ -21,6 +27,9 @@ impl CaptureSource {
         match self {
             CaptureSource::Variable(name) => name.clone(),
             CaptureSource::OuterParameter(levels) => ast::parameter_sigils(*levels),
+            // Identifiers can never start with `%`, so the module spelling is its own
+            // collision-free encoding, exactly as the sigil run is for outer parameters.
+            CaptureSource::Import(module) => format!("%{}", module.join("/")),
         }
     }
 }
@@ -180,6 +189,17 @@ impl<'a> FreeVariableCollector<'a> {
             }
             Some(ast::AccessSource::Parameter { depth }) => {
                 self.visit_parameter(*depth, access.accessors.clone(), access.base_span);
+            }
+            // A module reference is a compile-time-known value: record it so the
+            // function hoists its construction to a capture slot. An explicitly
+            // instantiated member (`%data.decode<'t>`) alters the emitted value, so
+            // it stays inline. Registration later drops values too cheap to hoist.
+            Some(ast::AccessSource::Import(module)) if access.type_arguments.is_empty() => {
+                self.add_capture(Capture {
+                    source: CaptureSource::Import(module.clone()),
+                    accessors: access.accessors.clone(),
+                    span: access.base_span,
+                });
             }
             _ => {}
         }
