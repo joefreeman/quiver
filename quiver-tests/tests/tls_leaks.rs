@@ -3,10 +3,10 @@ use common::tls_server::{Behaviour, TlsServer};
 use common::*;
 use std::time::Duration;
 
-// The regression this guards: a TLS close — or a failed attach — that leaves the socket in
-// the backend's resource table holds its file descriptor until process teardown, which no
-// correctness test can see. `/proc/self/fd` can. The test lives in a file of its own so no
-// parallel test churns descriptors while it counts.
+// The regression this guards: a TLS-upgraded socket whose close — or whose failed
+// handshake — leaves it in the backend's resource table holds its file descriptor until
+// process teardown, which no correctness test can see. `/proc/self/fd` can. The test lives
+// in a file of its own so no parallel test churns descriptors while it counts.
 
 #[test]
 fn test_repeated_tls_sessions_hold_no_descriptors() {
@@ -21,14 +21,14 @@ fn test_repeated_tls_sessions_hold_no_descriptors() {
 
             cycle = #[] {
               %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
-              %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__] ~> =(\TlsSocket)t
-              %tls.write [t, "ping" ~> .0]
-              %tls.read [t, 4]
-              %tls.close t
+              %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
+              %tcp.write [s, "ping" ~> .0]
+              %tcp.read [s, 4]
+              %tcp.close s
             }
 
-            // A failed attach must free the socket too: its caller never received a handle,
-            // so nothing else could ever close it. The refused attach answers nil, which the
+            // A failed handshake must free the socket too: it consumed the handle, so
+            // nothing else could ever close it. The refused attach answers nil, which the
             // block converts to Ok; an attach that unexpectedly *succeeds* fails the test.
             failed_cycle = #[] {
               %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s

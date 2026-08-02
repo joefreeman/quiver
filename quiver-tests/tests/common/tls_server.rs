@@ -1,14 +1,80 @@
-//! A TLS server on a loopback port, with certificates minted for the run — the peer the
-//! `%tls` tests talk to. `%tls.attach` taking trust anchors as DER bytes is what makes this
-//! possible at all: the client is told to trust exactly the CA that issued the server's
-//! certificate, so no filesystem, environment, or internet is involved.
+//! TLS test material: a per-run PKI (CA, "localhost" server certificate, decoy CA) and a
+//! rustls server on a loopback port to point `%tls.attach` at. Certificate material crosses
+//! into Quiver programs as spliced DER hex literals — `%tls` taking bytes rather than paths
+//! is what makes TLS testable without filesystem fixtures or the public internet.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// What the server does with a connection, after the handshake.
+/// A certificate authority, a "localhost" server certificate it issued, and a second,
+/// unrelated CA (valid anchors that must refuse the server). Minted fresh per use, in both
+/// DER (what `%tls` takes) and PEM (what `%pem` decodes).
+pub struct TestPki {
+    ca: Vec<u8>,
+    leaf: Vec<u8>,
+    key: Vec<u8>,
+    decoy: Vec<u8>,
+    ca_pem: String,
+    leaf_pem: String,
+    key_pem: String,
+}
+
+impl TestPki {
+    pub fn new() -> Self {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca_cert = ca(&ca_key, "quiver test ca");
+
+        let server_key = rcgen::KeyPair::generate().unwrap();
+        let server_cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .signed_by(&server_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        let decoy_key = rcgen::KeyPair::generate().unwrap();
+        let decoy_cert = ca(&decoy_key, "quiver decoy ca");
+
+        TestPki {
+            ca: ca_cert.der().to_vec(),
+            leaf: server_cert.der().to_vec(),
+            key: server_key.serialize_der(),
+            decoy: decoy_cert.der().to_vec(),
+            ca_pem: ca_cert.pem(),
+            leaf_pem: server_cert.pem(),
+            key_pem: server_key.serialize_pem(),
+        }
+    }
+
+    /// The chain as certbot's fullchain.pem has it: leaf first, then the issuer.
+    pub fn chain_pem(&self) -> String {
+        format!("{}{}", self.leaf_pem, self.ca_pem)
+    }
+
+    /// The presented chain, leaf first, as `%tls.accept`'s `cert` wants it.
+    fn chain(&self) -> Vec<u8> {
+        let mut chain = self.leaf.clone();
+        chain.extend_from_slice(&self.ca);
+        chain
+    }
+
+    /// Splice a program's `__ROOTS__`/`__CERT__`/`__KEY__`/`__DECOY__` markers (DER hex
+    /// literals) and `__CA_PEM__`/`__CHAIN_PEM__`/`__KEY_PEM__` markers (PEM text, escaped
+    /// for a Quiver string literal). Markers rather than `format!` so the Quiver source
+    /// keeps its braces unescaped.
+    pub fn splice(&self, source: &str) -> String {
+        source
+            .replace("__ROOTS__", &hex_literal(&self.ca))
+            .replace("__CERT__", &hex_literal(&self.chain()))
+            .replace("__KEY__", &hex_literal(&self.key))
+            .replace("__DECOY__", &hex_literal(&self.decoy))
+            .replace("__CA_PEM__", &escape(&self.ca_pem))
+            .replace("__CHAIN_PEM__", &escape(&self.chain_pem()))
+            .replace("__KEY_PEM__", &escape(&self.key_pem))
+    }
+}
+
+/// What the Rust-side server does with a connection, after the handshake.
 #[derive(Clone, Copy)]
 pub enum Behaviour {
     /// Read 4 bytes, echo them back, close with a close_notify.
@@ -22,38 +88,25 @@ pub enum Behaviour {
     /// Send one small record, its ciphertext dribbled a few bytes at a time, so the client
     /// sees a record split across several socket reads.
     Dribble,
+    /// Complete the handshake, then say nothing — for timeout races.
+    Silent,
 }
 
 pub struct TlsServer {
     pub port: u16,
-    /// The CA that issued the server's certificate, as DER.
-    ca: Vec<u8>,
-    /// A second, unrelated CA — valid trust anchors that must refuse the server.
-    decoy: Vec<u8>,
+    pki: TestPki,
 }
 
 impl TlsServer {
-    /// Mint a CA and a "localhost" server certificate, and serve `behaviour` on a fresh
-    /// loopback port until the test process exits.
+    /// Serve `behaviour` on a fresh loopback port until the test process exits.
     pub fn start(behaviour: Behaviour) -> Self {
-        let ca_key = rcgen::KeyPair::generate().unwrap();
-        let ca_cert = ca(&ca_key, "quiver test ca");
-
-        let server_key = rcgen::KeyPair::generate().unwrap();
-        let server_cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .signed_by(&server_key, &ca_cert, &ca_key)
-            .unwrap();
-
-        let decoy_key = rcgen::KeyPair::generate().unwrap();
-        let decoy_cert = ca(&decoy_key, "quiver decoy ca");
-
+        let pki = TestPki::new();
         let config = Arc::new(
             rustls::ServerConfig::builder()
                 .with_no_client_auth()
                 .with_single_cert(
-                    vec![server_cert.der().clone(), ca_cert.der().clone()],
-                    rustls::pki_types::PrivateKeyDer::Pkcs8(server_key.serialize_der().into()),
+                    vec![pki.leaf.clone().into(), pki.ca.clone().into()],
+                    rustls::pki_types::PrivateKeyDer::Pkcs8(pki.key.clone().into()),
                 )
                 .unwrap(),
         );
@@ -69,30 +122,14 @@ impl TlsServer {
             }
         });
 
-        TlsServer {
-            port,
-            ca: ca_cert.der().to_vec(),
-            decoy: decoy_cert.der().to_vec(),
-        }
+        TlsServer { port, pki }
     }
 
-    /// The issuing CA as a Quiver binary literal, for `roots:`.
-    pub fn roots(&self) -> String {
-        hex_literal(&self.ca)
-    }
-
-    /// The unrelated CA as a Quiver binary literal — anchors that must refuse the server.
-    pub fn decoy_roots(&self) -> String {
-        hex_literal(&self.decoy)
-    }
-
-    /// Splice a program's `__PORT__`/`__ROOTS__`/`__DECOY__` markers. Markers rather than
-    /// `format!` so the Quiver source keeps its braces unescaped.
+    /// Splice a program's `__PORT__` and certificate markers.
     pub fn program(&self, source: &str) -> String {
-        source
+        self.pki
+            .splice(source)
             .replace("__PORT__", &self.port.to_string())
-            .replace("__ROOTS__", &self.roots())
-            .replace("__DECOY__", &self.decoy_roots())
     }
 }
 
@@ -106,6 +143,11 @@ fn ca(key: &rcgen::KeyPair, name: &str) -> rcgen::Certificate {
         .distinguished_name
         .push(rcgen::DnType::CommonName, name);
     params.self_signed(key).unwrap()
+}
+
+/// PEM text as the body of a double-quoted Quiver string literal.
+pub fn escape(text: &str) -> String {
+    text.replace('\r', "\\r").replace('\n', "\\n")
 }
 
 fn hex_literal(bytes: &[u8]) -> String {
@@ -156,6 +198,11 @@ fn serve(
             }
             conn.send_close_notify();
             conn.complete_io(tcp)?;
+        }
+        Behaviour::Silent => {
+            // Hold the connection open without a byte until the peer goes away.
+            let mut buf = [0u8; 1];
+            let _ = rustls::Stream::new(&mut conn, tcp).read_exact(&mut buf);
         }
     }
     Ok(())

@@ -1,0 +1,85 @@
+// PEM (RFC 7468): DER binary armored as labelled base64 blocks between
+// `-----BEGIN <LABEL>-----` and `-----END <LABEL>-----` lines. This module is the bridge
+// between certificate files as tools write them — a certbot `fullchain.pem`, an openssl
+// key — and the DER bytes `%tls` takes: `certificates` yields the concatenated
+// certificate blocks for `accept`'s `cert` (or `attach`'s `roots`), and `key` the PKCS#8
+// key. The runtime's builtins deliberately take DER alone; PEM is text-and-bytes work,
+// so it lives here in pure Quiver.
+
+'block = [label: '%str, der: 'bin]
+
+// The line fold's state: collected blocks (newest first) and the open block once a BEGIN
+// line has been seen. `Bad` absorbs every later line — a mismatched END or a non-base64
+// body poisons the whole text, and the verdict lands when the fold does.
+'cur = Nil | Cur[label: '%str, body: 'bin]
+'state = Bad | State[blocks: '%list<'block>, cur: 'cur]
+
+// Strip one trailing carriage return, so CRLF files read like LF ones.
+chomp = #'%str {
+  | %str.ends_with? [$, "\r"] => %str.slice [$, 0, %num.sub [%str.length $, 1]]
+  | $
+}
+
+// The label of a `-----BEGIN <LABEL>-----` (resp. `-----END <LABEL>-----`) line, or nil.
+begin_label = #'%str {
+  %str.starts_with? [$, "-----BEGIN "]
+  %str.ends_with? [$, "-----"]
+  %str.slice [$, 11, %num.sub [%str.length $, 5]]
+}
+
+end_label = #'%str {
+  %str.starts_with? [$, "-----END "]
+  %str.ends_with? [$, "-----"]
+  %str.slice [$, 9, %num.sub [%str.length $, 5]]
+}
+
+line_step = #['state, '%str] {
+  =[state, raw]
+  line = chomp raw
+  state ~> {
+    | =Bad => Bad
+    | =State[blocks: bs, cur: Nil] => {
+      | begin_label line ~> =('%str)label => State[blocks: bs, cur: Cur[label: label, body: 0x]]
+      // Anything outside a block — headers, comments, blank lines — is ignored, matching
+      // how PEM readers have always treated surrounding text.
+      | State[blocks: bs, cur: Nil]
+    }
+    | =State[blocks: bs, cur: Cur[label: label, body: body]] => {
+      | end_label line ~> =('%str)end => {
+        | end ~> =&label; Str[body] ~> %bin.from_base64 ~> =('bin)der => {
+          State[blocks: Cons[[label: label, der: der], bs], cur: Nil]
+        }
+        | Bad
+      }
+      | State[blocks: bs, cur: Cur[label: label, body: %bin.concat [body, line.0]]]
+    }
+  }
+}
+
+parse = #'%str {
+  %str.split [$, "\n"]
+  ~> %iter.fold [~, State[blocks: Nil, cur: Nil], &line_step]
+  ~> =State[blocks: bs, cur: Nil]
+  %list.reverse bs
+}
+
+[
+  blocks: &parse ~> {
+    :doc "Every PEM block in the text as [label, der], in order; nil when malformed (a mismatched END, an unterminated block, a body that is not base64). Text outside blocks is ignored."
+  },
+
+  certificates: #'%str {
+    :doc "The text's CERTIFICATE blocks as concatenated DER — a fullchain.pem in the form %tls.accept's cert (or %tls.attach's roots) takes. Nil when the text is malformed or holds no certificate."
+    parse $ ~> =('%list<'block>)bs
+    certs = %list.filter [bs, #{ $label ~> ="CERTIFICATE"; $ }]
+    certs ~> =Cons[_, _]
+    %list.fold [certs, 0x, #{ %bin.concat [$0, $1.der] }]
+  },
+
+  key: #'%str {
+    :doc "The text's first PRIVATE KEY block as PKCS#8 DER — a privkey.pem in the form %tls.accept's key takes. Nil when malformed or absent; a legacy 'EC PRIVATE KEY'/'RSA PRIVATE KEY' block is deliberately not answered — convert it with `openssl pkcs8 -topk8 -nocrypt`."
+    parse $ ~> =('%list<'block>)bs
+    %list.find [bs, #{ $label ~> ="PRIVATE KEY"; $ }] ~> =('block)b
+    b.der
+  },
+]

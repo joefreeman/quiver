@@ -9,10 +9,9 @@
 // It runs inside the client's per-request process, so the socket it opens is owned there and
 // released by teardown even when a failure short-circuits past the explicit close.
 //
-// Both schemes are served. A `\TcpSocket` and a `\TlsSocket` are different resource kinds
-// with different builtins, so the scheme is resolved once into a `'conn` — a record of the
-// three operations the rest of this file needs — and the read/parse loop below never learns
-// which it got.
+// Both schemes are served, and by the same code: `%tls.attach` upgrades the socket in place,
+// so an `https://` connection is the same `\TcpSocket` with its reads and writes speaking
+// plaintext through the encryption — the loop below never learns which scheme it serves.
 
 // The first address a hostname resolves to. A lookup failure ends the iterator carrying its
 // `:error`, which is passed straight out; a host with no addresses at all gets one made for
@@ -30,34 +29,11 @@ resolve_host = #'%str {
   }
 }
 
-// A connection, whichever kind of socket is underneath. Closing over the handle rather than
-// passing it keeps the socket's *type* out of everything above here — and is the shape a
-// pooled or proxied connection would slot into unchanged.
-'conn = [read: #'int -> ('bin | []), write: #'bin -> ('int | []), close: #[] -> (Ok | [])]
-
-plain_conn = #\TcpSocket {
-  sock = $
-  [
-    read: #'int { %tcp.read [sock, ~] },
-    write: #'bin { %tcp.write [sock, ~] },
-    close: #[] { %tcp.close sock },
-  ]
-}
-
-tls_conn = #\TlsSocket {
-  sock = $
-  [
-    read: #'int { %tls.read [sock, ~] },
-    write: #'bin { %tls.write [sock, ~] },
-    close: #[] { %tls.close sock },
-  ]
-}
-
 // Read until the buffer holds a whole response. An empty read is end-of-connection, which is
 // what terminates a response framed by neither Content-Length nor chunking — and, if the
 // response is still incomplete at that point, what makes it a truncation rather than a wait.
-read_loop = #[(conn): 'conn, (buf): 'bin] {
-  $conn.read 8192 ~> =('bin)chunk
+read_loop = #[(sock): \TcpSocket, (buf): 'bin] {
+  %tcp.read [$sock, 8192] ~> =('bin)chunk
   eof = { %bin.length chunk ~> =0 => Ok | [] }
   buffer = %bin.concat [$buf, chunk]
   %http.parse_response [buffer, eof] ~> {
@@ -67,7 +43,7 @@ read_loop = #[(conn): 'conn, (buf): 'bin] {
       | eof ~> =Ok => [] ~> {
         :error IoError[kind: Other, message: "connection closed mid-response"]
       }
-      | ^ [$conn, buffer]
+      | ^ [$sock, buffer]
     }
   }
 }
@@ -78,11 +54,8 @@ open = #'%url {
   resolve_host $host ~> =('bin)ip
   %tcp.connect [ip, $port] ~> =(\TcpSocket)sock
   $scheme ~> {
-    | ="http" => plain_conn sock
-    | ="https" => {
-      %tls.attach [socket: sock, hostname: $host] ~> =(\TlsSocket)tls
-      tls_conn tls
-    }
+    | ="http" => sock
+    | ="https" => %tls.attach [socket: sock, hostname: $host]
     | [] ~> {
       :error IoError[kind: Other, message: "unsupported scheme: {$scheme}"]
     }
@@ -90,20 +63,20 @@ open = #'%url {
 }
 
 exchange = #[(url): '%url, (request): '%http] {
-  open $url ~> =('conn)conn
-  %http.serialize_request $request ~> conn.write
+  open $url ~> =(\TcpSocket)sock
+  %tcp.write [sock, %http.serialize_request $request]
 
   // Bound with a bare binder rather than a narrowing one: a failed read must still reach the
   // close below, and the annotated nil is what this answers.
-  response = read_loop [conn, 0x]
+  response = read_loop [sock, 0x]
   // Discard the close's own result — a close failure must not lose a response we already
   // have, and teardown is the backstop either way.
-  conn.close ~> Ok
+  %tcp.close sock ~> Ok
   response
 }
 
 [
   request: &exchange ~> {
-    :doc "Performs one HTTP/1.1 exchange over TCP: resolve, connect, send, read the response, close. Nil (carrying :error) on any failure; http:// only."
+    :doc "Performs one HTTP/1.1 exchange over TCP: resolve, connect, send, read the response, close. https:// upgrades the socket via %tls. Nil (carrying :error) on any failure."
   },
 ]

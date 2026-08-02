@@ -342,29 +342,7 @@ pub fn builtin_tls_attach(
     }))
 }
 
-pub fn builtin_tls_read(
-    value: &Value,
-    _ctx: &mut BuiltinContext<NativeEffect>,
-) -> Result<Completion<NativeEffect>, Error> {
-    let Value::Tuple(_, fields) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "tuple".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-    if fields.len() != 2 {
-        return Err(Error::ArityMismatch {
-            expected: 2,
-            found: fields.len(),
-        });
-    }
-    Ok(Completion::Effect(NativeEffect::TlsRead {
-        resource_id: expect_resource(&fields[0])?,
-        length: value_to_i64(&fields[1])?.max(0) as usize,
-    }))
-}
-
-pub fn builtin_tls_write(
+pub fn builtin_tls_accept(
     value: &Value,
     ctx: &mut BuiltinContext<NativeEffect>,
 ) -> Result<Completion<NativeEffect>, Error> {
@@ -374,35 +352,26 @@ pub fn builtin_tls_write(
             found: value.type_name().to_string(),
         });
     };
-    if fields.len() != 2 {
+    if fields.len() != 3 {
         return Err(Error::ArityMismatch {
-            expected: 2,
+            expected: 3,
             found: fields.len(),
         });
     }
-    Ok(Completion::Effect(NativeEffect::TlsWrite {
-        resource_id: expect_resource(&fields[0])?,
-        data: binary_bytes(&fields[1], ctx)?,
-    }))
-}
-
-pub fn builtin_tls_close(
-    value: &Value,
-    _ctx: &mut BuiltinContext<NativeEffect>,
-) -> Result<Completion<NativeEffect>, Error> {
-    Ok(Completion::Effect(NativeEffect::TlsClose {
-        resource_id: expect_resource(value)?,
+    let resource_id = expect_resource(&fields[0])?;
+    Ok(Completion::Effect(NativeEffect::TlsAccept {
+        resource_id,
+        cert: binary_bytes(&fields[1], ctx)?,
+        key: binary_bytes(&fields[2], ctx)?,
     }))
 }
 
 /// Attach the native TLS builtins. Registered separately from the network group: a host may
 /// have sockets without TLS.
 pub fn attach_tls_builtins(registry: &mut BuiltinRegistry<NativeEffect>) {
-    let implementations: [(&str, BuiltinFn<NativeEffect>); 4] = [
+    let implementations: [(&str, BuiltinFn<NativeEffect>); 2] = [
         ("tls_attach", builtin_tls_attach),
-        ("tls_read", builtin_tls_read),
-        ("tls_write", builtin_tls_write),
-        ("tls_close", builtin_tls_close),
+        ("tls_accept", builtin_tls_accept),
     ];
     for (name, impl_fn) in implementations {
         registry.attach_implementation(name, impl_fn);

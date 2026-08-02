@@ -19,6 +19,12 @@
 // the upgrade handler as a `'%http/websocket` connection, in the connection's own
 // process. The connection ends with that handler (a socket it leaves open is closed
 // with the process); a request with no Sec-WebSocket-Key answers 400.
+//
+// HTTPS is the same server with a `tls:` option — a certificate chain and key, DER
+// bytes as `%tls` takes them. Each accepted socket is upgraded in place in its own
+// connection process (a slow handshake never stalls the accept loop), and the pump,
+// websockets and live views run over it unchanged, since an upgraded socket reads,
+// writes and selects in plaintext.
 
 'request = '%http
 'response = '%http.response
@@ -110,24 +116,35 @@ conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
   }
 }
 
-conn = #[\TcpSocket, 'handler] { =[sock, h]; conn_loop [sock, &h, 0x] }
+// The TLS material `serve` takes: the certificate chain (concatenated DER, leaf first) and
+// its PKCS#8 DER private key, exactly as `%tls.accept` wants them.
+'tls = [cert: 'bin, key: 'bin]
+
+// A connection's whole life. With TLS material the socket is upgraded first, here in the
+// connection's own process — a handshake that fails (or stalls until teardown) takes only
+// this connection with it, and the socket is closed by the process ending either way.
+conn = #[\TcpSocket, 'handler, ('tls | [])] {
+  =[sock, h, t]
+  { t ~> =[cert: c, key: k] => %tls.accept [socket: sock, cert: c, key: k] | Ok }
+  conn_loop [sock, &h, 0x]
+}
 
 // A failed accept ends the loop rather than spinning on a broken listener; the nil carries
 // its `:error` out to `serve`'s caller.
-accept_loop = #[(listener): \TcpListener, (handler): 'handler] {
+accept_loop = #[(listener): \TcpListener, (handler): 'handler, (tls): ('tls | [])] {
   __tcp_listener_accept__ $listener ~> =(\TcpSocket)sock
-  [sock, &$handler] ~> @conn
-  ^ [$listener, &$handler]
+  [sock, &$handler, $tls] ~> @conn
+  ^ [$listener, &$handler, $tls]
 }
 
-serve = #[port: 'int, handler: 'handler] {
-  :doc "Serves HTTP on the port, one process per connection, each request answered by the handler (a nil result becomes a 500). Blocks forever; nil (with :error) if the listen or an accept failed."
-  =[port: p, handler: h]
+serve = #[port: 'int, handler: 'handler, tls: ('tls | []) = []] {
+  :doc "Serves HTTP on the port, one process per connection, each request answered by the handler (a nil result becomes a 500). With `tls:` ([cert, key] as %tls.accept takes them) each connection is upgraded first, serving HTTPS. Blocks forever; nil (with :error) if the listen or an accept failed."
+  =[port: p, handler: h, tls: t]
 
   p
   ~> __tcp_listen__ [~, 128] ~> =(\TcpListener)listener
 
-  accept_loop [listener, &h]
+  accept_loop [listener, &h, t]
 }
 
 html = #<'e>'%html<'e> {

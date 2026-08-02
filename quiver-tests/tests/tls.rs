@@ -1,14 +1,14 @@
 mod common;
-use common::tls_server::{Behaviour, TlsServer};
+use common::tls_server::{Behaviour, TestPki, TlsServer};
 use common::*;
 use std::time::Duration;
 
-// `%tls` against a real peer, without the internet: each test starts a rustls server on a
-// loopback port (tests/common/tls_server.rs) with a certificate minted for the run, and hands
-// the client its issuing CA through `roots` — the parameter that exists exactly so TLS is
-// testable against a locally-issued certificate. What a live remote server cannot do
-// reliably — close without a close_notify, dribble a record across many socket reads — the
-// local one does deterministically.
+// `%tls` against real peers, without the internet. TLS upgrades a socket *in place*, so
+// these exercise the ordinary `%tcp` operations — and selects — speaking plaintext through
+// the encryption. Client-side tests talk to a rustls server on a loopback port
+// (tests/common/tls_server.rs); server-side tests run both ends in Quiver. Certificate
+// material arrives as spliced DER hex, trusted via `roots` — the parameter that exists
+// exactly so TLS is testable against a locally-issued certificate.
 
 fn tls(server: &TlsServer, source: &str) -> TestResult {
     quiver()
@@ -21,17 +21,17 @@ fn tls(server: &TlsServer, source: &str) -> TestResult {
 #[test]
 fn test_a_locally_issued_certificate_is_trusted_via_roots() {
     // The positive counterpart of the refusal tests: anchors passed as DER bytes are
-    // sufficient for a full handshake, echo, and close against a certificate no default
-    // root set has ever seen.
+    // sufficient for a full handshake against a certificate no default root set has ever
+    // seen — and the upgraded socket answers to the ordinary %tcp operations.
     let server = TlsServer::start(Behaviour::Echo);
     tls(
         &server,
         r#"
         %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
-        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__] ~> =(\TlsSocket)t
-        %tls.write [t, "ping" ~> .0]
-        %tls.read [t, 4] ~> =('bin)reply
-        %tls.close t
+        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
+        %tcp.write [s, "ping" ~> .0]
+        %tcp.read [s, 4] ~> =('bin)reply
+        %tcp.close s
         Str[reply]
         "#,
     )
@@ -45,10 +45,10 @@ fn test_a_close_notify_reads_as_a_clean_end_of_stream() {
         &server,
         r#"
         %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
-        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__] ~> =(\TlsSocket)t
-        %tls.write [t, "ping" ~> .0]
-        %tls.read [t, 4] ~> =('bin)reply
-        after = %tls.read [t, 4]
+        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
+        %tcp.write [s, "ping" ~> .0]
+        %tcp.read [s, 4] ~> =('bin)reply
+        after = %tcp.read [s, 4]
         [Str[reply], after]
         "#,
     )
@@ -65,10 +65,10 @@ fn test_a_bare_tcp_close_is_an_error_not_an_end() {
         &server,
         r#"
         %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
-        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__] ~> =(\TlsSocket)t
-        %tls.write [t, "ping" ~> .0]
-        %tls.read [t, 4] ~> =('bin)reply
-        %tls.read [t, 4] ~> :('%io)error ~> =IoError(message: m)
+        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
+        %tcp.write [s, "ping" ~> .0]
+        %tcp.read [s, 4] ~> =('bin)reply
+        %tcp.read [s, 4] ~> :('%io)error ~> =IoError(message: m)
         %str.contains? [m, "close_notify"]
         "#,
     )
@@ -78,14 +78,14 @@ fn test_a_bare_tcp_close_is_an_error_not_an_end() {
 #[test]
 fn test_a_record_split_across_socket_reads_is_reassembled() {
     // The server dribbles one record's ciphertext a few bytes at a time, so a single
-    // `%tls.read` spans several socket reads before a whole record exists to decrypt.
+    // `%tcp.read` spans several socket reads before a whole record exists to decrypt.
     let server = TlsServer::start(Behaviour::Dribble);
     tls(
         &server,
         r#"
         %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
-        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__] ~> =(\TlsSocket)t
-        %tls.read [t, 16] ~> Str[~]
+        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
+        %tcp.read [s, 16] ~> Str[~]
         "#,
     )
     .expect(r#""drip""#);
@@ -99,16 +99,16 @@ fn test_records_spanning_read_boundaries_arrive_complete() {
     tls(
         &server,
         r#"
-        read_all = #[(sock): \TlsSocket, (buf): 'bin] {
-          %tls.read [$sock, 65536] ~> =('bin)chunk
+        read_all = #[(sock): \TcpSocket, (buf): 'bin] {
+          %tcp.read [$sock, 65536] ~> =('bin)chunk
           {
             | %bin.length chunk ~> =0 => $buf
             | ^ [$sock, %bin.concat [$buf, chunk]]
           }
         }
         %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
-        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__] ~> =(\TlsSocket)t
-        read_all [t, 0x] ~> =('bin)all
+        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
+        read_all [s, 0x] ~> =('bin)all
         %bin.length all
         "#,
     )
@@ -151,17 +151,17 @@ fn test_an_unknown_issuer_is_refused() {
 }
 
 #[test]
-fn test_attach_consumes_the_socket() {
-    // After a successful attach only the TLS handle may be used; the plain-socket handle is
-    // gone, and using it is a fault. The child process is the containment: the fault kills
-    // it, and the await answers a `:crash`-stamped nil.
+fn test_a_failed_handshake_closes_the_socket() {
+    // A handshake that fails poisons the byte stream, so the upgrade consumes the socket
+    // either way: after a refused attach the handle is dead, and using it is a fault. The
+    // child process is the containment — the await answers a `:crash`-stamped nil.
     let server = TlsServer::start(Behaviour::Echo);
     tls(
         &server,
         r#"
         p = @{
           %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
-          %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__] ~> =(\TlsSocket)t
+          { %tls.attach [socket: s, hostname: "localhost", roots: __DECOY__] => [] | Ok }
           %tcp.read [s, 1]
         }
         !p ~> :((message: Str['bin]))crash ~> =(message: m)
@@ -172,12 +172,126 @@ fn test_attach_consumes_the_socket() {
 }
 
 #[test]
-fn test_selecting_on_a_tls_socket_is_a_compile_error() {
-    // A TLS socket is not a stream source (yet): an armed read would complete with
-    // ciphertext, so until the backend can decrypt on that path, `![t]` must fail to
-    // compile rather than fault at runtime.
+fn test_a_select_yields_decrypted_data_then_closed() {
+    // The armed read completes with ciphertext; the event must carry plaintext. The clean
+    // close that follows arrives as `Closed` — to a selecting server, a disconnect.
+    let server = TlsServer::start(Behaviour::Echo);
+    tls(
+        &server,
+        r#"
+        %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
+        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
+        %tcp.write [s, "ping" ~> .0]
+        ![s] ~> =Data[sock: _, data: d]
+        ![s] ~> =Closed[sock: _]
+        Str[d]
+        "#,
+    )
+    .expect(r#""ping""#);
+}
+
+#[test]
+fn test_buffered_plaintext_answers_a_select() {
+    // A read that wanted less than a record carried leaves plaintext buffered; a select
+    // must be answerable from that buffer alone, without touching the socket.
+    let server = TlsServer::start(Behaviour::Echo);
+    tls(
+        &server,
+        r#"
+        %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
+        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
+        %tcp.write [s, "ping" ~> .0]
+        %tcp.read [s, 2] ~> =('bin)first
+        ![s] ~> =Data[sock: _, data: rest]
+        Str[%bin.concat [first, rest]]
+        "#,
+    )
+    .expect(r#""ping""#);
+}
+
+#[test]
+fn test_a_timeout_races_an_upgraded_socket() {
+    // A silent peer: the select's timeout must win while the armed TLS read stays pending.
+    let server = TlsServer::start(Behaviour::Silent);
+    tls(
+        &server,
+        r#"
+        %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
+        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
+        ![s, 100] ~> :('int)timeout
+        "#,
+    )
+    .expect("100");
+}
+
+#[test]
+fn test_tls_accept_serves_an_in_language_client() {
+    // Both ends in Quiver: a server process listens, accepts and upgrades with
+    // `%tls.accept`; the root process connects and upgrades with `%tls.attach`. The
+    // handshake, echo and close all cross a real loopback socket.
+    let pki = TestPki::new();
     quiver()
         .with_io()
-        .evaluate(r#"f = #\TlsSocket { t = $; ![t] }; Ok"#)
-        .expect_error_containing("not a stream");
+        .with_real_time()
+        .with_timeout(Duration::from_secs(10))
+        .evaluate(&pki.splice(
+            r#"
+            server = @{
+              %tcp.listen [4381, 8] ~> =(\TcpListener)l
+              %tcp.accept l ~> =(\TcpSocket)c
+              %tls.accept [socket: c, cert: __CERT__, key: __KEY__]
+              %tcp.read [c, 4] ~> =('bin)msg
+              %tcp.write [c, msg]
+              %tcp.close c
+              Done
+            }
+            { ![50] | Ok }
+            %tcp.connect [0x7f000001, 4381] ~> =(\TcpSocket)s
+            %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
+            %tcp.write [s, "ping" ~> .0]
+            %tcp.read [s, 4] ~> =('bin)reply
+            %tcp.close s
+            !server ~> =Done
+            Str[reply]
+            "#,
+        ))
+        .expect(r#""ping""#);
+}
+
+#[test]
+fn test_https_serves_via_http_server() {
+    // The whole point of the in-place upgrade: `%http/server` speaks HTTPS through the
+    // `tls:` option with its pump untouched. The client side is a raw `%tls.connect` plus
+    // hand-written HTTP/1.1 — the server's `connection: close` answer ends in a
+    // close_notify (the pump's ordinary `%tcp.close`), so the read loop finishes cleanly.
+    let pki = TestPki::new();
+    quiver()
+        .with_io()
+        .with_real_time()
+        .with_timeout(Duration::from_secs(10))
+        .evaluate(&pki.splice(
+            r#"
+            read_all = #[(sock): \TcpSocket, (buf): 'bin] {
+              %tcp.read [$sock, 8192] ~> =('bin)chunk
+              {
+                | %bin.length chunk ~> =0 => $buf
+                | ^ [$sock, %bin.concat [$buf, chunk]]
+              }
+            }
+            handler = #'%http { %http/server.text "secure hello" }
+            @{
+              [port: 4382, handler: &handler, tls: [cert: __CERT__, key: __KEY__]]
+              ~> %http/server.serve
+            }
+            { ![100] | Ok }
+            %tls.connect [host: "localhost", port: 4382, roots: __ROOTS__] ~> =(\TcpSocket)s
+            %tcp.write [s, "GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n" ~> .0]
+            read_all [s, 0x] ~> =('bin)resp
+            [
+              %str.contains? [Str[resp], "200"],
+              %str.contains? [Str[resp], "secure hello"],
+            ]
+            "#,
+        ))
+        .expect("[Ok, Ok]");
 }

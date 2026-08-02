@@ -51,17 +51,12 @@ pub enum Resource {
     TcpSocket {
         socket: Socket,
         peer_addr: SocketAddr,
-    },
-    /// A socket with TLS over it. The connection is the rustls state machine; `plaintext` is
-    /// what it has decrypted but the program has not yet asked for, and `outgoing` the
-    /// ciphertext still to be written (with how much of it has gone).
-    TlsSocket {
-        socket: Socket,
-        connection: Box<rustls::ClientConnection>,
-        plaintext: Vec<u8>,
-        outgoing: Vec<u8>,
-        outgoing_sent: usize,
-        eof: bool,
+        /// TLS state once the socket has been upgraded in place (`__tls_attach__` /
+        /// `__tls_accept__`). Encryption is a *property of the socket* — the kTLS model —
+        /// not a second resource kind: the ordinary socket reads, writes, closes and
+        /// selects then speak plaintext through the same handle, and there is no separate
+        /// handle left on which ciphertext could be reached at all.
+        tls: Option<Box<TlsState>>,
     },
     TcpListener {
         socket: Socket,
@@ -87,7 +82,6 @@ impl Resource {
     fn fd(&self) -> RawFd {
         match self {
             Resource::TcpSocket { socket, .. } => socket.as_raw_fd(),
-            Resource::TlsSocket { socket, .. } => socket.as_raw_fd(),
             Resource::TcpListener { socket, .. } => socket.as_raw_fd(),
             Resource::File { file, .. } => file.as_raw_fd(),
             Resource::Dir { .. } => panic!("Dir does not have a file descriptor"),
@@ -194,6 +188,13 @@ impl NativeEffectBackend {
                 resource_id,
                 mut buffer,
             } => {
+                if matches!(
+                    self.resources.get(&resource_id),
+                    Some(Resource::TcpSocket { tls: Some(_), .. })
+                ) {
+                    self.handle_armed_tls_read(resource_id, buffer, result_code);
+                    return;
+                }
                 self.armed_resources.remove(&resource_id);
                 let socket_type = self.get_resource_type_id("TcpSocket");
                 if result_code <= 0 {
@@ -221,8 +222,14 @@ impl NativeEffectBackend {
                     .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
                 let new_resource_id = self.next_resource_id;
                 self.next_resource_id += 1;
-                self.resources
-                    .insert(new_resource_id, Resource::TcpSocket { socket, peer_addr });
+                self.resources.insert(
+                    new_resource_id,
+                    Resource::TcpSocket {
+                        socket,
+                        peer_addr,
+                        tls: None,
+                    },
+                );
                 self.stream_events.push((
                     resource_id,
                     listener_type,
@@ -231,6 +238,100 @@ impl NativeEffectBackend {
                     },
                     vec![],
                 ));
+            }
+        }
+    }
+
+    /// Submit the armed (select-serving) read of a stream socket, marking it armed. Also the
+    /// re-arm path for an upgraded socket whose last chunk decrypted to nothing.
+    fn arm_submit_read(
+        &mut self,
+        resource_id: ResourceId,
+        fd: RawFd,
+        mut buffer: Vec<u8>,
+    ) -> Result<(), Error> {
+        let completion_id = self.next_completion_id;
+        self.next_completion_id += 1;
+        let read_op = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
+            .build()
+            .user_data(completion_id);
+        unsafe {
+            self.ring
+                .submission()
+                .push(&read_op)
+                .map_err(|e| Error::InvalidArgument(format!("Failed to submit read: {}", e)))?;
+        }
+        self.ring
+            .submit()
+            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
+        self.armed.insert(
+            completion_id,
+            ArmedOp::Read {
+                resource_id,
+                buffer,
+            },
+        );
+        self.armed_resources.insert(resource_id);
+        Ok(())
+    }
+
+    /// A completed armed read on a TLS-upgraded socket: the buffer holds ciphertext, and the
+    /// event may carry only what it decrypts to. A chunk that ends mid-record decrypts to
+    /// nothing — then the read is re-armed rather than delivering an empty event, invisibly
+    /// to the selecting process. A read error, a broken record, and both kinds of end of
+    /// stream all answer `Closed`: to a selecting server they are the same disconnect (the
+    /// explicit read path keeps the truncation distinction). Anything rustls queued to send
+    /// back (a key-update reply) stays in `outgoing` and rides out with the next write or
+    /// close — this path never writes.
+    fn handle_armed_tls_read(
+        &mut self,
+        resource_id: ResourceId,
+        buffer: Vec<u8>,
+        result_code: i32,
+    ) {
+        let socket_type = self.get_resource_type_id("TcpSocket");
+        let (event, fd) = {
+            let Some(Resource::TcpSocket {
+                socket,
+                tls: Some(state),
+                ..
+            }) = self.resources.get_mut(&resource_id)
+            else {
+                // Closed while the read was in flight; routing drops the event if the
+                // owner is gone too.
+                self.armed_resources.remove(&resource_id);
+                self.stream_events
+                    .push((resource_id, socket_type, StreamEvent::End, vec![]));
+                return;
+            };
+            let broken = result_code < 0
+                || state
+                    .ingest(&buffer[..result_code.max(0) as usize])
+                    .is_err();
+            let event = if broken || (state.plaintext.is_empty() && state.eof) {
+                Some((StreamEvent::End, vec![]))
+            } else if state.plaintext.is_empty() {
+                None
+            } else {
+                Some((StreamEvent::Data, std::mem::take(&mut state.plaintext)))
+            };
+            (event, socket.as_raw_fd())
+        };
+        match event {
+            Some((event, data)) => {
+                self.armed_resources.remove(&resource_id);
+                self.stream_events
+                    .push((resource_id, socket_type, event, data));
+            }
+            None => {
+                // Mid-record: nothing to deliver yet, so the select stays parked and the
+                // read is re-armed. A failed re-submit ends the stream — the alternative is
+                // a select that waits forever.
+                if self.arm_submit_read(resource_id, fd, buffer).is_err() {
+                    self.armed_resources.remove(&resource_id);
+                    self.stream_events
+                        .push((resource_id, socket_type, StreamEvent::End, vec![]));
+                }
             }
         }
     }
@@ -318,18 +419,13 @@ impl EffectBackend for NativeEffectBackend {
                 hostname,
                 roots,
             } => self.execute_tls_attach(process_id, resource_id, hostname, roots),
-            NativeEffect::TlsRead {
+            NativeEffect::TlsAccept {
                 resource_id,
-                length,
-            } => self.execute_tls_read(process_id, resource_id, length),
-            NativeEffect::TlsWrite { resource_id, data } => {
-                self.execute_tls_write(process_id, resource_id, data)
-            }
-            NativeEffect::TlsClose { resource_id } => {
-                self.execute_tls_close(process_id, resource_id)
-            }
+                cert,
+                key,
+            } => self.execute_tls_accept(process_id, resource_id, cert, key),
             NativeEffect::TcpSocketClose { resource_id } => {
-                self.execute_tcp_socket_close(resource_id)
+                self.execute_tcp_socket_close(process_id, resource_id)
             }
         }
     }
@@ -416,31 +512,55 @@ impl EffectBackend for NativeEffectBackend {
         if self.armed_resources.contains(&resource_id) {
             return Ok(());
         }
-        let resource = self
-            .resources
-            .get(&resource_id)
-            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
-        let fd = resource.fd();
-        let completion_id = self.next_completion_id;
-        self.next_completion_id += 1;
-        let op = match resource {
-            Resource::TcpSocket { .. } => {
-                let mut buffer = vec![0u8; 8192];
-                let read_op =
-                    opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
-                        .build()
-                        .user_data(completion_id);
-                unsafe {
-                    self.ring.submission().push(&read_op).map_err(|e| {
-                        Error::InvalidArgument(format!("Failed to submit read: {}", e))
-                    })?;
+        // What arming the resource needs, decided first: delivering an event or submitting
+        // io each needs `self` back.
+        enum Arm {
+            Data(Vec<u8>),
+            End,
+            Read(RawFd),
+            Accept(RawFd),
+        }
+        let arm = match self.resources.get_mut(&resource_id) {
+            // An upgraded socket may already hold decrypted bytes (a read wanted less than
+            // a record carried), or have seen the end of the stream; a select must be
+            // answerable from those without touching the socket. Delivering pushes the
+            // event directly — nothing is armed, and the next select arms afresh.
+            Some(Resource::TcpSocket { socket, tls, .. }) => match tls {
+                Some(state) if !state.plaintext.is_empty() => {
+                    Arm::Data(std::mem::take(&mut state.plaintext))
                 }
-                ArmedOp::Read {
-                    resource_id,
-                    buffer,
-                }
+                Some(state) if state.eof => Arm::End,
+                _ => Arm::Read(socket.as_raw_fd()),
+            },
+            Some(Resource::TcpListener { socket, .. }) => Arm::Accept(socket.as_raw_fd()),
+            Some(_) => {
+                return Err(Error::InvalidArgument(format!(
+                    "Resource {} is not a stream (not selectable)",
+                    resource_id
+                )));
             }
-            Resource::TcpListener { .. } => {
+            None => {
+                return Err(Error::InvalidArgument(format!(
+                    "Resource {} not found",
+                    resource_id
+                )));
+            }
+        };
+        match arm {
+            Arm::Data(data) => {
+                let socket_type = self.get_resource_type_id("TcpSocket");
+                self.stream_events
+                    .push((resource_id, socket_type, StreamEvent::Data, data));
+            }
+            Arm::End => {
+                let socket_type = self.get_resource_type_id("TcpSocket");
+                self.stream_events
+                    .push((resource_id, socket_type, StreamEvent::End, vec![]));
+            }
+            Arm::Read(fd) => self.arm_submit_read(resource_id, fd, vec![0u8; 8192])?,
+            Arm::Accept(fd) => {
+                let completion_id = self.next_completion_id;
+                self.next_completion_id += 1;
                 let accept_op =
                     opcode::Accept::new(types::Fd(fd), std::ptr::null_mut(), std::ptr::null_mut())
                         .build()
@@ -450,20 +570,14 @@ impl EffectBackend for NativeEffectBackend {
                         Error::InvalidArgument(format!("Failed to submit accept: {}", e))
                     })?;
                 }
-                ArmedOp::Accept { resource_id }
+                self.ring
+                    .submit()
+                    .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
+                self.armed
+                    .insert(completion_id, ArmedOp::Accept { resource_id });
+                self.armed_resources.insert(resource_id);
             }
-            _ => {
-                return Err(Error::InvalidArgument(format!(
-                    "Resource {} is not a stream (not selectable)",
-                    resource_id
-                )));
-            }
-        };
-        self.ring
-            .submit()
-            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
-        self.armed.insert(completion_id, op);
-        self.armed_resources.insert(resource_id);
+        }
         Ok(())
     }
 
@@ -946,6 +1060,16 @@ impl NativeEffectBackend {
             .get(&resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
 
+        // An upgraded socket answers in plaintext, which may take several socket operations.
+        if matches!(resource, Resource::TcpSocket { tls: Some(_), .. }) {
+            return self.tls_drive(
+                process_id,
+                resource_id,
+                TlsGoal::Read { want: length },
+                None,
+            );
+        }
+
         let fd = resource.fd();
 
         // Allocate buffer for the read
@@ -1027,8 +1151,21 @@ impl NativeEffectBackend {
     ) -> Result<Option<EffectResult>, Error> {
         let resource = self
             .resources
-            .get(&resource_id)
+            .get_mut(&resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
+
+        // An upgraded socket takes the bytes as plaintext: hand them to rustls, then drain
+        // the ciphertext it produces.
+        if let Resource::TcpSocket {
+            tls: Some(state), ..
+        } = resource
+        {
+            let len = data.len();
+            if let Err(e) = std::io::Write::write_all(&mut state.connection.writer(), &data) {
+                return Ok(Some(Err(tls_error("tls write", e))));
+            }
+            return self.tls_drive(process_id, resource_id, TlsGoal::Write { len }, None);
+        }
 
         let fd = resource.fd();
 
@@ -1147,8 +1284,22 @@ impl NativeEffectBackend {
 
     fn execute_tcp_socket_close(
         &mut self,
+        process_id: ProcessId,
         resource_id: ResourceId,
     ) -> Result<Option<EffectResult>, Error> {
+        // An upgraded socket first flushes a close_notify — what lets the peer tell a clean
+        // close from a truncated one. Process teardown cannot send it (that path just drops
+        // the socket), so this is best-effort on the explicit close only; `tls_finish`
+        // removes the resource when the goal completes, usually at the flush write's
+        // completion.
+        if let Some(Resource::TcpSocket {
+            tls: Some(state), ..
+        }) = self.resources.get_mut(&resource_id)
+        {
+            state.connection.send_close_notify();
+            return self.tls_drive(process_id, resource_id, TlsGoal::Close, None);
+        }
+
         // Remove the resource - Socket will be dropped and closed automatically
         self.resources
             .remove(&resource_id)
@@ -1249,8 +1400,14 @@ impl NativeEffectBackend {
         self.next_resource_id += 1;
 
         // Register the new socket
-        self.resources
-            .insert(new_resource_id, Resource::TcpSocket { socket, peer_addr });
+        self.resources.insert(
+            new_resource_id,
+            Resource::TcpSocket {
+                socket,
+                peer_addr,
+                tls: None,
+            },
+        );
 
         let type_id = self.get_resource_type_id("TcpSocket");
         Ok(WireValue::Resource(new_resource_id, type_id))
@@ -1278,8 +1435,14 @@ impl NativeEffectBackend {
         let new_resource_id = self.next_resource_id;
         self.next_resource_id += 1;
 
-        self.resources
-            .insert(new_resource_id, Resource::TcpSocket { socket, peer_addr });
+        self.resources.insert(
+            new_resource_id,
+            Resource::TcpSocket {
+                socket,
+                peer_addr,
+                tls: None,
+            },
+        );
 
         let type_id = self.get_resource_type_id("TcpSocket");
         Ok(WireValue::Resource(new_resource_id, type_id))
@@ -1288,20 +1451,98 @@ impl NativeEffectBackend {
 
 // --- TLS -----------------------------------------------------------------------------------
 //
-// rustls is sans-io: a `ClientConnection` is a state machine with four ports — feed it TLS
-// bytes (`read_tls`), let it process them, pull plaintext out (`reader`), push plaintext in
-// (`writer`) and drain the encrypted result (`write_tls`). It never touches a socket.
+// TLS is a property a socket takes on, not a resource kind of its own. `__tls_attach__`
+// (client side) and `__tls_accept__` (server side) upgrade a connected socket *in place* —
+// the kTLS model: the same handle then reads, writes, closes and selects in plaintext, with
+// the encryption invisible above this layer. Nothing upstream needs to know — the HTTP
+// server pump serves HTTPS unchanged, and a select on an upgraded socket yields decrypted
+// `Data` events. The upgrade leaves no second handle on which ciphertext could be reached.
 //
-// That makes TLS the one place this backend's "one CQE finishes one operation" rule does not
-// hold. A single `__tls_read__` may need several socket reads (a record can arrive split), and
-// it may need a *write* first (handshake continuation, a key update, an alert). So a TLS
-// operation is a small state machine of its own: `drive` applies whatever completion just
-// arrived, then either submits the next socket op and waits, or answers.
+// rustls is sans-io: a connection is a state machine with four ports — feed it TLS bytes
+// (`read_tls`), let it process them, pull plaintext out (`reader`), push plaintext in
+// (`writer`) and drain the encrypted result (`write_tls`). It never touches the socket.
+//
+// That makes an upgraded socket the one place this backend's "one CQE finishes one
+// operation" rule does not hold. A single read may need several socket reads (a record can
+// arrive split), and it may need a *write* first (handshake continuation, a key update, an
+// alert). So each operation is a small state machine of its own: `tls_drive` applies
+// whatever completion just arrived, then either submits the next socket op and waits, or
+// answers.
 
-/// What a TLS resource is trying to do. Held across however many socket operations it takes.
+/// The TLS half of an upgraded socket. `plaintext` is what rustls has decrypted but the
+/// program has not yet asked for; `outgoing` the ciphertext still to be written (with how
+/// much of it has gone).
+pub struct TlsState {
+    connection: rustls::Connection,
+    plaintext: Vec<u8>,
+    outgoing: Vec<u8>,
+    outgoing_sent: usize,
+    eof: bool,
+}
+
+impl TlsState {
+    fn new(connection: rustls::Connection) -> Box<Self> {
+        Box::new(TlsState {
+            connection,
+            plaintext: Vec::new(),
+            outgoing: Vec::new(),
+            outgoing_sent: 0,
+            eof: false,
+        })
+    }
+
+    fn flushed(&self) -> bool {
+        self.outgoing_sent >= self.outgoing.len()
+    }
+
+    /// Feed one completed socket read into the connection, growing `plaintext` with
+    /// whatever it decrypts. Shared by the goal driver and the armed (select) path. An
+    /// empty read is end-of-stream, which rustls must also learn: seeing the EOF is what
+    /// lets its reader distinguish a close_notify-terminated stream from a bare TCP close.
+    fn ingest(&mut self, mut bytes: &[u8]) -> Result<(), EffectError> {
+        if bytes.is_empty() {
+            self.eof = true;
+            self.connection
+                .read_tls(&mut std::io::empty())
+                .map_err(|e| tls_error("tls read", e))?;
+            return Ok(());
+        }
+        // `read_tls` takes what fits in rustls's own buffer and no more, so a single call
+        // can leave part of the read behind. Dropping that remainder loses TLS records —
+        // which, when the lost record is the one carrying the peer's certificate, means
+        // the handshake completes without it ever being checked.
+        while !bytes.is_empty() {
+            let consumed = self
+                .connection
+                .read_tls(&mut bytes)
+                .map_err(|e| tls_error("tls read", e))?;
+            if consumed == 0 {
+                break;
+            }
+            self.connection
+                .process_new_packets()
+                .map_err(|e| tls_error("tls", e))?;
+        }
+        // Drain whatever plaintext that produced. `WouldBlock` just means "no more yet",
+        // which is the ordinary case for a partial record.
+        let mut chunk = [0u8; 16384];
+        loop {
+            match std::io::Read::read(&mut self.connection.reader(), &mut chunk) {
+                Ok(0) => break,
+                Ok(n) => self.plaintext.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(e) => return Err(tls_error("tls read", e)),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What an upgraded socket is trying to do. Held across however many socket operations it
+/// takes.
 #[derive(Debug, Clone, Copy)]
 pub enum TlsGoal {
-    /// Handshaking, on the way to answering with the resource itself.
+    /// Handshaking, on the way to answering with the socket itself.
     Attach,
     /// Up to `want` bytes of plaintext.
     Read { want: usize },
@@ -1333,6 +1574,21 @@ fn tls_error(context: &str, detail: impl std::fmt::Display) -> EffectError {
 }
 
 impl NativeEffectBackend {
+    /// The TLS state of an upgraded socket, or an argument error for anything else.
+    fn tls_state(&mut self, resource_id: ResourceId) -> Result<&mut TlsState, Error> {
+        match self.resources.get_mut(&resource_id) {
+            Some(Resource::TcpSocket {
+                tls: Some(state), ..
+            }) => Ok(state),
+            Some(_) => Err(Error::InvalidArgument(format!(
+                "Resource {resource_id} is not a TLS-upgraded socket"
+            ))),
+            None => Err(Error::InvalidArgument(format!(
+                "Resource {resource_id} not found"
+            ))),
+        }
+    }
+
     /// A client config trusting exactly the DER certificates handed in. Nothing is read from
     /// the filesystem or the environment: the caller supplies the anchors, which is what makes
     /// a locally-issued certificate testable and keeps the trust decision out of the runtime.
@@ -1419,18 +1675,18 @@ impl NativeEffectBackend {
                 Error::InvalidArgument(format!("Resource {resource_id} not found"))
             })?;
             let fd = resource.fd();
-            let Resource::TlsSocket {
-                outgoing,
-                outgoing_sent,
-                ..
+            let Resource::TcpSocket {
+                tls: Some(state), ..
             } = resource
             else {
-                return Err(Error::InvalidArgument("Resource is not a TlsSocket".into()));
+                return Err(Error::InvalidArgument(
+                    "Resource is not a TLS-upgraded socket".into(),
+                ));
             };
             (
                 fd,
-                unsafe { outgoing.as_ptr().add(*outgoing_sent) },
-                outgoing.len() - *outgoing_sent,
+                unsafe { state.outgoing.as_ptr().add(state.outgoing_sent) },
+                state.outgoing.len() - state.outgoing_sent,
             )
         };
         let completion_id = self.next_completion_id;
@@ -1481,19 +1737,7 @@ impl NativeEffectBackend {
         match self.tls_step(resource_id, goal)? {
             Step::Done(result) => Ok(Some(self.tls_finish(resource_id, goal, result))),
             Step::Waiting => {
-                let wants_write = {
-                    let Some(Resource::TlsSocket {
-                        outgoing,
-                        outgoing_sent,
-                        ..
-                    }) = self.resources.get(&resource_id)
-                    else {
-                        return Err(Error::InvalidArgument(format!(
-                            "Resource {resource_id} is not a TlsSocket"
-                        )));
-                    };
-                    *outgoing_sent < outgoing.len()
-                };
+                let wants_write = !self.tls_state(resource_id)?.flushed();
                 if wants_write {
                     self.tls_submit_write(process_id, resource_id, goal)?;
                 } else {
@@ -1504,11 +1748,11 @@ impl NativeEffectBackend {
         }
     }
 
-    /// A goal's final answer, releasing the resource when that answer ends the handle's life:
-    /// a finished close (however it went), and a failed attach — whose caller never received
-    /// the handle, so nothing else could ever close it. Every goal finishes through here,
-    /// whether immediately or at a later socket completion; without that, either case would
-    /// hold the fd until process teardown.
+    /// A goal's final answer, closing the socket when that answer ends its life: a finished
+    /// close (however it went), and a failed upgrade — the handshake poisoned the byte
+    /// stream, so there is no plain socket left to hand back. Every goal finishes through
+    /// here, whether immediately or at a later socket completion; without that, either case
+    /// would hold the fd until process teardown.
     fn tls_finish(
         &mut self,
         resource_id: ResourceId,
@@ -1533,13 +1777,8 @@ impl NativeEffectBackend {
         io: TlsIo,
         result_code: i32,
     ) -> Result<(), EffectError> {
-        let Some(Resource::TlsSocket {
-            connection,
-            plaintext,
-            outgoing,
-            outgoing_sent,
-            eof,
-            ..
+        let Some(Resource::TcpSocket {
+            tls: Some(state), ..
         }) = self.resources.get_mut(&resource_id)
         else {
             return Err(tls_error("tls", "connection is closed"));
@@ -1549,52 +1788,16 @@ impl NativeEffectBackend {
                 if result_code < 0 {
                     return Err(tls_error("tls read", format!("errno {}", -result_code)));
                 }
-                if result_code == 0 {
-                    *eof = true;
-                    // Tell rustls the stream is over: it is what lets its reader distinguish
-                    // a close_notify-terminated stream from a bare TCP close — the read goal
-                    // in `tls_step` turns on exactly that.
-                    connection
-                        .read_tls(&mut std::io::empty())
-                        .map_err(|e| tls_error("tls read", e))?;
-                    return Ok(());
-                }
-                // `read_tls` takes what fits in rustls's own buffer and no more, so a single
-                // call can leave part of the read behind. Dropping that remainder loses TLS
-                // records — which, when the lost record is the one carrying the server's
-                // certificate, means the handshake completes without it ever being checked.
-                let mut bytes = &buffer[..result_code as usize];
-                while !bytes.is_empty() {
-                    let consumed = connection
-                        .read_tls(&mut bytes)
-                        .map_err(|e| tls_error("tls read", e))?;
-                    if consumed == 0 {
-                        break;
-                    }
-                    connection
-                        .process_new_packets()
-                        .map_err(|e| tls_error("tls", e))?;
-                }
-                // Drain whatever plaintext that produced. `WouldBlock` just means "no more
-                // yet", which is the ordinary case for a partial record.
-                let mut chunk = [0u8; 16384];
-                loop {
-                    match std::io::Read::read(&mut connection.reader(), &mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => plaintext.extend_from_slice(&chunk[..n]),
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                        Err(e) => return Err(tls_error("tls read", e)),
-                    }
-                }
+                state.ingest(&buffer[..result_code as usize])?;
             }
             TlsIo::Write => {
                 if result_code < 0 {
                     return Err(tls_error("tls write", format!("errno {}", -result_code)));
                 }
-                *outgoing_sent += result_code as usize;
-                if *outgoing_sent >= outgoing.len() {
-                    outgoing.clear();
-                    *outgoing_sent = 0;
+                state.outgoing_sent += result_code as usize;
+                if state.flushed() {
+                    state.outgoing.clear();
+                    state.outgoing_sent = 0;
                 }
             }
         }
@@ -1604,30 +1807,25 @@ impl NativeEffectBackend {
     /// Whether the goal can be answered now, having first given rustls the chance to queue
     /// anything it wants to send.
     fn tls_step(&mut self, resource_id: ResourceId, goal: TlsGoal) -> Result<Step, Error> {
-        let body_type = self.get_resource_type_id("TlsSocket");
-        let Some(Resource::TlsSocket {
-            connection,
-            plaintext,
-            outgoing,
-            outgoing_sent,
-            eof,
-            ..
-        }) = self.resources.get_mut(&resource_id)
-        else {
-            return Err(Error::InvalidArgument(format!(
-                "Resource {resource_id} is not a TlsSocket"
-            )));
-        };
+        let body_type = self.get_resource_type_id("TcpSocket");
+        let state = self.tls_state(resource_id)?;
 
         // Anything rustls wants to send goes out before we consider ourselves finished.
-        if *outgoing_sent >= outgoing.len() && connection.wants_write() {
-            outgoing.clear();
-            *outgoing_sent = 0;
-            connection
-                .write_tls(outgoing)
+        if state.flushed() && state.connection.wants_write() {
+            state.outgoing.clear();
+            state.outgoing_sent = 0;
+            state
+                .connection
+                .write_tls(&mut state.outgoing)
                 .map_err(|e| Error::InvalidArgument(format!("tls write: {e}")))?;
         }
-        let flushed = *outgoing_sent >= outgoing.len();
+        let flushed = state.flushed();
+        let TlsState {
+            connection,
+            plaintext,
+            eof,
+            ..
+        } = state;
 
         // A goal that still needs bytes from a peer that has hung up can never be met, and
         // waiting would submit read after read against a closed socket forever.
@@ -1702,7 +1900,7 @@ impl NativeEffectBackend {
             Ok(name) => name,
             Err(_) => return Ok(Some(Err(tls_error("tls", "hostname is not UTF-8")))),
         };
-        let server_name = match rustls::pki_types::ServerName::try_from(hostname.clone()) {
+        let server_name = match rustls::pki_types::ServerName::try_from(hostname) {
             Ok(name) => name,
             Err(e) => return Ok(Some(Err(tls_error("tls", e)))),
         };
@@ -1711,17 +1909,70 @@ impl NativeEffectBackend {
             Err(failure) => return Ok(Some(Err(failure))),
         };
         let connection = match rustls::ClientConnection::new(config, server_name) {
-            Ok(connection) => connection,
+            Ok(connection) => rustls::Connection::Client(connection),
             Err(e) => return Ok(Some(Err(tls_error("tls", e)))),
         };
+        self.tls_upgrade(process_id, resource_id, connection)
+    }
 
-        // The socket is consumed: from here only the TLS resource may be used, which is what
-        // keeps a caller from writing plaintext onto an encrypted connection. Consumed only on
-        // the match — a rejected resource must survive its rejection.
-        let socket = match self.resources.remove(&resource_id) {
-            Some(Resource::TcpSocket { socket, .. }) => socket,
-            Some(other) => {
-                self.resources.insert(resource_id, other);
+    fn execute_tls_accept(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        cert: Vec<u8>,
+        key: Vec<u8>,
+    ) -> Result<Option<EffectResult>, Error> {
+        let config = match Self::tls_server_config(&cert, key) {
+            Ok(config) => config,
+            Err(failure) => return Ok(Some(Err(failure))),
+        };
+        let connection = match rustls::ServerConnection::new(config) {
+            Ok(connection) => rustls::Connection::Server(connection),
+            Err(e) => return Ok(Some(Err(tls_error("tls", e)))),
+        };
+        self.tls_upgrade(process_id, resource_id, connection)
+    }
+
+    /// A server config presenting the given certificate chain (concatenated DER, leaf
+    /// first) with its PKCS#8 DER private key. The same convention as `roots`: bytes in,
+    /// nothing read from the filesystem or environment — PEM is decoded by the caller.
+    fn tls_server_config(
+        cert: &[u8],
+        key: Vec<u8>,
+    ) -> Result<Arc<rustls::ServerConfig>, EffectError> {
+        let chain: Vec<rustls::pki_types::CertificateDer> =
+            der_certificates(cert).into_iter().map(Into::into).collect();
+        if chain.is_empty() {
+            return Err(tls_error("tls", "no certificates in the supplied chain"));
+        }
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(key.into());
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(chain, key)
+            .map(Arc::new)
+            .map_err(|e| tls_error("tls", e))
+    }
+
+    /// Install the TLS state on the socket — in place, under the same resource id — and
+    /// start the handshake. Upgrading is one-way and one-shot: a socket already upgraded is
+    /// rejected. A handshake that later fails closes the socket (see `tls_finish`) — its
+    /// byte stream is poisoned mid-handshake, so there is nothing left to hand back.
+    fn tls_upgrade(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        connection: rustls::Connection,
+    ) -> Result<Option<EffectResult>, Error> {
+        match self.resources.get_mut(&resource_id) {
+            Some(Resource::TcpSocket { tls, .. }) => {
+                if tls.is_some() {
+                    return Err(Error::InvalidArgument(format!(
+                        "Resource {resource_id} is already TLS-upgraded"
+                    )));
+                }
+                *tls = Some(TlsState::new(connection));
+            }
+            Some(_) => {
                 return Err(Error::InvalidArgument(format!(
                     "Resource {resource_id} is not a TcpSocket"
                 )));
@@ -1731,78 +1982,8 @@ impl NativeEffectBackend {
                     "Resource {resource_id} not found"
                 )));
             }
-        };
-        let tls_id = self.next_resource_id;
-        self.next_resource_id += 1;
-        self.resources.insert(
-            tls_id,
-            Resource::TlsSocket {
-                socket,
-                connection: Box::new(connection),
-                plaintext: Vec::new(),
-                outgoing: Vec::new(),
-                outgoing_sent: 0,
-                eof: false,
-            },
-        );
-        self.tls_drive(process_id, tls_id, TlsGoal::Attach, None)
-    }
-
-    fn execute_tls_read(
-        &mut self,
-        process_id: ProcessId,
-        resource_id: ResourceId,
-        length: usize,
-    ) -> Result<Option<EffectResult>, Error> {
-        self.tls_drive(
-            process_id,
-            resource_id,
-            TlsGoal::Read { want: length },
-            None,
-        )
-    }
-
-    fn execute_tls_write(
-        &mut self,
-        process_id: ProcessId,
-        resource_id: ResourceId,
-        data: Vec<u8>,
-    ) -> Result<Option<EffectResult>, Error> {
-        let len = data.len();
-        {
-            let Some(Resource::TlsSocket { connection, .. }) = self.resources.get_mut(&resource_id)
-            else {
-                return Err(Error::InvalidArgument(format!(
-                    "Resource {resource_id} is not a TlsSocket"
-                )));
-            };
-            if let Err(e) = std::io::Write::write_all(&mut connection.writer(), &data) {
-                return Ok(Some(Err(tls_error("tls write", e))));
-            }
         }
-        self.tls_drive(process_id, resource_id, TlsGoal::Write { len }, None)
-    }
-
-    fn execute_tls_close(
-        &mut self,
-        process_id: ProcessId,
-        resource_id: ResourceId,
-    ) -> Result<Option<EffectResult>, Error> {
-        {
-            let Some(Resource::TlsSocket { connection, .. }) = self.resources.get_mut(&resource_id)
-            else {
-                // Already gone; closing twice is not an error.
-                return Ok(Some(Ok(WireValue::ok())));
-            };
-            // A `close_notify` is what lets the peer tell a clean close from a truncated one.
-            // Process teardown cannot send it — that path just drops the socket — so this is
-            // best-effort on the explicit close only.
-            connection.send_close_notify();
-        }
-        // `tls_finish` releases the resource when the goal completes — which is usually not
-        // here but at a later completion, since the close_notify queued above still needs a
-        // socket write.
-        self.tls_drive(process_id, resource_id, TlsGoal::Close, None)
+        self.tls_drive(process_id, resource_id, TlsGoal::Attach, None)
     }
 }
 

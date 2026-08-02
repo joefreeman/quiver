@@ -14,6 +14,10 @@
 // Events are chunks, not protocol messages — framing belongs above (e.g.
 // `%http/websocket`'s codec). At most one event is read ahead per resource: while
 // unconsumed, the kernel buffers and TCP flow control throttles the sender.
+//
+// A socket upgraded with `%tls` reads, writes and selects the same way, in plaintext:
+// `Data` events carry decrypted bytes, and either kind of end of stream arrives as
+// `Closed` (a blocking read keeps the clean/truncated distinction).
 
 'data = Data[sock: \TcpSocket, data: 'bin]
 'closed = Closed[sock: \TcpSocket]

@@ -82,23 +82,18 @@ pub enum NativeEffect {
         resource_id: ResourceId,
     },
 
-    // TLS. `Attach` consumes a connected socket and performs the handshake; the rest mirror
-    // the socket operations, over plaintext.
+    // TLS upgrades a connected socket *in place* (client and server side respectively) —
+    // encryption becomes a property of the socket, and the ordinary socket operations then
+    // speak plaintext through it. There are no TLS read/write/close effects for that reason.
     TlsAttach {
         resource_id: ResourceId,
         hostname: Vec<u8>,
         roots: Vec<u8>,
     },
-    TlsRead {
+    TlsAccept {
         resource_id: ResourceId,
-        length: usize,
-    },
-    TlsWrite {
-        resource_id: ResourceId,
-        data: Vec<u8>,
-    },
-    TlsClose {
-        resource_id: ResourceId,
+        cert: Vec<u8>,
+        key: Vec<u8>,
     },
 }
 
@@ -127,12 +122,8 @@ impl Effect for NativeEffect {
             | NativeEffect::TcpSocketRead { resource_id, .. }
             | NativeEffect::TcpSocketWrite { resource_id, .. }
             | NativeEffect::TcpSocketClose { resource_id }
-            // Attach operates on the *socket* it consumes, so that is what the ownership
-            // check must see; the rest operate on the TLS resource itself.
             | NativeEffect::TlsAttach { resource_id, .. }
-            | NativeEffect::TlsRead { resource_id, .. }
-            | NativeEffect::TlsWrite { resource_id, .. }
-            | NativeEffect::TlsClose { resource_id } => Some(*resource_id),
+            | NativeEffect::TlsAccept { resource_id, .. } => Some(*resource_id),
         }
     }
 }

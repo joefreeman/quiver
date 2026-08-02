@@ -16,4 +16,4 @@ serde_json.workspace = true
 # a second crypto provider in the tree would make `ClientConfig::builder()` ambiguous and
 # panic at runtime.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
