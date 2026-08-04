@@ -270,7 +270,7 @@ pub struct Executor<E: Effect> {
     pub(crate) compile_time: bool,
     tuples: Vec<usize>, // Tuple arities
     /// The full type and tuple tables (what the program serializes), so type-consuming
-    /// builtins (`__type_name__<'t>`) can read their type argument's structure at
+    /// builtins (`__data_decode__<'t>`) can read their type argument's structure at
     /// runtime — exposed to implementations through the executor's `TypeLookup`.
     types: Arc<Vec<Type>>,
     tuple_infos: Arc<Vec<TupleTypeInfo>>,

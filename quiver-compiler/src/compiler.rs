@@ -78,9 +78,9 @@ pub enum Error {
         declared: usize,
         given: usize,
     },
-    /// A type-consuming builtin (`__type_name__`) called without its explicit type
+    /// A type-consuming builtin (`__data_decode__`) called without its explicit type
     /// argument(s): the implementation reads the type at runtime, so the call site must
-    /// instantiate (`__type_name__<'t>`).
+    /// instantiate (`__data_decode__<'t>`).
     TypeArgumentsRequired {
         builtin: String,
         declared: usize,

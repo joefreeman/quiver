@@ -102,7 +102,7 @@ pub struct BuiltinContext<'a, E: Effect> {
     pid: ProcessId,
     process: &'a mut Process,
     action: Option<Action<E>>,
-    /// A type-consuming builtin's explicit type argument (`__type_name__<'t>`), read
+    /// A type-consuming builtin's explicit type argument (`__data_decode__<'t>`), read
     /// off the called builtin value; `None` for ordinary builtins. Resolve it against
     /// the executor's `TypeLookup`.
     type_argument: Option<usize>,
@@ -462,7 +462,7 @@ pub struct BuiltinEntry<E: Effect> {
     pub result: TypeSpec,
     /// Declared type parameters, for a **type-consuming** builtin: names in declaration
     /// order (matching any `TypeSpec::Var` occurrences in the signature). Non-empty
-    /// means every call must instantiate explicitly (`__type_name__<'t>`) — the compiler
+    /// means every call must instantiate explicitly (`__data_decode__<'t>`) — the compiler
     /// resolves the arguments and embeds the (single, for now) type id in the emitted
     /// instruction for the implementation to read via `BuiltinContext::type_argument`.
     pub type_parameters: Vec<String>,
@@ -515,7 +515,7 @@ impl<E: Effect> BuiltinRegistry<E> {
     }
 
     /// Register a **type-consuming** builtin: one whose behavior depends on an explicit
-    /// type argument (`__type_name__<'t>`), declared here in order. Currently limited to
+    /// type argument (`__data_decode__<'t>`), declared here in order. Currently limited to
     /// exactly one parameter — the emitted instruction carries a single type id.
     pub fn register_generic(
         &mut self,
@@ -860,39 +860,6 @@ pub fn register_control_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "panic", builtin_panic, str => TypeSpec::Union(vec![]));
 }
 
-/// The formatted form of the builtin's explicit type argument (`__type_name__<'t>`), as
-/// UTF-8 bytes — wrap in `Str[...]` for display. The first **type-consuming** builtin:
-/// its behavior depends on its instantiation (read from the context), not on its (nil)
-/// argument. Deterministic per program, so pure.
-pub fn builtin_type_name<E: Effect>(
-    _arg: &Value,
-    ctx: &mut BuiltinContext<E>,
-) -> Result<Completion<E>, Error> {
-    let type_id = ctx.type_argument().ok_or_else(|| {
-        Error::InvalidArgument(
-            "__type_name__ called without a type argument — a bare reference carries no \
-             instantiation; name it with one (`__type_name__<'t>`) where the type is \
-             concrete"
-                .to_string(),
-        )
-    })?;
-    let formatted = crate::format::format_type_by_id(&*ctx.executor, type_id);
-    let binary = ctx.executor.allocate_binary(formatted.into_bytes())?;
-    Ok(Completion::Value(Value::Binary(binary)))
-}
-
-pub fn register_type_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
-    let nil = TypeSpec::Tuple(None, vec![]);
-    registry.register_generic(
-        "type_name".to_string(),
-        coerce_builtin(builtin_type_name),
-        Purity::Pure,
-        nil,
-        TypeSpec::Binary,
-        vec!["t".to_string()],
-    );
-}
-
 /// The Quiver data notation codec (`%data`): `data_encode` walks any data value into
 /// its textual form; `data_decode` is type-consuming — the expected type drives the
 /// parse and appears as the result (`#Str['bin] -> ('t | [])`), so the declared
@@ -1044,7 +1011,6 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
         register_vector_builtins,
         register_reference_builtins,
         register_control_builtins,
-        register_type_builtins,
         register_data_builtins,
         register_process_builtins,
     ]

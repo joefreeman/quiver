@@ -60,7 +60,7 @@ struct Extras {
     /// Annotations attached to the owning value: `(key id, value)` pairs, sorted by key id.
     /// Invisible to equality and pattern matching — only `GetAnnotation` observes them.
     annotations: Vec<(usize, Value)>,
-    /// A type-consuming builtin's explicit type argument (`__type_name__<'t>` → the
+    /// A type-consuming builtin's explicit type argument (`__data_decode__<'t>` → the
     /// resolved type id), carried on the *value* so an instantiated builtin flows
     /// through bindings and generic code intact. Unlike annotations it is operational
     /// (the implementation reads it), so equality compares it. Always `None` on tuple

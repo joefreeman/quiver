@@ -336,7 +336,7 @@ pub enum Instruction {
     TailCall(bool),
     Function(Id),
     /// Push a builtin value by id. The optional type id is a type-consuming builtin's
-    /// explicit type argument (`__type_name__<'t>`), resolved to a concrete type at
+    /// explicit type argument (`__data_decode__<'t>`), resolved to a concrete type at
     /// compile time and carried on the pushed value for the implementation to read.
     Builtin(Id, Option<Id>),
     Equal(Id),
