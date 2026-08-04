@@ -76,6 +76,26 @@ fn test_a_bare_tcp_close_is_an_error_not_an_end() {
 }
 
 #[test]
+fn test_a_bare_tcp_close_fails_a_select() {
+    // The select twin of the blocking case above: the peer vanishes without a
+    // close_notify, and the armed read must answer the failure — nil carrying `:error` —
+    // rather than a clean `Closed` that would pass off a cut-short stream as complete.
+    let server = TlsServer::start(Behaviour::EchoThenVanish);
+    tls(
+        &server,
+        r#"
+        %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
+        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
+        %tcp.write [s, "ping" ~> .0]
+        ![s] ~> =Data[sock: _, data: _]
+        ![s] ~> :('%io)error ~> =IoError(message: m)
+        %str.contains? [m, "close_notify"]
+        "#,
+    )
+    .expect("Ok");
+}
+
+#[test]
 fn test_a_record_split_across_socket_reads_is_reassembled() {
     // The server dribbles one record's ciphertext a few bytes at a time, so a single
     // `%tcp.read` spans several socket reads before a whole record exists to decrypt.

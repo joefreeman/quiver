@@ -1511,7 +1511,10 @@ alife = #[(req): '%http, (mode): 'amode, (buffer): 'strs, (token): ('%str | []),
         Cons[[vid: v, pid: &p], del_route [$routes, v]],
       ]
       | =Unroute[v] => ^ [$req, Attached[conn], Nil, $token, &reg, del_route [$routes, v]]
-      | =Closed[sock: _] => $token ~> {
+      // A clean `Closed`, or the nil of a failed read — a reset is how a browser tab
+      // usually vanishes. Either way the socket is gone, and gone means park: the
+      // recovery is deliberate, so the clean/failed difference is dropped with the nil.
+      | $token ~> {
         | =Str[tb] => {
           tell_views [$routes, Park]
           Register[Str[tb], &.] ~> reg

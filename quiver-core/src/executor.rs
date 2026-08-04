@@ -1089,9 +1089,9 @@ impl<E: Effect> Executor<E> {
     }
 
     /// Deliver a stream resource's next event (the completion of an armed select
-    /// read): build the event tuple, stash it on the owner — one slot per resource,
-    /// since at most one read is armed — and wake its select. A tombstoned owner
-    /// drops the event.
+    /// read): build the event tuple — or, for a failed read, the `:error`-stamped
+    /// nil — stash it on the owner — one slot per resource, since at most one read
+    /// is armed — and wake its select. A tombstoned owner drops the event.
     pub fn notify_resource_event(
         &mut self,
         id: ProcessId,
@@ -1141,6 +1141,11 @@ impl<E: Effect> Executor<E> {
                 )
             }
             StreamEvent::End => Value::tuple(info.end_tuple, vec![source]),
+            // A failed read answers what any failed I/O operation answers: an
+            // `:error`-stamped nil. The select completes with it, the step boundary
+            // short-circuits, and the payload rides out — while a clean `Closed`
+            // stays the only shape that means "you have the whole stream".
+            StreamEvent::Failed { error } => self.io_error_result(&error)?,
         };
 
         let process = self.get_process_mut(id).unwrap();

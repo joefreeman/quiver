@@ -152,7 +152,7 @@ fold = #<'t, 'acc>[(it): 'thunk<'t>, (acc): 'acc, (f): #['acc, 't] -> 'acc] {
 try_fold = #<'t, 'acc>[(it): 'thunk<'t>, (acc): 'acc, (f): #['acc, 't] -> 'acc] {
   $it ~> {
     | =[value, next] => $f [$acc, value] ~> ^ [&next, ~, &$f]
-    | =e; e:()error => e
+    | :()error => ~
     | $acc
   }
 }

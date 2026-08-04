@@ -7,17 +7,22 @@
 //
 //   ![sock, &handle] ~> {
 //     | =Data[sock: s, data: d] => ...      // bytes arrived (up to 8 KiB per event)
-//     | =Closed[sock: s] => ...             // EOF or error: the stream ends
+//     | =Closed[sock: s] => ...             // clean end of stream: nothing more is coming
 //     | ...                                  // a mailbox message
 //   }
+//
+// Selecting on a stream is fallible, like every other I/O operation: a *failed* read (a
+// reset, a truncation) answers nil carrying `:error IoError[...]` rather than an event,
+// so `Closed` alone means "you saw the whole stream". An unhandled failure simply ends
+// the sequence; a consumer that recovers on purpose catches the nil.
 //
 // Events are chunks, not protocol messages — framing belongs above (e.g.
 // `%http/websocket`'s codec). At most one event is read ahead per resource: while
 // unconsumed, the kernel buffers and TCP flow control throttles the sender.
 //
 // A socket upgraded with `%tls` reads, writes and selects the same way, in plaintext:
-// `Data` events carry decrypted bytes, and either kind of end of stream arrives as
-// `Closed` (a blocking read keeps the clean/truncated distinction).
+// `Data` events carry decrypted bytes, a close_notify ends the stream as `Closed`, and a
+// peer that vanished without one fails it — the same distinction the blocking read draws.
 
 'data = Data[sock: \TcpSocket, data: 'bin]
 'closed = Closed[sock: \TcpSocket]

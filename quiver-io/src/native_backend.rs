@@ -35,6 +35,12 @@ fn effect_error(context: &str, error: &std::io::Error) -> EffectError {
     }
 }
 
+/// Classify a failed io_uring completion (`result_code` is `-errno`) as an effect outcome —
+/// the completion-side twin of [`effect_error`], for the armed (select-serving) paths.
+fn completion_error(context: &str, result_code: i32) -> EffectError {
+    effect_error(context, &std::io::Error::from_raw_os_error(-result_code))
+}
+
 /// Unwrap an OS result, or return early with an effect *outcome* (a value the caller can
 /// branch on) rather than a submit failure (which kills the process).
 macro_rules! try_io {
@@ -178,10 +184,11 @@ impl NativeEffectBackend {
         *self.resource_type_ids.get(name).unwrap_or(&0)
     }
 
-    /// Turn a completed select-armed read into a stream event. Any read/accept error
-    /// ends the stream (`Closed`/listener-`Closed`) — a select answers events, not
-    /// errno values. A successful accept registers the new socket here; the
-    /// environment records its ownership as it routes the event.
+    /// Turn a completed select-armed read into a stream event. A read of zero bytes is
+    /// the peer's FIN — a clean `Closed`; a negative completion is an errno, and answers
+    /// the failure it names rather than masquerading as an end of stream. A successful
+    /// accept registers the new socket here; the environment records its ownership as it
+    /// routes the event.
     fn handle_armed_completion(&mut self, armed: ArmedOp, result_code: i32) {
         match armed {
             ArmedOp::Read {
@@ -197,7 +204,16 @@ impl NativeEffectBackend {
                 }
                 self.armed_resources.remove(&resource_id);
                 let socket_type = self.get_resource_type_id("TcpSocket");
-                if result_code <= 0 {
+                if result_code < 0 {
+                    self.stream_events.push((
+                        resource_id,
+                        socket_type,
+                        StreamEvent::Failed {
+                            error: completion_error("read", result_code),
+                        },
+                        vec![],
+                    ));
+                } else if result_code == 0 {
                     self.stream_events
                         .push((resource_id, socket_type, StreamEvent::End, vec![]));
                 } else {
@@ -210,8 +226,14 @@ impl NativeEffectBackend {
                 self.armed_resources.remove(&resource_id);
                 let listener_type = self.get_resource_type_id("TcpListener");
                 if result_code < 0 {
-                    self.stream_events
-                        .push((resource_id, listener_type, StreamEvent::End, vec![]));
+                    self.stream_events.push((
+                        resource_id,
+                        listener_type,
+                        StreamEvent::Failed {
+                            error: completion_error("accept", result_code),
+                        },
+                        vec![],
+                    ));
                     return;
                 }
                 let socket = unsafe { Socket::from_raw_fd(result_code) };
@@ -278,11 +300,11 @@ impl NativeEffectBackend {
     /// A completed armed read on a TLS-upgraded socket: the buffer holds ciphertext, and the
     /// event may carry only what it decrypts to. A chunk that ends mid-record decrypts to
     /// nothing — then the read is re-armed rather than delivering an empty event, invisibly
-    /// to the selecting process. A read error, a broken record, and both kinds of end of
-    /// stream all answer `Closed`: to a selecting server they are the same disconnect (the
-    /// explicit read path keeps the truncation distinction). Anything rustls queued to send
-    /// back (a key-update reply) stays in `outgoing` and rides out with the next write or
-    /// close — this path never writes.
+    /// to the selecting process. A read error or a broken record answers `Failed`; the end
+    /// of the stream answers what rustls's reader says it was — `Closed` after a
+    /// close_notify, `Failed` after a bare TCP close — the same distinction the explicit
+    /// read path draws. Anything rustls queued to send back (a key-update reply) stays in
+    /// `outgoing` and rides out with the next write or close — this path never writes.
     fn handle_armed_tls_read(
         &mut self,
         resource_id: ResourceId,
@@ -304,16 +326,18 @@ impl NativeEffectBackend {
                     .push((resource_id, socket_type, StreamEvent::End, vec![]));
                 return;
             };
-            let broken = result_code < 0
-                || state
-                    .ingest(&buffer[..result_code.max(0) as usize])
-                    .is_err();
-            let event = if broken || (state.plaintext.is_empty() && state.eof) {
-                Some((StreamEvent::End, vec![]))
-            } else if state.plaintext.is_empty() {
-                None
+            let ingested = if result_code < 0 {
+                Err(completion_error("tls read", result_code))
             } else {
-                Some((StreamEvent::Data, std::mem::take(&mut state.plaintext)))
+                state.ingest(&buffer[..result_code as usize])
+            };
+            let event = match ingested {
+                Err(error) => Some((StreamEvent::Failed { error }, vec![])),
+                Ok(()) if !state.plaintext.is_empty() => {
+                    Some((StreamEvent::Data, std::mem::take(&mut state.plaintext)))
+                }
+                Ok(()) if state.eof => Some((state.eof_event(), vec![])),
+                Ok(()) => None,
             };
             (event, socket.as_raw_fd())
         };
@@ -325,12 +349,20 @@ impl NativeEffectBackend {
             }
             None => {
                 // Mid-record: nothing to deliver yet, so the select stays parked and the
-                // read is re-armed. A failed re-submit ends the stream — the alternative is
-                // a select that waits forever.
+                // read is re-armed. A failed re-submit fails the stream — the alternative
+                // is a select that waits forever.
                 if self.arm_submit_read(resource_id, fd, buffer).is_err() {
                     self.armed_resources.remove(&resource_id);
-                    self.stream_events
-                        .push((resource_id, socket_type, StreamEvent::End, vec![]));
+                    self.stream_events.push((
+                        resource_id,
+                        socket_type,
+                        StreamEvent::Failed {
+                            error: EffectError::IO(
+                                "tls read: could not re-arm the socket read".to_string(),
+                            ),
+                        },
+                        vec![],
+                    ));
                 }
             }
         }
@@ -516,7 +548,7 @@ impl EffectBackend for NativeEffectBackend {
         // io each needs `self` back.
         enum Arm {
             Data(Vec<u8>),
-            End,
+            End(StreamEvent),
             Read(RawFd),
             Accept(RawFd),
         }
@@ -529,7 +561,7 @@ impl EffectBackend for NativeEffectBackend {
                 Some(state) if !state.plaintext.is_empty() => {
                     Arm::Data(std::mem::take(&mut state.plaintext))
                 }
-                Some(state) if state.eof => Arm::End,
+                Some(state) if state.eof => Arm::End(state.eof_event()),
                 _ => Arm::Read(socket.as_raw_fd()),
             },
             Some(Resource::TcpListener { socket, .. }) => Arm::Accept(socket.as_raw_fd()),
@@ -552,10 +584,10 @@ impl EffectBackend for NativeEffectBackend {
                 self.stream_events
                     .push((resource_id, socket_type, StreamEvent::Data, data));
             }
-            Arm::End => {
+            Arm::End(event) => {
                 let socket_type = self.get_resource_type_id("TcpSocket");
                 self.stream_events
-                    .push((resource_id, socket_type, StreamEvent::End, vec![]));
+                    .push((resource_id, socket_type, event, vec![]));
             }
             Arm::Read(fd) => self.arm_submit_read(resource_id, fd, vec![0u8; 8192])?,
             Arm::Accept(fd) => {
@@ -1535,6 +1567,20 @@ impl TlsState {
             }
         }
         Ok(())
+    }
+
+    /// The event an exhausted upgraded socket answers. Rustls's reader knows whether the
+    /// EOF it saw was announced (a close_notify — a clean `End`) or bare (a peer that
+    /// just vanished, which may be a stream cut short — `Failed`), because `ingest` fed
+    /// the EOF through; this is the same distinction the blocking read draws, so a
+    /// select and an explicit read tell the same story.
+    fn eof_event(&mut self) -> StreamEvent {
+        match std::io::Read::read(&mut self.connection.reader(), &mut [0u8; 1]) {
+            Ok(_) => StreamEvent::End,
+            Err(e) => StreamEvent::Failed {
+                error: tls_error("tls read", e),
+            },
+        }
     }
 }
 

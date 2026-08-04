@@ -22,7 +22,7 @@ resolve_host = #'%str {
     | =IPv4[b] => b
     | =IPv6[b] => b
     // A lookup that broke — propagate the reason it already carries.
-    | ~:()error => ~
+    | :()error => ~
     | [] ~> {
       :error IoError[kind: NotFound, message: "no addresses for {host}"]
     }

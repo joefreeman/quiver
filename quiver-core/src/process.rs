@@ -171,8 +171,14 @@ pub enum StreamEvent {
     /// The stream produced a fresh resource (e.g. an accepted connection). The
     /// environment has already recorded the receiving process as its owner.
     Resource { resource_id: ResourceId },
-    /// The stream ended: EOF, or any error — a select answers events, not errno.
+    /// The stream ended cleanly: EOF, a FIN, a close_notify. Nothing more will
+    /// arrive, and everything that did arrive is the whole of it.
     End,
+    /// The stream failed: a reset, a truncation, an aborted transfer. The select
+    /// answers the same `:error IoError[…]`-stamped nil every failed I/O operation
+    /// does, so a consumer that would recover must first look — completeness is
+    /// exactly what a failure no longer promises.
+    Failed { error: crate::effects::EffectError },
 }
 
 #[derive(Debug, Clone)]

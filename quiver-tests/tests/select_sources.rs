@@ -32,6 +32,19 @@ fn test_listener_and_socket_as_select_sources() {
 }
 
 #[test]
+fn test_stream_select_is_fallible() {
+    // A stream source's select type carries nil beside its events: a failed read answers
+    // the same `:error`-stamped nil every I/O operation does, so only a clean `Closed`
+    // means the stream was seen whole.
+    quiver()
+        .with_io()
+        .evaluate(r#"#\TcpSocket { ![$] }"#)
+        .expect_type(
+            "#\\TcpSocket -> (Closed[sock: \\TcpSocket] | Data[sock: \\TcpSocket, data: 'bin] | [])",
+        );
+}
+
+#[test]
 fn test_socket_select_races_timeout() {
     // A silent peer: the timeout source wins and answers the `:timeout` nil.
     quiver()

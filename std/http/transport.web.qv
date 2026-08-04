@@ -14,12 +14,15 @@
 // CORS decides which response headers are readable at all, and the browser follows redirects
 // itself — so the client's own redirect loop simply never fires.
 
-// Drain the response body stream. It is the same `Data`/`Closed` shape a socket yields, so
-// this is the ordinary select-and-accumulate loop.
-drain = #[(body): \HttpBody, (acc): 'bin] {
-  ![$body] ~> {
-    | =Data[body: _, data: d] => ^ [$body, %bin.concat [$acc, d]]
-    | =Closed[body: _] => $acc
+// Drain the response body: the ordinary select-and-accumulate loop over a `\ByteStream`.
+// A failed read answers nil carrying `:error`, and the binding gates on it — the failure
+// propagates out of the exchange rather than passing off a truncated body as the whole one.
+// Only a clean `Closed` means the accumulator holds everything.
+drain = #[(stream): \ByteStream, (acc): 'bin] {
+  event = ![$stream]
+  event ~> {
+    | =Data[stream: _, data: d] => ^ [$stream, %bin.concat [$acc, d]]
+    | =Closed[stream: _] => $acc
   }
 }
 
@@ -44,7 +47,8 @@ exchange = #[(url): '%url, (request): '%http] {
     }
   } ~> =('%http.pairs)hs
 
-  Response[status: status, headers: hs, body: drain [body, 0x]]
+  drain [body, 0x] ~> =('bin)content
+  Response[status: status, headers: hs, body: content]
 }
 
 [

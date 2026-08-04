@@ -6287,11 +6287,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Type::Resource(name) => {
                     // A stream resource yields its registry-declared event type (a
                     // socket: `Data[sock, data] | Closed[sock]`; a listener:
-                    // `Accepted[...] | Closed[...]`). Resource kinds without a stream
-                    // declaration have no externally-timed next event and are not
-                    // selectable. Resolution registers the event tuples on demand —
-                    // content-addressed, so they match the runtime's stream table and
-                    // any source-level twins (`std/tcp.qv`).
+                    // `Accepted[...] | Closed[...]`) — or nil, stamped `:error`, when
+                    // the read fails: only a clean end is an event, so reading a
+                    // stream is fallible like every other I/O operation. Resource
+                    // kinds without a stream declaration have no externally-timed
+                    // next event and are not selectable. Resolution registers the
+                    // event tuples on demand — content-addressed, so they match the
+                    // runtime's stream table and any source-level twins
+                    // (`std/tcp.qv`).
                     let name = name.clone();
                     match self.builtins.stream_spec(&name).cloned() {
                         Some(spec) => {
@@ -6303,6 +6306,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                 members.push(resource.resolve_to_id(self.program));
                             }
                             members.push(spec.end.resolve_to_id(self.program));
+                            members.push(annotations::closed_nil(self.program));
                             result_types.push(typing::union_type_ids(self.program, members));
                         }
                         None => {

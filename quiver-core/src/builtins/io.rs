@@ -244,11 +244,11 @@ pub fn register_tls_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 /// Method and headers cross as bytes (a raw CRLF block) rather than as structured values: the
 /// backend has no type registry, so a `'%http.pairs` would mean plumbing tuple ids for `Cons`,
 /// `Nil` and `Str` through `set_type_ids` — while `%http` already has the header codec both
-/// ways. The response body is a `\HttpBody` stream, the same shape as a socket's.
+/// ways. The response body is a `\ByteStream`.
 fn fetch_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     let bin = TypeSpec::Binary;
     let int = TypeSpec::Integer;
-    let body = TypeSpec::Resource("HttpBody".to_string());
+    let body = TypeSpec::Resource("ByteStream".to_string());
     vec![(
         "fetch",
         TypeSpec::Tuple(
@@ -271,22 +271,28 @@ fn fetch_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     )]
 }
 
-/// A fetch response body is a stream, exactly as a socket is: bytes arrive when they arrive,
-/// so it is selectable and yields the same `Data`/`Closed` shape.
-fn register_fetch_streams<E: Effect>(registry: &mut BuiltinRegistry<E>) {
-    let body = TypeSpec::Resource("HttpBody".to_string());
+/// Register `\ByteStream`: the general verb-free stream of byte chunks. A socket is a
+/// stream *and* a bundle of operations, so it earns its own kind; a source that is
+/// nothing but "chunks until a clean end" — a fetch response body today; a streamed
+/// request body or a child process's output tomorrow — is a `\ByteStream`, whatever
+/// produced it. One kind is what lets one consumer drain them all. Every capability
+/// group whose operations mint one declares it (the registration is keyed by kind, so
+/// repeats agree harmlessly); which group *minted* a given handle is the operation's
+/// business, not the type's.
+pub fn register_byte_stream<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let stream = TypeSpec::Resource("ByteStream".to_string());
     registry.register_stream(
-        "HttpBody",
+        "ByteStream",
         crate::builtins::StreamSpec {
             data: Some(TypeSpec::Tuple(
                 Some("Data"),
                 vec![
-                    (Some("body"), body.clone()),
+                    (Some("stream"), stream.clone()),
                     (Some("data"), TypeSpec::Binary),
                 ],
             )),
             resource: None,
-            end: TypeSpec::Tuple(Some("Closed"), vec![(Some("body"), body)]),
+            end: TypeSpec::Tuple(Some("Closed"), vec![(Some("stream"), stream)]),
         },
     );
 }
@@ -303,7 +309,7 @@ pub fn register_fetch_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
             fallible(result),
         );
     }
-    register_fetch_streams(registry);
+    register_byte_stream(registry);
     register_error_vocabulary(registry);
 }
 
