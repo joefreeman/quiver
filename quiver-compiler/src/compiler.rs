@@ -960,6 +960,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             },
         );
 
+        // `parameter_type_id` indexes the *type* table. A caller passing a tuple id instead
+        // (`types::NIL` is the nil tuple, not the nil type) would silently type every
+        // top-level step's input as whatever type happened to land at that index, so reject
+        // an id no type occupies rather than miscompile.
+        if compiler.program.lookup_type(parameter_type_id).is_none() {
+            return Err(LocatedError {
+                error: Error::InternalError {
+                    message: format!("parameter_type_id {parameter_type_id} is not a type id"),
+                },
+                span: None,
+            });
+        }
+
         // Only allocate a parameter slot if there are chain steps; a program of nothing but
         // type aliases produces no value and needs no parameter.
         let has_chains = ast_program.chains().next().is_some();

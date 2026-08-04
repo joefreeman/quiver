@@ -143,6 +143,32 @@ fn test_cycle_ref_nested_depth() {
 }
 
 #[test]
+fn test_cycle_ref_across_members_of_differing_depth() {
+    // `^` counts binders as the type was *written*, so it must resolve the same however the
+    // value alternates between members whose `^` sits at different depths — here `Array`'s
+    // directly in `Cons`, `Object`'s one tuple deeper. Following a `^` re-enters the binder
+    // it names rather than nesting past it, so an array inside an object (and vice versa)
+    // fits, and a longer list doesn't shift the outer `^` per element.
+    let json = "'json = 'int | Array[(Nil | Cons[^, ^1])] | Object[(Nil | Cons[['%str, ^], ^1])];\n\
+                f = #'json { Ok };\n";
+    quiver()
+        .evaluate(&format!(
+            "{json}Object[Cons[[\"a\", Array[Cons[1, Nil]]], Nil]] ~> f"
+        ))
+        .expect("Ok");
+    quiver()
+        .evaluate(&format!(
+            "{json}Array[Cons[Object[Cons[[\"a\", 1], Nil]], Nil]] ~> f"
+        ))
+        .expect("Ok");
+    quiver()
+        .evaluate(&format!(
+            "{json}Object[Cons[[\"a\", Array[Cons[1, Cons[2, Nil]]]], Nil]] ~> f"
+        ))
+        .expect("Ok");
+}
+
+#[test]
 fn test_cycle_ref_error_no_union() {
     // Should fail: cycle without enclosing union
     let result = std::panic::catch_unwind(|| {

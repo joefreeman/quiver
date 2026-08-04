@@ -501,6 +501,72 @@ fn intersect_pair(a: usize, b: usize, program: &mut Program) -> usize {
         (Type::Integer, Type::Integer)
         | (Type::Binary, Type::Binary)
         | (Type::Reference, Type::Reference) => a,
+        // Two partials constrain by name, so their intersection constrains by the union of
+        // their names: fields in both must intersect, fields in one carry over. Stated tuple
+        // names must agree; an unnamed partial adopts the other's.
+        (
+            Type::Partial {
+                name: n1,
+                fields: f1,
+            },
+            Type::Partial {
+                name: n2,
+                fields: f2,
+            },
+        ) => {
+            if let (Some(a), Some(b)) = (n1, n2)
+                && a != b
+            {
+                return never;
+            }
+            let mut fields = f1.clone();
+            for (name, bty) in f2 {
+                match fields.iter_mut().find(|(n, _)| n == name) {
+                    Some((_, aty)) => {
+                        let intersected = intersect_types(*aty, *bty, program);
+                        if intersected == program.never() {
+                            return never;
+                        }
+                        *aty = intersected;
+                    }
+                    None => fields.push((name.clone(), *bty)),
+                }
+            }
+            program.register_type(Type::Partial {
+                name: n1.clone().or_else(|| n2.clone()),
+                fields,
+            })
+        }
+        // A partial meeting a concrete tuple keeps the tuple — the more specific of the two —
+        // with each constrained field narrowed. A tuple missing a constrained field, or whose
+        // name the partial contradicts, satisfies neither.
+        (Type::Partial { name, fields }, Type::Tuple(tuple_id))
+        | (Type::Tuple(tuple_id), Type::Partial { name, fields }) => {
+            let Some(info) = program.lookup_tuple(*tuple_id).cloned() else {
+                return never;
+            };
+            if let Some(name) = name
+                && info.name.as_ref() != Some(name)
+            {
+                return never;
+            }
+            let mut tuple_fields = info.fields.clone();
+            for (name, constraint) in fields {
+                let Some((_, field)) = tuple_fields
+                    .iter_mut()
+                    .find(|(n, _)| n.as_deref() == Some(name.as_str()))
+                else {
+                    return never;
+                };
+                let intersected = intersect_types(*field, *constraint, program);
+                if intersected == program.never() {
+                    return never;
+                }
+                *field = intersected;
+            }
+            let narrowed = program.register_tuple(info.name.clone(), tuple_fields);
+            program.register_type(Type::Tuple(narrowed))
+        }
         (Type::Tuple(id1), Type::Tuple(id2)) => {
             let (Some(i1), Some(i2)) = (
                 program.lookup_tuple(*id1).cloned(),

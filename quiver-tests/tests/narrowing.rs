@@ -901,14 +901,100 @@ fn test_type_intersection_in_type_definition() {
 
 #[test]
 fn test_type_intersection_of_partials_checks_every_member() {
-    // Soundness: each member is checked separately, so a value satisfying only one partial fails —
-    // even though `intersect_types` widens partial intersections internally.
+    // Soundness: each member is checked separately, so a value satisfying only one partial fails.
     quiver()
         .evaluate("[x: 1, y: 2] ~> =((x: 'int) & (y: 'int))")
         .expect("Ok");
     quiver()
         .evaluate("[x: 1] ~> =((x: 'int) & (y: 'int))")
         .expect("[]");
+}
+
+#[test]
+fn test_type_intersection_of_partials_is_a_partial_over_both_field_sets() {
+    // Written as a type — a function parameter — two partials meet in a partial constraining
+    // the union of their fields, so a value with both satisfies it and the body reads either.
+    // (Intersecting them used to fold to `never`, which no value satisfies.)
+    quiver()
+        .evaluate(
+            r#"
+            'a = (x: 'int);
+            'b = (y: 'int);
+            f = #('a & 'b) { %num.add [$x, $y] };
+            [x: 1, y: 2] ~> f
+            "#,
+        )
+        .expect("3");
+    quiver()
+        .evaluate(
+            r#"
+            'a = (x: 'int);
+            'b = (y: 'int);
+            f = #('a & 'b) { $x };
+            [x: 1] ~> f
+            "#,
+        )
+        .expect_type_mismatch();
+}
+
+#[test]
+fn test_type_intersection_of_partials_intersects_shared_fields() {
+    // A field both members constrain takes the intersection of the two constraints, so a
+    // conflicting pair is uninhabited.
+    quiver()
+        .evaluate(
+            r#"
+            f = #((x: 'int | 'bin) & (x: 'int)) { %num.add [$x, 1] };
+            [x: 1] ~> f
+            "#,
+        )
+        .expect("2");
+    quiver()
+        .evaluate("f = #(('int & 'bin)) { $ };\n5 ~> f")
+        .expect_type_mismatch();
+}
+
+#[test]
+fn test_type_intersection_of_a_partial_and_a_tuple_keeps_the_tuple() {
+    // The concrete side is the more specific, so the meet is that tuple with the constrained
+    // field narrowed — and a tuple missing a constrained field satisfies neither member.
+    quiver()
+        .evaluate(
+            r#"
+            f = #((y: 'int) & [x: 'int, y: 'int]) { %num.add [$x, $y] };
+            [x: 1, y: 2] ~> f
+            "#,
+        )
+        .expect("3");
+    quiver()
+        .evaluate(
+            r#"
+            f = #((z: 'int) & [x: 'int, y: 'int]) { Ok };
+            [x: 1, y: 2] ~> f
+            "#,
+        )
+        .expect_type_mismatch();
+}
+
+#[test]
+fn test_type_intersection_of_named_partials_requires_one_name() {
+    // An unnamed partial adopts the other's name; two different stated names contradict.
+    quiver()
+        .evaluate(
+            r#"
+            f = #(A(x: 'int) & (y: 'int)) { %num.add [$x, $y] };
+            A[x: 1, y: 2] ~> f
+            "#,
+        )
+        .expect("3");
+    quiver()
+        .evaluate(
+            r#"
+            f = #(A(x: 'int) & B(y: 'int)) { Ok };
+            A[x: 1, y: 2] ~> f
+            "#,
+        )
+        .expect_type_mismatch();
 }
 
 #[test]

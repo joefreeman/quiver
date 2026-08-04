@@ -185,13 +185,17 @@ fn compile_and_extract_entry(
 
     let mut program = Program::new();
     let mut module_cache = ModuleCache::new();
+    // The top level is a sequence, so each step starts from a block value: nil for a
+    // program. This must be a *type* id — `types::NIL` is the nil tuple's id, and passing
+    // it types the top-level parameter as whatever type happens to land at id 0.
+    let nil_type_id = program.register_type(Type::nil());
     let compilation_result = Compiler::compile(
         ast,
         &quiver_compiler::compiler::Bindings::default(),
         &mut module_cache,
         resolver,
         &mut program,
-        quiver_core::types::NIL, // parameter_type_id - use pre-registered nil type
+        nil_type_id, // parameter_type_id
         &HashMap::new(),
         builtins,
         None, // no semantic recorder for the CLI
@@ -242,7 +246,6 @@ fn compile_and_extract_entry(
     // entry's receive covers both.
     let receive = union_types(&mut program, vec![receive_type, call_receive]);
 
-    let nil_type_id = program.register_type(Type::nil());
     let result = if fallible {
         union_types(&mut program, vec![call_result, nil_type_id])
     } else {
@@ -357,13 +360,14 @@ fn compile_command(
                 };
                 let mut program = Program::new();
                 let mut module_cache = ModuleCache::new();
+                let nil_type_id = program.register_type(Type::nil());
                 Compiler::compile(
                     ast,
                     &quiver_compiler::compiler::Bindings::default(),
                     &mut module_cache,
                     &resolver,
                     &mut program,
-                    quiver_core::types::NIL, // parameter_type_id
+                    nil_type_id, // parameter_type_id
                     &HashMap::new(),
                     &builtins,
                     None, // no semantic recorder for the CLI
@@ -630,8 +634,11 @@ fn execute_bytecode_with_environment(
                     std::process::exit(1);
                 }
 
-                // Print result unless quiet or OK/NIL
-                if !quiet && !value.is_ok() && !value.is_nil() {
+                // Print the result. Nil already returned above, so this prints every
+                // value the program can answer with — `Ok` included, since a program
+                // whose last step is a successful match has `Ok` as its result and
+                // printing nothing reads as "no output" rather than "matched".
+                if !quiet {
                     println!("{}", environment.format_value(&value));
                 }
 

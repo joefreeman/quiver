@@ -284,6 +284,23 @@ fn test_json_dialect_unifies_with_module_type() {
 }
 
 #[test]
+fn test_json_dialect_unifies_when_composites_alternate() {
+    // `'%json`'s `Array` and `Object` members hold their `^` at different depths (an object's
+    // sits one tuple deeper, inside the `[key, value]` pair), so a document that alternates
+    // between them exercises cycle resolution across members. It used to be rejected —
+    // object-in-object and array-in-array were fine, but either inside the other was not.
+    quiver()
+        .evaluate(r#"%json{ { "a": [1, 2] } } ~> %json.stringify"#)
+        .expect(r#""{\"a\":[1,2]}""#);
+    quiver()
+        .evaluate(r#"%json{ [{ "a": 1 }] } ~> %json.stringify"#)
+        .expect(r#""[{\"a\":1}]""#);
+    quiver()
+        .evaluate(r#"%json{ { "a": [1, { "b": [2, 3] }] } } ~> %json.stringify"#)
+        .expect(r#""{\"a\":[1,{\"b\":[2,3]}]}""#);
+}
+
+#[test]
 fn test_num_dialect_precedence() {
     quiver().evaluate("%num{ 1 + 2 * 3 }").expect("7");
 }

@@ -12,7 +12,7 @@ use quiver_compiler::recorder::Recorder;
 use quiver_core::builtins::{BuiltinRegistry, core_modules};
 use quiver_core::format::format_type_by_id;
 use quiver_core::program::Program;
-use quiver_core::types::{NIL, Type, TypeLookup};
+use quiver_core::types::{Type, TypeLookup};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tower_lsp::lsp_types::{Diagnostic, DocumentSymbol};
@@ -81,13 +81,16 @@ pub fn analyze(text: &str, index: &LineIndex, resolver: &dyn ModuleResolver) -> 
     let mut program = Program::new();
     let mut module_cache = ModuleCache::new();
     let mut recorder = Recorder::default();
+    // A *type* id, not the nil tuple's id: passing `types::NIL` would type the top-level
+    // parameter as whatever type happened to land at id 0.
+    let nil_type_id = program.register_type(Type::nil());
     let result = Compiler::compile(
         ast,
         &quiver_compiler::compiler::Bindings::default(),
         &mut module_cache,
         resolver,
         &mut program,
-        NIL,
+        nil_type_id,
         &process_types,
         builtins(),
         Some(&mut recorder),
@@ -152,6 +155,17 @@ mod tests {
     fn valid_program_has_no_diagnostics() {
         // A program that both parses and typechecks: integer add.
         assert!(diagnostics("[1, 2] ~> __integer_add__").is_empty());
+    }
+
+    #[test]
+    fn a_top_level_step_starts_from_a_nil_block_value() {
+        // Every step of the top-level sequence starts from the program's block value, which
+        // is nil. Passing the nil *tuple* id where the compiler wants a *type* id typed that
+        // value as whatever type landed at id 0 (a fresh `Program` registers none), so any
+        // step reading it — a block whose chain is just an implicit continuation, which is
+        // what a dialect expands to — failed to match. See `quiv`'s entry compilation.
+        assert!(diagnostics("c = { =v }\nc").is_empty());
+        assert!(diagnostics("xs = %list{ 1, 2 }\nxs ~> %list.count").is_empty());
     }
 
     #[test]

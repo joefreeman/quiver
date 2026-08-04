@@ -468,14 +468,30 @@ fn check_type_relation<T: TypeLookup>(
         // When both are cycles with same depth, they refer to the same recursive type
         (Type::Cycle(d1), Type::Cycle(d2)) if d1 == d2 => true,
 
-        // Handle cycles by looking up the type in the stack
+        // Handle cycles by looking up the type in the stack. Following a `^` *re-enters* the
+        // binder it names, so the traversal returns to that binder's own depth rather than
+        // nesting one deeper: the enclosing binders of the referenced type are exactly those
+        // below it on the stack. Truncating to it (the binder is pushed again when the union
+        // arm re-enters it) is what keeps `Cycle(n)` counting the same binders the type was
+        // written against — without it, a `^1` back-edge through a list's own knot shifted
+        // every outer `^` by one per element.
         (Type::Cycle(depth), _) => {
             if type_stack.len() < *depth {
                 return true; // Coinductive reasoning
             }
             let lookup_index = type_stack.len() - *depth;
             if let Some(&stack_id) = type_stack.get(lookup_index) {
-                check_type_relation(stack_id, pattern_id, lookup, mode, assumptions, type_stack)
+                let tail = type_stack.split_off(lookup_index);
+                let result = check_type_relation(
+                    stack_id,
+                    pattern_id,
+                    lookup,
+                    mode,
+                    assumptions,
+                    type_stack,
+                );
+                type_stack.extend(tail);
+                result
             } else {
                 true
             }
@@ -487,7 +503,11 @@ fn check_type_relation<T: TypeLookup>(
             }
             let lookup_index = type_stack.len() - *depth;
             if let Some(&stack_id) = type_stack.get(lookup_index) {
-                check_type_relation(self_id, stack_id, lookup, mode, assumptions, type_stack)
+                let tail = type_stack.split_off(lookup_index);
+                let result =
+                    check_type_relation(self_id, stack_id, lookup, mode, assumptions, type_stack);
+                type_stack.extend(tail);
+                result
             } else {
                 true
             }
@@ -579,16 +599,19 @@ fn check_type_relation<T: TypeLookup>(
             // recursing without bound.
             assumptions.insert(key);
 
-            let already_on_stack = type_stack.contains(&pattern_id);
-            if !already_on_stack {
-                type_stack.push(pattern_id);
-            }
+            // Push unconditionally, even for a union already on the stack. A `Cycle(n)` is
+            // resolved by counting `n` entries back from the top, so the stack must mirror
+            // the binder nesting of the path taken through the pattern — re-entering the
+            // root union (as a `^` in one member does) is one binder deeper, not the same
+            // one. Skipping the push flattened that path, and a `^` reached through a
+            // *different* member's binder depth then resolved to the wrong ancestor: a JSON
+            // array nested in an object was rejected while an object in an object was not.
+            // Termination is the `assumptions` hypothesis above, not stack dedup.
+            type_stack.push(pattern_id);
             let result = variants.iter().any(|&variant_id| {
                 check_type_relation(self_id, variant_id, lookup, mode, assumptions, type_stack)
             });
-            if !already_on_stack {
-                type_stack.pop();
-            }
+            type_stack.pop();
             result
         }
 
