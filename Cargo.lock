@@ -887,6 +887,7 @@ dependencies = [
  "quiver-core",
  "quiver-environment",
  "quiver-io",
+ "quiver-markdown",
  "rustyline",
  "serde_json",
 ]
@@ -955,6 +956,13 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower-lsp",
+]
+
+[[package]]
+name = "quiver-markdown"
+version = "0.3.0"
+dependencies = [
+ "quiver-compiler",
 ]
 
 [[package]]

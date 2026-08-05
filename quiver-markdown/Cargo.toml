@@ -1,0 +1,7 @@
+[package]
+name = "quiver-markdown"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+quiver-compiler = { path = "../quiver-compiler" }

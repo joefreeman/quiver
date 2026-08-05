@@ -13,6 +13,7 @@ use std::io::{self, IsTerminal, Read};
 
 mod diagnostics;
 mod repl_cli;
+mod test_cli;
 use quiver_cli::native_transport;
 use quiver_cli::spawn_worker;
 use repl_cli::ReplCli;
@@ -107,6 +108,13 @@ enum Commands {
         #[arg(long)]
         check: bool,
     },
+
+    /// Run the Quiver code embedded in a Markdown document, checking its `//=>` assertions.
+    /// Each `##` chapter is one accumulating session, and exits non-zero if any check fails.
+    Test {
+        /// Markdown documents to run.
+        input: Vec<String>,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -128,6 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }) => run_command(input, eval, quiet, profile, release)?,
         Some(Commands::Inspect { input }) => inspect_command(input)?,
         Some(Commands::Format { input, eval, check }) => format_command(input, eval, check)?,
+        Some(Commands::Test { input }) => test_cli::test_command(input)?,
         None => run_repl()?,
     }
 
@@ -172,17 +181,12 @@ fn entry_resolver(input_path: Option<&str>) -> PackageResolver {
 /// Compile source into a Program and a nilary entry function: the program's top level,
 /// followed by a call of the function it evaluates to. The top level thus runs at boot, in
 /// the root process — compilation never executes user code.
-fn compile_and_extract_entry(
-    source: &str,
+pub fn compile_entry(
+    ast: quiver_compiler::ast::Sequence,
     resolver: &dyn ModuleResolver,
     builtins: &quiver_core::builtins::BuiltinRegistry<quiver_io::NativeEffect>,
     options: quiver_compiler::compiler::CompileOptions,
 ) -> Result<(Program, usize), Box<dyn std::error::Error>> {
-    let ast = match parse(source) {
-        Ok(ast) => ast,
-        Err(e) => handle_parse_error(e, source, "input"),
-    };
-
     let mut program = Program::new();
     let mut module_cache = ModuleCache::new();
     // The top level is a sequence, so each step starts from a block value: nil for a
@@ -349,15 +353,16 @@ fn compile_command(
 
     // Compile and extract entry function
     // Note: compile_command allows programs that don't evaluate to a function
+    let parsed = match parse(&source) {
+        Ok(ast) => ast,
+        Err(e) => handle_parse_error(e, &source, &source_id),
+    };
     let (program, entry) =
-        match compile_and_extract_entry(&source, &resolver, &builtins, options.clone()) {
+        match compile_entry(parsed.clone(), &resolver, &builtins, options.clone()) {
             Ok((program, entry)) => (program, Some(entry)),
             Err(_) => {
                 // If it doesn't evaluate to a function, compile without an entry point
-                let ast = match parse(&source) {
-                    Ok(ast) => ast,
-                    Err(e) => handle_parse_error(e, &source, &source_id),
-                };
+                let ast = parsed;
                 let mut program = Program::new();
                 let mut module_cache = ModuleCache::new();
                 let nil_type_id = program.register_type(Type::nil());
@@ -545,7 +550,11 @@ fn compile_execute(
     };
 
     // Compile and extract entry function (this will error if not a function)
-    let (program, entry) = compile_and_extract_entry(source, &resolver, &builtins, options)?;
+    let ast = match parse(source) {
+        Ok(ast) => ast,
+        Err(e) => handle_parse_error(e, source, &options.source_name),
+    };
+    let (program, entry) = compile_entry(ast, &resolver, &builtins, options)?;
 
     // Convert to bytecode
     let bytecode = program.to_bytecode_optimized(entry);
