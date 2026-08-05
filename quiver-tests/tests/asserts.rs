@@ -11,7 +11,7 @@ use common::*;
 fn test_assertion_passes_and_value_flows() {
     quiver().debug().evaluate("5 //=> 5").expect("5");
     // A binding step's value is its match verdict.
-    quiver().debug().evaluate("x = 5 //=> Ok; x").expect("5");
+    quiver().debug().evaluate("x = 5 //=> Ok\nx").expect("5");
 }
 
 #[test]
@@ -75,12 +75,12 @@ fn test_nil_is_assertable_and_still_short_circuits() {
     // The assertion observes: a passing `//=> []` does not turn the nil step into Ok.
     quiver()
         .debug()
-        .evaluate("{ | [] //=> []; Unreached | Reached }")
+        .evaluate("{ | [] //=> []\nUnreached | Reached }")
         .expect("Reached");
     // A chain-final match's verdict is the step's value, so its failure is assertable.
     quiver()
         .debug()
-        .evaluate("{ | 42 ~> =41 //=> []; Unreached | Reached }")
+        .evaluate("{ | 42 ~> =41 //=> []\nUnreached | Reached }")
         .expect("Reached");
 }
 
@@ -89,7 +89,7 @@ fn test_pattern_vocabulary() {
     // Pins, types, tuples, and alternations all assert; none bind.
     quiver()
         .debug()
-        .evaluate("y = 2; 2 //=> &y; Done")
+        .evaluate("y = 2; 2 //=> &y\nDone")
         .expect("Done");
     quiver().debug().evaluate("5 //=> 'int").expect("5");
     quiver()
@@ -164,13 +164,13 @@ fn test_stacked_assertions_each_fire() {
 fn test_opening_assertion_observes_the_block_input() {
     quiver()
         .debug()
-        .evaluate("5 ~> { //=> 5; Ok }")
+        .evaluate("5 ~> { //=> 5\nOk }")
         .expect("Ok");
     // The empty chain's value is the input, so it is also the step's value.
-    quiver().debug().evaluate("5 ~> { //=> 5 }").expect("5");
+    quiver().debug().evaluate("5 ~> { //=> 5\n}").expect("5");
     quiver()
         .debug()
-        .evaluate("f = #'int { //=> 5; $ }; f 6")
+        .evaluate("f = #\'int { //=> 5\n$ }; f 6")
         .expect_runtime_error(quiver_core::error::Error::Panic(
             "Assertion '5' failed at test:1:13".to_string(),
         ));
@@ -182,7 +182,7 @@ fn test_opening_assertion_on_nil_input_still_gates() {
     // sequence, assertion verdict notwithstanding.
     quiver()
         .debug()
-        .evaluate("{ | //=> []; Unreached | Reached }")
+        .evaluate("{ | //=> []\nUnreached | Reached }")
         .expect("Reached");
 }
 
@@ -192,7 +192,7 @@ fn test_assertion_inside_stripped_block_still_fires() {
     // must keep it firing.
     quiver()
         .debug()
-        .evaluate("{ 5 //=> 6 }")
+        .evaluate("{ 5 //=> 6\n}")
         .expect_runtime_error(quiver_core::error::Error::Panic(
             "Assertion '6' failed at test:1:5".to_string(),
         ));

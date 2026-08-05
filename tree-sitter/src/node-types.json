@@ -210,6 +210,128 @@
     }
   },
   {
+    "type": "assertion",
+    "named": true,
+    "fields": {
+      "pattern": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "\n",
+            "named": false
+          },
+          {
+            "type": "(",
+            "named": false
+          },
+          {
+            "type": ")",
+            "named": false
+          },
+          {
+            "type": "binary",
+            "named": true
+          },
+          {
+            "type": "cycle_type",
+            "named": true
+          },
+          {
+            "type": "function_type",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "module_type",
+            "named": true
+          },
+          {
+            "type": "multiline_string",
+            "named": true
+          },
+          {
+            "type": "partial_type",
+            "named": true
+          },
+          {
+            "type": "pattern_ascription",
+            "named": true
+          },
+          {
+            "type": "pattern_or",
+            "named": true
+          },
+          {
+            "type": "pattern_partial",
+            "named": true
+          },
+          {
+            "type": "pattern_pin",
+            "named": true
+          },
+          {
+            "type": "pattern_tuple",
+            "named": true
+          },
+          {
+            "type": "placeholder",
+            "named": true
+          },
+          {
+            "type": "process_type",
+            "named": true
+          },
+          {
+            "type": "resource_type",
+            "named": true
+          },
+          {
+            "type": "self_default_type",
+            "named": true
+          },
+          {
+            "type": "star",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "union_type",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "assertion_note",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "bind_match",
     "named": true,
     "fields": {},
@@ -423,6 +545,10 @@
         },
         {
           "type": "application",
+          "named": true
+        },
+        {
+          "type": "assertion",
           "named": true
         },
         {
@@ -2112,6 +2238,10 @@
       "required": true,
       "types": [
         {
+          "type": "assertion",
+          "named": true
+        },
+        {
           "type": "chain",
           "named": true
         },
@@ -2830,6 +2960,10 @@
     "named": false
   },
   {
+    "type": "//=>",
+    "named": false
+  },
+  {
     "type": ":",
     "named": false
   },
@@ -2883,6 +3017,10 @@
   },
   {
     "type": "annotation_name",
+    "named": true
+  },
+  {
+    "type": "assertion_note",
     "named": true
   },
   {

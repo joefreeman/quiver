@@ -382,26 +382,22 @@ fn wrap_breaking_body(sequence: &Sequence, body: Doc, multi_branch: bool) -> Doc
 /// block, tuple, or function) is kept attached to the preceding terms and allowed to break
 /// internally, rather than forcing the whole chain onto `~>` lines.
 /// Render a step-final `//=> P` assertion: the canonical pattern, plus any prose note three
-/// spaces off. A note runs to the end of the line, so — like a trailing comment — a trailing
-/// assertion's note is deferred to the line's end and forces the enclosing construct to break.
-/// An assertion rendered at the start of its line (`bare`) keeps its note in place — the line
-/// is its own — but still forces the break, so a closing `}` never lands after the note to be
-/// swallowed by it. Without a note the assertion is plain text, and a same-line `;` or `}`
-/// after it parses fine.
+/// spaces off. An assertion terminates its line like a comment, so every form forces the
+/// enclosing construct to break — a closing `}` must never land after one. A trailing
+/// assertion with a note is additionally deferred to the line's end via `line_suffix`, like
+/// the trailing comment it resembles; an assertion rendered at the start of its line (`bare`)
+/// keeps its text in place — the line is its own.
 fn assertion_doc(assertion: &Assertion, bare: bool) -> Doc {
     let text = match &assertion.note {
         Some(note) => format!("//=> {}   {}", render_match(&assertion.pattern), note),
         None => format!("//=> {}", render_match(&assertion.pattern)),
     };
-    match (&assertion.note, bare) {
-        (Some(_), false) => pretty::concat(vec![
-            pretty::line_suffix(pretty::text(format!(" {text}"))),
-            pretty::break_parent(),
-        ]),
-        (Some(_), true) => pretty::concat(vec![pretty::text(text), pretty::break_parent()]),
-        (None, false) => pretty::text(format!(" {text}")),
-        (None, true) => pretty::text(text),
-    }
+    let text = if bare { text } else { format!(" {text}") };
+    let doc = match (&assertion.note, bare) {
+        (Some(_), false) => pretty::line_suffix(pretty::text(text)),
+        _ => pretty::text(text),
+    };
+    pretty::concat(vec![doc, pretty::break_parent()])
 }
 
 fn chain_doc(trivia: &Trivia, chain: &Chain) -> Doc {
@@ -1860,14 +1856,12 @@ mod tests {
 
     #[test]
     fn assertion_only_steps_render_bare() {
-        // An opening assertion is a step with no chain: nothing precedes the marker.
-        assert_idempotent("f = #'int { //=> 5; $ }\nf 5\n", "flat opening assertion");
+        // An opening assertion is a step with no chain: nothing precedes the marker. The
+        // assertion terminates its line, so the enclosing block never flattens around it.
         assert_idempotent(
             "f = #'int {\n  //=> 5\n  $ ~> g\n}\nf 5\n",
-            "broken opening assertion",
+            "opening assertion",
         );
-        // A note runs to the end of the line, so a noted opening assertion may never
-        // flatten — `}` after the note would be swallowed by it.
         assert_formats(
             "f = #'int {\n  //=> 5   the note\n  $\n}\n",
             "f = #'int {\n  //=> 5   the note\n  $\n}\n",
@@ -1876,14 +1870,14 @@ mod tests {
 
     #[test]
     fn assertion_note_and_trailing_comment_survive() {
-        // The note is preserved three spaces off; a trailing comment stays after it.
+        // The note is preserved three spaces off.
         assert_idempotent("x = 5 //=> Ok\nx //=> 5   the note\n", "assertion note");
         assert_idempotent(
-            "f = #'int { $ //=> 'int }\nf 3 //=> 3\n",
+            "f = #'int {\n  $ //=> 'int\n}\nf 3 //=> 3\n",
             "assertion in body",
         );
         // A redundant block whose body asserts is kept, not spliced.
-        assert_idempotent("{ 5 //=> 6 }\n", "assertion keeps its block");
+        assert_idempotent("{\n  5 //=> 6\n}\n", "assertion keeps its block");
     }
 
     #[test]

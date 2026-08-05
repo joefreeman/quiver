@@ -1,0 +1,148 @@
+==================
+trailing assertion
+==================
+
+5 ~> double //=> 10
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (integer)
+      (access
+        source: (identifier))
+      (assertion
+        pattern: (integer)))))
+
+==================
+assertion inside a block
+==================
+
+#{
+  %list{ 1, 2, 3 } ~> sum [~] //=> 6
+}
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (function
+        (block
+          (branch
+            (sequence
+              (chain
+                (dialect
+                  (import
+                    (identifier))
+                  (dialect_content))
+                (application
+                  (access
+                    (identifier))
+                  (tuple
+                    (chain
+                      (access
+                        (ripple)))))
+                (assertion
+                  (integer))))))))))
+
+==================
+stacked leading assertions
+==================
+
+double 5
+//=> 10
+//=> ('int)
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (application
+        function: (access
+          source: (identifier))
+        argument: (integer)))
+    (assertion
+      pattern: (integer))
+    (assertion
+      pattern: (type_identifier
+        name: (type_name)))))
+
+==================
+assertion on a binding with a prose note
+==================
+
+x = double 3 //=> Ok   a binding step's value is its verdict
+
+---
+
+(source_file
+  (sequence
+    (chain
+      binding: (identifier)
+      (application
+        function: (access
+          source: (identifier))
+        argument: (integer))
+      (assertion
+        pattern: (pattern_tuple
+          name: (tuple_name))
+        (assertion_note)))))
+
+==================
+assertion at the start of a block
+==================
+
+double = #'int {
+  //=> ('int)
+  %num.mul [~, 2]
+}
+
+---
+
+(source_file
+  (sequence
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (type_identifier
+          name: (type_name))
+        (block
+          (branch
+            (sequence
+              (assertion
+                pattern: (type_identifier
+                  name: (type_name)))
+              (chain
+                (application
+                  function: (access
+                    source: (import
+                      (identifier))
+                    field: (identifier))
+                  argument: (tuple
+                    (chain
+                      (access
+                        source: (ripple)))
+                    (chain
+                      (integer))))))))))))
+
+==================
+comments that are not assertions
+==================
+
+// => an arrow in a comment
+//=ribbon
+//=
+5
+
+---
+
+(source_file
+  (comment)
+  (comment)
+  (comment)
+  (sequence
+    (chain
+      (integer))))

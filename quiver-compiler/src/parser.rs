@@ -73,6 +73,7 @@ pub enum ErrorKind {
     StepComma,
     MissingChainArrow,
     AssertionOnAlias,
+    AssertionNotLineFinal,
 
     // Generic parser errors
     ParseError(String),
@@ -105,6 +106,9 @@ impl std::fmt::Display for ErrorKind {
             }
             ErrorKind::AssertionOnAlias => {
                 write!(f, "A '//=>' assertion cannot attach to a type alias")
+            }
+            ErrorKind::AssertionNotLineFinal => {
+                write!(f, "A '//=>' assertion must end its line")
             }
 
             ErrorKind::ParseError(msg) => write!(f, "Parse error: {}", msg),
@@ -142,6 +146,9 @@ impl ErrorKind {
             }
             ErrorKind::AssertionOnAlias => {
                 "An assertion observes a step's value, and an alias declares only a type; attach the '//=>' to a value step"
+            }
+            ErrorKind::AssertionNotLineFinal => {
+                "An assertion runs to the end of its line, like a comment; move code after it to the next line"
             }
             ErrorKind::HexMalformed(_) => {
                 "Binary literals must contain only hexadecimal digits: 0-9, a-f, A-F"
@@ -286,6 +293,11 @@ pub fn parse(source: &str) -> Result<Sequence, Error> {
                     // failure with the (otherwise unused) `Not` code.
                     if is_failure && e.code == nom::error::ErrorKind::Not {
                         return Err(Error::new(ErrorKind::AssertionOnAlias, span));
+                    }
+                    // `assertion` smuggles code following an assertion on its line out as a
+                    // hard failure with the (otherwise unused) `CrLf` code.
+                    if is_failure && e.code == nom::error::ErrorKind::CrLf {
+                        return Err(Error::new(ErrorKind::AssertionNotLineFinal, span));
                     }
 
                     let kind = match e.code {
@@ -2957,7 +2969,9 @@ fn sequence_boundary_cut(input: Span) -> IResult<Span, ()> {
 /// A step-final assertion: `//=> P`, with an optional prose note separated from the pattern by
 /// three or more spaces (the note runs to the end of the line). The pattern is ordinary match
 /// grammar; once the marker is seen, a malformed pattern is a hard error rather than a
-/// backtrack, since the text can no longer be anything else.
+/// backtrack, since the text can no longer be anything else. Like a comment, the assertion
+/// terminates its line: code after the pattern is a hard error (smuggled out with the
+/// otherwise-unused `CrLf` code, which `parse` maps to `AssertionNotLineFinal`).
 fn assertion(input: Span) -> IResult<Span, Assertion> {
     let start = input;
     let (input, _) = tag("//=>")(input)?;
@@ -2970,6 +2984,13 @@ fn assertion(input: Span) -> IResult<Span, Assertion> {
         ),
         |(_, note): (_, Span)| note.fragment().trim_end().to_string(),
     ))(input)?;
+    let (input, _) = space0(input)?;
+    if !input.fragment().is_empty() && !input.fragment().starts_with(['\n', '\r']) {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::CrLf,
+        )));
+    }
     Ok((
         input,
         Assertion {
@@ -3275,12 +3296,32 @@ mod tests {
         // An alias produces no value to assert on — trailing or on the following line; the
         // error points at the `//=>`.
         for (source, line, column) in [
-            ("'t = 'int //=> Ok; 5", 1, 11),
+            ("'t = 'int //=> Ok", 1, 11),
             ("'t = 'int\n//=> Ok\n5", 2, 1),
         ] {
             let err = parse(source).expect_err(source);
             assert!(
                 matches!(err.kind, ErrorKind::AssertionOnAlias),
+                "for {source}: {:?}",
+                err.kind
+            );
+            let span = err.span.expect(source);
+            assert_eq!((span.line, span.column), (line, column), "for {source}");
+        }
+    }
+
+    #[test]
+    fn test_assertion_must_end_its_line() {
+        // An assertion terminates its line, like the comment it resembles: code after the
+        // pattern (or note) is a pointed error at the offending character.
+        for (source, line, column) in [
+            ("5 //=> 5; Ok", 1, 9),
+            ("{ 5 //=> 6 }", 1, 12),
+            ("5 //=> 5 ~> f", 1, 10),
+        ] {
+            let err = parse(source).expect_err(source);
+            assert!(
+                matches!(err.kind, ErrorKind::AssertionNotLineFinal),
                 "for {source}: {:?}",
                 err.kind
             );
@@ -3297,7 +3338,7 @@ mod tests {
             ("5\n//=> 5", 1, 1),
             ("5 //=> 'int\n//=> 5", 1, 2),
             ("5;\n\n// why\n//=> 5", 1, 1),
-            ("//=> []; 5", 0, 1),
+            ("//=> []\n5", 0, 1),
         ] {
             let program = parse(source).unwrap_or_else(|e| panic!("{source}: {e:?}"));
             let Step::Chain(chain) = &program.steps[0] else {

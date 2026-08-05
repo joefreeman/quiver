@@ -125,7 +125,10 @@ conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
 // this connection with it, and the socket is closed by the process ending either way.
 conn = #[\TcpSocket, 'handler, ('tls | [])] {
   =[sock, h, t]
-  { t ~> =[cert: c, key: k] => %tls.accept [socket: sock, cert: c, key: k] | Ok }
+  {
+    | t ~> =[cert: c, key: k] => %tls.accept [socket: sock, cert: c, key: k]
+    | Ok
+  }
   conn_loop [sock, &h, 0x]
 }
 

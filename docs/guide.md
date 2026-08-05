@@ -1191,7 +1191,8 @@ x                      //=> 6
 
 The value flows on unchanged — an asserted nil still ends its sequence — and a run of
 three or more spaces after the pattern starts a prose note, ignored to the end of the
-line. The pattern may not bind, since an assertion only observes; pins and type tests
+line. An assertion terminates its line, as the comment it resembles would: code may not
+follow it. The pattern may not bind, since an assertion only observes; pins and type tests
 cover most of what a binder would. A pattern that could never match the step's type is a
 compile error, so a stale expectation fails the build even in release mode, where the
 check itself costs nothing.

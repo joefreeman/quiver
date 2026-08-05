@@ -5,6 +5,11 @@
 
 (comment) @comment
 
+; A step assertion's `//=>` marker and prose note read as comment; the pattern between
+; them is real, checked syntax and keeps its ordinary highlighting.
+(assertion "//=>" @comment)
+(assertion_note) @comment
+
 ; ------------------------------------------------------------------- literals
 
 (integer) @number
