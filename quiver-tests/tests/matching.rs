@@ -671,15 +671,20 @@ fn test_as_pattern_with_union_type() {
 // test. This matches the spec's destructuring examples.
 
 #[test]
-fn test_unnamed_pattern_destructures_named_value() {
+fn test_unnamed_pattern_rejects_named_value() {
     quiver()
         .evaluate("[x: a, y: b] = Point[x: 10, y: 20]; a")
+        .expect("[]");
+    // A partial pattern destructures regardless of the name.
+    quiver()
+        .evaluate("(x, y) = Point[x: 10, y: 20]; x")
         .expect("10");
 }
 
 #[test]
-fn test_unnamed_positional_pattern_destructures_named_value() {
-    quiver().evaluate("[x, _] = Point[10, 20]; x").expect("10");
+fn test_unnamed_positional_pattern_rejects_named_value() {
+    quiver().evaluate("[x, _] = Point[10, 20]; x").expect("[]");
+    quiver().evaluate("[x, _] = [10, 20]; x").expect("10");
 }
 
 #[test]
@@ -690,12 +695,23 @@ fn test_named_pattern_still_requires_name() {
 }
 
 #[test]
-fn test_unnamed_pattern_matches_across_union_members() {
+fn test_unnamed_pattern_rejects_named_union_members() {
+    // No member is unnamed, so the pattern matches neither; an alternation
+    // states the names and destructures both.
     quiver()
         .evaluate(
             r#"
             'shape = Point['int, 'int] | Size['int, 'int]
-            f = #'shape { =[a, _]; a }
+            f = #'shape { | =[a, _]; a | NoMatch }
+            [f Point[1, 2], f Size[3, 4]]
+            "#,
+        )
+        .expect("[NoMatch, NoMatch]");
+    quiver()
+        .evaluate(
+            r#"
+            'shape = Point['int, 'int] | Size['int, 'int]
+            f = #'shape { =(Point[a, _] | Size[a, _]); a }
             [f Point[1, 2], f Size[3, 4]]
             "#,
         )

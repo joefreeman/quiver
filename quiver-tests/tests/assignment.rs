@@ -22,8 +22,9 @@ fn test_tuple_destructuring() {
 #[test]
 fn test_named_field_assignment() {
     quiver().evaluate("A[a: 1] ~> =A[a: a]; a").expect("1");
-    // An unnamed tuple pattern with fields doesn't constrain the value's name.
-    quiver().evaluate("A[a: 1] ~> =[a: a]; a").expect("1");
+    // An unnamed tuple pattern matches only an unnamed value; a partial takes any name.
+    quiver().evaluate("A[a: 1] ~> =[a: a]; a").expect("[]");
+    quiver().evaluate("A[a: 1] ~> =(a); a").expect("1");
     quiver()
         .evaluate("A[a: 1] ~> =A[a: a, b: b]; a")
         .expect("[]");

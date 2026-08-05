@@ -955,12 +955,12 @@ fn check_match_tuple_match(
         .lookup_tuple(tuple_id)
         .ok_or(Error::TupleNotInRegistry { tuple_id })?;
 
-    // A stated tuple name must match. An unnamed pattern with fields destructures any
-    // tuple name (state the name to require it) — but the empty unnamed pattern `[]` is
-    // the nil literal, an exact test, so it never matches a named empty tuple.
+    // Names must correspond exactly: a stated tuple name requires that name, and an
+    // unnamed pattern requires an unnamed value — destructuring a named tuple without
+    // stating its name is a partial or star pattern's job (`(x, y)`, `*`).
     let name_compatible = match &tuple.name {
         Some(name) => tuple_info.name.as_ref() == Some(name),
-        None => !tuple.fields.is_empty() || tuple_info.name.is_none(),
+        None => tuple_info.name.is_none(),
     };
     if !name_compatible || tuple.fields.len() != tuple_info.fields.len() {
         return Ok(None);
