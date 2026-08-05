@@ -265,8 +265,13 @@ fn test_tls_accept_serves_an_in_language_client() {
               %tcp.close c
               Done
             }
-            { ![50] | Ok }
-            %tcp.connect [0x7f000001, 4381] ~> =(\TcpSocket)s
+            // The server races the connect: retry (bounded) until its listener is up.
+            connect = #'int {
+              | %tcp.connect [0x7f000001, 4381] ~> =(\TcpSocket)c => c
+              | =0 => []
+              | { ![50] | Ok }; n = %num.sub [$, 1]; ^ n
+            }
+            connect 20 ~> =(\TcpSocket)s
             %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
             %tcp.write [s, "ping" ~> .0]
             %tcp.read [s, 4] ~> =('bin)reply
@@ -303,8 +308,14 @@ fn test_https_serves_via_http_server() {
               [port: 4382, handler: &handler, tls: [cert: __CERT__, key: __KEY__]]
               ~> %http/server.serve
             }
-            { ![100] | Ok }
-            %tls.connect [host: "localhost", port: 4382, roots: __ROOTS__] ~> =(\TcpSocket)s
+            // The server races the connect: retry (bounded) until it accepts and shakes
+            // hands — a refused or half-up connection answers nil, and we go again.
+            connect = #'int {
+              | %tls.connect [host: "localhost", port: 4382, roots: __ROOTS__] ~> =(\TcpSocket)c => c
+              | =0 => []
+              | { ![50] | Ok }; n = %num.sub [$, 1]; ^ n
+            }
+            connect 20 ~> =(\TcpSocket)s
             %tcp.write [s, "GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n" ~> .0]
             read_all [s, 0x] ~> =('bin)resp
             [
