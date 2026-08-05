@@ -1,6 +1,6 @@
 <div align="center">
     <img src="logo.svg" alt="Quiver" width="300" />
-    <p><em>A statically-typed functional programming language with structural typing, pattern matching, lightweight processes, typed message passing, and an argument-first syntax.</em></p>
+    <p><em>A statically-typed functional programming language with structural typing, pattern matching, lightweight processes, typed message passing, and a pipeline syntax.</em></p>
     <a href="https://quiver.run">Try Quiver in the online REPL</a>
     <br />
     <br />
@@ -13,15 +13,13 @@
 'list<'t> = Nil | Cons['t, ^]
 
 // Compute the sum of a list using tail recursion
-sum_ = #['list<'int>, 'int] {
+sum = #['list<'int>, (acc): 'int = 0] {
   | =[Nil, acc] => acc
-  | =[Cons[head, tail], acc] => [head, acc] %num.add [tail, ~] ^
+  | =[Cons[head, tail], acc] => %num.add [head, acc] ~> ^ [tail, ~]
 }
 
-sum = #'list<'int> { [~, 0] sum_ }
-
 // Build and sum a list
-Cons[1, Cons[2, Cons[3, Nil]]] sum  // 6
+#{ %list{ 1, 2, 3 } ~> sum [~] }  // 6
 ```
 
 > Run the example above in the REPL (`quiv repl`, or at [quiver.run](https://quiver.run)), or run the executable version in [examples/sum.qv](examples/sum.qv) with `quiv run examples/sum.qv`.
@@ -30,14 +28,14 @@ Cons[1, Cons[2, Cons[3, Nil]]] sum  // 6
 
 ## Language features
 
-- **Argument-first syntax**: Data flows left-to-right through transformations
+- **Pipeline syntax**: Data flows left-to-right through `~>`-separated transformations
 - **Structural typing**: Types are defined by their structure, not their names
 - **Pattern matching**: Destructure and branch on values with expressive pattern syntax
 - **Union types**: Model complex data with algebraic types
 - **Tail recursion**: Efficient recursive algorithms via explicit tail-calls
 - **Concurrent processes**: Erlang-inspired lightweight processes with typed message passing
 
-See [docs/spec.md](docs/spec.md) for the complete language specification.
+See [docs/guide.md](docs/guide.md) for the language guide.
 
 ## Getting started
 
