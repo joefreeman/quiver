@@ -196,6 +196,7 @@ pub fn compile_entry(
     let compilation_result = Compiler::compile(
         ast,
         &quiver_compiler::compiler::Bindings::default(),
+        Default::default(),
         &mut module_cache,
         resolver,
         &mut program,
@@ -369,6 +370,7 @@ fn compile_command(
                 Compiler::compile(
                     ast,
                     &quiver_compiler::compiler::Bindings::default(),
+                    Default::default(),
                     &mut module_cache,
                     &resolver,
                     &mut program,

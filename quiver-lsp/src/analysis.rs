@@ -87,6 +87,7 @@ pub fn analyze(text: &str, index: &LineIndex, resolver: &dyn ModuleResolver) -> 
     let result = Compiler::compile(
         ast,
         &quiver_compiler::compiler::Bindings::default(),
+        Default::default(),
         &mut module_cache,
         resolver,
         &mut program,

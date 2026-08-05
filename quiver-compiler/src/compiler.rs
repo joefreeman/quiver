@@ -541,6 +541,29 @@ impl std::fmt::Display for LocatedError {
     }
 }
 
+/// Compiler knowledge that outlives one compilation: what has been learned about values
+/// already compiled, keyed by ids in the `Program`'s id space.
+///
+/// A file is one compilation, so these never need to leave it. A REPL entry is *its own*
+/// compilation over a persistent program, and a function defined in an earlier entry is
+/// reachable by name in a later one — so without carrying these, that function is compiled as
+/// though nothing were known about it: an explicit instantiation (`f<'int>`) fails, and a
+/// dispatch function's call-site result widens to its whole union. Imported modules carry the
+/// same tables through the module cache, which is why only *entry-level* definitions are
+/// affected.
+///
+/// Their keys stay unique across entries because the uniquifying suffix is minted from
+/// `program.type_count()` (see `mint_type_param_suffix`), and the program persists.
+#[derive(Debug, Clone, Default)]
+pub struct SessionTables {
+    /// Per-definition dispatch tables, keyed by function index.
+    pub fn_case_tables: HashMap<usize, Vec<(usize, usize)>>,
+    /// Callable type id → the function index whose dispatch table to use.
+    pub case_tables: HashMap<usize, usize>,
+    /// Callable type id → its declared type parameters, in declaration order.
+    pub callable_type_params: HashMap<usize, Vec<String>>,
+}
+
 /// The products of a successful compilation. The caller-owned `program`, `module_cache`, and
 /// (optional) semantic recorder are borrowed by [`Compiler::compile`] and mutated in place,
 /// so they are not returned here — only the genuine outputs are.
@@ -549,6 +572,9 @@ pub struct Compiled {
     pub result_type: usize,
     pub receive_type: usize,
     pub bindings: Bindings,
+    /// What this compilation learned, for a caller that will compile again against the same
+    /// program (the REPL). A one-shot caller drops it.
+    pub tables: SessionTables,
 }
 
 /// Compilation mode options.
@@ -914,6 +940,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     pub fn compile(
         ast_program: ast::Sequence,
         existing_bindings: &Bindings,
+        // What earlier compilations against this program learned; `Default::default()` for a
+        // one-shot compile.
+        tables: SessionTables,
         module_cache: &'a mut ModuleCache,
         resolver: &'a dyn ModuleResolver,
         program: &'a mut Program,
@@ -940,9 +969,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             current_states: None,
             collected_dispatch: None,
             last_uncovered: None,
-            fn_case_tables: HashMap::new(),
-            case_tables: HashMap::new(),
-            callable_type_params: HashMap::new(),
+            fn_case_tables: tables.fn_case_tables,
+            case_tables: tables.case_tables,
+            callable_type_params: tables.callable_type_params,
             current_span: None,
             type_param_suffix: None,
             suffix_scopes: Vec::new(),
@@ -1066,6 +1095,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // when calling functions that have receive types
             receive_type: compiler.current_receive_type_id,
             bindings,
+            tables: SessionTables {
+                fn_case_tables: compiler.fn_case_tables,
+                case_tables: compiler.case_tables,
+                callable_type_params: compiler.callable_type_params,
+            },
         })
     }
 

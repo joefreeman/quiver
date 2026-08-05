@@ -467,3 +467,19 @@ fn test_enclosing_rigid_variable_survives_inner_calls() {
         )
         .expect("43");
 }
+
+#[test]
+fn test_explicit_instantiation_across_repl_entries() {
+    // The declared type parameters of a generic defined in an earlier REPL entry must still be
+    // known when a later one instantiates it explicitly; they are recorded per compilation, so
+    // the session has to carry them (this was `TypeArgumentsNotApplicable`).
+    quiver()
+        .evaluate("id = #<'t>'t { $ }; Ok")
+        .then_evaluate("id<'int> 42")
+        .expect("42");
+
+    quiver()
+        .evaluate("id = #<'t>'t { $ }; Ok")
+        .then_evaluate("f = &id<'int>; f 7")
+        .expect("7");
+}

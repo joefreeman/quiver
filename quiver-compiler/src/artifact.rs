@@ -355,6 +355,7 @@ pub fn warm_std_store<E: Effect>(
     Compiler::compile(
         parsed,
         &Bindings::default(),
+        Default::default(),
         &mut module_cache,
         &resolver,
         &mut program,

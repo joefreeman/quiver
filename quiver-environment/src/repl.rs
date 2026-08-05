@@ -2,7 +2,7 @@ use crate::environment::{Environment, EnvironmentError};
 use quiver_compiler::Compiler;
 use quiver_compiler::ModuleResolver;
 use quiver_compiler::compiler::{
-    Bindings, ModuleCache, Scope, ScopeKind, resolve_type_alias_for_display,
+    Bindings, ModuleCache, Scope, ScopeKind, SessionTables, resolve_type_alias_for_display,
 };
 use quiver_core::bytecode::Function;
 use quiver_core::effects::Effect;
@@ -35,8 +35,13 @@ pub struct Repl<E: Effect> {
     repl_process_id: Option<ProcessId>,
     program: Program, // Accumulated program state across evaluations (needed for module caching)
     bindings: Bindings, // variables and type aliases persisted across sessions
+    /// What earlier entries taught the compiler about the values they defined. Persisted for
+    /// the same reason `bindings` is: an entry is its own compilation, so without this a
+    /// function defined earlier is recompiled against as if nothing were known about it —
+    /// losing explicit instantiation (`f<'int>`) and dispatch result specialisation.
+    tables: SessionTables,
     module_cache: ModuleCache, // persistent module cache across evaluations
-    last_result_type: Type, // Type of the last evaluated result, for continuations
+    last_result_type: Type,    // Type of the last evaluated result, for continuations
     resolver: Box<dyn ModuleResolver>,
     builtins: quiver_core::builtins::BuiltinRegistry<E>,
     options: quiver_compiler::compiler::CompileOptions,
@@ -55,6 +60,7 @@ impl<E: Effect> Repl<E> {
             repl_process_id: Some(pid),
             program: Program::new(),
             bindings: Bindings::default(),
+            tables: SessionTables::default(),
             module_cache: ModuleCache::new(),
             last_result_type: Type::nil(),
             resolver,
@@ -135,6 +141,9 @@ impl<E: Effect> Repl<E> {
         let result = Compiler::compile(
             parsed,
             &self.bindings,
+            // Cloned, like `program` and `module_cache` above: committed back only on success,
+            // so a failed line cannot pollute the session.
+            self.tables.clone(),
             &mut module_cache,
             self.resolver.as_ref(),
             &mut program,
@@ -159,6 +168,7 @@ impl<E: Effect> Repl<E> {
 
         // Update REPL state
         self.bindings = bindings;
+        self.tables = result.tables;
         self.module_cache = module_cache;
         self.last_result_type = result_type;
 
