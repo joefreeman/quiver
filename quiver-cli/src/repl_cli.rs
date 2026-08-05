@@ -26,6 +26,10 @@ pub struct ReplCli {
     repl: Option<Repl<NativeEffect>>,
     stepping_thread: Option<JoinHandle<()>>,
     shutdown_signal: Arc<AtomicBool>,
+    /// Kept so shutdown can wake the stepping thread. An idle thread parks in
+    /// `WakeSignal::wait`, which blocks on a channel receive, so setting the flag alone never
+    /// returns it — and the join below would hang after `\q`.
+    waker: quiver_cli::native_transport::Waker,
     /// The content-addressed artifact store every REPL session links std (and, in
     /// time, project) modules from — and extracts freshly-compiled modules into.
     /// Attaching it is monotonic (it only affects future imports), so sessions use it
@@ -143,6 +147,7 @@ impl ReplCli {
             repl: None,
             stepping_thread,
             shutdown_signal,
+            waker,
             artifact_store,
         })
     }
@@ -739,8 +744,10 @@ impl ReplCli {
 
 impl Drop for ReplCli {
     fn drop(&mut self) {
-        // Signal the background thread to stop
+        // Signal the background thread to stop, then wake it so it observes the flag: parked in
+        // `WakeSignal::wait`, it is blocked on a receive the flag cannot interrupt.
         self.shutdown_signal.store(true, Ordering::Relaxed);
+        self.waker.wake();
 
         // Wait for the thread to finish
         if let Some(handle) = self.stepping_thread.take() {
