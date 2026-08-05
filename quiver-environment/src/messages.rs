@@ -146,6 +146,12 @@ pub enum Command<E: Effect> {
     /// result and tombstones it, cascading to its own watchers.
     KillProcess { id: ProcessId },
 
+    /// Stop a host-started (persistent) process — the host's session-teardown verb
+    /// (REPL interrupt and reset), which `KillProcess` deliberately refuses. The worker
+    /// clears the persistence flag and terminates the process whether running or
+    /// sleeping; the tombstone's watcher flush tears down its owned subtree.
+    StopProcess { id: ProcessId },
+
     /// Establish the target-side half of a link (`%proc.link`): kill `peer` when
     /// `target` terminates abnormally. An already-crashed target kills `peer`
     /// immediately; a normally-completed one makes this a no-op.

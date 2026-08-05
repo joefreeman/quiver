@@ -26,6 +26,10 @@ pub struct ReplCli {
     repl: Option<Repl<NativeEffect>>,
     stepping_thread: Option<JoinHandle<()>>,
     shutdown_signal: Arc<AtomicBool>,
+    /// Set by Ctrl-C during an evaluation (at the prompt, rustyline's raw mode
+    /// swallows `^C` before it becomes a signal). The evaluation wait polls it and
+    /// answers by stopping the session process; the line loop then resets the session.
+    interrupt: Arc<AtomicBool>,
     /// Kept so shutdown can wake the stepping thread. An idle thread parks in
     /// `WakeSignal::wait`, which blocks on a channel receive, so setting the flag alone never
     /// returns it — and the join below would hang after `\q`.
@@ -87,6 +91,19 @@ impl ReplCli {
         let environment = Arc::new(Mutex::new(environment));
         let shutdown_signal = Arc::new(AtomicBool::new(false));
 
+        // Ctrl-C during an evaluation: the first sets the flag (the evaluation wait
+        // answers it by stopping the session process); a second, with the flag still
+        // set, hard-exits — the escape hatch if the runtime itself is wedged.
+        // Registration order matters: actions run in it, so the conditional shutdown
+        // sees the flag from the *previous* Ctrl-C, not its own.
+        let interrupt = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register_conditional_shutdown(
+            signal_hook::consts::SIGINT,
+            130,
+            Arc::clone(&interrupt),
+        )?;
+        signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&interrupt))?;
+
         // Spawn background thread to step the environment continuously
         let env_clone = Arc::clone(&environment);
         let shutdown_clone = Arc::clone(&shutdown_signal);
@@ -147,6 +164,7 @@ impl ReplCli {
             repl: None,
             stepping_thread,
             shutdown_signal,
+            interrupt,
             waker,
             artifact_store,
         })
@@ -170,6 +188,14 @@ impl ReplCli {
     }
 
     fn reset_repl(&mut self) -> Result<(), ReplError> {
+        // Tear down the outgoing session's process before starting the next: an
+        // abandoned persistent process is a permanent GC root, its heap never
+        // reclaimed and everything it spawned still running. The stop's ownership
+        // cascade takes the whole subtree with it.
+        if let Some(old_pid) = self.repl.as_ref().map(|repl| repl.process_id()) {
+            let _ = self.environment.lock().unwrap().stop_process(old_pid);
+        }
+
         let repl = {
             let mut env = self.environment.lock().unwrap();
             let builtins = crate::build_builtin_registry();
@@ -223,16 +249,30 @@ impl ReplCli {
                             break;
                         }
                     } else {
-                        match self.evaluate(line) {
-                            Ok(result) => self.print(result),
-                            Err(e) => {
-                                let is_runtime_error = matches!(e, ReplError::Runtime(_));
-                                self.print_error(e, line);
-                                if is_runtime_error {
-                                    println!();
-                                    if let Err(e) = self.reset_repl() {
-                                        eprintln!("Fatal: Failed to restart REPL: {}", e);
-                                        break;
+                        self.interrupt.store(false, Ordering::Relaxed);
+                        let outcome = self.evaluate(line);
+                        if self.interrupt.swap(false, Ordering::Relaxed) {
+                            // Ctrl-C is deterministic: however the race with completion
+                            // fell, the session process was stopped (here or by the
+                            // reset below), so report the interruption and restart.
+                            println!("{}", "Interrupted".red());
+                            println!();
+                            if let Err(e) = self.reset_repl() {
+                                eprintln!("Fatal: Failed to restart REPL: {}", e);
+                                break;
+                            }
+                        } else {
+                            match outcome {
+                                Ok(result) => self.print(result),
+                                Err(e) => {
+                                    let is_runtime_error = matches!(e, ReplError::Runtime(_));
+                                    self.print_error(e, line);
+                                    if is_runtime_error {
+                                        println!();
+                                        if let Err(e) = self.reset_repl() {
+                                            eprintln!("Fatal: Failed to restart REPL: {}", e);
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -357,6 +397,32 @@ impl ReplCli {
         loop {
             // The background thread is now stepping, but we still want to
             // step here to ensure progress on this request
+            self.environment.lock().unwrap().step()?;
+
+            match self.environment.lock().unwrap().poll_request(request_id)? {
+                Some(result) => return Ok(result),
+                None => std::thread::sleep(std::time::Duration::from_micros(10)),
+            }
+        }
+    }
+
+    /// Wait for an evaluation result, honouring Ctrl-C: on interrupt, stop the session
+    /// process — host teardown, so everything it spawned dies with it — and keep
+    /// waiting. The pending request then resolves (with the `Killed` error if the stop
+    /// beat the result), and the line loop reads the still-set interrupt flag to report
+    /// the interruption and reset the session.
+    fn wait_for_eval_result(
+        &mut self,
+        request_id: u64,
+        process_id: quiver_core::process::ProcessId,
+    ) -> Result<RequestResult, quiver_environment::EnvironmentError> {
+        let mut stopped = false;
+        loop {
+            if !stopped && self.interrupt.load(Ordering::Relaxed) {
+                self.environment.lock().unwrap().stop_process(process_id)?;
+                stopped = true;
+            }
+
             self.environment.lock().unwrap().step()?;
 
             match self.environment.lock().unwrap().poll_request(request_id)? {
@@ -651,10 +717,11 @@ impl ReplCli {
                 return Ok(None);
             }
         };
+        let repl_pid = self.repl.as_ref().unwrap().process_id();
 
         // Wait for the evaluation result
         match self
-            .wait_for_result(request_id)
+            .wait_for_eval_result(request_id, repl_pid)
             .map_err(ReplError::Environment)?
         {
             RequestResult::Result(Ok(value), _) => {

@@ -601,7 +601,36 @@ impl<E: Effect> Executor<E> {
             }
             _ => return,
         }
+        // A kill lands while the process is parked in a waiting set (or queued for a
+        // slice); no delivery will ever pull it out again, so clear its scheduling
+        // state here. A stale entry would misreport the tombstone as Waiting/Active —
+        // and an expiring select timeout would re-queue the corpse.
+        self.spawning.remove(&pid);
+        self.selecting.remove(&pid);
+        self.effecting.remove(&pid);
+        self.sampling.remove(&pid);
+        self.queue.retain(|&queued| queued != pid);
         self.tombstone(pid);
+    }
+
+    /// Terminate a process on the host's authority — the one sanctioned way to end a
+    /// persistent process, which `kill` deliberately exempts. Clears persistence, then
+    /// terminates: a still-running process is killed (awaiters observe the `Killed`
+    /// crash kind), while a completed, sleeping one keeps its result and is tombstoned
+    /// directly. Either way the tombstone now drops the process's retained state and
+    /// flushes its owned-child watchers, so the teardown cascades through everything it
+    /// spawned. No-op on unknown pids; idempotent.
+    pub fn stop(&mut self, pid: ProcessId) {
+        let Some(process) = self.get_process_mut(pid) else {
+            return;
+        };
+        process.persistent = false;
+        let running = process.result.is_none();
+        if running {
+            self.kill(pid, Error::Killed);
+        } else {
+            self.tombstone(pid);
+        }
     }
 
     /// Drain pending completion notifications: `(watcher, completed pid)` pairs. The

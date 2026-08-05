@@ -278,6 +278,9 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             Command::KillProcess { id } => {
                 self.executor.kill(id, quiver_core::error::Error::Killed);
             }
+            Command::StopProcess { id } => {
+                self.executor.stop(id);
+            }
             Command::LinkProcess { target, peer } => {
                 // The target-side half of a link. An already-terminated target:
                 // crashed or killed → the link fires immediately (tombstones keep the

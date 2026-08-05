@@ -138,6 +138,14 @@ export class Repl {
   evaluate(source: string, callback: EvaluateCallback): void;
 
   /**
+   * Stop this REPL's session process — the host-side interrupt for a hung or runaway
+   * evaluation. A pending evaluate callback then settles with an "Interrupted" error,
+   * and everything the session spawned is torn down with it. The session process is
+   * gone afterwards, so the Repl cannot evaluate again: replace it with a new instance.
+   */
+  interrupt(): void;
+
+  /**
    * Get all variables defined in the REPL
    * @param callback - Callback invoked with the list of variables
    */
@@ -698,10 +706,15 @@ impl Environment {
                 })));
             }
             RequestResult::Result(Err(e), _) => {
-                callback.invoke::<EvaluationResult>(crate::types::Result::err(format!(
-                    "Runtime error: {:?}",
-                    e
-                )));
+                // A `Killed` result can only come from a host stop (`Repl.interrupt`) —
+                // no in-language kill reaches a persistent session process — so report
+                // it as the interruption it is rather than a runtime error.
+                let message = if matches!(e, quiver_core::error::Error::Killed) {
+                    "Interrupted".to_string()
+                } else {
+                    format!("Runtime error: {:?}", e)
+                };
+                callback.invoke::<EvaluationResult>(crate::types::Result::err(message));
             }
             RequestResult::Statuses(statuses) => {
                 let mut processes: Vec<Process> = statuses
@@ -863,6 +876,22 @@ impl Repl {
             self.repl.clone(),
         ));
         wake(&self.pump);
+    }
+
+    /// Stop this REPL's session process — the host-side interrupt for a hung or runaway
+    /// evaluation. A pending evaluate request then resolves through the normal callback
+    /// path (as an "Interrupted" error), and ownership teardown takes everything the
+    /// session spawned. The session process is gone afterwards, so a later evaluate
+    /// fails: replace this Repl with a fresh instance. Idempotent while the process's
+    /// tombstone survives.
+    pub fn interrupt(&mut self) -> std::result::Result<(), JsValue> {
+        let pid = self.repl.borrow().process_id();
+        self.environment
+            .borrow_mut()
+            .stop_process(pid)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        wake(&self.pump);
+        Ok(())
     }
 
     /// Get all variables (synchronous)

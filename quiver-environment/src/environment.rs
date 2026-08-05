@@ -615,6 +615,22 @@ impl<E: Effect> Environment<E> {
         Ok(())
     }
 
+    /// Stop a host-started (persistent) process: the host-side sibling of `%proc.kill`,
+    /// authorised to cross the persistent exemption that protects such processes from
+    /// in-language kills. Frees the resources the process owns, then routes the stop to
+    /// its worker; ownership teardown cascades from there to everything it spawned. A
+    /// pending result request for the process resolves with the `Killed` error.
+    pub fn stop_process(&mut self, pid: ProcessId) -> Result<(), EnvironmentError> {
+        self.cleanup_process_resources(pid);
+        let worker_id = self
+            .process_router
+            .get(&pid)
+            .ok_or(EnvironmentError::ProcessNotFound(pid))?;
+        self.workers[*worker_id]
+            .send(Command::StopProcess { id: pid })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))
+    }
+
     /// Request a process result (async operation)
     /// Stats are included in the response if the executor has profiling enabled.
     /// `keep_locals` is the REPL's keep-set (see [`Command::GetResult`]); pass `None` for
