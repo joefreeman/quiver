@@ -150,6 +150,7 @@ pub fn wrap_expansion(mut holes: Vec<Hole>, expansion: ast::Chain) -> ast::Term 
             RIPPLE_BINDING.to_string(),
             ast::Spanned::default(),
         ))],
+        assertions: Vec::new(),
     };
     let mut chains = vec![binder];
     holes.sort_by(|a, b| a.key.cmp(&b.key));
@@ -157,6 +158,7 @@ pub fn wrap_expansion(mut holes: Vec<Hole>, expansion: ast::Chain) -> ast::Term 
         binding: None,
         binding_span: ast::Spanned::default(),
         span: ast::Spanned::default(),
+        assertions: Vec::new(),
         terms: hole.terms,
     }));
     chains.push(expansion);
@@ -639,6 +641,7 @@ fn term_chain(term: ast::Term) -> ast::Chain {
         binding_span: ast::Spanned::default(),
         span: ast::Spanned::default(),
         terms: vec![term],
+        assertions: Vec::new(),
     }
 }
 

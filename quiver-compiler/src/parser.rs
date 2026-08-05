@@ -3,8 +3,12 @@ use nom::{
     IResult, Slice,
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
-    character::complete::{char, digit1, line_ending, multispace0, multispace1, satisfy, space1},
-    combinator::{map, map_res, not, opt, peek, recognize, success, value as nom_value, verify},
+    character::complete::{
+        char, digit1, line_ending, multispace0, multispace1, satisfy, space0, space1,
+    },
+    combinator::{
+        cut, map, map_res, not, opt, peek, recognize, success, value as nom_value, verify,
+    },
     multi::{many0, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
 };
@@ -68,6 +72,7 @@ pub enum ErrorKind {
     // Sequence errors
     StepComma,
     MissingChainArrow,
+    AssertionOnAlias,
 
     // Generic parser errors
     ParseError(String),
@@ -97,6 +102,9 @@ impl std::fmt::Display for ErrorKind {
             ErrorKind::StepComma => write!(f, "Unexpected ','; use ';' between steps"),
             ErrorKind::MissingChainArrow => {
                 write!(f, "Expected '~>' between chain terms, or ';' between steps")
+            }
+            ErrorKind::AssertionOnAlias => {
+                write!(f, "A '//=>' assertion cannot attach to a type alias")
             }
 
             ErrorKind::ParseError(msg) => write!(f, "Parse error: {}", msg),
@@ -131,6 +139,9 @@ impl ErrorKind {
             }
             ErrorKind::MissingChainArrow => {
                 "Whitespace does not join chain terms: write 'a ~> b' to chain them, or 'a; b' for separate steps"
+            }
+            ErrorKind::AssertionOnAlias => {
+                "An assertion observes a step's value, and an alias declares only a type; attach the '//=>' to a value step"
             }
             ErrorKind::HexMalformed(_) => {
                 "Binary literals must contain only hexadecimal digits: 0-9, a-f, A-F"
@@ -270,6 +281,11 @@ pub fn parse(source: &str) -> Result<Sequence, Error> {
                     // failure with the (otherwise unused) `Space` code.
                     if is_failure && e.code == nom::error::ErrorKind::Space {
                         return Err(Error::new(ErrorKind::MissingChainArrow, span));
+                    }
+                    // `step` smuggles an assertion attached to a type alias out as a hard
+                    // failure with the (otherwise unused) `Not` code.
+                    if is_failure && e.code == nom::error::ErrorKind::Not {
+                        return Err(Error::new(ErrorKind::AssertionOnAlias, span));
                     }
 
                     let kind = match e.code {
@@ -440,7 +456,15 @@ fn adjacent_spread_args(input: Span) -> IResult<Span, (SourceSpan, Vec<TupleFiel
 }
 
 fn comment(input: Span) -> IResult<Span, Span> {
-    preceded(tag("//"), take_while(|c| c != '\n' && c != '\r'))(input)
+    // `//=>` opens a step assertion, not a comment — leave it for [`assertion`].
+    let (rest, _) = tag("//")(input)?;
+    if rest.fragment().starts_with("=>") {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+    take_while(|c| c != '\n' && c != '\r')(rest)
 }
 
 fn ws_with_comments(input: Span) -> IResult<Span, ()> {
@@ -660,6 +684,7 @@ fn rational_field(value: BigInt) -> TupleField {
             binding_span: Spanned::default(),
             span: Spanned::default(),
             terms: vec![Term::Literal(Literal::Integer(value))],
+            assertions: Vec::new(),
         }),
     }
 }
@@ -1888,6 +1913,7 @@ fn make_source_chain(term: Term) -> Chain {
         binding_span: Spanned::default(),
         span: Spanned::default(),
         terms: vec![term],
+        assertions: Vec::new(),
     }
 }
 
@@ -2800,6 +2826,7 @@ fn chain(input: Span) -> IResult<Span, Chain> {
                 binding_span: Spanned(Some(binding_span)),
                 span: Spanned::default(),
                 terms,
+                assertions: Vec::new(),
             },
         ),
         // Plain chain
@@ -2808,6 +2835,7 @@ fn chain(input: Span) -> IResult<Span, Chain> {
             binding_span: Spanned::default(),
             span: Spanned::default(),
             terms,
+            assertions: Vec::new(),
         }),
     ))(input)?;
     // Record the chain's start offset, for attaching leading trivia during formatting.
@@ -2916,7 +2944,7 @@ fn sequence_boundary_cut(input: Span) -> IResult<Span, ()> {
     let terminated = fragment.is_empty()
         || fragment.starts_with(['}', ']', ')', '|', ';', '\n', '\r', '~'])
         || fragment.starts_with("=>")
-        || fragment.starts_with("//");
+        || (fragment.starts_with("//") && !fragment.starts_with("//=>"));
     if !terminated {
         return Err(nom::Err::Failure(nom::error::Error::new(
             after_ws,
@@ -2926,14 +2954,104 @@ fn sequence_boundary_cut(input: Span) -> IResult<Span, ()> {
     Ok((input, ()))
 }
 
-/// One step of a sequence: a type-alias declaration or a chain.
+/// A step-final assertion: `//=> P`, with an optional prose note separated from the pattern by
+/// three or more spaces (the note runs to the end of the line). The pattern is ordinary match
+/// grammar; once the marker is seen, a malformed pattern is a hard error rather than a
+/// backtrack, since the text can no longer be anything else.
+fn assertion(input: Span) -> IResult<Span, Assertion> {
+    let start = input;
+    let (input, _) = tag("//=>")(input)?;
+    let (input, _) = space0(input)?;
+    let (input, pattern) = cut(match_pattern)(input)?;
+    let (input, note) = opt(map(
+        pair(
+            verify(space1, |gap: &Span| gap.fragment().len() >= 3),
+            take_while1(|c| c != '\n' && c != '\r'),
+        ),
+        |(_, note): (_, Span)| note.fragment().trim_end().to_string(),
+    ))(input)?;
+    Ok((
+        input,
+        Assertion {
+            pattern,
+            note,
+            own_line: false,
+            span: Spanned(Some(span_between(start, input))),
+        },
+    ))
+}
+
+/// The gap before a step-final assertion: horizontal space for a trailing `//=> P`, or any run
+/// of newlines, blank lines, comments and `;` separators for one on its own line — a leading
+/// `//=>` continues the step above, so the separators between belong to the step. Answers
+/// whether the gap crossed a line break, i.e. whether the assertion sits on its own line.
+fn assertion_gap(input: Span) -> IResult<Span, bool> {
+    let (rest, gap) = recognize(many0(alt((
+        nom_value((), multispace1),
+        nom_value((), comment),
+        nom_value((), char(';')),
+    ))))(input)?;
+    Ok((rest, gap.fragment().contains(['\n', '\r'])))
+}
+
+/// A step consisting solely of `//=>` assertion lines — `//=>` opening a block, a branch, or a
+/// REPL entry. The chain is empty, so the step's value is the block's input, exactly as a bare
+/// `~` step's would be; the assertions observe it. Consumes nothing: the shared assertion loop
+/// in [`step`] takes the lines themselves.
+fn assertion_only_step(input: Span) -> IResult<Span, Step> {
+    let (rest, _) = peek(tag("//=>"))(input)?;
+    Ok((
+        rest,
+        Step::Chain(Chain {
+            binding: None,
+            binding_span: Spanned(None),
+            span: Spanned(Some(token_span(input, 4))),
+            terms: Vec::new(),
+            assertions: Vec::new(),
+        }),
+    ))
+}
+
+/// One step of a sequence: a type-alias declaration, a chain, or nothing but assertion lines,
+/// carrying any step-final `//=> P` assertions (chains only — an alias produces no value to
+/// assert on). One assertion may trail on the step's line; further `//=>` lines below continue
+/// the step, each asserting the same value.
 ///
 /// The alias alternative is tried first because an alias whose right-hand side is a function type
 /// also parses as a chain (`'q<'t> = #['int] -> ('t | [])` reads as a binding of an identity
 /// literal with a declared return type). No chain term can begin with `'`, so a leading `'` at
 /// step position is unambiguously an alias.
 fn step(input: Span) -> IResult<Span, Step> {
-    alt((type_alias, map(chain, Step::Chain)))(input)
+    let (input, step) = alt((type_alias, map(chain, Step::Chain), assertion_only_step))(input)?;
+    let before_assertions = input;
+    let (input, assertions) = many0(map(
+        pair(assertion_gap, assertion),
+        |(own_line, mut assertion)| {
+            assertion.own_line = own_line;
+            assertion
+        },
+    ))(input)?;
+    match (step, assertions) {
+        (step, assertions) if assertions.is_empty() => Ok((input, step)),
+        (Step::Chain(mut chain), assertions) => {
+            chain.assertions = assertions;
+            Ok((input, Step::Chain(chain)))
+        }
+        // An alias produces no value to assert on. Positioned on the first `//=>`, and
+        // smuggled out as a hard failure with the (otherwise unused) `Not` code, which
+        // `parse` maps to `AssertionOnAlias`.
+        (Step::TypeAlias { .. }, assertions) => {
+            let offset = assertions[0]
+                .span
+                .get()
+                .expect("the assertion parser always records a span")
+                .offset;
+            Err(nom::Err::Failure(nom::error::Error::new(
+                before_assertions.slice(offset - before_assertions.location_offset()..),
+                nom::error::ErrorKind::Not,
+            )))
+        }
+    }
 }
 
 fn sequence(input: Span) -> IResult<Span, Sequence> {
@@ -3149,6 +3267,44 @@ mod tests {
             "p = @#{ 42 }; ![p, 1000]",
         ] {
             assert!(parse(source).is_ok(), "expected {source} to parse");
+        }
+    }
+
+    #[test]
+    fn test_assertion_on_alias_is_a_pointed_error() {
+        // An alias produces no value to assert on — trailing or on the following line; the
+        // error points at the `//=>`.
+        for (source, line, column) in [
+            ("'t = 'int //=> Ok; 5", 1, 11),
+            ("'t = 'int\n//=> Ok\n5", 2, 1),
+        ] {
+            let err = parse(source).expect_err(source);
+            assert!(
+                matches!(err.kind, ErrorKind::AssertionOnAlias),
+                "for {source}: {:?}",
+                err.kind
+            );
+            let span = err.span.expect(source);
+            assert_eq!((span.line, span.column), (line, column), "for {source}");
+        }
+    }
+
+    #[test]
+    fn test_own_line_assertions_attach_to_the_step_above() {
+        // A leading `//=>` continues the step: blank lines, comments and `;` between belong
+        // to it, and several stack. At the start of a sequence the chain is empty.
+        for (source, terms, assertions) in [
+            ("5\n//=> 5", 1, 1),
+            ("5 //=> 'int\n//=> 5", 1, 2),
+            ("5;\n\n// why\n//=> 5", 1, 1),
+            ("//=> []; 5", 0, 1),
+        ] {
+            let program = parse(source).unwrap_or_else(|e| panic!("{source}: {e:?}"));
+            let Step::Chain(chain) = &program.steps[0] else {
+                panic!("{source}: expected a chain step");
+            };
+            assert_eq!(chain.terms.len(), terms, "for {source}");
+            assert_eq!(chain.assertions.len(), assertions, "for {source}");
         }
     }
 

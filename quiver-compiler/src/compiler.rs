@@ -203,6 +203,12 @@ pub enum Error {
     FallibleMatchBindingsInValueChain {
         bindings: Vec<String>,
     },
+    /// A binding pattern appears in a `//=>` assertion. Nothing gates on the assertion's
+    /// verdict — and a release build skips the check entirely — so the binding could never
+    /// be relied on. Assertions observe: literals, types and pins only.
+    AssertionBindings {
+        bindings: Vec<String>,
+    },
 
     /// A value flows into a union whose members include functions or processes, and the
     /// union is not sendable (a union of only process types is — the message is checked
@@ -456,6 +462,19 @@ impl std::fmt::Display for Error {
                      tuple field, an argument, an annotation value): nothing gates on \
                      its verdict there, so the bindings cannot be relied on. Bind in a \
                      preceding step instead",
+                    bindings
+                        .iter()
+                        .map(|b| format!("'{b}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+            Error::AssertionBindings { bindings } => {
+                write!(
+                    f,
+                    "An assertion pattern cannot bind {}: an assertion only observes the \
+                     step's value (and release builds skip it entirely). Test with \
+                     literals, types and pins, or bind in the step itself",
                     bindings
                         .iter()
                         .map(|b| format!("'{b}'"))
@@ -1880,6 +1899,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 binding_span: ast::Spanned::default(),
                 span: ast::Spanned::default(),
                 terms: vec![ast::Term::Access(source)],
+                assertions: Vec::new(),
             }),
         }
     }
@@ -2363,6 +2383,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 binding: None,
                 binding_span: ast::Spanned::default(),
                 span: ast::Spanned::default(),
+                assertions: Vec::new(),
                 terms: vec![ast::Term::Tuple(ast::Tuple {
                     name: ast::TupleName::Anonymous,
                     fields,
@@ -3943,6 +3964,80 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(())
     }
 
+    /// Compile a step-final `//=> P` assertion. The step's value is on top of the stack and is
+    /// left there untouched: the assertion observes, so a nil step still short-circuits and the
+    /// value's flow is identical across build modes. The pattern is analyzed in both modes — it
+    /// may not bind, and one that can never match is a stale expectation, rejected — but checks
+    /// are emitted only in debug builds, where a mismatch aborts like a violated contract.
+    fn compile_assertion(
+        &mut self,
+        assertion: &ast::Assertion,
+        value_type: usize,
+        value_provenance: &Provenance,
+    ) -> Result<(), Error> {
+        let mut binding_spans = Vec::new();
+        collect_binding_spans(&assertion.pattern, &mut binding_spans);
+        if !binding_spans.is_empty() {
+            return Err(Error::AssertionBindings {
+                bindings: binding_spans.into_iter().map(|(name, _)| name).collect(),
+            });
+        }
+        let mut env = typing::TypeEnv {
+            resolver: self.resolver,
+            module_cache: &mut *self.module_cache,
+            package: &self.current_package,
+        };
+        let (bindings, binding_sets, result_type, _) = pattern::analyze_pattern(
+            &mut env,
+            self.program,
+            &assertion.pattern,
+            value_type,
+            &self.scopes,
+            value_provenance,
+        )?;
+        // The syntactic check above names dead-alternative binders too; this one catches
+        // bindings with no syntactic site of their own (a star pattern's are type-derived) —
+        // which would otherwise emit `Store`s for locals never registered.
+        if !bindings.is_empty() {
+            return Err(Error::AssertionBindings {
+                bindings: bindings.into_iter().map(|(name, _)| name).collect(),
+            });
+        }
+        if self.is_never(result_type) {
+            return Err(Error::PatternNoMatchingTypes {
+                pattern: crate::format::render_match(&assertion.pattern),
+            });
+        }
+        if !self.debug {
+            return Ok(());
+        }
+        // Mirror `compile_match`'s layout: a trampoline gives the requirement checks a fixed
+        // failure address to jump to; the success path falls through with the value untouched.
+        let start_jump = self.codegen.emit_jump_placeholder();
+        let fail_jump = self.codegen.emit_jump_placeholder();
+        self.codegen.patch_jump_to_here(start_jump);
+        pattern::generate_pattern_code(
+            &mut self.codegen,
+            self.program,
+            &self.scopes,
+            &binding_sets,
+            fail_jump,
+        )?;
+        let ok_jump = self.codegen.emit_jump_placeholder();
+        self.codegen.patch_jump_to_here(fail_jump);
+        let location = assertion
+            .span
+            .get()
+            .map(|span| format!(" at {}:{}:{}", self.current_module, span.line, span.column))
+            .unwrap_or_default();
+        self.emit_panic(&format!(
+            "Assertion '{}' failed{location}",
+            crate::format::render_match(&assertion.pattern)
+        ))?;
+        self.codegen.patch_jump_to_here(ok_jump);
+        Ok(())
+    }
+
     /// Compile a sequence of steps, short-circuiting to nil if any yields nil.
     ///
     /// Every step starts from the **block value** — the enclosing block's parameter, or the value
@@ -4041,6 +4136,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     quiver_core::bytecode::SiteKind::NilResult
                 };
                 self.emit_stamp(chain.span.get(), kind);
+            }
+
+            // Step-final `//=> P` assertions observe the step's value in place.
+            for assertion in &chain.assertions {
+                self.compile_assertion(assertion, chain_type, &chain_prov)?;
             }
 
             // If a prior chain could short-circuit to nil, the sequence's result includes

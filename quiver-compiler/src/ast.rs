@@ -148,7 +148,30 @@ pub struct Chain {
     /// Span starting at the chain's first character, for attaching leading comments/blank lines
     /// (trivia) to the chain during formatting. `None` for synthetic chains built by the parser.
     pub span: Spanned,
+    /// Empty exactly for an assertion-only step (`//=>` opening a sequence): the chain then
+    /// evaluates to the block's input, as a bare `~` step would.
     pub terms: Vec<Term>,
+    /// Step-final `//=> P` assertions, set only on sequence steps: in debug builds the step's
+    /// value is matched against each pattern and a mismatch aborts; release builds skip the
+    /// check but still type-check the patterns, so types are identical across build modes. The
+    /// value flows on unchanged either way — a nil step still short-circuits — and a pattern
+    /// may not bind. A step carries several when `//=>` lines are stacked: a leading `//=>`
+    /// continues the step above rather than opening a new one.
+    pub assertions: Vec<Assertion>,
+}
+
+/// The payload of a step-final `//=> P` assertion (see [`Chain::assertions`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Assertion {
+    pub pattern: Match,
+    /// A prose note following the pattern, separated from it by three or more spaces and
+    /// running to the end of the line; ignored by the compiler, preserved by the formatter.
+    pub note: Option<String>,
+    /// Whether the assertion sits on its own line (a leading `//=>` continuing the step above)
+    /// rather than trailing at the end of the step's line; preserved by the formatter.
+    pub own_line: bool,
+    /// Span of the whole `//=> …`, for diagnostics.
+    pub span: Spanned,
 }
 
 #[derive(Debug, Clone, PartialEq)]

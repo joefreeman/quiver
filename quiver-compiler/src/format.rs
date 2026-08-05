@@ -166,7 +166,24 @@ fn sequence_doc(
             Step::Chain(chain) => {
                 let body = chain_doc(trivia, chain);
                 let tall = is_tall_step(chain, &body);
-                (body, tall)
+                // Step-final assertions ride after the chain, before any trailing comment;
+                // they do not make a step "tall". A trailing assertion is glued to the
+                // step's line; an own-line one (a leading `//=>`) starts a fresh line at the
+                // step's indent, keeping any comments written above it (it is an anchor —
+                // see `visit_steps`).
+                let mut parts = vec![body];
+                for (index, assertion) in chain.assertions.iter().enumerate() {
+                    // The first assertion of an assertion-only step opens the step itself,
+                    // so the step-level leading trivia above already covers it.
+                    let opens_step = index == 0 && chain.terms.is_empty();
+                    let own_line = assertion.own_line && !opens_step;
+                    if own_line {
+                        parts.push(pretty::hardline());
+                        parts.push(trivia.leading_doc(assertion.span));
+                    }
+                    parts.push(assertion_doc(assertion, own_line || opens_step));
+                }
+                (pretty::concat(parts), tall)
             }
             Step::TypeAlias {
                 name,
@@ -364,6 +381,29 @@ fn wrap_breaking_body(sequence: &Sequence, body: Doc, multi_branch: bool) -> Doc
 /// fit, they break with a leading `~>` per continuation line. A trailing breakable container (a
 /// block, tuple, or function) is kept attached to the preceding terms and allowed to break
 /// internally, rather than forcing the whole chain onto `~>` lines.
+/// Render a step-final `//=> P` assertion: the canonical pattern, plus any prose note three
+/// spaces off. A note runs to the end of the line, so — like a trailing comment — a trailing
+/// assertion's note is deferred to the line's end and forces the enclosing construct to break.
+/// An assertion rendered at the start of its line (`bare`) keeps its note in place — the line
+/// is its own — but still forces the break, so a closing `}` never lands after the note to be
+/// swallowed by it. Without a note the assertion is plain text, and a same-line `;` or `}`
+/// after it parses fine.
+fn assertion_doc(assertion: &Assertion, bare: bool) -> Doc {
+    let text = match &assertion.note {
+        Some(note) => format!("//=> {}   {}", render_match(&assertion.pattern), note),
+        None => format!("//=> {}", render_match(&assertion.pattern)),
+    };
+    match (&assertion.note, bare) {
+        (Some(_), false) => pretty::concat(vec![
+            pretty::line_suffix(pretty::text(format!(" {text}"))),
+            pretty::break_parent(),
+        ]),
+        (Some(_), true) => pretty::concat(vec![pretty::text(text), pretty::break_parent()]),
+        (None, false) => pretty::text(format!(" {text}")),
+        (None, true) => pretty::text(text),
+    }
+}
+
 fn chain_doc(trivia: &Trivia, chain: &Chain) -> Doc {
     let prefix = match &chain.binding {
         Some(pattern) => pretty::text(format!("{} = ", render_match(pattern))),
@@ -1161,6 +1201,10 @@ fn scan_trivia(source: &str, skip: &[(usize, usize)]) -> Vec<Scanned> {
                 line_blank = true;
             }
             '/' if matches!(chars.peek(), Some((_, '/'))) => {
+                // A `//=>` assertion is AST, not trivia: consume it like a comment so its
+                // pattern text isn't scanned, but record nothing — the formatter re-emits it
+                // from the `Chain.assertion` node.
+                let is_assertion = source[index..].starts_with("//=>");
                 let mut end = source.len();
                 while let Some(&(j, next)) = chars.peek() {
                     if next == '\n' {
@@ -1169,11 +1213,13 @@ fn scan_trivia(source: &str, skip: &[(usize, usize)]) -> Vec<Scanned> {
                     }
                     chars.next();
                 }
-                out.push(Scanned::Comment {
-                    offset: index,
-                    text: source[index..end].trim_end().to_string(),
-                    trailing: !line_blank,
-                });
+                if !is_assertion {
+                    out.push(Scanned::Comment {
+                        offset: index,
+                        text: source[index..end].trim_end().to_string(),
+                        trailing: !line_blank,
+                    });
+                }
                 line_blank = false;
             }
             '"' => {
@@ -1220,6 +1266,15 @@ fn visit_steps(steps: &[Step], out: &mut Collected) {
     for step in steps {
         push_anchor(step.span(), out);
         if let Step::Chain(chain) = step {
+            // An own-line assertion is its own anchor, so comments between a step and its
+            // `//=>` lines keep their place. The first assertion of an assertion-only step
+            // shares the step's offset and is covered by the step's anchor. Mirrors the
+            // emission in `sequence_doc`.
+            for (index, assertion) in chain.assertions.iter().enumerate() {
+                if assertion.own_line && !(index == 0 && chain.terms.is_empty()) {
+                    push_anchor(assertion.span, out);
+                }
+            }
             visit_chain(chain, out);
         }
     }
@@ -1387,7 +1442,7 @@ fn render_access(access: &Access) -> String {
 // Patterns
 // ---------------------------------------------------------------------------
 
-fn render_match(pattern: &Match) -> String {
+pub(crate) fn render_match(pattern: &Match) -> String {
     match pattern {
         Match::Identifier(name, _) => name.clone(),
         Match::Literal(literal) => render_literal(literal),
@@ -1778,6 +1833,60 @@ mod tests {
     }
 
     #[test]
+    fn assertion_round_trips_and_canonicalizes() {
+        // Marker spacing and the pattern normalize; the value side formats as usual.
+        assert_formats("5  //=>  Ok\n", "5 //=> Ok\n");
+        assert_formats("x = 5 //=> Ok", "x = 5 //=> Ok\n");
+        assert_formats(
+            "Point[1,2] //=> Point[1, 2]",
+            "Point[1, 2] //=> Point[1, 2]\n",
+        );
+    }
+
+    #[test]
+    fn own_line_assertions_keep_their_lines() {
+        // A leading `//=>` continues the step above; the formatter keeps it on its own line,
+        // at the step's indent, with any comments and blanks between held in place.
+        assert_idempotent("1 ~> f\n//=> 2\n", "own-line assertion");
+        assert_idempotent("5 //=> 'int\n//=> 5   note\n", "trailing then own-line");
+        assert_idempotent("5 ~> f\n\n// why\n//=> 10\n", "trivia above an assertion");
+        assert_idempotent(
+            "x = {\n  5 ~> f\n  //=> 10\n}\nx\n",
+            "own-line assertion in a block",
+        );
+        // A `;`-separated trailing assertion is the trailing form: the separator drops.
+        assert_formats("5; //=> 5\n", "5 //=> 5\n");
+    }
+
+    #[test]
+    fn assertion_only_steps_render_bare() {
+        // An opening assertion is a step with no chain: nothing precedes the marker.
+        assert_idempotent("f = #'int { //=> 5; $ }\nf 5\n", "flat opening assertion");
+        assert_idempotent(
+            "f = #'int {\n  //=> 5\n  $ ~> g\n}\nf 5\n",
+            "broken opening assertion",
+        );
+        // A note runs to the end of the line, so a noted opening assertion may never
+        // flatten — `}` after the note would be swallowed by it.
+        assert_formats(
+            "f = #'int {\n  //=> 5   the note\n  $\n}\n",
+            "f = #'int {\n  //=> 5   the note\n  $\n}\n",
+        );
+    }
+
+    #[test]
+    fn assertion_note_and_trailing_comment_survive() {
+        // The note is preserved three spaces off; a trailing comment stays after it.
+        assert_idempotent("x = 5 //=> Ok\nx //=> 5   the note\n", "assertion note");
+        assert_idempotent(
+            "f = #'int { $ //=> 'int }\nf 3 //=> 3\n",
+            "assertion in body",
+        );
+        // A redundant block whose body asserts is kept, not spliced.
+        assert_idempotent("{ 5 //=> 6 }\n", "assertion keeps its block");
+    }
+
+    #[test]
     fn preserves_leading_comments_and_blank_lines() {
         // Comments and a single blank line survive; a doubled blank collapses to one.
         let source = "// header\nx = 1\n\n\n// note\ny = 2";
@@ -2154,6 +2263,9 @@ mod tests {
         // A snippet corpus exercising every AST variant the printer must handle. Each must parse
         // and reach a print fixpoint.
         let corpus: &[&str] = &[
+            // --- step-final assertions ---
+            "5 //=> 5",
+            "x = f y //=> Ok   the note runs to end of line",
             // --- argument-first application (chain terms joined by `~>`) ---
             "[3, 4] ~> add ~> [~, 2] ~> mul",
             "x ~> f",

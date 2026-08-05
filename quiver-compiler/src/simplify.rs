@@ -70,6 +70,7 @@ fn strip_chain(chain: Chain, options: &Options) -> Chain {
         binding_span,
         span,
         terms,
+        assertions,
     } = chain;
     let last_index = terms.len().saturating_sub(1);
     let mut simplified = Vec::with_capacity(terms.len());
@@ -86,9 +87,13 @@ fn strip_chain(chain: Chain, options: &Options) -> Chain {
                 .single_chain()
                 .expect("redundant implies a single chain step");
             // A body ending in a tail call may only be spliced when the block is the chain's last
-            // term, so the `^` stays final rather than gaining dead code after it.
+            // term, so the `^` stays final rather than gaining dead code after it. A body
+            // carrying a `//=>` assertion may not be spliced at all — the splice keeps only the
+            // body's terms, and the assertion must keep firing.
             let ends_in_tail_call = body.terms.last().is_some_and(is_tail_call);
-            !(options.keep)(body) && (!ends_in_tail_call || index == last_index)
+            !(options.keep)(body)
+                && body.assertions.is_empty()
+                && (!ends_in_tail_call || index == last_index)
         };
         if strip {
             let Term::Block(mut block) = term else {
@@ -108,6 +113,7 @@ fn strip_chain(chain: Chain, options: &Options) -> Chain {
         binding_span,
         span,
         terms: simplified,
+        assertions,
     }
 }
 
@@ -209,6 +215,7 @@ fn group_consequence(consequence: Sequence) -> Sequence {
             binding_span: Spanned::default(),
             span: Spanned::default(),
             terms: vec![block],
+            assertions: Vec::new(),
         }])
     } else {
         consequence
