@@ -33,6 +33,10 @@ jobs:
             exit 1
           }
 
+      # Every runnable example in the guide is executed and its `//=>` assertions checked.
+      - name: Check the guide
+        run: cargo run --quiet --bin quiv -- test docs/guide.md
+
       - name: Run clippy
         run: cargo clippy --all --all-targets -- -D warnings
 

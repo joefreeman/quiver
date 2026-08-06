@@ -196,8 +196,7 @@ A newline or a `;` ends a chain and starts a new **step**. A run of steps is a
 
 Two rules govern a sequence, and together they are most of Quiver's control flow:
 
-1. Every step starts from the same value — the enclosing block's input — **not** from the
-   previous step's result.
+1. Every step starts from the same value — the enclosing block's input.
 2. If a step evaluates to nil, the rest of the sequence is skipped and the sequence
    evaluates to that nil.
 
@@ -205,8 +204,8 @@ Two rules govern a sequence, and together they are most of Quiver's control flow
 f = #'int { 5; ~ }
 9 ~> f                        //=> 9     `~` is f's input, not the 5
 
-g = #'int { a = %num.add [~, 10]; %num.add [a, 100] }
-0 ~> g                        //=> 110   carried across the boundary by name
+g = #'int { a = %num.add [~, 20]; %num.add [a, 100] }
+3 ~> g                        //=> 123   carried across the boundary by name
 ```
 
 So a step's result gates the boundary, and — if it is the last step — is the sequence's
@@ -217,7 +216,7 @@ chains: within a chain nil flows onward like any other value.
 
 ```quiver
 [] ~> 5                       //=> 5    one step; nil flows through the chain
-{ | []; 5 }                   //=> []   two steps; the first is nil, so it stops
+{ []; 5 }                   //=> []   two steps; the first is nil, so it stops
 ```
 
 That is the whole model: **a chain pipes, a sequence restarts and can fail.**
@@ -475,7 +474,7 @@ literal, simply the rule's empty case: it never matches a named empty tuple. To
 destructure a named tuple without stating its name, use a partial or star pattern.
 
 ```quiver
-{ | [x: a, y: b] = Point[x: 1, y: 2]; a }   //=> []       the name must be stated...
+{ [x: a, y: b] = Point[x: 1, y: 2]; a }   //=> []       the name must be stated...
 (x, y) = Point[x: 1, y: 2]; [x, y]          //=> [1, 2]   ...or left to a partial
 ```
 
@@ -483,7 +482,7 @@ Literals inside a pattern test rather than bind:
 
 ```quiver
 Point[x: 0, y: n] = Point[x: 0, y: 10]         //=> Ok
-{ | Point[x: 0, y: n] = Point[x: 1, y: 10] }   //=> []
+{ Point[x: 0, y: n] = Point[x: 1, y: 10] }   //=> []
 ```
 
 ### Testing types and pinning
@@ -516,7 +515,7 @@ adjacent to the `)`.
 
 ```quiver
 42 ~> =('int)n; n             //=> 42
-{ | [] ~> =('int)n }          //=> []   nil is not an int, so this fails
+{ [] ~> =('int)n }          //=> []   nil is not an int, so this fails
 ```
 
 This is the idiom for "bind, but fail on the wrong type", which combines with
@@ -570,7 +569,7 @@ none left, the block is nil. That gives fallback chains directly:
 
 ```quiver
 first_hit = #'int {
-  | { | =0 => [] | ~ }        // fails on 0
+  | { =0 => [] | ~ }        // fails on 0
   | -1                         // ... and then this
 }
 7 ~> first_hit                //=> 7
@@ -653,7 +652,7 @@ Point[x: 'int, y: 'int]       // a named tuple
 #'int -> 'bin                 // a function
 ```
 
-### Aliases
+### Type aliases
 
 An alias is defined with `=`, like a binding; the `'` on the name is what makes it a type
 definition.
@@ -954,7 +953,7 @@ it, and never waits.
 
 ```quiver
 'status = Loading | Done['int]
-step = #'status { | =Loading => 7 ~> ^ Done[~] | =Done[x] => x }
+step = #'status { =Loading => 7 ~> ^ Done[~] | =Done[x] => x }
 p = Loading ~> @step
 ?p ~> ='status                //=> Ok   Loading, then Done[7]
 ```
@@ -971,7 +970,7 @@ the sigil:
 
 ```quiver
 'status = Loading | Done['int]
-step = #'status { | =Loading => 7 ~> ^ Done[~] | =Done[x] => x }
+step = #'status { =Loading => 7 ~> ^ Done[~] | =Done[x] => x }
 p = Loading ~> @step
 
 watch = #(@?'status) { ?$ }         // sample-only
