@@ -96,14 +96,11 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
+      # Trusted publishing needs npm >= 11.5.1; Node 24 bundles npm 11.6+.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-
-      # Trusted publishing needs npm >= 11.5.1; Node 20 bundles npm 10.
-      - name: Update npm
-        run: npm install -g npm@latest
+          node-version: "24"
 
       # build.sh bundles the tree-sitter grammar via `npx tree-sitter`, which needs the
       # tree-sitter-cli devDependency installed in tree-sitter/.
