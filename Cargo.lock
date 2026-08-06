@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ariadne",
  "clap",
@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-compiler"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "hex",
  "include_dir",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "hex",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-environment"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "quiver-compiler",
  "quiver-core",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-io"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "getrandom 0.3.4",
  "io-uring",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-lsp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dashmap 6.2.1",
  "quiver-compiler",
@@ -961,14 +961,14 @@ dependencies = [
 
 [[package]]
 name = "quiver-markdown"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "quiver-compiler",
 ]
 
 [[package]]
 name = "quiver-tests"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "quiver-cli",
  "quiver-compiler",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "quiver-web"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "console_error_panic_hook",
  "hex",
