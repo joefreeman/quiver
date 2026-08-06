@@ -82,6 +82,11 @@ jobs:
     name: Publish to npm
     needs: verify-version
     runs-on: ubuntu-latest
+    # Authenticates via OIDC trusted publishing (configured on npmjs.com for this
+    # repo + workflow), so there is no npm token to expire.
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -95,7 +100,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing needs npm >= 11.5.1; Node 20 bundles npm 10.
+      - name: Update npm
+        run: npm install -g npm@latest
 
       # build.sh bundles the tree-sitter grammar via `npx tree-sitter`, which needs the
       # tree-sitter-cli devDependency installed in tree-sitter/.
@@ -109,8 +117,6 @@ jobs:
         run: |
           cd quiver-web/pkg
           npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   create-release:
     name: Create GitHub release
