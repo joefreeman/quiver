@@ -13,22 +13,6 @@
 // so an `https://` connection is the same `\TcpSocket` with its reads and writes speaking
 // plaintext through the encryption — the loop below never learns which scheme it serves.
 
-// The first address a hostname resolves to. A lookup failure ends the iterator carrying its
-// `:error`, which is passed straight out; a host with no addresses at all gets one made for
-// it, since a bare nil would tell the caller nothing.
-resolve_host = #'%str {
-  host = $
-  %dns.resolve host ~> %iter.nth [~, 0] ~> {
-    | =IPv4[b] => b
-    | =IPv6[b] => b
-    // A lookup that broke — propagate the reason it already carries.
-    | :()error => ~
-    | [] ~> {
-      :error IoError[kind: NotFound, message: "no addresses for {host}"]
-    }
-  }
-}
-
 // Read until the buffer holds a whole response. An empty read is end-of-connection, which is
 // what terminates a response framed by neither Content-Length nor chunking — and, if the
 // response is still incomplete at that point, what makes it a truncation rather than a wait.
@@ -51,8 +35,7 @@ read_loop = #[(sock): \TcpSocket, (buf): 'bin] {
 // Open a connection of the kind the scheme calls for. TLS verifies against the host's default
 // anchors; a caller needing its own would go through `%tls` directly.
 open = #'%url {
-  resolve_host $host ~> =('bin)ip
-  %tcp.connect [ip, $port] ~> =(\TcpSocket)sock
+  %tcp.connect [$host, $port] ~> =(\TcpSocket)sock
   $scheme ~> {
     | ="http" => sock
     | ="https" => %tls.attach [socket: sock, hostname: $host]

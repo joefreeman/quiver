@@ -80,6 +80,18 @@ fn test_a_refused_connection_is_a_value_the_caller_can_read() {
 }
 
 #[test]
+fn test_connect_falls_through_to_an_address_that_accepts() {
+    // The mock's resolver answers `::1` before `127.0.0.1` — an ordering real resolvers do
+    // produce for localhost — and nothing is bound on IPv6, so *every* mock test crosses a
+    // refused first address. This one names the property: taking the resolver's first
+    // answer on faith was the bug, and the transport must try the next address instead.
+    quiver()
+        .with_mock_io(serves("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nhi"))
+        .evaluate(r#"%http/client.get "http://dual.test/" ~> =('%http.response)r; r.status"#)
+        .expect("200");
+}
+
+#[test]
 fn test_a_silent_peer_times_out_rather_than_hanging() {
     // The read never completes, so the request process stays parked. A parked effect is not a
     // select source, which is exactly why the client wraps each request in a process: the

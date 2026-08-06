@@ -28,10 +28,8 @@
   },
 
   connect: #[(host): '%str, (port): 'int, roots: 'bin = 0x] {
-    :doc "Resolves, connects and upgrades in one step: a TLS connection to host:port. Nil (with :error) if any stage fails."
-    %dns.resolve $host ~> %iter.nth [~, 0] ~> { =IPv4[b] => b | =IPv6[b] => b } ~> =('bin)ip
-
-    %tcp.connect [ip, $port] ~> =(\TcpSocket)socket
+    :doc "Resolves, connects and upgrades in one step: a TLS connection to host:port, trying each resolved address until one accepts. Nil (with :error) if any stage fails."
+    %tcp.connect [$host, $port] ~> =(\TcpSocket)socket
     __tls_attach__ [socket: socket, hostname: $host.0, roots: $roots]
   },
 ]

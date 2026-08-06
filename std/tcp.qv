@@ -32,9 +32,46 @@
 'listener_closed = Closed[listener: \TcpListener]
 'listener_event = 'accepted | 'listener_closed
 
+// Where a connection goes: a raw IP address (4 or 16 bytes), or a hostname to resolve.
+'address = 'bin | '%str
+
+// Try each address in turn: resolvers order their answers however they like (`::1` before
+// `127.0.0.1` for localhost is the classic), and the first family offered may be one the
+// server never bound. `last` carries the most recent refusal, answered — `:error` intact —
+// when the list runs out.
+try_each = #[(addrs): '%list<'%dns.ip>, (port): 'int, (last): []] {
+  $addrs ~> {
+    | =Nil => $last
+    | =Cons[addr, rest] => {
+      addr
+      ~> { =IPv4[b] => b | =IPv6[b] => b } ~> =('bin)ip
+
+      outcome = __tcp_connect__ [ip, $port]
+      outcome ~> {
+        | =(\TcpSocket)s => s
+        | =([])failure => ^ [rest, $port, failure]
+      }
+    }
+  }
+}
+
 [
-  connect: &__tcp_connect__ ~> {
-    :doc "Connects to [ip: 'bin (4 or 16 bytes), port: 'int], yielding a \\TcpSocket."
+  connect: #[(to): 'address, (port): 'int] {
+    :doc "Connects to [to, port], yielding a \\TcpSocket. A raw IP ('bin, 4 or 16 bytes) is connected in one step; a hostname ('%str) is resolved and each address tried until one accepts. Nil (carrying :error) on failure — for a hostname, also when resolution fails or the name has no addresses."
+    $to ~> {
+      | =('bin)ip => __tcp_connect__ [ip, $port]
+      | =('%str)host => {
+        %dns.resolve host ~> %list.try_collect
+        ~> =('%list<'%dns.ip>)addrs
+
+        addrs ~> {
+          | =Nil => [] ~> {
+            :error IoError[kind: NotFound, message: "no addresses for {host}"]
+          }
+          | try_each [addrs, $port, []]
+        }
+      }
+    }
   },
   listen: &__tcp_listen__ ~> {
     :doc "Listens on [port: 'int, backlog: 'int], yielding a \\TcpListener."

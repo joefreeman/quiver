@@ -8,6 +8,11 @@
 //!
 //! The native builtin *implementations* are still attached; they only construct
 //! `NativeEffect` values, so nothing about them needs faking.
+//!
+//! The fake host is dual-stack with nothing bound on IPv6: every name resolves to `::1`
+//! then `127.0.0.1`, and a connect to `::1` is always refused. So every test that dials a
+//! name also exercises the fallback across a resolver's answers — a client that took the
+//! first address on faith would fail all of them.
 
 use quiver_core::effects::{EffectBackend, EffectError, EffectResult};
 use quiver_core::error::Error;
@@ -70,8 +75,6 @@ impl EffectBackend for MockBackend {
         effect: NativeEffect,
     ) -> Result<Option<EffectResult>, Error> {
         let result = match effect {
-            // A hostname resolves to 127.0.0.1, so the transport's DNS step is exercised
-            // without a resolver.
             NativeEffect::DnsResolve { .. } => {
                 let id = self.next_resource;
                 self.next_resource += 1;
@@ -79,19 +82,27 @@ impl EffectBackend for MockBackend {
                 Ok(WireValue::Resource(id, self.dns_type_id))
             }
             NativeEffect::DnsNext { resource_id } => {
+                let addresses: &[&[u8]] = &[
+                    &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                    &[127, 0, 0, 1],
+                ];
                 let seen = self.cursors.entry(resource_id).or_insert(0);
-                if *seen == 0 {
-                    *seen = 1;
-                    Ok(WireValue::Binary(vec![127, 0, 0, 1].into()))
-                } else {
-                    Ok(WireValue::nil())
+                match addresses.get(*seen) {
+                    Some(address) => {
+                        *seen += 1;
+                        Ok(WireValue::Binary(address.to_vec().into()))
+                    }
+                    None => Ok(WireValue::nil()),
                 }
             }
             NativeEffect::DnsClose { .. } => Ok(WireValue::ok()),
 
-            NativeEffect::TcpConnect { .. } => match self.behaviour {
+            NativeEffect::TcpConnect { ip, .. } => match self.behaviour {
                 MockIo::Refuses => Err(EffectError::ConnectionRefused(
                     "mock: connection refused".to_string(),
+                )),
+                _ if ip.len() == 16 => Err(EffectError::ConnectionRefused(
+                    "mock: nothing bound on ::1".to_string(),
                 )),
                 _ => self.fresh_socket(),
             },
