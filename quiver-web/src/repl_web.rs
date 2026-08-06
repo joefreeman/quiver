@@ -510,13 +510,14 @@ impl Environment {
             match outcome {
                 Ok(Some(request_id)) => {
                     // Capture the inferred type now: the compiler has just produced it, and
-                    // the completion that arrives later carries only a value.
+                    // the completion that arrives later carries only a value. The type is
+                    // compiler-side (REPL id space), so format it with the REPL's program,
+                    // not the environment's merged one.
                     let mut callback = callback;
-                    callback.result_type = Some(
-                        environment
-                            .borrow()
-                            .format_type(repl.borrow().get_last_result_type()),
-                    );
+                    callback.result_type = Some({
+                        let repl = repl.borrow();
+                        repl.format_type(repl.get_last_result_type())
+                    });
                     pending_callbacks.borrow_mut().insert(request_id, callback);
                 }
                 Ok(None) => {
