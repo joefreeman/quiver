@@ -88,6 +88,9 @@ struct Runner {
     /// `WakeSignal::wait`, which blocks on a channel receive — so setting the flag alone
     /// never returns, and joining would hang exactly when the run has *passed*.
     waker: quiver_cli::native_transport::Waker,
+    /// Signalled by the stepping thread after every productive step, so request waits
+    /// sleep instead of polling.
+    progress: Arc<quiver_cli::native_transport::Progress>,
     stepping: Option<JoinHandle<()>>,
     artifact_store: Rc<quiver_compiler::ArtifactStore>,
 }
@@ -117,15 +120,19 @@ impl Runner {
         let environment = Arc::new(Mutex::new(environment));
         let shutdown = Arc::new(AtomicBool::new(false));
 
+        let progress = Arc::new(quiver_cli::native_transport::Progress::new());
         let env_clone = Arc::clone(&environment);
         let shutdown_clone = Arc::clone(&shutdown);
+        let progress_clone = Arc::clone(&progress);
         let stepping = Some(thread::spawn(move || {
             while !shutdown_clone.load(Ordering::Relaxed) {
                 let did_work = env_clone
                     .lock()
                     .map(|mut env| env.step().unwrap_or(false))
                     .unwrap_or(false);
-                if !did_work {
+                if did_work {
+                    progress_clone.notify();
+                } else {
                     let in_flight = env_clone
                         .lock()
                         .map(|env| env.io_in_flight())
@@ -143,6 +150,7 @@ impl Runner {
             environment,
             shutdown,
             waker,
+            progress,
             stepping,
             artifact_store,
         }
@@ -295,6 +303,7 @@ impl Runner {
                 quiver_compiler::compiler::CompileOptions {
                     debug: true,
                     source_name: source_name(path),
+                    ..Default::default()
                 },
             )
             .map_err(|e| format!("{e}"))?;
@@ -360,6 +369,7 @@ impl Runner {
         repl.set_compile_options(quiver_compiler::compiler::CompileOptions {
             debug: true,
             source_name: source_name(path),
+            ..Default::default()
         });
         repl.set_artifact_store(self.artifact_store.clone());
         Ok(repl)
@@ -402,14 +412,16 @@ impl Runner {
     }
 
     fn wait(&self, request: u64) -> RequestResult {
+        // The stepping thread does the stepping; this thread only polls, sleeping on
+        // the progress signal between polls. The timeout is a safety bound, not a poll
+        // interval — a resolution wakes the wait immediately.
         loop {
-            let mut env = self.environment.lock().unwrap();
-            let _ = env.step();
-            if let Ok(Some(result)) = env.poll_request(request) {
+            let seen = self.progress.generation();
+            if let Ok(Some(result)) = self.environment.lock().unwrap().poll_request(request) {
                 return result;
             }
-            drop(env);
-            thread::sleep(std::time::Duration::from_micros(10));
+            self.progress
+                .wait_past(seen, std::time::Duration::from_millis(100));
         }
     }
 }

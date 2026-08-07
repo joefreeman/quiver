@@ -134,6 +134,8 @@ pub struct TestBuilder {
     files: Option<HashMap<String, String>>,
     capabilities: Capabilities,
     debug: bool,
+    compile_fuel: Option<u64>,
+    compile_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     collection_threshold: Option<usize>,
     timeout: Option<std::time::Duration>,
     real_time: bool,
@@ -212,6 +214,20 @@ impl TestBuilder {
     /// Compile in debug mode: nil results carry failure-provenance `origin` stamps.
     pub fn debug(mut self) -> Self {
         self.debug = true;
+        self
+    }
+
+    /// Cap compile-time evaluation (module bodies, dialect expansion) at `fuel` step
+    /// units, so a test can exercise the budget without burning the generous default.
+    pub fn with_compile_fuel(mut self, fuel: u64) -> Self {
+        self.compile_fuel = Some(fuel);
+        self
+    }
+
+    /// Attach a cancellation flag to compile-time evaluation, polled between execution
+    /// slices.
+    pub fn with_compile_cancel(mut self, cancel: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.compile_cancel = Some(cancel);
         self
     }
 
@@ -355,11 +371,17 @@ impl TestBuilder {
         if self.capabilities == Capabilities::Full {
             repl.set_artifact_store(ARTIFACTS.with(Rc::clone));
         }
-        if self.debug {
-            repl.set_compile_options(quiver_compiler::compiler::CompileOptions {
-                debug: true,
+        if self.debug || self.compile_fuel.is_some() || self.compile_cancel.is_some() {
+            let mut options = quiver_compiler::compiler::CompileOptions {
+                debug: self.debug,
                 source_name: "test".to_string(),
-            });
+                ..Default::default()
+            };
+            if let Some(fuel) = self.compile_fuel {
+                options.fuel = fuel;
+            }
+            options.cancel = self.compile_cancel.clone();
+            repl.set_compile_options(options);
         }
 
         let timeout = self

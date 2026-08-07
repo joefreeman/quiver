@@ -346,6 +346,7 @@ fn compile_command(
     let options = quiver_compiler::compiler::CompileOptions {
         debug,
         source_name: source_id.clone(),
+        ..Default::default()
     };
 
     // Build registry from core modules and network builtins
@@ -549,6 +550,7 @@ fn compile_execute(
                     .unwrap_or_else(|| path.to_string())
             })
             .unwrap_or_else(|| "main".to_string()),
+        ..Default::default()
     };
 
     // Compile and extract entry function (this will error if not a function)

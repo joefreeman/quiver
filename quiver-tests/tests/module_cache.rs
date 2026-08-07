@@ -128,6 +128,7 @@ fn run_session(
         repl.set_compile_options(quiver_compiler::compiler::CompileOptions {
             debug: true,
             source_name: "test".to_string(),
+            ..Default::default()
         });
     }
 
@@ -214,6 +215,7 @@ fn options(debug: bool) -> quiver_compiler::compiler::CompileOptions {
     quiver_compiler::compiler::CompileOptions {
         debug,
         source_name: "std".to_string(),
+        ..Default::default()
     }
 }
 

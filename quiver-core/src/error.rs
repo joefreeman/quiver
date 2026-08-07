@@ -94,6 +94,13 @@ pub enum Error {
     // arrive (no sender can exist, and time is frozen so timeouts never expire).
     StalledAtCompileTime,
 
+    // Compile-time execution ran past its step budget — the bound that turns an
+    // infinite loop at a module's top level into an error instead of a hang.
+    ExhaustedAtCompileTime,
+
+    // The host abandoned a compile-time execution in flight (a cancelled evaluation).
+    CancelledAtCompileTime,
+
     // An explicit, unrecoverable abort (`__panic__`) — e.g. a debug-mode `:pre`/`:post`
     // contract whose verdict was nil, or an `assert`/`unreachable` helper.
     Panic(String),
@@ -155,6 +162,11 @@ impl Error {
                  arrive in compile-time execution (module bodies are evaluated at compile \
                  time — receive inside a function instead)"
                 .to_string(),
+            Error::ExhaustedAtCompileTime => "compile-time execution exceeded its step \
+                 budget (module bodies are evaluated at compile time — move long-running \
+                 work into a function the module exports)"
+                .to_string(),
+            Error::CancelledAtCompileTime => "compile-time execution was cancelled".to_string(),
             Error::VariableUndefined(name) => format!("undefined variable: {name}"),
             other => format!("internal error: {other:?}"),
         }

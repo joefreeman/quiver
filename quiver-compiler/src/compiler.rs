@@ -586,13 +586,27 @@ pub struct CompileOptions {
     /// The display name provenance sites use for top-level code (the source file name,
     /// `"repl"`, ...); imported modules use their own module ids.
     pub source_name: String,
+    /// Step budget for compile-time evaluation (module bodies, dialect expansion): the
+    /// bound that turns an infinite loop at a module's top level into a compile error
+    /// instead of a hang.
+    pub fuel: u64,
+    /// Cooperative cancellation for compile-time evaluation, polled between execution
+    /// slices; a host sets it to abandon a compilation in flight.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
+
+/// The default compile-time evaluation budget: far above what any reasonable module
+/// top level uses (std's heaviest evaluate in a few million units), while bounding a
+/// runaway one to seconds rather than forever.
+pub const DEFAULT_COMPILE_FUEL: u64 = 1_000_000_000;
 
 impl Default for CompileOptions {
     fn default() -> Self {
         CompileOptions {
             debug: false,
             source_name: "main".to_string(),
+            fuel: DEFAULT_COMPILE_FUEL,
+            cancel: None,
         }
     }
 }
@@ -824,6 +838,11 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // (swapped in `import_and_cache_module`, like `current_package`).
     current_module: String,
 
+    // Bounds on compile-time evaluation (module bodies, dialect expansion): the step
+    // budget, and the host's cooperative cancellation flag. See `CompileOptions`.
+    fuel: u64,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+
     // Opt-in symbol recorder for the language server (hover/definition). `None` for
     // ordinary compilation, so there is no cost. Caller-owned, so the recorded data
     // survives a failed compile.
@@ -979,6 +998,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             function_depth: 0,
             debug: options.debug,
             current_module: options.source_name,
+            fuel: options.fuel,
+            cancel: options.cancel,
             recorder,
             _phantom: std::marker::PhantomData,
         };
@@ -4871,17 +4892,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Execute the module to get the result value
         // Modules are executed at compile time only to produce their value; they don't
         // receive messages, so skip the (expensive) parameter-compatibility tables.
-        let (module_value, _executor) =
-            match quiver_core::execute_bytecode_sync_with(bytecode, self.builtins, false, false) {
-                Ok(result) => result,
-                Err(e) => {
-                    self.module_cache.recording.pop();
-                    return Err(Error::ModuleExecution {
-                        module: module_name.clone(),
-                        error: Box::new(e),
-                    });
-                }
-            };
+        let (module_value, _executor) = match quiver_core::execute_bytecode_sync_with(
+            bytecode,
+            self.builtins,
+            false,
+            false,
+            self.fuel,
+            self.cancel.as_deref(),
+        ) {
+            Ok(result) => result,
+            Err(e) => {
+                self.module_cache.recording.pop();
+                return Err(Error::ModuleExecution {
+                    module: module_name.clone(),
+                    error: Box::new(e),
+                });
+            }
+        };
 
         // Extract binary data from the executor
 
@@ -5108,7 +5135,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         bytecode.entry = Some(bytecode.functions.len() - 1);
 
         let (expr_value, executor) = quiver_core::execute_bytecode_sync_with(
-            bytecode, &registry, false, false,
+            bytecode,
+            &registry,
+            false,
+            false,
+            self.fuel,
+            self.cancel.as_deref(),
         )
         .map_err(|e| Error::ModuleExecution {
             module: module_name.clone(),

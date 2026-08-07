@@ -21,20 +21,29 @@ pub fn execute_bytecode_sync<E: Effect>(
     builtins: &crate::builtins::BuiltinRegistry<E>,
     profile: bool,
 ) -> Result<(Value, Executor<E>), Error> {
-    execute_bytecode_sync_with(bytecode, builtins, profile, true)
+    execute_bytecode_sync_with(bytecode, builtins, profile, true, u64::MAX, None)
 }
 
 /// As [`execute_bytecode_sync`], but `param_compat` controls whether parameter-compatibility
-/// tables (used only for mailbox message filtering during select/receive) are computed.
+/// tables (used only for mailbox message filtering during select/receive) are computed,
+/// and execution is bounded:
 ///
 /// Computing them is O(functions × types) and is the dominant cost of compiling modules,
 /// which are executed at compile time purely to produce a value and do not receive messages.
 /// Skipping it leaves the tables empty, which `check_message_compatible` treats permissively.
+///
+/// `fuel` is the step budget in executor units; running past it answers
+/// [`Error::ExhaustedAtCompileTime`], the bound that turns an infinite loop at a
+/// module's top level into an error instead of a hang. `cancel` is polled between
+/// execution slices; a host sets it to abandon the evaluation, answering
+/// [`Error::CancelledAtCompileTime`].
 pub fn execute_bytecode_sync_with<E: Effect>(
     bytecode: Bytecode,
     builtins: &crate::builtins::BuiltinRegistry<E>,
     profile: bool,
     param_compat: bool,
+    fuel: u64,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<(Value, Executor<E>), Error> {
     let entry = bytecode
         .entry
@@ -100,8 +109,20 @@ pub fn execute_bytecode_sync_with<E: Effect>(
     executor.spawn_process(process_id, Some(entry), vec![], WireValue::nil(), false)?;
 
     // Execute until completion
+    const SLICE: u64 = 1000;
+    let mut spent: u64 = 0;
     loop {
-        let (did_work, action) = executor.step(1000, 0);
+        if let Some(cancel) = cancel
+            && cancel.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(Error::CancelledAtCompileTime);
+        }
+        if spent >= fuel {
+            return Err(Error::ExhaustedAtCompileTime);
+        }
+        spent = spent.saturating_add(SLICE);
+
+        let (did_work, action) = executor.step(SLICE as usize, 0);
 
         let process = executor
             .get_process(process_id)

@@ -24,6 +24,9 @@ pub struct ReplCli {
     editor: Editor<(), rustyline::history::DefaultHistory>,
     environment: Arc<Mutex<Environment<NativeEffect>>>,
     repl: Option<Repl<NativeEffect>>,
+    /// Signalled by the stepping thread after every productive step, so request waits
+    /// sleep instead of polling.
+    progress: Arc<quiver_cli::native_transport::Progress>,
     stepping_thread: Option<JoinHandle<()>>,
     shutdown_signal: Arc<AtomicBool>,
     /// Set by Ctrl-C during an evaluation (at the prompt, rustyline's raw mode
@@ -105,8 +108,10 @@ impl ReplCli {
         signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&interrupt))?;
 
         // Spawn background thread to step the environment continuously
+        let progress = Arc::new(quiver_cli::native_transport::Progress::new());
         let env_clone = Arc::clone(&environment);
         let shutdown_clone = Arc::clone(&shutdown_signal);
+        let progress_clone = Arc::clone(&progress);
         let stepping_thread = Some(thread::spawn(move || {
             while !shutdown_clone.load(Ordering::Relaxed) {
                 let did_work = if let Ok(mut env) = env_clone.lock() {
@@ -120,7 +125,9 @@ impl ReplCli {
                 // message. The shutdown flag is checked on each wake, so a signal is all it
                 // takes to leave; `io_in_flight` bounds the wait so a completion is still
                 // noticed.
-                if !did_work {
+                if did_work {
+                    progress_clone.notify();
+                } else {
                     let io_in_flight = env_clone
                         .lock()
                         .map(|env| env.io_in_flight())
@@ -153,6 +160,7 @@ impl ReplCli {
                     quiver_compiler::compiler::CompileOptions {
                         debug: true,
                         source_name: "std".to_string(),
+                        ..Default::default()
                     },
                 );
             });
@@ -162,6 +170,7 @@ impl ReplCli {
             editor,
             environment,
             repl: None,
+            progress,
             stepping_thread,
             shutdown_signal,
             interrupt,
@@ -204,6 +213,7 @@ impl ReplCli {
             repl.set_compile_options(quiver_compiler::compiler::CompileOptions {
                 debug: true,
                 source_name: "repl".to_string(),
+                ..Default::default()
             });
             repl.set_artifact_store(self.artifact_store.clone());
             repl
@@ -394,14 +404,20 @@ impl ReplCli {
         &mut self,
         request_id: u64,
     ) -> Result<RequestResult, quiver_environment::EnvironmentError> {
+        // The background thread does the stepping; this thread only polls, sleeping on
+        // the progress signal between polls. The timeout is a safety bound, not a poll
+        // interval — a resolution wakes the wait immediately.
         loop {
-            // The background thread is now stepping, but we still want to
-            // step here to ensure progress on this request
-            self.environment.lock().unwrap().step()?;
-
-            match self.environment.lock().unwrap().poll_request(request_id)? {
+            let seen = self.progress.generation();
+            // Bound to a local so the environment guard drops before the wait below —
+            // a `match` on the locked call would hold the lock through the wait arm,
+            // starving the stepping thread.
+            let polled = self.environment.lock().unwrap().poll_request(request_id)?;
+            match polled {
                 Some(result) => return Ok(result),
-                None => std::thread::sleep(std::time::Duration::from_micros(10)),
+                None => self
+                    .progress
+                    .wait_past(seen, std::time::Duration::from_millis(100)),
             }
         }
     }
@@ -423,11 +439,18 @@ impl ReplCli {
                 stopped = true;
             }
 
-            self.environment.lock().unwrap().step()?;
-
-            match self.environment.lock().unwrap().poll_request(request_id)? {
+            // The wait is bounded so the interrupt flag above stays responsive even
+            // when nothing is making progress.
+            let seen = self.progress.generation();
+            // Bound to a local so the environment guard drops before the wait below —
+            // a `match` on the locked call would hold the lock through the wait arm,
+            // starving the stepping thread.
+            let polled = self.environment.lock().unwrap().poll_request(request_id)?;
+            match polled {
                 Some(result) => return Ok(result),
-                None => std::thread::sleep(std::time::Duration::from_micros(10)),
+                None => self
+                    .progress
+                    .wait_past(seen, std::time::Duration::from_millis(50)),
             }
         }
     }
@@ -705,12 +728,21 @@ impl ReplCli {
             }
         };
 
-        // Now evaluate with the process types
-        let request_id = match self.repl.as_mut().unwrap().evaluate(
+        // Now evaluate with the process types: prepare against the environment, compile
+        // with the lock released (the background thread keeps stepping while the line
+        // compiles), then commit.
+        let prepared = self.repl.as_mut().unwrap().prepare(
             &mut *self.environment.lock().unwrap(),
             line,
             process_types,
-        )? {
+        )?;
+        let compiled = self.repl.as_ref().unwrap().compile(prepared)?;
+        let request_id = match self
+            .repl
+            .as_mut()
+            .unwrap()
+            .commit(&mut *self.environment.lock().unwrap(), compiled)?
+        {
             Some(id) => id,
             None => {
                 // No executable code (e.g., only type definitions)

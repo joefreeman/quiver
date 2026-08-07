@@ -396,8 +396,11 @@ apply 5                       //=> 10
 ### Optional labels and defaults
 
 A parameter field whose label is written in parentheses is **omittable**: the argument may
-state it or leave the field positional, and the value adopts the label either way.
-Labelled entries may be given in any order; positional ones come first.
+state it or leave the field positional, and the value adopts the label either way. The
+label is inferred from the entry's position — a bare entry adopts the marked label of the
+field at its index — so it may be left off exactly where the positions line up, and an
+unmarked field's label must always be written. Labelled entries may be given in any order;
+positional ones come first.
 
 ```quiver
 at = #[(x): 'int, (y): 'int] { [$x, $y] }

@@ -213,6 +213,46 @@ pub fn wake_channel() -> (Waker, WakeSignal) {
     (Waker { sender }, WakeSignal { receiver })
 }
 
+/// A progress signal between an environment's stepping thread and threads waiting on
+/// requests it will resolve. The stepping thread calls [`Progress::notify`] after every
+/// productive step; a waiter snapshots [`Progress::generation`], polls its request, and
+/// — if unresolved — sleeps in [`Progress::wait_past`] until the generation moves on or
+/// a timeout elapses (the bound that keeps interrupt flags responsive). Snapshotting
+/// *before* polling is what makes the missed-wakeup race benign: a resolution landing
+/// between the poll and the wait has already advanced the generation, so the wait
+/// returns at once.
+#[derive(Default)]
+pub struct Progress {
+    generation: std::sync::Mutex<u64>,
+    condvar: std::sync::Condvar,
+}
+
+impl Progress {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The current generation, to snapshot before polling.
+    pub fn generation(&self) -> u64 {
+        *self.generation.lock().unwrap()
+    }
+
+    /// Record progress and wake every waiter.
+    pub fn notify(&self) {
+        *self.generation.lock().unwrap() += 1;
+        self.condvar.notify_all();
+    }
+
+    /// Block until the generation has moved past `seen`, or `timeout` elapses.
+    pub fn wait_past(&self, seen: u64, timeout: std::time::Duration) {
+        let guard = self.generation.lock().unwrap();
+        let _ = self
+            .condvar
+            .wait_timeout_while(guard, timeout, |generation| *generation == seen)
+            .unwrap();
+    }
+}
+
 /// Spawn a native worker thread on the given clock (see [`WorkerClock`]).
 pub fn spawn_worker<C: WorkerClock>(
     clock: C,
