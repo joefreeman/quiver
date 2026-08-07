@@ -19,3 +19,7 @@ signal-hook = "0.3"
 colored = "2.1"
 ariadne = "0.4"
 serde_json.workspace = true
+serde.workspace = true
+libc = "0.2"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }

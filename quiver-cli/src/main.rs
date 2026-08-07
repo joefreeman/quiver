@@ -1,53 +1,23 @@
 use clap::{Parser, Subcommand};
 use quiver_compiler::compiler::ModuleCache;
-use quiver_compiler::{Compiler, ModuleResolver, PackageResolver, parse};
+use quiver_compiler::{Compiler, PackageResolver, parse};
 use quiver_core::bytecode;
-use quiver_core::bytecode::{Id, Instruction};
 use quiver_core::format;
 use quiver_core::program::Program;
-use quiver_core::types::{Type, TypeLookup};
+use quiver_core::types::Type;
 use quiver_environment::{Environment, WorkerHandle};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal, Read};
 
 mod diagnostics;
+use quiver_cli::{build_builtin_registry, create_effect_backend};
 mod repl_cli;
+mod server_cli;
 mod test_cli;
 use quiver_cli::native_transport;
 use quiver_cli::spawn_worker;
 use repl_cli::ReplCli;
-
-/// Build complete builtin registry including core builtins and network builtins
-pub fn build_builtin_registry() -> quiver_core::builtins::BuiltinRegistry<quiver_io::NativeEffect> {
-    let mut registry = quiver_core::builtins::BuiltinRegistry::with_modules(
-        &quiver_core::builtins::core_modules(),
-    );
-    for module in quiver_core::builtins::io_modules()
-        .into_iter()
-        .chain(quiver_core::builtins::tls_modules())
-    {
-        module(&mut registry);
-    }
-    // Add I/O builtins from quiver-io
-    // Signatures came from `core_modules`; attach the native implementations.
-    quiver_io::attach_network_builtins(&mut registry);
-    quiver_io::attach_file_builtins(&mut registry);
-    quiver_io::attach_system_builtins(&mut registry);
-    quiver_io::attach_tls_builtins(&mut registry);
-    registry
-}
-
-/// Create an effect backend for the new effects system
-pub fn create_effect_backend()
--> Option<Box<dyn quiver_core::effects::EffectBackend<E = quiver_io::NativeEffect>>> {
-    quiver_io::NativeEffectBackend::new(256)
-        .ok()
-        .map(|backend| {
-            Box::new(backend)
-                as Box<dyn quiver_core::effects::EffectBackend<E = quiver_io::NativeEffect>>
-        })
-}
 
 #[derive(Parser)]
 #[command(name = "quiv", version, about = "Quiver CLI")]
@@ -115,6 +85,31 @@ enum Commands {
         /// Markdown documents to run.
         input: Vec<String>,
     },
+
+    /// Run the persistent server: one shared environment that client sessions connect
+    /// to over a unix socket. Foreground; stop with `quiv server stop` or SIGTERM.
+    /// (`quiv run` and `quiv repl` spawn one automatically when none is listening.)
+    Server {
+        #[command(subcommand)]
+        action: Option<ServerAction>,
+
+        /// Listen on this socket path instead of the per-user default.
+        #[arg(long)]
+        socket: Option<String>,
+
+        /// Include a code phase in a reclamation round after this many function/
+        /// constant registrations (a testing/tuning knob).
+        #[arg(long)]
+        code_collection_threshold: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServerAction {
+    /// Whether a server is listening, and which build it is.
+    Status,
+    /// Stop the server (its sessions' processes die with it, detached ones included).
+    Stop,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -137,6 +132,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Inspect { input }) => inspect_command(input)?,
         Some(Commands::Format { input, eval, check }) => format_command(input, eval, check)?,
         Some(Commands::Test { input }) => test_cli::test_command(input)?,
+        Some(Commands::Server {
+            action,
+            socket,
+            code_collection_threshold,
+        }) => match action {
+            None => server_cli::server_command(socket, code_collection_threshold)?,
+            Some(ServerAction::Status) => server_cli::status_command(socket)?,
+            Some(ServerAction::Stop) => server_cli::stop_command(socket)?,
+        },
         None => run_repl()?,
     }
 
@@ -178,156 +182,6 @@ fn entry_resolver(input_path: Option<&str>) -> PackageResolver {
     }
 }
 
-/// Compile source into a Program and a nilary entry function: the program's top level,
-/// followed by a call of the function it evaluates to. The top level thus runs at boot, in
-/// the root process — compilation never executes user code.
-pub fn compile_entry(
-    ast: quiver_compiler::ast::Sequence,
-    resolver: &dyn ModuleResolver,
-    builtins: &quiver_core::builtins::BuiltinRegistry<quiver_io::NativeEffect>,
-    options: quiver_compiler::compiler::CompileOptions,
-) -> Result<(Program, usize), Box<dyn std::error::Error>> {
-    let mut program = Program::new();
-    let mut module_cache = ModuleCache::new();
-    // The top level is a sequence, so each step starts from a block value: nil for a
-    // program. This must be a *type* id — `types::NIL` is the nil tuple's id, and passing
-    // it types the top-level parameter as whatever type happens to land at id 0.
-    let nil_type_id = program.register_type(Type::nil());
-    let compilation_result = Compiler::compile(
-        ast,
-        &quiver_compiler::compiler::Bindings::default(),
-        Default::default(),
-        &mut module_cache,
-        resolver,
-        &mut program,
-        nil_type_id, // parameter_type_id
-        &HashMap::new(),
-        builtins,
-        None, // no semantic recorder for the CLI
-        options,
-    )
-    .map_err(|e| match e.span {
-        Some(span) => format!(
-            "Compile error at {}:{}: {:?}",
-            span.line, span.column, e.error
-        ),
-        None => format!("Compile error: {:?}", e.error),
-    })?;
-
-    let instructions = compilation_result.instructions;
-    let receive_type = compilation_result.receive_type;
-
-    // The program must evaluate to a function; check the type rather than running it.
-    let Some((call_result, call_receive)) =
-        resolve_program_callable(&program, compilation_result.result_type)
-    else {
-        return Err("Program is not executable. Must evaluate to a function.".into());
-    };
-
-    // The entry runs the top level — leaving the program's function on the stack — then
-    // calls it with nil. Top-level bindings live in the entry frame below the call, so
-    // they persist for the program's lifetime, exactly as bindings do in any scope.
-    //
-    // Note the call pushes a frame: the program function runs at depth 2, so its tail
-    // calls no longer update the root process's observable state (`record_state` fires
-    // only in the root frame). Currently unobservable — `&.` in the entry types as a
-    // state-less process, so nothing can sample it — but if root-state sampling ever
-    // matters here, the call must become a tail call instead.
-    let mut entry_instructions = instructions;
-    // A fallible top level short-circuits with nil (carrying its debug `:origin` stamp).
-    // Guard the call so that nil becomes the program's *result* — reported like any
-    // other failure, stamp intact — instead of an opaque call-on-nil type error.
-    let fallible = type_contains_nil(&program, compilation_result.result_type);
-    if fallible {
-        entry_instructions.push(Instruction::Duplicate);
-        entry_instructions.push(Instruction::Not);
-        entry_instructions.push(Instruction::JumpIf(3));
-    }
-    entry_instructions.push(Instruction::Tuple(quiver_core::types::NIL as Id));
-    entry_instructions.push(Instruction::Rotate(2));
-    entry_instructions.push(Instruction::Call);
-
-    // Both the top level and the program's function execute in the root process, so the
-    // entry's receive covers both.
-    let receive = union_types(&mut program, vec![receive_type, call_receive]);
-
-    let result = if fallible {
-        union_types(&mut program, vec![call_result, nil_type_id])
-    } else {
-        call_result
-    };
-    let callable_type_id = program.register_type(Type::Callable {
-        parameter: nil_type_id,
-        result,
-        receive,
-        // The entry is never spawned; grant nothing.
-        states: None,
-    });
-
-    let entry = program.register_function(quiver_core::bytecode::Function {
-        instructions: entry_instructions,
-        captures: 0,
-        type_id: callable_type_id,
-    });
-
-    Ok((program, entry))
-}
-
-/// The callable the program's top level evaluates to: its (result, receive) type ids,
-/// looking through annotation rows and unions (a fallible top level unions with nil —
-/// the entry guards that case and yields the nil as the program's result). A union of
-/// several callables takes the FIRST member found: the entry's declared type is
-/// informational (nothing narrows against it), but note the receive may under-declare
-/// the other members'.
-fn resolve_program_callable(program: &Program, type_id: usize) -> Option<(usize, usize)> {
-    match program.lookup_type(type_id)? {
-        Type::Callable {
-            result, receive, ..
-        } => Some((*result, *receive)),
-        Type::Annotated { base, .. } => resolve_program_callable(program, *base),
-        Type::Union(members) => members
-            .clone()
-            .into_iter()
-            .find_map(|member| resolve_program_callable(program, member)),
-        _ => None,
-    }
-}
-
-/// Whether the type can be nil: nil itself, or a union with a nil member (looking
-/// through annotation rows) — the fallible-top-level test for the entry's nil guard.
-fn type_contains_nil(program: &Program, type_id: usize) -> bool {
-    match program.lookup_type(type_id) {
-        Some(Type::Tuple(id)) => *id == quiver_core::types::NIL,
-        Some(Type::Annotated { base, .. }) => type_contains_nil(program, *base),
-        Some(Type::Union(members)) => members
-            .clone()
-            .iter()
-            .any(|member| type_contains_nil(program, *member)),
-        _ => false,
-    }
-}
-
-/// Union of type ids for the entry's declared type, flattening one level of nesting,
-/// deduping, and dropping `never` (the empty union) — enough normalization for a type
-/// nothing narrows against (the compiler's full normalizer is module-private).
-fn union_types(program: &mut Program, ids: Vec<usize>) -> usize {
-    let mut members: Vec<usize> = Vec::new();
-    for id in ids {
-        match program.lookup_type(id) {
-            Some(Type::Union(inner)) => members.extend(inner.clone()),
-            _ => members.push(id),
-        }
-    }
-    members.dedup();
-    let mut seen = std::collections::HashSet::new();
-    members.retain(|id| seen.insert(*id));
-    match members.len() {
-        0 => program.never(),
-        1 => members[0],
-        _ => program.register_type(Type::Union(members)),
-    }
-}
-
 fn compile_command(
     input: Option<String>,
     output: Option<String>,
@@ -359,38 +213,43 @@ fn compile_command(
         Ok(ast) => ast,
         Err(e) => handle_parse_error(e, &source, &source_id),
     };
-    let (program, entry) =
-        match compile_entry(parsed.clone(), &resolver, &builtins, options.clone()) {
-            Ok((program, entry)) => (program, Some(entry)),
-            Err(_) => {
-                // If it doesn't evaluate to a function, compile without an entry point
-                let ast = parsed;
-                let mut program = Program::new();
-                let mut module_cache = ModuleCache::new();
-                let nil_type_id = program.register_type(Type::nil());
-                Compiler::compile(
-                    ast,
-                    &quiver_compiler::compiler::Bindings::default(),
-                    Default::default(),
-                    &mut module_cache,
-                    &resolver,
-                    &mut program,
-                    nil_type_id, // parameter_type_id
-                    &HashMap::new(),
-                    &builtins,
-                    None, // no semantic recorder for the CLI
-                    options,
-                )
-                .map_err(|e| match e.span {
-                    Some(span) => format!(
-                        "Compile error at {}:{}: {:?}",
-                        span.line, span.column, e.error
-                    ),
-                    None => format!("Compile error: {:?}", e.error),
-                })?;
-                (program, None)
-            }
-        };
+    let (program, entry) = match quiver_cli::compile::compile_entry(
+        parsed.clone(),
+        &resolver,
+        &builtins,
+        options.clone(),
+        None,
+    ) {
+        Ok((program, entry)) => (program, Some(entry)),
+        Err(_) => {
+            // If it doesn't evaluate to a function, compile without an entry point
+            let ast = parsed;
+            let mut program = Program::new();
+            let mut module_cache = ModuleCache::new();
+            let nil_type_id = program.register_type(Type::nil());
+            Compiler::compile(
+                ast,
+                &quiver_compiler::compiler::Bindings::default(),
+                Default::default(),
+                &mut module_cache,
+                &resolver,
+                &mut program,
+                nil_type_id, // parameter_type_id
+                &HashMap::new(),
+                &builtins,
+                None, // no semantic recorder for the CLI
+                options,
+            )
+            .map_err(|e| match e.span {
+                Some(span) => format!(
+                    "Compile error at {}:{}: {:?}",
+                    span.line, span.column, e.error
+                ),
+                None => format!("Compile error: {:?}", e.error),
+            })?;
+            (program, None)
+        }
+    };
 
     let bytecode = match entry {
         Some(entry_fn) => program.to_bytecode_optimized(entry_fn),
@@ -497,36 +356,162 @@ fn run_command(
     release: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let debug = !release;
-    if let Some(code) = eval {
-        compile_execute(&code, None, quiet, profile, debug)?;
-    } else if let Some(path) = input {
-        let content = fs::read_to_string(&path)?;
 
-        if path.ends_with(".qv") {
-            compile_execute(&content, Some(&path), quiet, profile, debug)?;
-        } else if path.ends_with(".qx") {
-            execute_bytecode(&content, quiet, profile)?;
-        } else {
-            eprintln!(
-                "Error: Unsupported file extension - expected .qv for source or .qx for bytecode."
-            );
-            std::process::exit(1);
-        }
-    } else {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-
-        // Try to parse as bytecode first
-        if buffer.trim_start().starts_with('{') {
-            match serde_json::from_str::<bytecode::Bytecode>(&buffer) {
-                Ok(_) => execute_bytecode(&buffer, quiet, profile)?,
-                Err(_) => compile_execute(&buffer, None, quiet, profile, debug)?,
+    // Profiling measures a dedicated runtime — per-worker instrumentation the shared
+    // server cannot switch on per request — so it keeps the in-process path. Every
+    // ordinary run goes through the server.
+    if profile {
+        if let Some(code) = eval {
+            compile_execute(&code, None, quiet, profile, debug)?;
+        } else if let Some(path) = input {
+            let content = fs::read_to_string(&path)?;
+            if path.ends_with(".qx") {
+                execute_bytecode(&content, quiet, profile)?;
+            } else {
+                compile_execute(&content, Some(&path), quiet, profile, debug)?;
             }
         } else {
+            let mut buffer = String::new();
+            io::stdin().read_to_string(&mut buffer)?;
             compile_execute(&buffer, None, quiet, profile, debug)?;
         }
+        return Ok(());
     }
 
+    // Compile client-side (parse and compile errors are local, with the usual
+    // diagnostics), or take bytecode as given; the server only ever sees bytecode.
+    let bytecode = {
+        let (source, source_id, path): (String, String, Option<String>) = if let Some(code) = eval {
+            (code, "eval".to_string(), None)
+        } else if let Some(path) = input {
+            let content = fs::read_to_string(&path)?;
+            if path.ends_with(".qx") {
+                let bytecode: bytecode::Bytecode = serde_json::from_str(&content)?;
+                if bytecode.entry.is_none() {
+                    return Err("Bytecode has no entry point".into());
+                }
+                run_on_server(bytecode, quiet)?;
+                return Ok(());
+            } else if path.ends_with(".qv") {
+                (content, path.clone(), Some(path))
+            } else {
+                eprintln!(
+                    "Error: Unsupported file extension - expected .qv for source or .qx for bytecode."
+                );
+                std::process::exit(1);
+            }
+        } else {
+            let mut buffer = String::new();
+            io::stdin().read_to_string(&mut buffer)?;
+            // Try to parse as bytecode first
+            if buffer.trim_start().starts_with('{')
+                && let Ok(bytecode) = serde_json::from_str::<bytecode::Bytecode>(&buffer)
+            {
+                if bytecode.entry.is_none() {
+                    return Err("Bytecode has no entry point".into());
+                }
+                run_on_server(bytecode, quiet)?;
+                return Ok(());
+            }
+            (buffer, "stdin".to_string(), None)
+        };
+
+        let ast = match parse(&source) {
+            Ok(ast) => ast,
+            Err(e) => handle_parse_error(e, &source, &source_id),
+        };
+        let resolver = entry_resolver(path.as_deref());
+        let options = quiver_compiler::compiler::CompileOptions {
+            debug,
+            source_name: source_id,
+            ..Default::default()
+        };
+        let store = std::rc::Rc::new(quiver_compiler::ArtifactStore::cache());
+        let (program, entry) = quiver_cli::compile::compile_entry(
+            ast,
+            &resolver,
+            &build_builtin_registry(),
+            options,
+            Some(store),
+        )?;
+        program.to_bytecode_optimized(entry)
+    };
+
+    run_on_server(bytecode, quiet)
+}
+
+/// Execute compiled bytecode on the shared server: create a root process, resume it
+/// with the program, delete it afterwards. Ctrl-C cancels the run (the server stops
+/// the root, the resume answers `Interrupted`) and still deletes — lifecycle is
+/// explicit now that nothing ties it to a connection.
+fn run_on_server(
+    bytecode: bytecode::Bytecode,
+    quiet: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use quiver_cli::protocol::Outcome;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let client = quiver_cli::client::connect_or_spawn(
+        &quiver_cli::protocol::default_socket_path(),
+        &std::env::current_exe()?,
+    )?;
+    let pid = client.create_process().map_err(|e| e.to_string())?;
+
+    // Forward Ctrl-C as a cancel; the second Ctrl-C hard-exits (conditional shutdown
+    // sees the flag from the previous one).
+    let interrupt = std::sync::Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register_conditional_shutdown(
+        signal_hook::consts::SIGINT,
+        130,
+        std::sync::Arc::clone(&interrupt),
+    )?;
+    signal_hook::flag::register(
+        signal_hook::consts::SIGINT,
+        std::sync::Arc::clone(&interrupt),
+    )?;
+    {
+        let client = client.clone();
+        let interrupt = std::sync::Arc::clone(&interrupt);
+        std::thread::spawn(move || {
+            let mut sent = false;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                if interrupt.load(Ordering::Relaxed) && !sent {
+                    let _ = client.cancel(pid);
+                    sent = true;
+                }
+            }
+        });
+    }
+
+    let outcome = client.resume(pid, bytecode, None);
+    let _ = client.delete_process(pid);
+
+    match outcome.map_err(|e| e.to_string())? {
+        Outcome::Value {
+            rendered,
+            origin,
+            is_nil,
+            ..
+        } => {
+            // Nil is the failing result: surface its provenance (debug builds) and
+            // exit non-zero, exactly as the in-process runner did.
+            if is_nil {
+                if !quiet && let Some(origin) = origin {
+                    eprintln!("[]  ({origin})");
+                }
+                std::process::exit(1);
+            }
+            if !quiet {
+                println!("{rendered}");
+            }
+        }
+        Outcome::Error { message } => {
+            eprintln!("Runtime error: {message}");
+            std::process::exit(1);
+        }
+        Outcome::Interrupted => std::process::exit(130),
+    }
     Ok(())
 }
 
@@ -558,7 +543,8 @@ fn compile_execute(
         Ok(ast) => ast,
         Err(e) => handle_parse_error(e, source, &options.source_name),
     };
-    let (program, entry) = compile_entry(ast, &resolver, &builtins, options)?;
+    let (program, entry) =
+        quiver_cli::compile::compile_entry(ast, &resolver, &builtins, options, None)?;
 
     // Convert to bytecode
     let bytecode = program.to_bytecode_optimized(entry);

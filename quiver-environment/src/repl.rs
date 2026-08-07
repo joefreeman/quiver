@@ -1,3 +1,16 @@
+//! The REPL session, split along the evaluator boundary (see the server plan):
+//!
+//! - [`LineCompiler`] is the *client-side* half: every piece of compiler-side session
+//!   state — the accumulated program, bindings, session tables, module cache, the
+//!   last result type — and the prepare/compile/commit-line lifecycle over it. It
+//!   never touches an environment; what the host must do comes back as values
+//!   (a keep-set to compact, bytecode to resume).
+//! - [`Repl`] binds a `LineCompiler` to an in-process [`Environment`]: the driver the
+//!   web build and the test harnesses use, with the same API it has always had.
+//!
+//! A remote driver (the CLI talking to `quiv server`) uses `LineCompiler` directly
+//! and carries the returned values over its protocol instead.
+
 use crate::environment::{Environment, EnvironmentError};
 use quiver_compiler::Compiler;
 use quiver_compiler::ModuleResolver;
@@ -31,22 +44,46 @@ impl std::fmt::Display for ReplError {
     }
 }
 
-/// A line staged by [`Repl::prepare`]: parsed, aligned with the session process, and
-/// carrying clones of everything the compiler mutates. Consumed by [`Repl::compile`],
-/// which needs no environment access.
+/// A line staged by [`LineCompiler::prepare`]: parsed, its binding indices re-aligned
+/// (the host must apply [`PreparedLine::compact_keep`] to the session process before
+/// the line's resume), and carrying clones of everything the compiler mutates.
+/// Consumed by [`LineCompiler::compile`].
 pub struct PreparedLine {
     epoch: u64,
     parsed: quiver_compiler::ast::Sequence,
+    /// The keep-set produced by the binding re-alignment, for the host to apply to
+    /// the session process's locals.
+    compact_keep: Vec<usize>,
     program: Program,
     module_cache: ModuleCache,
     process_type_ids: HashMap<usize, (usize, usize)>,
     last_result_type_id: usize,
 }
 
-/// A line compiled by [`Repl::compile`]: the session state it produces, staged but not
-/// yet applied, plus the bytecode to run (`None` for a line with nothing to execute,
-/// such as type definitions alone). Dropping it without [`Repl::commit`] leaves the
-/// session exactly as it was.
+impl PreparedLine {
+    /// The locals to keep when compacting the session process — the environment-side
+    /// half of the re-alignment `prepare` performed on the binding indices.
+    pub fn compact_keep(&self) -> &[usize] {
+        &self.compact_keep
+    }
+
+    /// The staged program, for deep-importing environment-space types before
+    /// compiling (see [`PreparedLine::add_process_type`]).
+    pub fn program_mut(&mut self) -> &mut Program {
+        &mut self.program
+    }
+
+    /// Grant the line an `@pid` reference: `type_id` must already be an id in this
+    /// line's program (imported via [`PreparedLine::program_mut`]).
+    pub fn add_process_type(&mut self, pid: usize, type_id: usize, function_index: usize) {
+        self.process_type_ids.insert(pid, (type_id, function_index));
+    }
+}
+
+/// A line compiled by [`LineCompiler::compile`]: the session state it produces,
+/// staged but not yet applied, plus the bytecode to run (`None` for a line with
+/// nothing to execute, such as type definitions alone). Dropping it without
+/// [`LineCompiler::commit_line`] leaves the session exactly as it was.
 pub struct CompiledLine {
     epoch: u64,
     program: Program,
@@ -57,8 +94,18 @@ pub struct CompiledLine {
     bytecode: Option<Bytecode>,
 }
 
-pub struct Repl<E: Effect> {
-    repl_process_id: Option<ProcessId>,
+/// What a committed line asks of the host: resume the session process with the
+/// bytecode, and hand the keep-set to the result request so the line's orphaned
+/// locals are released at delivery. `None` when the line had nothing to execute.
+pub struct CommittedLine {
+    pub bytecode: Bytecode,
+    pub keep_indices: Vec<usize>,
+}
+
+/// The compiler-side half of a REPL session. Owns every piece of cross-line compile
+/// state and no environment access; hosts (in-process or remote) apply what its
+/// lifecycle methods hand back.
+pub struct LineCompiler<E: Effect> {
     /// Guards the prepare → compile → commit sequence: each stamped line must be the
     /// most recently prepared one, so an out-of-order or superseded line fails loudly
     /// instead of silently committing a stale session snapshot.
@@ -77,17 +124,12 @@ pub struct Repl<E: Effect> {
     options: quiver_compiler::compiler::CompileOptions,
 }
 
-impl<E: Effect> Repl<E> {
+impl<E: Effect> LineCompiler<E> {
     pub fn new(
-        env: &mut Environment<E>,
         resolver: Box<dyn ModuleResolver>,
         builtins: quiver_core::builtins::BuiltinRegistry<E>,
-    ) -> Result<Self, ReplError> {
-        // Create a sleeping process ready for resume
-        let pid = env.start_process(None).map_err(ReplError::Environment)?;
-
-        Ok(Self {
-            repl_process_id: Some(pid),
+    ) -> Self {
+        Self {
             line_epoch: 0,
             program: Program::new(),
             bindings: Bindings::default(),
@@ -97,18 +139,13 @@ impl<E: Effect> Repl<E> {
             resolver,
             builtins,
             options: quiver_compiler::compiler::CompileOptions::default(),
-        })
+        }
     }
 
     /// Set the compilation mode for subsequent evaluations (debug builds stamp nil
     /// results with failure provenance).
     pub fn set_compile_options(&mut self, options: quiver_compiler::compiler::CompileOptions) {
         self.options = options;
-    }
-
-    /// Get the REPL process ID
-    pub fn process_id(&self) -> ProcessId {
-        self.repl_process_id.expect("REPL process not initialized")
     }
 
     /// Swap in a fresh resolver and drop all cached modules, so subsequent evaluations re-read
@@ -128,61 +165,25 @@ impl<E: Effect> Repl<E> {
         self.module_cache.artifact_store = Some(store);
     }
 
-    /// Compile and evaluate an expression: [`Repl::prepare`], [`Repl::compile`] and
-    /// [`Repl::commit`] in sequence. Drivers that share the environment across threads
-    /// should call the three steps directly, releasing the environment around `compile`.
-    /// Returns a request ID that can be polled for the result
-    /// Returns None if the source only contains type definitions (no executable code)
-    ///
-    /// Process types must be fetched before calling this method:
-    /// - Native: request_process_types() + step()/poll_request() loop
-    /// - Web: async request via wasm bindings
-    pub fn evaluate(
-        &mut self,
-        env: &mut Environment<E>,
-        source: &str,
-        process_types: HashMap<usize, (Type, usize)>,
-    ) -> Result<Option<u64>, ReplError> {
-        let prepared = self.prepare(env, source, process_types)?;
-        let compiled = self.compile(prepared)?;
-        self.commit(env, compiled)
-    }
-
-    /// Parse a line and stage it against the session: the environment-touching prologue.
-    /// Re-aligns the session process's locals and imports process types, then captures
-    /// clones of everything the compiler will mutate.
-    pub fn prepare(
-        &mut self,
-        env: &mut Environment<E>,
-        source: &str,
-        process_types: HashMap<usize, (Type, usize)>,
-    ) -> Result<PreparedLine, ReplError> {
+    /// Parse a line and stage it: re-align the binding indices (the caller applies the
+    /// resulting keep-set to the session process before the line's resume) and capture
+    /// clones of everything the compiler will mutate — a failed or abandoned line
+    /// can't pollute session state.
+    pub fn prepare(&mut self, source: &str) -> Result<PreparedLine, ReplError> {
         // Parse the source
         let parsed = quiver_compiler::parse(source).map_err(|e| ReplError::Parser(Box::new(e)))?;
 
-        // Re-align the persistent process's locals with the binding indices before compiling, so
-        // each line begins from an aligned state (see `compact`). This mutates the session
-        // immediately — deliberately: the re-alignment is self-consistent whether or not the
-        // prepared line ever compiles or commits.
-        self.compact(env);
+        // Re-align the binding indices before compiling, so each line begins from an
+        // aligned state (see `compact_bindings`). This mutates the session state
+        // immediately — deliberately: the re-alignment is self-consistent whether or
+        // not the prepared line ever compiles or commits, provided the host applies
+        // the keep-set before the next resume.
+        let compact_keep = self.compact_bindings();
 
         // Clone the program and module cache for compilation; the compiler mutates these in
-        // place, and they reach `self` only when the compiled line is committed (so a failed
-        // or abandoned line can't pollute REPL state).
+        // place, and they reach `self` only when the compiled line is committed.
         let mut program = self.program.clone();
         let module_cache = self.module_cache.clone();
-
-        // Convert process types (for `@N` references) from Type to type IDs for the compiler.
-        // These types are built in the environment's id space, so deep-import them into this
-        // REPL's program first; registering them directly would leave their child ids dangling
-        // (referencing the environment's table, not ours) and corrupt the REPL program.
-        let process_type_ids: HashMap<usize, (usize, usize)> = process_types
-            .into_iter()
-            .map(|(pid, (ty, func_idx))| {
-                let local_ty = env.import_type_into(&mut program, ty);
-                (pid, (program.register_type(local_ty), func_idx))
-            })
-            .collect();
 
         // Convert last_result_type from Type to type ID for the compiler
         let last_result_type_id = program.register_type(self.last_result_type.clone());
@@ -191,17 +192,17 @@ impl<E: Effect> Repl<E> {
         Ok(PreparedLine {
             epoch: self.line_epoch,
             parsed,
+            compact_keep,
             program,
             module_cache,
-            process_type_ids,
+            process_type_ids: HashMap::new(),
             last_result_type_id,
         })
     }
 
-    /// Compile a prepared line. Needs no environment access — a driver holding a lock on
-    /// the environment should release it around this call, the slow step of the three.
-    /// Mutates nothing: the session state the line produces is staged in the returned
-    /// [`CompiledLine`] and applied by [`Repl::commit`].
+    /// Compile a prepared line. The slow step: a driver holding any host lock should
+    /// release it around this call. Mutates nothing — the session state the line
+    /// produces is staged in the returned [`CompiledLine`].
     pub fn compile(&self, line: PreparedLine) -> Result<CompiledLine, ReplError> {
         assert_eq!(
             line.epoch, self.line_epoch,
@@ -210,6 +211,7 @@ impl<E: Effect> Repl<E> {
         let PreparedLine {
             epoch,
             parsed,
+            compact_keep: _,
             mut program,
             mut module_cache,
             process_type_ids,
@@ -259,7 +261,12 @@ impl<E: Effect> Repl<E> {
                 type_id: callable_type_id,
             };
             let function_index = program.register_function(function);
-            Some(program.to_bytecode(Some(function_index)))
+            // Tree-shaken: the payload is the line's own closure — everything the
+            // wrapper statically reaches — not the whole session program. Earlier
+            // lines' code is already merged (append-only, with content-driven
+            // revival), and values reach it through the heap, not through this
+            // bytecode.
+            Some(program.to_bytecode_optimized(function_index))
         } else {
             None
         };
@@ -275,14 +282,10 @@ impl<E: Effect> Repl<E> {
         })
     }
 
-    /// Apply a compiled line's session state and hand its bytecode to the session
-    /// process: the environment-touching epilogue. Returns a request ID that can be
-    /// polled for the result, or `None` for a line with nothing to execute.
-    pub fn commit(
-        &mut self,
-        env: &mut Environment<E>,
-        line: CompiledLine,
-    ) -> Result<Option<u64>, ReplError> {
+    /// Apply a compiled line's session state, answering what the host must now do —
+    /// resume the session process with the bytecode, keep-set attached to the result
+    /// request — or `None` for a line with nothing to execute.
+    pub fn commit_line(&mut self, line: CompiledLine) -> Option<CommittedLine> {
         assert_eq!(
             line.epoch, self.line_epoch,
             "stale line: prepare, compile and commit must run in order, one line at a time"
@@ -295,91 +298,10 @@ impl<E: Effect> Repl<E> {
         self.module_cache = line.module_cache;
         self.last_result_type = line.last_result_type;
 
-        // If no bytecode was produced (type definitions only), we're done
-        let Some(bytecode) = line.bytecode else {
-            return Ok(None);
-        };
-
-        // Create or resume the REPL process
-        let repl_process_id = match self.repl_process_id {
-            Some(pid) => {
-                // Resume existing process with new function
-                // resume_process will push the previous result from process.result onto the stack
-                env.resume_process(pid, bytecode)
-                    .map_err(ReplError::Environment)?;
-                pid
-            }
-            None => {
-                // Create the persistent REPL process on first evaluation
-                let pid = env
-                    .start_process(Some(bytecode))
-                    .map_err(ReplError::Environment)?;
-                self.repl_process_id = Some(pid);
-                pid
-            }
-        };
-
-        // Request the result, handing the worker this line's keep-set so it releases the line's
-        // orphaned locals (its parameter and temporaries) the moment the result is delivered. This
-        // is the GC early-release; the next line's pre-compile `compact` still does the
-        // correctness-critical re-indexing, so the two are not redundant.
-        let request_id = env
-            .request_result(repl_process_id, Some(self.keep_indices()))
-            .map_err(ReplError::Environment)?;
-
-        Ok(Some(request_id))
-    }
-
-    /// Request a variable value by name
-    /// Returns a request ID that can be polled with poll_request()
-    /// The result will be RequestResult::Locals containing the variable value
-    pub fn request_variable(
-        &mut self,
-        env: &mut Environment<E>,
-        name: &str,
-    ) -> Result<u64, EnvironmentError> {
-        let local_index = self
-            .bindings
-            .variables
-            .get(name)
-            .map(|variable| variable.index)
-            .ok_or_else(|| {
-                if self.bindings.type_aliases.contains_key(name) {
-                    EnvironmentError::VariableNotFound(format!(
-                        "'{}' is a type alias, not a variable",
-                        name
-                    ))
-                } else {
-                    EnvironmentError::VariableNotFound(name.to_string())
-                }
-            })?;
-
-        let repl_process_id = self
-            .repl_process_id
-            .ok_or(EnvironmentError::NoReplProcess)?;
-
-        env.request_locals(repl_process_id, vec![local_index])
-    }
-
-    /// Get all variable names and their formatted types, ordered by local index
-    pub fn get_variables(&self) -> Vec<(String, String)> {
-        let mut vars: Vec<_> = self
-            .bindings
-            .variables
-            .iter()
-            .map(|(name, variable)| {
-                // Format the type using the Repl's own program
-                let formatted_type =
-                    quiver_core::format::format_type_by_id(&self.program, variable.ty);
-                (name.clone(), formatted_type, variable.index)
-            })
-            .collect();
-
-        // Sort by local index to maintain definition order
-        vars.sort_by_key(|(_, _, idx)| *idx);
-
-        // Drop the index from the result
-        vars.into_iter().map(|(name, ty, _)| (name, ty)).collect()
+        line.bytecode.map(|bytecode| CommittedLine {
+            bytecode,
+            keep_indices: self.keep_indices(),
+        })
     }
 
     /// Sorted local indices of every currently-bound variable. These are the slots that must
@@ -396,18 +318,13 @@ impl<E: Effect> Repl<E> {
         indices
     }
 
-    /// Re-align the process's locals with the binding indices: keep only the bound variables,
-    /// re-indexed contiguously, and rewrite the binding map to match. Called by `evaluate` before
-    /// compiling each line — without it the physical local positions drift from the compiler's
-    /// binding indices and lookups read stale slots, so this is correctness-critical, not an
-    /// optimisation. (The worker separately releases a finished line's orphaned locals at result
-    /// delivery; see `keep_indices` and `Command::GetResult`.)
-    fn compact(&mut self, env: &mut Environment<E>) {
-        // Silently ignore if no REPL process exists yet
-        let Some(repl_process_id) = self.repl_process_id else {
-            return;
-        };
-
+    /// Re-align the binding indices contiguously, answering the keep-set (the old
+    /// indices, in their new order) the host must apply to the session process's
+    /// locals. Correctness-critical, not an optimisation: without it the physical
+    /// local positions drift from the compiler's binding indices and lookups read
+    /// stale slots. (The host separately releases a finished line's orphaned locals
+    /// at result delivery; see `keep_indices`.)
+    fn compact_bindings(&mut self) -> Vec<usize> {
         let keep_indices = self.keep_indices();
 
         // Build mapping from old index to new index
@@ -424,18 +341,52 @@ impl<E: Effect> Repl<E> {
                 .expect("Invalid variable index");
         }
 
-        // Compact the locals on the worker (ignore errors - this is just an optimization)
-        let _ = env.compact_locals(repl_process_id, keep_indices);
+        keep_indices
+    }
+
+    /// The local slot of a bound variable, for host-side value requests.
+    pub fn variable_index(&self, name: &str) -> Result<usize, EnvironmentError> {
+        self.bindings
+            .variables
+            .get(name)
+            .map(|variable| variable.index)
+            .ok_or_else(|| {
+                if self.bindings.type_aliases.contains_key(name) {
+                    EnvironmentError::VariableNotFound(format!(
+                        "'{}' is a type alias, not a variable",
+                        name
+                    ))
+                } else {
+                    EnvironmentError::VariableNotFound(name.to_string())
+                }
+            })
+    }
+
+    /// Get all variable names and their formatted types, ordered by local index
+    pub fn get_variables(&self) -> Vec<(String, String)> {
+        let mut vars: Vec<_> = self
+            .bindings
+            .variables
+            .iter()
+            .map(|(name, variable)| {
+                // Format the type using the session's own program
+                let formatted_type =
+                    quiver_core::format::format_type_by_id(&self.program, variable.ty);
+                (name.clone(), formatted_type, variable.index)
+            })
+            .collect();
+
+        // Sort by local index to maintain definition order
+        vars.sort_by_key(|(_, _, idx)| *idx);
+
+        // Drop the index from the result
+        vars.into_iter().map(|(name, ty, _)| (name, ty)).collect()
     }
 
     /// Resolve a type alias and return the resolved type ID.
     /// Type parameters are resolved to type variable placeholders.
     /// This is useful for testing and displaying type aliases.
-    pub fn resolve_type_alias(
-        &mut self,
-        _env: &mut Environment<E>,
-        alias_name: &str,
-    ) -> Result<usize, String> {
+    pub fn resolve_type_alias(&mut self, alias_name: &str) -> Result<usize, String> {
         // Only the type aliases matter for resolution; variables are irrelevant here
         let bindings = Bindings {
             variables: HashMap::new(),
@@ -444,21 +395,21 @@ impl<E: Effect> Repl<E> {
         let scope = Scope::new(bindings, None, ScopeKind::Root);
         let scopes = vec![scope];
 
-        // Use the REPL's program for resolution (not the environment's)
-        // because TypeAliasDef::Resolved type IDs are registered in the REPL's program
+        // Use the session's program for resolution (not the environment's)
+        // because TypeAliasDef::Resolved type IDs are registered in the session's program
         resolve_type_alias_for_display(&scopes, alias_name).map_err(|e| format!("{:?}", e))
     }
 
-    /// Format a type by its ID using the REPL's program.
+    /// Format a type by its ID using the session's program.
     /// This is needed because type IDs in TypeAliasDef::Resolved are registered
-    /// in the REPL's program, not the Environment's.
+    /// in the session's program, not the Environment's.
     pub fn format_type_by_id(&self, type_id: usize) -> String {
         quiver_core::format::format_type_by_id(&self.program, type_id)
     }
 
-    /// Format a type using the REPL's program. Compiler-produced types (such as
-    /// `get_last_result_type`) carry ids in the REPL's program space, so they must be
-    /// formatted here — the environment's merged program is a different id space.
+    /// Format a type using the session's program. Compiler-produced types (such as
+    /// `get_last_result_type`) carry ids in the session's program space, so they must
+    /// be formatted here — an environment's merged program is a different id space.
     pub fn format_type(&self, ty: &Type) -> String {
         quiver_core::format::format_type(&self.program, ty)
     }
@@ -466,5 +417,190 @@ impl<E: Effect> Repl<E> {
     /// Get the type of the last evaluated result
     pub fn get_last_result_type(&self) -> &Type {
         &self.last_result_type
+    }
+}
+
+/// A [`LineCompiler`] bound to an in-process [`Environment`] — the driver the web
+/// build and the test harnesses use.
+pub struct Repl<E: Effect> {
+    repl_process_id: Option<ProcessId>,
+    compiler: LineCompiler<E>,
+}
+
+impl<E: Effect> Repl<E> {
+    pub fn new(
+        env: &mut Environment<E>,
+        resolver: Box<dyn ModuleResolver>,
+        builtins: quiver_core::builtins::BuiltinRegistry<E>,
+    ) -> Result<Self, ReplError> {
+        // Create a sleeping process ready for resume
+        let pid = env.start_process(None).map_err(ReplError::Environment)?;
+
+        Ok(Self {
+            repl_process_id: Some(pid),
+            compiler: LineCompiler::new(resolver, builtins),
+        })
+    }
+
+    /// Set the compilation mode for subsequent evaluations (debug builds stamp nil
+    /// results with failure provenance).
+    pub fn set_compile_options(&mut self, options: quiver_compiler::compiler::CompileOptions) {
+        self.compiler.set_compile_options(options);
+    }
+
+    /// Get the REPL process ID
+    pub fn process_id(&self) -> ProcessId {
+        self.repl_process_id.expect("REPL process not initialized")
+    }
+
+    /// See [`LineCompiler::reload_modules`].
+    pub fn reload_modules(&mut self, resolver: Box<dyn ModuleResolver>) {
+        self.compiler.reload_modules(resolver);
+    }
+
+    /// See [`LineCompiler::set_artifact_store`].
+    pub fn set_artifact_store(&mut self, store: Rc<quiver_compiler::ArtifactStore>) {
+        self.compiler.set_artifact_store(store);
+    }
+
+    /// Compile and evaluate an expression: [`Repl::prepare`], [`Repl::compile`] and
+    /// [`Repl::commit`] in sequence. Drivers that share the environment across threads
+    /// should call the three steps directly, releasing the environment around `compile`.
+    /// Returns a request ID that can be polled for the result
+    /// Returns None if the source only contains type definitions (no executable code)
+    ///
+    /// Process types must be fetched before calling this method:
+    /// - Native: request_process_types() + step()/poll_request() loop
+    /// - Web: async request via wasm bindings
+    pub fn evaluate(
+        &mut self,
+        env: &mut Environment<E>,
+        source: &str,
+        process_types: HashMap<usize, (Type, usize)>,
+    ) -> Result<Option<u64>, ReplError> {
+        let prepared = self.prepare(env, source, process_types)?;
+        let compiled = self.compile(prepared)?;
+        self.commit(env, compiled)
+    }
+
+    /// Parse a line and stage it against the session: the environment-touching
+    /// prologue. Compacts the session process's locals and deep-imports process types
+    /// (for `@N` references) from the environment's id space into the line's.
+    pub fn prepare(
+        &mut self,
+        env: &mut Environment<E>,
+        source: &str,
+        process_types: HashMap<usize, (Type, usize)>,
+    ) -> Result<PreparedLine, ReplError> {
+        let mut prepared = self.compiler.prepare(source)?;
+
+        // Apply the binding re-alignment to the process's locals (ignore errors —
+        // before the first executable line there is nothing to compact).
+        if let Some(pid) = self.repl_process_id {
+            let _ = env.compact_locals(pid, prepared.compact_keep().to_vec());
+        }
+
+        // Deep-import the process types: they are built in the environment's id
+        // space, and registering them directly would leave their child ids dangling.
+        for (pid, (ty, function_index)) in process_types {
+            let local_ty = env.import_type_into(prepared.program_mut(), ty);
+            let type_id = prepared.program_mut().register_type(local_ty);
+            prepared.add_process_type(pid, type_id, function_index);
+        }
+
+        Ok(prepared)
+    }
+
+    /// See [`LineCompiler::compile`]. Needs no environment access — a driver holding
+    /// a lock on the environment should release it around this call.
+    pub fn compile(&self, line: PreparedLine) -> Result<CompiledLine, ReplError> {
+        self.compiler.compile(line)
+    }
+
+    /// Apply a compiled line's session state and hand its bytecode to the session
+    /// process: the environment-touching epilogue. Returns a request ID that can be
+    /// polled for the result, or `None` for a line with nothing to execute.
+    pub fn commit(
+        &mut self,
+        env: &mut Environment<E>,
+        line: CompiledLine,
+    ) -> Result<Option<u64>, ReplError> {
+        let Some(committed) = self.compiler.commit_line(line) else {
+            return Ok(None);
+        };
+
+        // Create or resume the REPL process
+        let repl_process_id = match self.repl_process_id {
+            Some(pid) => {
+                // Resume existing process with new function
+                // resume_process will push the previous result from process.result onto the stack
+                env.resume_process(pid, committed.bytecode)
+                    .map_err(ReplError::Environment)?;
+                pid
+            }
+            None => {
+                // Create the persistent REPL process on first evaluation
+                let pid = env
+                    .start_process(Some(committed.bytecode))
+                    .map_err(ReplError::Environment)?;
+                self.repl_process_id = Some(pid);
+                pid
+            }
+        };
+
+        // Request the result, handing the worker this line's keep-set so it releases the line's
+        // orphaned locals (its parameter and temporaries) the moment the result is delivered. This
+        // is the GC early-release; the next line's pre-compile compaction still does the
+        // correctness-critical re-indexing, so the two are not redundant.
+        let request_id = env
+            .request_result(repl_process_id, Some(committed.keep_indices))
+            .map_err(ReplError::Environment)?;
+
+        Ok(Some(request_id))
+    }
+
+    /// Request a variable value by name
+    /// Returns a request ID that can be polled with poll_request()
+    /// The result will be RequestResult::Locals containing the variable value
+    pub fn request_variable(
+        &mut self,
+        env: &mut Environment<E>,
+        name: &str,
+    ) -> Result<u64, EnvironmentError> {
+        let local_index = self.compiler.variable_index(name)?;
+        let repl_process_id = self
+            .repl_process_id
+            .ok_or(EnvironmentError::NoReplProcess)?;
+
+        env.request_locals(repl_process_id, vec![local_index])
+    }
+
+    /// See [`LineCompiler::get_variables`].
+    pub fn get_variables(&self) -> Vec<(String, String)> {
+        self.compiler.get_variables()
+    }
+
+    /// See [`LineCompiler::resolve_type_alias`].
+    pub fn resolve_type_alias(
+        &mut self,
+        _env: &mut Environment<E>,
+        alias_name: &str,
+    ) -> Result<usize, String> {
+        self.compiler.resolve_type_alias(alias_name)
+    }
+
+    /// See [`LineCompiler::format_type_by_id`].
+    pub fn format_type_by_id(&self, type_id: usize) -> String {
+        self.compiler.format_type_by_id(type_id)
+    }
+
+    /// See [`LineCompiler::format_type`].
+    pub fn format_type(&self, ty: &Type) -> String {
+        self.compiler.format_type(ty)
+    }
+
+    /// See [`LineCompiler::get_last_result_type`].
+    pub fn get_last_result_type(&self) -> &Type {
+        self.compiler.get_last_result_type()
     }
 }

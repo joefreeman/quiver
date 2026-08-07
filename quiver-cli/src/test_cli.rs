@@ -97,7 +97,7 @@ struct Runner {
 
 impl Runner {
     fn new() -> Self {
-        let builtins = crate::build_builtin_registry();
+        let builtins = quiver_cli::build_builtin_registry();
         let (waker, wake) = quiver_cli::native_transport::wake_channel();
 
         let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
@@ -113,7 +113,7 @@ impl Runner {
 
         let mut environment = Environment::<NativeEffect>::new(workers);
         environment.set_runtime_declarations(builtins.runtime_declarations().clone());
-        if let Some(backend) = crate::create_effect_backend() {
+        if let Some(backend) = quiver_cli::create_effect_backend() {
             environment.set_effect_backend(backend);
         }
 
@@ -294,9 +294,9 @@ impl Runner {
         report.total += count_assertions(block);
 
         let result = (|| -> Result<(), String> {
-            let builtins = crate::build_builtin_registry();
+            let builtins = quiver_cli::build_builtin_registry();
             let ast = quiver_compiler::parse(&source).map_err(|e| format!("{e}"))?;
-            let (program, entry) = crate::compile_entry(
+            let (program, entry) = quiver_cli::compile::compile_entry(
                 ast,
                 &resolver_for(path),
                 &builtins,
@@ -305,6 +305,7 @@ impl Runner {
                     source_name: source_name(path),
                     ..Default::default()
                 },
+                Some(Rc::clone(&self.artifact_store)),
             )
             .map_err(|e| format!("{e}"))?;
             let bytecode = program.to_bytecode_optimized(entry);
@@ -362,7 +363,7 @@ impl Runner {
     }
 
     fn session(&mut self, path: &Path) -> Result<Repl<NativeEffect>, ReplError> {
-        let builtins = crate::build_builtin_registry();
+        let builtins = quiver_cli::build_builtin_registry();
         let mut env = self.environment.lock().unwrap();
         let mut repl = Repl::new(&mut env, Box::new(resolver_for(path)), builtins)?;
         // Assertions are checked in debug builds only, which is the whole point of the run.
