@@ -137,6 +137,7 @@ pub struct TestBuilder {
     compile_fuel: Option<u64>,
     compile_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     collection_threshold: Option<usize>,
+    code_collection_threshold: Option<usize>,
     timeout: Option<std::time::Duration>,
     real_time: bool,
 }
@@ -235,6 +236,13 @@ impl TestBuilder {
     /// Lets a test exercise reclamation under load without a huge spawn count.
     pub fn with_collection_threshold(mut self, n: usize) -> Self {
         self.collection_threshold = Some(n);
+        self
+    }
+
+    /// Include a code phase in a reclamation round once `n` functions/constants have
+    /// been registered since the last sweep — the auto-trigger, at test scale.
+    pub fn with_code_collection_threshold(mut self, n: usize) -> Self {
+        self.code_collection_threshold = Some(n);
         self
     }
 
@@ -348,6 +356,9 @@ impl TestBuilder {
 
         if let Some(threshold) = self.collection_threshold {
             environment.set_collection_threshold(threshold);
+        }
+        if let Some(threshold) = self.code_collection_threshold {
+            environment.set_code_collection_threshold(threshold);
         }
 
         // Set the effect backend
@@ -724,19 +735,48 @@ impl TestResult {
         self.environment
             .start_collection()
             .expect("failed to start collection");
-        let start = std::time::Instant::now();
-        while self.environment.is_collecting() {
-            let did_work = self.environment.step().unwrap_or(false);
-            if !did_work {
-                if start.elapsed() > std::time::Duration::from_secs(5) {
-                    panic!(
-                        "collection did not complete within 5s for source: {}",
-                        self.source
-                    );
-                }
-                std::thread::sleep(std::time::Duration::from_micros(10));
+        pump_collection(&mut self.environment, &self.source);
+        self
+    }
+
+    /// Run a reclamation round *with a code phase* to completion. If a round is
+    /// already in flight it is pumped first (the code request then applies to a fresh
+    /// round), so this always sweeps.
+    pub fn force_code_collection(mut self) -> Self {
+        loop {
+            let started = self
+                .environment
+                .start_code_collection()
+                .expect("failed to start code collection");
+            pump_collection(&mut self.environment, &self.source);
+            if started {
+                break;
             }
         }
+        self
+    }
+
+    /// Assert at least `functions` function slots have been reclaimed by code sweeps
+    /// so far.
+    pub fn expect_code_reclaimed_at_least(self, functions: usize) -> Self {
+        let (actual, _constants) = self.environment.code_reclaimed_totals();
+        assert!(
+            actual >= functions,
+            "expected at least {functions} reclaimed functions, got {actual} for source: {}",
+            self.source
+        );
+        self
+    }
+
+    /// Assert no code has been reclaimed by any sweep so far.
+    pub fn expect_no_code_reclaimed(self) -> Self {
+        let totals = self.environment.code_reclaimed_totals();
+        assert_eq!(
+            totals,
+            (0, 0),
+            "expected no reclaimed code, got {totals:?} for source: {}",
+            self.source
+        );
         self
     }
 
@@ -772,6 +812,20 @@ impl TestResult {
             self.source
         );
         self
+    }
+}
+
+/// Drive an in-flight reclamation round to completion.
+fn pump_collection(environment: &mut Environment<NativeEffect>, source: &str) {
+    let start = std::time::Instant::now();
+    while environment.is_collecting() {
+        let did_work = environment.step().unwrap_or(false);
+        if !did_work {
+            if start.elapsed() > std::time::Duration::from_secs(5) {
+                panic!("collection did not complete within 5s for source: {source}");
+            }
+            std::thread::sleep(std::time::Duration::from_micros(10));
+        }
     }
 }
 

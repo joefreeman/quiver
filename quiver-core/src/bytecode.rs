@@ -54,7 +54,7 @@ impl IdRemaps {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Clone)]
 pub struct Function {
     pub instructions: Vec<Instruction>,
     pub captures: usize,
@@ -110,6 +110,30 @@ impl Function {
             instructions,
             captures: self.captures,
             type_id: IdRemaps::map(&remaps.types, self.type_id),
+        }
+    }
+
+    /// Collect the code this function's instructions reference statically: function and
+    /// constant table indices. The code-reclamation sweep closes over these; everything
+    /// else an instruction carries (types, tuples, builtins, field names, sites) belongs
+    /// to tables that are never reclaimed. `Process` operands are deliberately not
+    /// collected — a pid's root-function index is identity, and a reclaimed stub keeps
+    /// what identity tests read.
+    pub fn collect_code_refs(
+        &self,
+        functions: &mut std::collections::HashSet<usize>,
+        constants: &mut std::collections::HashSet<usize>,
+    ) {
+        for instruction in &self.instructions {
+            match instruction {
+                Instruction::Constant(idx) => {
+                    constants.insert(*idx as usize);
+                }
+                Instruction::Function(idx) => {
+                    functions.insert(*idx as usize);
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -310,7 +334,7 @@ pub type Id = u32;
 /// A relative jump, in instructions. `i32` for the same reason as [`Id`].
 pub type Offset = i32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Instruction {
     Constant(Id),
     Pop,
@@ -361,4 +385,9 @@ pub enum Instruction {
     /// value, push its state. No runtime test — the state type is statically known
     /// (inferred at spawns; enforced by strict state subtyping at declared boundaries).
     State,
+    /// The body of a function whose code was reclaimed: liveness said nothing could
+    /// call it, so executing this is a reclamation bug — it aborts the process loudly
+    /// rather than returning garbage. Never emitted by the compiler; written into
+    /// stubbed slots by `Program::reclaim_code`.
+    Reclaimed,
 }

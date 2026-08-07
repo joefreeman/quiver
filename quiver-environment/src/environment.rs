@@ -39,6 +39,9 @@ enum CollectionPhase {
     Pausing,
     /// Awaiting each worker's `AdjacencyResponse` (its slice of the graph).
     Collecting,
+    /// Code phase (rounds that include one, after the process sweep): awaiting each
+    /// worker's `CodeRootsResponse`.
+    CollectingCode,
 }
 
 struct CollectionState {
@@ -49,6 +52,20 @@ struct CollectionState {
     pending: HashSet<WorkerId>,
     /// Graph slices accumulated during `Collecting`.
     adjacency: Vec<ProcessAdjacency>,
+    /// Whether this round runs the code phase after the process sweep.
+    include_code: bool,
+    /// Table lengths when the round began: entries registered mid-round are outside
+    /// this sweep (the workers' root walk predates them).
+    snapshot_functions: usize,
+    snapshot_constants: usize,
+    /// Code roots accumulated during `CollectingCode`.
+    code_functions: HashSet<usize>,
+    code_constants: HashSet<usize>,
+    /// Ids a mid-round `merge_bytecode` touched (its full remap image, revivals
+    /// included): the merged code may reference them statically, and the workers'
+    /// walk cannot have seen it — excluded from this round's dead set.
+    code_exclusion_functions: HashSet<usize>,
+    code_exclusion_constants: HashSet<usize>,
 }
 
 /// Default spawns since the last reclamation round after which one is auto-triggered. The
@@ -56,6 +73,12 @@ struct CollectionState {
 /// moment; this just bounds how many tombstones may accumulate between rounds. Overridable
 /// via [`Environment::set_collection_threshold`].
 const DEFAULT_COLLECTION_THRESHOLD: usize = 256;
+
+/// Default function+constant registrations since the last code sweep after which the next
+/// reclamation round includes a code phase. Growth-based: an environment that stops
+/// registering code stops paying for sweeps. Overridable via
+/// [`Environment::set_code_collection_threshold`].
+const DEFAULT_CODE_COLLECTION_THRESHOLD: usize = 4096;
 
 /// Trace the process graph and return the tombstones that are unreachable from any root and
 /// may be reclaimed. Roots are the pids that
@@ -90,6 +113,29 @@ fn compute_sweep(adjacency: &[ProcessAdjacency]) -> Vec<ProcessId> {
         .into_iter()
         .filter(|pid| !marked.contains(pid))
         .collect()
+}
+
+/// Collect the code a host-held request result keeps alive — the environment's slice of
+/// the code-reclamation root set (worker heaps are walked worker-side).
+fn collect_request_result_refs(
+    result: &RequestResult,
+    functions: &mut HashSet<usize>,
+    constants: &mut HashSet<usize>,
+) {
+    match result {
+        RequestResult::Result(Ok(value), _) => value.collect_code_refs(functions, constants),
+        RequestResult::Locals(values) => {
+            for value in values {
+                value.collect_code_refs(functions, constants);
+            }
+        }
+        RequestResult::ProcessInfo(Some(info)) => {
+            if let Some(Ok(value)) = &info.result {
+                value.collect_code_refs(functions, constants);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn remap_type_id(id: usize, type_remap: &HashMap<usize, usize>) -> usize {
@@ -439,6 +485,13 @@ pub struct Environment<E: Effect> {
     spawns_since_collection: usize,
     collection_threshold: usize,
     reclaimed_total: usize,
+    // Code-reclamation state: growth since the last code sweep drives the trigger, the
+    // request flag forces one on the next round, and the totals are metric/test hooks.
+    code_registered_since_sweep: usize,
+    code_collection_threshold: usize,
+    code_collection_requested: bool,
+    code_reclaimed_functions_total: usize,
+    code_reclaimed_constants_total: usize,
 }
 
 impl<E: Effect> Environment<E> {
@@ -462,6 +515,11 @@ impl<E: Effect> Environment<E> {
             spawns_since_collection: 0,
             collection_threshold: DEFAULT_COLLECTION_THRESHOLD,
             reclaimed_total: 0,
+            code_registered_since_sweep: 0,
+            code_collection_threshold: DEFAULT_CODE_COLLECTION_THRESHOLD,
+            code_collection_requested: false,
+            code_reclaimed_functions_total: 0,
+            code_reclaimed_constants_total: 0,
         }
     }
 
@@ -469,6 +527,37 @@ impl<E: Effect> Environment<E> {
     /// values reclaim more eagerly.
     pub fn set_collection_threshold(&mut self, threshold: usize) {
         self.collection_threshold = threshold;
+    }
+
+    /// Set how many function/constant registrations since the last code sweep make the
+    /// next reclamation round include a code phase. Lower values sweep more eagerly.
+    pub fn set_code_collection_threshold(&mut self, threshold: usize) {
+        self.code_collection_threshold = threshold;
+    }
+
+    /// Request a code phase on the next reclamation round (and start one if none is in
+    /// flight). Answers whether a round was started — `false` means one was already
+    /// running, and the flag applies to the next.
+    pub fn start_code_collection(&mut self) -> Result<bool, EnvironmentError> {
+        self.code_collection_requested = true;
+        if self.collection.is_some() {
+            return Ok(false);
+        }
+        self.start_collection()
+    }
+
+    /// Functions and constants reclaimed by code sweeps so far (a test/metric hook).
+    pub fn code_reclaimed_totals(&self) -> (usize, usize) {
+        (
+            self.code_reclaimed_functions_total,
+            self.code_reclaimed_constants_total,
+        )
+    }
+
+    /// Whether a function slot in the merged program is currently a reclaimed stub
+    /// (a test/metric hook).
+    pub fn function_stubbed(&self, index: usize) -> bool {
+        self.program.function_stubbed(index)
     }
 
     /// Set the effect backend for executing platform-specific effects
@@ -556,9 +645,13 @@ impl<E: Effect> Environment<E> {
             self.handle_event(event)?;
         }
 
-        // Auto-trigger a reclamation round once enough processes have accumulated. The round's
-        // pause barrier supplies its own quiescence, so this can fire at any time.
-        if self.collection.is_none() && self.spawns_since_collection >= self.collection_threshold {
+        // Auto-trigger a reclamation round once enough processes — or enough freshly
+        // registered code — have accumulated. The round's pause barrier supplies its
+        // own quiescence, so this can fire at any time.
+        if self.collection.is_none()
+            && (self.spawns_since_collection >= self.collection_threshold
+                || self.code_registered_since_sweep >= self.code_collection_threshold)
+        {
             self.start_collection()?;
             did_work = true;
         }
@@ -1072,12 +1165,33 @@ impl<E: Effect> Environment<E> {
             remaps.functions.insert(old_idx, new_idx);
         }
 
+        // Revived stubs (identical content re-registered after reclamation refilled its
+        // original slot) must reach append-only workers explicitly; a shared table
+        // already carries the new content. Mid-collection, everything this merge
+        // touched — its whole remap image — is excluded from the round's dead set: the
+        // merged instructions may reference it, and the workers' root walk predates
+        // this code running.
+        let (revived_functions, revived_constants) = self.program.take_revived();
+        if let Some(state) = self.collection.as_mut() {
+            state
+                .code_exclusion_functions
+                .extend(remaps.functions.values().copied());
+            state
+                .code_exclusion_constants
+                .extend(remaps.constants.values().copied());
+        }
+        self.code_registered_since_sweep += (self.program.get_functions().len()
+            - old_functions_len)
+            + (self.program.get_constants().len() - old_constants_len);
+
         self.send_program_update(
             old_constants_len,
             old_functions_len,
             old_tuples_len,
             old_types_len,
             old_builtins_len,
+            revived_functions,
+            revived_constants,
         )?;
 
         // Return remapped entry function index
@@ -1089,7 +1203,12 @@ impl<E: Effect> Environment<E> {
 
     /// Refresh the derived tables over the merged program and ship every registry item
     /// beyond the given watermarks to the workers (pass zeros to ship everything, as a
-    /// seed does). No-op when nothing is new.
+    /// seed does). `patched_functions`/`patched_constants` name slots *below* the
+    /// watermarks whose content changed in place — revived stubs after a merge, or
+    /// freshly reclaimed stubs after a code sweep; shared-table workers pick the new
+    /// content up wholesale, append-only workers receive explicit patches. No-op when
+    /// nothing is new and nothing was patched.
+    #[allow(clippy::too_many_arguments)]
     fn send_program_update(
         &mut self,
         old_constants_len: usize,
@@ -1097,6 +1216,8 @@ impl<E: Effect> Environment<E> {
         old_tuples_len: usize,
         old_types_len: usize,
         old_builtins_len: usize,
+        patched_functions: Vec<usize>,
+        patched_constants: Vec<usize>,
     ) -> Result<(), EnvironmentError> {
         // Ensure the crash-delivery shapes exist in the merged program *before* the
         // deltas below are computed, so the workers receive their tuple infos and the
@@ -1118,12 +1239,14 @@ impl<E: Effect> Environment<E> {
         let new_builtins: Vec<quiver_core::types::BuiltinInfo> =
             self.program.get_builtins()[old_builtins_len..].to_vec();
 
-        // Only send update if there's new data
+        // Only send update if there's new data or an in-place patch
         if !new_constants.is_empty()
             || !new_functions.is_empty()
             || !new_tuples.is_empty()
             || !new_types.is_empty()
             || !new_builtins.is_empty()
+            || !patched_functions.is_empty()
+            || !patched_constants.is_empty()
         {
             let resource_names = self.program.collect_resource_names();
 
@@ -1162,6 +1285,23 @@ impl<E: Effect> Environment<E> {
             // form: the whole program would otherwise be re-encoded, per worker, per update.
             let shared = self.workers.iter().all(|worker| worker.shares_memory());
 
+            // In-place patches only matter where tables arrive as appends; a shared
+            // table already carries the patched slots.
+            let (patched_functions, patched_constants) = if shared {
+                (Vec::new(), Vec::new())
+            } else {
+                (
+                    patched_functions
+                        .into_iter()
+                        .map(|index| (index, self.program.get_functions()[index].clone()))
+                        .collect(),
+                    patched_constants
+                        .into_iter()
+                        .map(|index| (index, self.program.get_constants()[index].clone()))
+                        .collect(),
+                )
+            };
+
             let update = ProgramUpdate {
                 constants: table(shared, self.program.get_constants(), new_constants),
                 functions: table(shared, self.program.get_functions(), new_functions),
@@ -1177,6 +1317,8 @@ impl<E: Effect> Environment<E> {
                 // Full snapshot: the executor rebuilds its prebuilt site values from it.
                 debug: self.program.debug_sites().cloned(),
                 runtime: Some(runtime_tables),
+                patched_functions,
+                patched_constants,
             };
 
             let update_cmd = Command::UpdateProgram(Box::new(update));
@@ -1315,6 +1457,12 @@ impl<E: Effect> Environment<E> {
                 worker_id,
                 adjacency,
             } => self.handle_adjacency_response(request_id, worker_id, adjacency),
+            Event::CodeRootsResponse {
+                request_id,
+                worker_id,
+                functions,
+                constants,
+            } => self.handle_code_roots_response(request_id, worker_id, functions, constants),
             Event::_Phantom(_) => {
                 // This variant is never actually used, only for maintaining generics
                 unreachable!("_Phantom variant should never be constructed")
@@ -1336,11 +1484,24 @@ impl<E: Effect> Environment<E> {
                 .send(Command::BeginCollection { request_id })
                 .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
         }
+        // The code phase rides a round rather than running alone: it needs the same
+        // pause barrier, and process reachability settled first (tombstone results
+        // keep code alive).
+        let include_code = self.code_collection_requested
+            || self.code_registered_since_sweep >= self.code_collection_threshold;
+        self.code_collection_requested = false;
         self.collection = Some(CollectionState {
             phase: CollectionPhase::Pausing,
             request_id,
             pending: (0..self.workers.len()).collect(),
             adjacency: Vec::new(),
+            include_code,
+            snapshot_functions: self.program.get_functions().len(),
+            snapshot_constants: self.program.get_constants().len(),
+            code_functions: HashSet::new(),
+            code_constants: HashSet::new(),
+            code_exclusion_functions: HashSet::new(),
+            code_exclusion_constants: HashSet::new(),
         });
         self.spawns_since_collection = 0;
         Ok(true)
@@ -1418,10 +1579,10 @@ impl<E: Effect> Environment<E> {
         Ok(())
     }
 
-    /// Trace the assembled graph, reclaim the unreachable tombstones, prune the router, and
-    /// resume every worker.
+    /// Trace the assembled graph, reclaim the unreachable tombstones, prune the router,
+    /// then either resume every worker or hand off to the code phase.
     fn finalize_collection(&mut self) -> Result<(), EnvironmentError> {
-        let Some(state) = self.collection.take() else {
+        let Some(mut state) = self.collection.take() else {
             return Ok(());
         };
         let sweep = compute_sweep(&state.adjacency);
@@ -1443,6 +1604,156 @@ impl<E: Effect> Environment<E> {
                     })
                     .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
             }
+        }
+
+        if state.include_code {
+            // Still paused; FIFO puts CollectCodeRoots after Reclaim, so the walk sees
+            // only surviving processes.
+            let request_id = state.request_id;
+            state.phase = CollectionPhase::CollectingCode;
+            state.pending = (0..self.workers.len()).collect();
+            state.adjacency = Vec::new();
+            self.collection = Some(state);
+            for worker in self.workers.iter_mut() {
+                worker
+                    .send(Command::CollectCodeRoots { request_id })
+                    .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+            }
+            return Ok(());
+        }
+
+        for worker in self.workers.iter_mut() {
+            worker
+                .send(Command::EndCollection)
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// A worker's code-roots slice arrived. Once every worker has reported, sweep the
+    /// merged program's dead code and resume.
+    fn handle_code_roots_response(
+        &mut self,
+        request_id: u64,
+        worker_id: WorkerId,
+        functions: Vec<usize>,
+        constants: Vec<usize>,
+    ) -> Result<(), EnvironmentError> {
+        let complete = match self.collection.as_mut() {
+            Some(state)
+                if state.request_id == request_id
+                    && matches!(state.phase, CollectionPhase::CollectingCode) =>
+            {
+                if state.pending.remove(&worker_id) {
+                    state.code_functions.extend(functions);
+                    state.code_constants.extend(constants);
+                }
+                state.pending.is_empty()
+            }
+            _ => return Ok(()),
+        };
+        if complete {
+            self.finalize_code_collection()?;
+        }
+        Ok(())
+    }
+
+    /// Compute the live code set — worker roots, host-held values, mid-round merge
+    /// exclusions, debug-site constants — close it over static instruction references,
+    /// stub what's left, ship the patched tables, and resume every worker.
+    fn finalize_code_collection(&mut self) -> Result<(), EnvironmentError> {
+        let Some(state) = self.collection.take() else {
+            return Ok(());
+        };
+        let mut live_functions = state.code_functions;
+        let mut live_constants = state.code_constants;
+        live_functions.extend(state.code_exclusion_functions);
+        live_constants.extend(state.code_exclusion_constants);
+
+        // Host-held values: resolved-but-unpolled request results, subscription
+        // payloads, await results collected but not yet delivered. (Aggregation
+        // slices carry statuses/types, never values.)
+        for result in self
+            .pending_requests
+            .values()
+            .flatten()
+            .chain(self.subscription_updates.values())
+        {
+            collect_request_result_refs(result, &mut live_functions, &mut live_constants);
+        }
+        for pending in self.pending_awaits.values() {
+            for results in pending.responses.values() {
+                for value in results.values().flatten().filter_map(|r| r.as_ref().ok()) {
+                    value.collect_code_refs(&mut live_functions, &mut live_constants);
+                }
+            }
+        }
+        for subscription in self.subscriptions.values() {
+            for payload in subscription.per_worker.values() {
+                if let SubscriptionPayload::ProcessInfo(Some(info)) = payload
+                    && let Some(Ok(value)) = &info.result
+                {
+                    value.collect_code_refs(&mut live_functions, &mut live_constants);
+                }
+            }
+        }
+
+        // Debug sites stay (they are shared, positionally indexed weight-free entries),
+        // and workers prebuild their provenance values over these constants.
+        if let Some(table) = self.program.debug_sites() {
+            for site in &table.sites {
+                live_constants.insert(site.module_constant);
+            }
+        }
+
+        // Close over static instruction references: a live function's operands keep
+        // the functions and constants they name alive.
+        let mut worklist: Vec<usize> = live_functions.iter().copied().collect();
+        while let Some(index) = worklist.pop() {
+            let Some(function) = self.program.get_function(index) else {
+                continue;
+            };
+            let mut referenced = HashSet::new();
+            function.collect_code_refs(&mut referenced, &mut live_constants);
+            for function_index in referenced {
+                if live_functions.insert(function_index) {
+                    worklist.push(function_index);
+                }
+            }
+        }
+
+        // Dead: everything the round could see that nothing live reaches. Entries
+        // registered mid-round sit beyond the snapshot and are untouchable.
+        let dead_functions: Vec<usize> = (0..state.snapshot_functions)
+            .filter(|index| {
+                !live_functions.contains(index) && !self.program.function_stubbed(*index)
+            })
+            .collect();
+        let dead_constants: Vec<usize> = (0..state.snapshot_constants)
+            .filter(|index| !live_constants.contains(index))
+            .collect();
+
+        let before = self.program.stubbed_counts();
+        self.program.reclaim_code(&dead_functions, &dead_constants);
+        let after = self.program.stubbed_counts();
+        self.code_reclaimed_functions_total += after.0 - before.0;
+        self.code_reclaimed_constants_total += after.1 - before.1;
+        self.code_registered_since_sweep = 0;
+
+        // Ship the stubs (whole shared tables for native workers; index patches for
+        // append-only ones), then resume.
+        if after != before {
+            let functions_len = self.program.get_functions().len();
+            let constants_len = self.program.get_constants().len();
+            self.send_program_update(
+                constants_len,
+                functions_len,
+                self.program.get_tuples().len(),
+                self.program.get_types().len(),
+                self.program.get_builtins().len(),
+                dead_functions,
+                dead_constants,
+            )?;
         }
         for worker in self.workers.iter_mut() {
             worker

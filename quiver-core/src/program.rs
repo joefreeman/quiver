@@ -41,8 +41,36 @@ pub struct Program {
     /// `register_*` methods are hash lookups instead of scans of the whole table. Skipped
     /// by serde and lazily rebuilt on first registration after deserialization; mapping
     /// to the first occurrence matches the scan behaviour they replace.
+    ///
+    /// Functions and constants — the reclaimable tables — are keyed by a 128-bit content
+    /// digest rather than by the content itself: the key survives `reclaim_code` dropping
+    /// an entry's weight, which is what lets an identical re-registration *revive* the
+    /// original slot instead of minting a new one (id-stable revival). The digest is also
+    /// far cheaper to hold than a cloned key. On a digest hit the content is verified
+    /// against the table when the entry is live; a stubbed entry's content is gone, so
+    /// there the digest alone is trusted — the 2×64-bit SipHash keys are random per
+    /// program instance, making an accidental (or engineered) collision negligible.
     #[serde(skip)]
-    constant_index: std::collections::HashMap<Constant, usize>,
+    constant_index: std::collections::HashMap<u128, Vec<usize>>,
+    #[serde(skip)]
+    function_index: std::collections::HashMap<u128, Vec<usize>>,
+    #[serde(skip)]
+    digest_keys: (
+        std::collections::hash_map::RandomState,
+        std::collections::hash_map::RandomState,
+    ),
+    /// Slots whose weight `reclaim_code` dropped. Env-side state (a compiler-side
+    /// program is never reclaimed); intentionally not serialized.
+    #[serde(skip)]
+    stubbed_functions: std::collections::HashSet<usize>,
+    #[serde(skip)]
+    stubbed_constants: std::collections::HashSet<usize>,
+    /// Stubs revived in place since the last `take_revived` — the environment ships
+    /// their content to workers whose tables only ever receive appends.
+    #[serde(skip)]
+    revived_functions: Vec<usize>,
+    #[serde(skip)]
+    revived_constants: Vec<usize>,
     #[serde(skip)]
     type_index: std::collections::HashMap<Type, usize>,
     #[serde(skip)]
@@ -95,6 +123,12 @@ impl Program {
             debug: None,
             function_dedup_floor: 0,
             constant_index: std::collections::HashMap::new(),
+            function_index: std::collections::HashMap::new(),
+            digest_keys: Default::default(),
+            stubbed_functions: std::collections::HashSet::new(),
+            stubbed_constants: std::collections::HashSet::new(),
+            revived_functions: Vec::new(),
+            revived_constants: Vec::new(),
             type_index: std::collections::HashMap::new(),
             tuple_index: std::collections::HashMap::new(),
             annotation_key_index: std::collections::HashMap::new(),
@@ -111,18 +145,46 @@ impl Program {
         program
     }
 
-    pub fn register_constant(&mut self, constant: Constant) -> usize {
+    /// A 128-bit content digest under this program's two per-instance SipHash keys.
+    fn digest<T: std::hash::Hash>(&self, value: &T) -> u128 {
+        use std::hash::BuildHasher;
+        let first = self.digest_keys.0.hash_one(value);
+        let second = self.digest_keys.1.hash_one(value);
+        ((first as u128) << 64) | second as u128
+    }
+
+    fn ensure_constant_index(&mut self) {
         if self.constant_index.is_empty() && !self.constants.is_empty() {
-            for (index, existing) in self.constants.iter().enumerate() {
-                self.constant_index.entry(existing.clone()).or_insert(index);
+            for index in 0..self.constants.len() {
+                let digest = self.digest(&self.constants[index]);
+                self.constant_index.entry(digest).or_default().push(index);
             }
         }
-        if let Some(&index) = self.constant_index.get(&constant) {
-            return index;
+    }
+
+    pub fn register_constant(&mut self, constant: Constant) -> usize {
+        self.ensure_constant_index();
+        let digest = self.digest(&constant);
+        if let Some(indices) = self.constant_index.get(&digest) {
+            // A live entry with equal content wins (the digest is verified); failing
+            // that, a stubbed slot with this digest is the same content reclaimed —
+            // revive it in place, keeping the id stable.
+            for &index in indices {
+                if !self.stubbed_constants.contains(&index) && self.constants[index] == constant {
+                    return index;
+                }
+            }
+            for &index in indices {
+                if self.stubbed_constants.remove(&index) {
+                    self.constants[index] = constant;
+                    self.revived_constants.push(index);
+                    return index;
+                }
+            }
         }
         let index = self.constants.len();
-        self.constants.push(constant.clone());
-        self.constant_index.insert(constant, index);
+        self.constants.push(constant);
+        self.constant_index.entry(digest).or_default().push(index);
         index
     }
 
@@ -137,6 +199,15 @@ impl Program {
         &self.constants
     }
 
+    fn ensure_function_index(&mut self) {
+        if self.function_index.is_empty() && !self.functions.is_empty() {
+            for index in 0..self.functions.len() {
+                let digest = self.digest(&self.functions[index]);
+                self.function_index.entry(digest).or_default().push(index);
+            }
+        }
+    }
+
     /// Register a function and return its index.
     /// Deduplicates based on full equality (instructions, captures, type_id).
     pub fn register_function(&mut self, function: Function) -> usize {
@@ -145,15 +216,31 @@ impl Program {
         // structurally identical ones — function identity is attributed per module,
         // and cross-module collapse would make that attribution depend on session
         // history. Collapsing across the whole program is the runtime merge's job.
-        if let Some(index) = self.functions[self.function_dedup_floor..]
-            .iter()
-            .position(|f| f == &function)
-        {
-            self.function_dedup_floor + index
-        } else {
-            self.functions.push(function);
-            self.functions.len() - 1
+        self.ensure_function_index();
+        let digest = self.digest(&function);
+        if let Some(indices) = self.function_index.get(&digest) {
+            for &index in indices {
+                if index >= self.function_dedup_floor
+                    && !self.stubbed_functions.contains(&index)
+                    && self.functions[index] == function
+                {
+                    return index;
+                }
+            }
+            // A stubbed slot with this digest is the same content reclaimed — revive
+            // it in place, keeping the id stable (see the index fields' doc).
+            for &index in indices {
+                if index >= self.function_dedup_floor && self.stubbed_functions.remove(&index) {
+                    self.functions[index] = function;
+                    self.revived_functions.push(index);
+                    return index;
+                }
+            }
         }
+        let index = self.functions.len();
+        self.functions.push(function);
+        self.function_index.entry(digest).or_default().push(index);
+        index
     }
 
     /// Set the function-interning floor (see [`Self::register_function`]), returning
@@ -166,13 +253,69 @@ impl Program {
     /// Append a function without structural interning — the linker's registration
     /// primitive. Ids are sequential, so a caller can precompute where a batch of
     /// functions will land and remap mutually-referencing bodies before pushing any.
+    /// Still recorded in the digest index, so later `register_function` calls dedup
+    /// onto pushed entries exactly as the old whole-table scan did.
     pub fn push_function(&mut self, function: Function) -> usize {
+        self.ensure_function_index();
+        let digest = self.digest(&function);
+        let index = self.functions.len();
         self.functions.push(function);
-        self.functions.len() - 1
+        self.function_index.entry(digest).or_default().push(index);
+        index
     }
 
     pub fn get_functions(&self) -> &Vec<Function> {
         &self.functions
+    }
+
+    /// Reclaim dead code: keep identity, drop weight. A stubbed function keeps its
+    /// `type_id` (live pids carry root-function indices used for process type tests)
+    /// while its body becomes a single `Reclaimed` trap — executing one is a liveness
+    /// bug and aborts the process loudly. A stubbed constant keeps its slot with the
+    /// cheapest same-variant payload. The digest-index entries survive, so an identical
+    /// re-registration revives the slot in place. Callers guarantee the dead sets are
+    /// unreferenced; already-stubbed ids are skipped.
+    pub fn reclaim_code(&mut self, dead_functions: &[usize], dead_constants: &[usize]) {
+        // The maps must exist before content disappears — a lazy rebuild afterwards
+        // would digest stub payloads instead of the original content.
+        self.ensure_function_index();
+        self.ensure_constant_index();
+        for &index in dead_functions {
+            if !self.stubbed_functions.insert(index) {
+                continue;
+            }
+            let function = &mut self.functions[index];
+            function.instructions = vec![Instruction::Reclaimed];
+            function.captures = 0;
+        }
+        for &index in dead_constants {
+            if !self.stubbed_constants.insert(index) {
+                continue;
+            }
+            self.constants[index] = match &self.constants[index] {
+                Constant::Integer(_) => Constant::Integer(0.into()),
+                Constant::Binary(_) => Constant::Binary(Vec::new()),
+            };
+        }
+    }
+
+    /// The ids `register_*` revived since the last call — content the environment must
+    /// re-ship to workers whose tables only ever receive appends.
+    pub fn take_revived(&mut self) -> (Vec<usize>, Vec<usize>) {
+        (
+            std::mem::take(&mut self.revived_functions),
+            std::mem::take(&mut self.revived_constants),
+        )
+    }
+
+    /// Whether a function slot is currently stubbed (a test/metric hook).
+    pub fn function_stubbed(&self, index: usize) -> bool {
+        self.stubbed_functions.contains(&index)
+    }
+
+    /// Currently-stubbed slot counts, `(functions, constants)` (a test/metric hook).
+    pub fn stubbed_counts(&self) -> (usize, usize) {
+        (self.stubbed_functions.len(), self.stubbed_constants.len())
     }
 
     pub fn get_function(&self, index: usize) -> Option<&Function> {

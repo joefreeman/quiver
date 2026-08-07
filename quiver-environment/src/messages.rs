@@ -206,6 +206,12 @@ pub enum Command<E: Effect> {
     /// already been routed by the environment.
     BeginCollection { request_id: u64 },
 
+    /// Code phase (after `Reclaim`, still paused): report this worker's `code_roots()`
+    /// — the function/constant indices its surviving processes keep alive — as a
+    /// `CodeRootsResponse`. FIFO puts this after `Reclaim`, so swept processes are
+    /// already gone from the walk.
+    CollectCodeRoots { request_id: u64 },
+
     /// Phase 2: report this worker's `process_adjacency()` as an `AdjacencyResponse`.
     /// Sent only after all workers are paused, so any in-flight message has landed in a
     /// mailbox (FIFO: the routed `DeliverMessage` precedes this command).
@@ -354,6 +360,14 @@ pub enum Event<E: Effect> {
     CollectionReady {
         request_id: u64,
         worker_id: WorkerId,
+    },
+
+    /// Response to `CollectCodeRoots`: the code this worker's processes keep alive.
+    CodeRootsResponse {
+        request_id: u64,
+        worker_id: usize,
+        functions: Vec<usize>,
+        constants: Vec<usize>,
     },
 
     /// Response to `CollectAdjacency`: this worker's slice of the reclamation graph.

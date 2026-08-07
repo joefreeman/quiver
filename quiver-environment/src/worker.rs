@@ -420,6 +420,17 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     adjacency: self.executor.process_adjacency(),
                 })?;
             }
+            Command::CollectCodeRoots { request_id } => {
+                // Still paused, and FIFO put this after `Reclaim`: swept tombstones are
+                // gone, so only surviving processes contribute roots.
+                let (functions, constants) = self.executor.code_roots();
+                self.sender.send(Event::CodeRootsResponse {
+                    request_id,
+                    worker_id: self.worker_id,
+                    functions: functions.into_iter().collect(),
+                    constants: constants.into_iter().collect(),
+                })?;
+            }
             Command::Reclaim { pids } => {
                 // Broadcast: remove any of these tombstones this worker owns (a no-op for the
                 // rest), then drop stale watcher entries pointing at them — an OwnedChild/Link

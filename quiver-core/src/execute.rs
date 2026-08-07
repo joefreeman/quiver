@@ -99,6 +99,8 @@ pub fn execute_bytecode_sync_with<E: Effect>(
         // arrive here: a select timeout falls back to a bare nil, and stream arms
         // are rejected as actions.
         runtime: None,
+        patched_functions: Vec::new(),
+        patched_constants: Vec::new(),
     };
 
     executor.update_program(program_update);

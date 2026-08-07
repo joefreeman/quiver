@@ -60,6 +60,37 @@ pub struct WirePayload {
 }
 
 impl WireValue {
+    /// The wire twin of [`crate::value::Value::collect_code_refs`], for the values the
+    /// environment holds host-side (resolved-but-unpolled request results, aggregation
+    /// slices) — roots for the code-reclamation sweep.
+    pub fn collect_code_refs(
+        &self,
+        functions: &mut std::collections::HashSet<usize>,
+        constants: &mut std::collections::HashSet<usize>,
+    ) {
+        fn push<'a>(stack: &mut Vec<&'a WireValue>, payload: &'a WirePayload) {
+            stack.extend(payload.elements.iter());
+            if let Some(annotations) = &payload.annotations {
+                stack.extend(annotations.iter().map(|(_, value)| value));
+            }
+        }
+        let mut stack: Vec<&WireValue> = vec![self];
+        while let Some(value) = stack.pop() {
+            match value {
+                WireValue::Constant(index) => {
+                    constants.insert(*index);
+                }
+                WireValue::Function(index, payload) => {
+                    functions.insert(*index);
+                    push(&mut stack, payload);
+                }
+                WireValue::Tuple(_, payload) => push(&mut stack, payload),
+                WireValue::Builtin(_, Some(payload)) => push(&mut stack, payload),
+                _ => {}
+            }
+        }
+    }
+
     /// The wire form of nil — a spawn with no argument, an entry point's init.
     pub fn nil() -> Self {
         WireValue::Tuple(crate::types::NIL, WirePayload::default())

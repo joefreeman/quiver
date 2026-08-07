@@ -82,6 +82,14 @@ pub struct ProgramUpdate {
     /// and stream events. `None` leaves any existing tables as is (the compile-time
     /// sync driver never delivers any of these).
     pub runtime: Option<crate::bytecode::RuntimeTables>,
+    /// Slots patched *below* the append watermark: reclaimed stubs being shipped, or
+    /// stubs a merge revived. Applied after the table updates. Only workers whose
+    /// tables receive `Appended` deltas need them — a `Shared` table already carries
+    /// the patched content, and these stay empty.
+    #[serde(default)]
+    pub patched_functions: Vec<(usize, Function)>,
+    #[serde(default)]
+    pub patched_constants: Vec<(usize, Constant)>,
     /// For each tuple_id, a canonical *value-shape* id (same name + field labels). Lets `==`
     /// treat structurally-identical tuples built via different paths as equal.
     pub canonical_tuples: Arc<Vec<usize>>,
@@ -119,6 +127,7 @@ pub enum InstructionType {
     Select,
     Process,
     State,
+    Reclaimed,
 }
 
 impl InstructionType {
@@ -153,6 +162,7 @@ impl InstructionType {
             Instruction::Select => InstructionType::Select,
             Instruction::Process(_, _) => InstructionType::Process,
             Instruction::State => InstructionType::State,
+            Instruction::Reclaimed => InstructionType::Reclaimed,
         }
     }
 }
@@ -790,6 +800,52 @@ impl<E: Effect> Executor<E> {
                 }
             })
             .collect()
+    }
+
+    /// Every function and constant table index reachable from this worker's processes —
+    /// the worker's slice of the code-reclamation root set. Walks the same value
+    /// surfaces as [`Self::process_adjacency`], plus frame function indices and the
+    /// armed-stream stash. Retained tombstones are included: their `result`/`state`
+    /// stay observable via a late `!p`/`?p`, so the code those values reference stays
+    /// live. Static instruction references need no walking here — the environment
+    /// closes over its own program's operands.
+    pub fn code_roots(&self) -> (HashSet<usize>, HashSet<usize>) {
+        let mut functions = HashSet::new();
+        let mut constants = HashSet::new();
+        for process in self.processes.values() {
+            for frame in &process.frames {
+                functions.insert(frame.function_index);
+            }
+            for value in process
+                .stack
+                .iter()
+                .chain(process.locals.iter())
+                .chain(process.mailbox.iter())
+            {
+                value.collect_code_refs(&mut functions, &mut constants);
+            }
+            if let Some(Ok(value)) = &process.result {
+                value.collect_code_refs(&mut functions, &mut constants);
+            }
+            process
+                .state
+                .collect_code_refs(&mut functions, &mut constants);
+            for value in process.resource_events.values() {
+                value.collect_code_refs(&mut functions, &mut constants);
+            }
+            if let Some(state) = &process.select_state {
+                for value in &state.sources {
+                    value.collect_code_refs(&mut functions, &mut constants);
+                }
+                if let Some((_, value)) = &state.receiving {
+                    value.collect_code_refs(&mut functions, &mut constants);
+                }
+                for value in state.awaited.values().flatten() {
+                    value.collect_code_refs(&mut functions, &mut constants);
+                }
+            }
+        }
+        (functions, constants)
     }
 
     pub fn new(
@@ -1436,6 +1492,16 @@ impl<E: Effect> Executor<E> {
         update.functions.apply(&mut self.functions);
         update.types.apply(&mut self.types);
 
+        // In-place patches below the append watermark (reclaimed stubs, revived slots).
+        // Empty unless this worker's tables are append-only, so the `make_mut` never
+        // clones a genuinely shared table.
+        for (index, function) in update.patched_functions {
+            Arc::make_mut(&mut self.functions)[index] = function;
+        }
+        for (index, constant) in update.patched_constants {
+            Arc::make_mut(&mut self.constants)[index] = constant;
+        }
+
         // `tuples` (arities) is the hot-path projection of `tuple_infos`; the full infos stay
         // for type-consuming builtins' `TypeLookup`. A replacement rebuilds the projection so
         // the two can never drift apart.
@@ -1794,6 +1860,11 @@ impl<E: Effect> Executor<E> {
                 self.handle_get_annotation(proc, key as usize, check.map(|id| id as usize))
             }
             Instruction::Stamp(site) => self.handle_stamp(proc, site as usize),
+            // Liveness said nothing could reach this code; abort the process loudly
+            // rather than return garbage.
+            Instruction::Reclaimed => Err(Error::Panic(
+                "reclaimed code invoked (code-collection liveness bug)".to_string(),
+            )),
             _ => unreachable!("cold instruction routed to execute_hot"),
         };
 

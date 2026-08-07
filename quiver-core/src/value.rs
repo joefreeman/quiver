@@ -776,6 +776,33 @@ impl Value {
         }
     }
 
+    /// Collect the code this value keeps alive: function table indices (closures, and
+    /// through every payload) and constant table indices (constant-backed binaries).
+    /// The code-reclamation sweep's per-value root walk. Iterative, to survive deep
+    /// cons lists. A pid's root-function index is identity, not a code reference, and
+    /// is deliberately not collected — a reclaimed stub keeps what identity tests read.
+    pub fn collect_code_refs(
+        &self,
+        functions: &mut std::collections::HashSet<usize>,
+        constants: &mut std::collections::HashSet<usize>,
+    ) {
+        let mut stack: Vec<&Value> = vec![self];
+        while let Some(value) = stack.pop() {
+            match value {
+                Value::Binary(Binary::Constant(index)) => {
+                    constants.insert(*index);
+                }
+                Value::Function(index, payload) => {
+                    functions.insert(*index);
+                    stack.extend(payload.all_values());
+                }
+                Value::Tuple(_, payload) => stack.extend(payload.all_values()),
+                Value::Builtin(_, Some(payload)) => stack.extend(payload.all_values()),
+                _ => {}
+            }
+        }
+    }
+
     /// Check if this value is NIL
     pub fn is_nil(&self) -> bool {
         matches!(self, Value::Tuple(id, fields) if *id == NIL && fields.is_empty())
