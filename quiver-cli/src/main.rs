@@ -255,7 +255,9 @@ fn compile_command(
         Some(entry_fn) => program.to_bytecode_optimized(entry_fn),
         None => program.to_bytecode(None),
     };
-    let json = serde_json::to_string_pretty(&bytecode)?;
+    // Compact, not pretty: this is machine output — `quiv inspect` is the readable view,
+    // and indentation was over half the file.
+    let json = serde_json::to_string(&bytecode)?;
 
     if let Some(output_path) = output {
         fs::write(output_path, json)?;

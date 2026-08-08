@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 pub enum Constant {
     // One form for all integers: the small/big split is a runtime-representation
     // concern, applied where a constant becomes a `Value` (`handle_constant`).
-    #[serde(rename = "int")]
+    #[serde(rename = "int", with = "decimal_bigint")]
     Integer(BigInt),
-    #[serde(rename = "bin")]
+    #[serde(rename = "bin", with = "base64_bytes")]
     Binary(Vec<u8>),
 }
 
@@ -49,6 +49,7 @@ impl IdRemaps {
 
 #[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Clone)]
 pub struct Function {
+    #[serde(with = "instruction_stream")]
     pub instructions: Vec<Instruction>,
     pub captures: usize,
     /// Type ID referencing this function's callable type in the types vec
@@ -276,7 +277,12 @@ impl SiteKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{Instruction, Opcode, SiteKind};
+    use super::{BigInt, Constant, Function, Instruction, Opcode, SiteKind};
+    use base64::Engine as _;
+    use std::str::FromStr as _;
+
+    const BASE64_TEST: base64::engine::general_purpose::GeneralPurpose =
+        base64::engine::general_purpose::STANDARD;
 
     #[test]
     fn site_kind_all_matches_indices() {
@@ -317,6 +323,86 @@ mod tests {
             assert_eq!(Instruction::jump(offset).offset(), offset);
             assert_eq!(Instruction::jump_if(offset).offset(), offset);
         }
+    }
+
+    /// Every opcode must survive the serialized encoding, including both operand
+    /// extremes and both jump directions — the cases a hand-written codec gets wrong.
+    #[test]
+    fn instruction_stream_round_trips() {
+        let mut instructions: Vec<Instruction> = Opcode::ALL
+            .iter()
+            .map(|opcode| match opcode.operand_kind() {
+                super::OperandKind::None => Instruction::bare(*opcode),
+                super::OperandKind::Id => Instruction::with_id(*opcode, 0),
+                super::OperandKind::Offset => Instruction::with_offset(*opcode, 0),
+            })
+            .collect();
+        for id in [1usize, 127, 128, 4095, Instruction::OPERAND_MAX] {
+            instructions.push(Instruction::constant(id));
+            instructions.push(Instruction::load(id));
+        }
+        for offset in [1, -1, 63, -64, 930, -833, (1 << 23) - 1, -(1 << 23)] {
+            instructions.push(Instruction::jump(offset));
+            instructions.push(Instruction::jump_if(offset));
+        }
+
+        let function = Function {
+            instructions: instructions.clone(),
+            captures: 3,
+            type_id: 7,
+        };
+        let json = serde_json::to_string(&function).expect("serialize");
+        let restored: Function = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.instructions, instructions);
+        assert_eq!(restored.captures, 3);
+        assert_eq!(restored.type_id, 7);
+    }
+
+    #[test]
+    fn empty_instruction_stream_round_trips() {
+        let function = Function {
+            instructions: vec![],
+            captures: 0,
+            type_id: 0,
+        };
+        let json = serde_json::to_string(&function).expect("serialize");
+        let restored: Function = serde_json::from_str(&json).expect("deserialize");
+        assert!(restored.instructions.is_empty());
+    }
+
+    #[test]
+    fn constants_round_trip() {
+        let constants = vec![
+            Constant::Integer(BigInt::from(0)),
+            Constant::Integer(BigInt::from(-1)),
+            Constant::Integer(BigInt::from(i64::MIN)),
+            // Past 2^53, where a JSON number would silently lose precision.
+            Constant::Integer(BigInt::from_str("123456789012345678901234567890").unwrap()),
+            Constant::Binary(vec![]),
+            Constant::Binary(vec![0x00, 0xff, 0x68, 0x69]),
+            Constant::Binary((0..=255).collect()),
+        ];
+        let json = serde_json::to_string(&constants).expect("serialize");
+        let restored: Vec<Constant> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, constants);
+    }
+
+    /// A corrupt stream must be a deserialization error, never a panic — the range check
+    /// in `with_id` is an assertion, so the decoder has to reject before constructing.
+    #[test]
+    fn malformed_instruction_streams_are_rejected() {
+        let case = |encoded: &str| {
+            serde_json::from_str::<Function>(&format!(
+                r#"{{"instructions":"{encoded}","captures":0,"type_id":0}}"#
+            ))
+        };
+        assert!(case("!!!not base64!!!").is_err());
+        // Opcode 200 does not exist.
+        assert!(case(&BASE64_TEST.encode([200u8])).is_err());
+        // `Constant` (opcode 0) with its operand missing.
+        assert!(case(&BASE64_TEST.encode([0u8])).is_err());
+        // An operand past the 24-bit field.
+        assert!(case(&BASE64_TEST.encode([0u8, 0x80, 0x80, 0x80, 0x80, 0x01])).is_err());
     }
 
     /// The two normalising constructors are what keep the encoding canonical.
@@ -404,7 +490,43 @@ pub enum Opcode {
     Reclaimed,
 }
 
+/// What an opcode's operand field means — the one place that knows, so the disassembler
+/// and the serialized encoding cannot disagree about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandKind {
+    /// No operand; the field is zero.
+    None,
+    /// A table index or a stack/local slot.
+    Id,
+    /// A relative jump.
+    Offset,
+}
+
 impl Opcode {
+    /// What this opcode's operand field means.
+    pub fn operand_kind(self) -> OperandKind {
+        match self {
+            Opcode::Jump | Opcode::JumpIf => OperandKind::Offset,
+            Opcode::Pop
+            | Opcode::Duplicate
+            | Opcode::Store
+            | Opcode::Nil
+            | Opcode::Ok
+            | Opcode::Call
+            | Opcode::TailCall
+            | Opcode::Recurse
+            | Opcode::Equal
+            | Opcode::Not
+            | Opcode::Spawn
+            | Opcode::Send
+            | Opcode::Self_
+            | Opcode::Select
+            | Opcode::State
+            | Opcode::Reclaimed => OperandKind::None,
+            _ => OperandKind::Id,
+        }
+    }
+
     /// Every opcode, in discriminant order — `ALL[op as usize] == op` (asserted in tests),
     /// which is what makes the decode below a single indexed load.
     pub const ALL: [Opcode; 33] = [
@@ -727,25 +849,144 @@ impl Instruction {
 impl std::fmt::Debug for Instruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let opcode = self.opcode();
-        match opcode {
-            Opcode::Jump | Opcode::JumpIf => write!(f, "{opcode:?}({})", self.offset()),
-            Opcode::Pop
-            | Opcode::Duplicate
-            | Opcode::Store
-            | Opcode::Nil
-            | Opcode::Ok
-            | Opcode::Call
-            | Opcode::TailCall
-            | Opcode::Recurse
-            | Opcode::Equal
-            | Opcode::Not
-            | Opcode::Spawn
-            | Opcode::Send
-            | Opcode::Self_
-            | Opcode::Select
-            | Opcode::State
-            | Opcode::Reclaimed => write!(f, "{opcode:?}"),
-            _ => write!(f, "{opcode:?}({})", self.operand()),
+        match opcode.operand_kind() {
+            OperandKind::None => write!(f, "{opcode:?}"),
+            OperandKind::Id => write!(f, "{opcode:?}({})", self.operand()),
+            OperandKind::Offset => write!(f, "{opcode:?}({})", self.offset()),
         }
+    }
+}
+
+/// A function's instruction stream, serialized as base64 over a compact byte encoding:
+/// one opcode byte, then the operand as LEB128 (zigzagged for a jump) where the opcode
+/// takes one.
+///
+/// The *stored* form is variable-length even though the in-memory one is not. The reason
+/// the in-memory representation is fixed-width — that every id-remapping pass rewrites
+/// operands in place — does not apply here, because deserializing rebuilds the vector
+/// anyway. So the wire is free to be as small as it likes.
+mod instruction_stream {
+    use super::{Instruction, Opcode, OperandKind};
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    const BASE64: base64::engine::general_purpose::GeneralPurpose =
+        base64::engine::general_purpose::STANDARD;
+
+    fn write_uleb(mut value: u64, out: &mut Vec<u8>) {
+        while value >= 0x80 {
+            out.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    fn read_uleb(bytes: &[u8], cursor: &mut usize) -> Option<u64> {
+        let mut value: u64 = 0;
+        for shift in (0..64).step_by(7) {
+            let byte = *bytes.get(*cursor)?;
+            *cursor += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// Jump offsets are small in both directions, so zigzag keeps a backward jump one byte.
+    fn zigzag(offset: i32) -> u64 {
+        ((offset << 1) ^ (offset >> 31)) as u32 as u64
+    }
+
+    fn unzigzag(value: u64) -> i32 {
+        ((value >> 1) as i32) ^ -((value & 1) as i32)
+    }
+
+    pub fn serialize<S: Serializer>(
+        instructions: &[Instruction],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        // Most instructions encode to one or two bytes; sizing for two avoids regrowth.
+        let mut bytes = Vec::with_capacity(instructions.len() * 2);
+        for instruction in instructions {
+            let opcode = instruction.opcode();
+            bytes.push(opcode as u8);
+            match opcode.operand_kind() {
+                OperandKind::None => {}
+                OperandKind::Id => write_uleb(u64::from(instruction.operand()), &mut bytes),
+                OperandKind::Offset => write_uleb(zigzag(instruction.offset()), &mut bytes),
+            }
+        }
+        serializer.serialize_str(&BASE64.encode(&bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<Instruction>, D::Error> {
+        let encoded = <&str>::deserialize(deserializer)?;
+        let bytes = BASE64.decode(encoded).map_err(D::Error::custom)?;
+
+        let mut instructions = Vec::new();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            let byte = bytes[cursor];
+            cursor += 1;
+            let opcode = *Opcode::ALL
+                .get(byte as usize)
+                .ok_or_else(|| D::Error::custom(format!("unknown opcode {byte}")))?;
+            let truncated = || D::Error::custom("instruction stream ends mid-operand");
+            instructions.push(match opcode.operand_kind() {
+                OperandKind::None => Instruction::bare(opcode),
+                OperandKind::Id => {
+                    let id = read_uleb(&bytes, &mut cursor).ok_or_else(truncated)?;
+                    if id > Instruction::OPERAND_MAX as u64 {
+                        return Err(D::Error::custom(format!("operand {id} out of range")));
+                    }
+                    Instruction::with_id(opcode, id as usize)
+                }
+                OperandKind::Offset => {
+                    let offset = unzigzag(read_uleb(&bytes, &mut cursor).ok_or_else(truncated)?);
+                    Instruction::with_offset(opcode, offset)
+                }
+            });
+        }
+        Ok(instructions)
+    }
+}
+
+/// A binary constant, serialized as base64 rather than a JSON array of byte numbers.
+mod base64_bytes {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    const BASE64: base64::engine::general_purpose::GeneralPurpose =
+        base64::engine::general_purpose::STANDARD;
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&BASE64.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let encoded = <&str>::deserialize(deserializer)?;
+        BASE64.decode(encoded).map_err(D::Error::custom)
+    }
+}
+
+/// An integer constant, serialized as a decimal string. Integers are arbitrary precision,
+/// so a JSON number would not round-trip past 2^53; base64 over the magnitude bytes would
+/// round-trip but costs *more* than decimal for the small values that dominate.
+mod decimal_bigint {
+    use num_bigint::BigInt;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+    use std::str::FromStr as _;
+
+    pub fn serialize<S: Serializer>(value: &BigInt, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BigInt, D::Error> {
+        let text = <&str>::deserialize(deserializer)?;
+        BigInt::from_str(text).map_err(D::Error::custom)
     }
 }
