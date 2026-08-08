@@ -1,22 +1,87 @@
-use crate::bytecode::{ConcreteType, Function, Instruction};
+use crate::bytecode::{ConcreteType, Function, Opcode};
 use crate::types::{BuiltinInfo, TupleTypeInfo, Type, TypeLookup, is_compatible};
 use std::collections::{HashMap, HashSet};
 
-/// TypeLookup implementation for compatibility computation
+/// TypeLookup implementation for compatibility computation.
+///
+/// Answers ids beyond the program's own type table from [`Self::derived`]: the process
+/// types this computation needs but a program need not contain (see
+/// [`Self::process_type_id`]).
 pub struct TypeLookupImpl<'a> {
     types: &'a [Type],
     tuples: &'a [TupleTypeInfo],
+    /// Process types derived from the functions, for triples the type table lacks. Their
+    /// ids continue after `types`, and are only ever used as the *value* side of a
+    /// compatibility test — never as a pattern, and never stored in a table indexed by
+    /// type id — so they need not be stable across calls.
+    derived: Vec<Type>,
+    /// Every process triple's type id, real where the table has one and derived otherwise.
+    process_ids: HashMap<ProcessTypeKey, usize>,
 }
 
 impl<'a> TypeLookupImpl<'a> {
-    pub fn new(types: &'a [Type], tuples: &'a [TupleTypeInfo]) -> Self {
-        TypeLookupImpl { types, tuples }
+    pub fn new(types: &'a [Type], tuples: &'a [TupleTypeInfo], functions: &'a [Function]) -> Self {
+        // Real entries first, so a triple the program does name resolves to its own id.
+        let mut process_ids: HashMap<ProcessTypeKey, usize> = HashMap::new();
+        for (type_id, ty) in types.iter().enumerate() {
+            if let Type::Process {
+                send,
+                receive,
+                state,
+            } = ty
+            {
+                process_ids
+                    .entry((*send, *receive, *state))
+                    .or_insert(type_id);
+            }
+        }
+
+        // Then one per function triple the program doesn't already name. Whether a
+        // program happens to contain the process type for a function it spawns is
+        // incidental — it depends on some site having *written* that exact type — but a
+        // pid's compatibility must not be: a received pid is admitted to a mailbox only
+        // if its type fits, and that test is what keeps bare `?p` sound.
+        let mut derived = Vec::new();
+        for func in functions {
+            let (_, _, send, receive, state) = extract_function_type_info(func, types);
+            process_ids
+                .entry((send, receive, state))
+                .or_insert_with(|| {
+                    derived.push(Type::Process {
+                        send,
+                        receive,
+                        state,
+                    });
+                    types.len() + derived.len() - 1
+                });
+        }
+
+        TypeLookupImpl {
+            types,
+            tuples,
+            derived,
+            process_ids,
+        }
+    }
+
+    /// The type id standing for a process with this `(send, receive, state)` triple.
+    /// Total over the functions this was built from.
+    fn process_type_id(&self, triple: ProcessTypeKey) -> Option<usize> {
+        self.process_ids.get(&triple).copied()
+    }
+
+    /// Whether `type_id` is one of the derived entries rather than the program's own.
+    fn is_derived(&self, type_id: usize) -> bool {
+        type_id >= self.types.len()
     }
 }
 
 impl<'a> TypeLookup for TypeLookupImpl<'a> {
     fn lookup_type(&self, type_id: usize) -> Option<&Type> {
-        self.types.get(type_id)
+        match self.types.get(type_id) {
+            Some(ty) => Some(ty),
+            None => self.derived.get(type_id - self.types.len()),
+        }
     }
 
     fn lookup_tuple(&self, tuple_id: usize) -> Option<&TupleTypeInfo> {
@@ -65,7 +130,7 @@ fn extract_function_type_info(
 /// allowing O(1) runtime type checking instead of recursive type traversal.
 /// Returns a Vec where index is type_id and value is the set of compatible concrete types.
 pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<ConcreteType>> {
-    let lookup = TypeLookupImpl::new(input.types, input.tuples);
+    let lookup = TypeLookupImpl::new(input.types, input.tuples, input.functions);
     let index = TypeIndex::build(input, &lookup);
 
     // Collect all pattern type IDs (types used in IsType instructions)
@@ -73,13 +138,11 @@ pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<Con
 
     for function in input.functions {
         for instruction in &function.instructions {
-            match instruction {
-                Instruction::IsType(type_id) | Instruction::GetAnnotation(_, Some(type_id)) => {
-                    // Widen here, at the edge of the instruction stream; everything
-                    // downstream indexes tables and stays `usize`.
-                    pattern_type_ids.insert(*type_id as usize);
-                }
-                _ => {}
+            if instruction.opcode() == Opcode::IsType {
+                let type_id = instruction.operand();
+                // Widen here, at the edge of the instruction stream; everything
+                // downstream indexes tables and stays `usize`.
+                pattern_type_ids.insert(type_id as usize);
             }
         }
     }
@@ -148,7 +211,7 @@ pub fn compute_canonical_tuples(tuples: &[TupleTypeInfo]) -> Vec<usize> {
 pub fn compute_param_compatibility(
     input: &CompatibilityInput,
 ) -> (Vec<HashSet<ConcreteType>>, Vec<HashSet<ConcreteType>>) {
-    let lookup = TypeLookupImpl::new(input.types, input.tuples);
+    let lookup = TypeLookupImpl::new(input.types, input.tuples, input.functions);
     let index = TypeIndex::build(input, &lookup);
 
     // Many functions share a parameter type, so memoise the result by parameter type id.
@@ -210,7 +273,7 @@ impl CompatibilityTables {
     /// Extend the tables to cover `input`, which must describe an append-only extension
     /// of the program covered by the previous call (the environment's merged program).
     pub fn update(&mut self, input: &CompatibilityInput) {
-        let lookup = TypeLookupImpl::new(input.types, input.tuples);
+        let lookup = TypeLookupImpl::new(input.types, input.tuples, input.functions);
         let index = TypeIndex::build(input, &lookup);
 
         self.type_compatibility
@@ -248,13 +311,15 @@ impl CompatibilityTables {
             new_concretes.push((ConcreteType::Function(func_id), callable));
         }
 
-        // Process concretes exist where a function's (send, receive, state) key has a
-        // `Type::Process` entry: new functions against the index, plus old functions
-        // whose key entry only just appeared.
+        // Every function has a process type: new functions, plus old functions whose type
+        // the program itself only just named. A derived id carries no such news — it
+        // exists for as long as its function does — so it counts only when the function
+        // is new, which is what keeps this from re-adding every process every round.
         for (func_id, func) in input.functions.iter().enumerate() {
             let (_, _, send, receive, state) = extract_function_type_info(func, input.types);
-            if let Some(&process_id) = index.process_to_type.get(&(send, receive, state))
-                && (func_id >= self.functions_len || process_id >= self.types_len)
+            if let Some(process_id) = lookup.process_type_id((send, receive, state))
+                && (func_id >= self.functions_len
+                    || (!lookup.is_derived(process_id) && process_id >= self.types_len))
             {
                 new_concretes.push((ConcreteType::Process(func_id), process_id));
             }
@@ -330,12 +395,11 @@ impl CompatibilityTables {
         // New pattern types (only new functions can introduce them) get a full scan.
         for function in &input.functions[self.functions_len..] {
             for instruction in &function.instructions {
-                if let Instruction::IsType(type_id) | Instruction::GetAnnotation(_, Some(type_id)) =
-                    instruction
-                    && (*type_id as usize) < input.types.len()
-                    && self.pattern_ids.insert(*type_id as usize)
+                let type_id = instruction.operand() as usize;
+                if instruction.opcode() == Opcode::IsType
+                    && type_id < input.types.len()
+                    && self.pattern_ids.insert(type_id)
                 {
-                    let type_id = *type_id as usize;
                     self.type_compatibility[type_id] =
                         compute_compatible_concrete_types(type_id, input, &lookup, &index);
                 }
@@ -395,8 +459,6 @@ struct TypeIndex {
     tuple_to_type: Vec<Option<usize>>,
     /// (parameter, result) -> type id of a never-receiving `Type::Callable` (for builtins)
     callable_to_type: HashMap<(usize, usize), usize>,
-    /// (send, receive, state) -> type id of `Type::Process`
-    process_to_type: HashMap<ProcessTypeKey, usize>,
     /// resource name -> type id of `Type::Resource`
     resource_to_type: HashMap<String, usize>,
 }
@@ -409,7 +471,6 @@ impl TypeIndex {
             reference: None,
             tuple_to_type: vec![None; input.tuples.len()],
             callable_to_type: HashMap::new(),
-            process_to_type: HashMap::new(),
             resource_to_type: HashMap::new(),
         };
         // Single pass over the type table, keeping the first occurrence of each shape
@@ -444,16 +505,6 @@ impl TypeIndex {
                             .entry((*parameter, *result))
                             .or_insert(type_id);
                     }
-                }
-                Type::Process {
-                    send,
-                    receive,
-                    state,
-                } => {
-                    index
-                        .process_to_type
-                        .entry((*send, *receive, *state))
-                        .or_insert(type_id);
                 }
                 Type::Resource(name) => {
                     index
@@ -531,10 +582,8 @@ fn compute_compatible_concrete_types(
     for (func_id, func) in input.functions.iter().enumerate() {
         let (_, _, process_send, process_receive, process_state) =
             extract_function_type_info(func, input.types);
-        if let Some(&process_id) =
-            index
-                .process_to_type
-                .get(&(process_send, process_receive, process_state))
+        if let Some(process_id) =
+            lookup.process_type_id((process_send, process_receive, process_state))
             && is_compatible(process_id, pattern_id, lookup)
         {
             compat_set.insert(ConcreteType::Process(func_id));

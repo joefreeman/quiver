@@ -285,7 +285,7 @@ impl Program {
                 continue;
             }
             let function = &mut self.functions[index];
-            function.instructions = vec![Instruction::Reclaimed];
+            function.instructions = vec![Instruction::reclaimed()];
             function.captures = 0;
         }
         for &index in dead_constants {
@@ -327,8 +327,24 @@ impl Program {
         name: String,
         registry: &crate::builtins::BuiltinRegistry<E>,
     ) -> usize {
-        // Check if builtin already exists
-        if let Some(index) = self.builtins.iter().position(|b| b.name == name) {
+        self.register_builtin_instantiated(name, None, registry)
+    }
+
+    /// Register a builtin, optionally at an explicit type argument. Each distinct
+    /// instantiation of a type-consuming builtin is its own entry, so that the id alone
+    /// tells the runtime which one a `Builtin` instruction means.
+    pub fn register_builtin_instantiated<E: crate::effects::Effect>(
+        &mut self,
+        name: String,
+        type_argument: Option<usize>,
+        registry: &crate::builtins::BuiltinRegistry<E>,
+    ) -> usize {
+        // Check if this instantiation already exists
+        if let Some(index) = self
+            .builtins
+            .iter()
+            .position(|b| b.name == name && b.type_argument == type_argument)
+        {
             return index;
         }
 
@@ -341,6 +357,7 @@ impl Program {
                 name: name.clone(),
                 param_type,
                 result_type,
+                type_argument,
             }
         } else {
             // Builtin not found in registry - this shouldn't happen in well-formed programs
@@ -350,6 +367,7 @@ impl Program {
                 name,
                 param_type: never_id,
                 result_type: never_id,
+                type_argument,
             }
         };
 
@@ -360,8 +378,12 @@ impl Program {
     /// Register a builtin with pre-resolved type information.
     /// Used when loading bytecode that already has resolved builtin types.
     pub fn register_builtin_info(&mut self, info: BuiltinInfo) -> usize {
-        // Check if builtin already exists
-        if let Some(index) = self.builtins.iter().position(|b| b.name == info.name) {
+        // Check if this instantiation already exists
+        if let Some(index) = self
+            .builtins
+            .iter()
+            .position(|b| b.name == info.name && b.type_argument == info.type_argument)
+        {
             return index;
         }
 

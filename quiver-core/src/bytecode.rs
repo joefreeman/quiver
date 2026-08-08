@@ -1,4 +1,4 @@
-use crate::types::{BuiltinInfo, TupleTypeInfo, Type, TypeLookup};
+use crate::types::{BuiltinInfo, NIL, OK, TupleTypeInfo, Type, TypeLookup};
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
@@ -45,13 +45,6 @@ impl IdRemaps {
     fn map(table: &std::collections::HashMap<usize, usize>, id: usize) -> usize {
         *table.get(&id).unwrap_or(&id)
     }
-
-    /// The [`Id`]-typed twin of [`map`](Self::map), for instruction operands. The remap
-    /// tables are keyed by `usize` because they also remap table entries, which are indexed
-    /// that way; only the instruction operands are narrowed.
-    fn map_id(table: &std::collections::HashMap<usize, usize>, id: Id) -> Id {
-        Self::map(table, id as usize) as Id
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Clone)]
@@ -70,39 +63,23 @@ impl Function {
         let instructions = self
             .instructions
             .into_iter()
-            .map(|instruction| match instruction {
-                Instruction::Constant(idx) => {
-                    Instruction::Constant(IdRemaps::map_id(&remaps.constants, idx))
-                }
-                Instruction::Function(idx) => {
-                    Instruction::Function(IdRemaps::map_id(&remaps.functions, idx))
-                }
-                Instruction::Builtin(idx, type_argument) => Instruction::Builtin(
-                    IdRemaps::map_id(&remaps.builtins, idx),
-                    // A type-consuming builtin's type argument is a type reference,
-                    // like GetAnnotation's check.
-                    type_argument.map(|type_id| IdRemaps::map_id(&remaps.types, type_id)),
-                ),
-                Instruction::Tuple(tuple_id) => {
-                    Instruction::Tuple(IdRemaps::map_id(&remaps.tuples, tuple_id))
-                }
-                Instruction::IsType(type_id) => {
-                    Instruction::IsType(IdRemaps::map_id(&remaps.types, type_id))
-                }
-                Instruction::GetNamed(name_id) => {
-                    Instruction::GetNamed(IdRemaps::map_id(&remaps.field_names, name_id))
-                }
-                Instruction::Annotate(key) => {
-                    Instruction::Annotate(IdRemaps::map_id(&remaps.annotation_keys, key))
-                }
-                Instruction::GetAnnotation(key, check) => Instruction::GetAnnotation(
-                    IdRemaps::map_id(&remaps.annotation_keys, key),
-                    check.map(|type_id| IdRemaps::map_id(&remaps.types, type_id)),
-                ),
-                Instruction::Stamp(site) => {
-                    Instruction::Stamp(IdRemaps::map_id(&remaps.sites, site))
-                }
-                other => other,
+            .map(|instruction| {
+                // Fixed-width packing is what lets this be an operand rewrite: the opcode
+                // is untouched and nothing downstream shifts.
+                let table = match instruction.opcode() {
+                    Opcode::Constant => &remaps.constants,
+                    Opcode::Function => &remaps.functions,
+                    Opcode::Builtin => &remaps.builtins,
+                    Opcode::Tuple => &remaps.tuples,
+                    Opcode::IsType => &remaps.types,
+                    Opcode::GetNamed => &remaps.field_names,
+                    Opcode::Annotate | Opcode::GetAnnotation => &remaps.annotation_keys,
+                    Opcode::Stamp => &remaps.sites,
+                    // Stack slots, jump offsets, positions and arities are not table ids;
+                    // `Process` names a function whose index is already session-space.
+                    _ => return instruction,
+                };
+                instruction.with_operand(IdRemaps::map(table, instruction.operand() as usize))
             })
             .collect();
 
@@ -125,12 +102,12 @@ impl Function {
         constants: &mut std::collections::HashSet<usize>,
     ) {
         for instruction in &self.instructions {
-            match instruction {
-                Instruction::Constant(idx) => {
-                    constants.insert(*idx as usize);
+            match instruction.opcode() {
+                Opcode::Constant => {
+                    constants.insert(instruction.operand() as usize);
                 }
-                Instruction::Function(idx) => {
-                    functions.insert(*idx as usize);
+                Opcode::Function => {
+                    functions.insert(instruction.operand() as usize);
                 }
                 _ => {}
             }
@@ -299,13 +276,57 @@ impl SiteKind {
 
 #[cfg(test)]
 mod tests {
-    use super::SiteKind;
+    use super::{Instruction, Opcode, SiteKind};
 
     #[test]
     fn site_kind_all_matches_indices() {
         for (position, kind) in SiteKind::ALL.iter().enumerate() {
             assert_eq!(kind.index(), position);
         }
+    }
+
+    /// The decode is an indexed load into `Opcode::ALL`, which is only correct while the
+    /// array is in discriminant order.
+    #[test]
+    fn opcode_all_matches_discriminants() {
+        for (position, opcode) in Opcode::ALL.iter().enumerate() {
+            assert_eq!(*opcode as usize, position);
+        }
+    }
+
+    #[test]
+    fn instruction_packs_into_a_word() {
+        assert_eq!(std::mem::size_of::<Instruction>(), 4);
+    }
+
+    #[test]
+    fn operands_round_trip() {
+        assert_eq!(Instruction::load(0).operand(), 0);
+        assert_eq!(
+            Instruction::load(Instruction::OPERAND_MAX).operand() as usize,
+            Instruction::OPERAND_MAX
+        );
+        assert_eq!(Instruction::constant(1234).opcode(), Opcode::Constant);
+        assert_eq!(Instruction::constant(1234).operand(), 1234);
+    }
+
+    /// Jump offsets are signed and sign-extend out of the same 24 bits.
+    #[test]
+    fn offsets_round_trip() {
+        for offset in [0, 1, -1, 930, -833, (1 << 23) - 1, -(1 << 23)] {
+            assert_eq!(Instruction::jump(offset).offset(), offset);
+            assert_eq!(Instruction::jump_if(offset).offset(), offset);
+        }
+    }
+
+    /// The two normalising constructors are what keep the encoding canonical.
+    #[test]
+    fn constructors_normalise() {
+        assert_eq!(Instruction::pick(0), Instruction::duplicate());
+        assert_eq!(Instruction::pick(1).opcode(), Opcode::Pick);
+        assert_eq!(Instruction::tuple(super::NIL), Instruction::nil());
+        assert_eq!(Instruction::tuple(super::OK), Instruction::ok());
+        assert_eq!(Instruction::tuple(2).opcode(), Opcode::Tuple);
     }
 }
 
@@ -329,65 +350,402 @@ impl TypeLookup for Bytecode {
 /// app is ~60k of them, replicated per worker — and the two-word operands were what forced
 /// `Instruction` to 32 bytes. No program comes close to 4 billion of anything, and a denser
 /// instruction also means more of them per cache line in the dispatch loop.
+/// A table index (constants, functions, types, tuples, builtins, field names, annotation
+/// keys, sites) or a stack/frame slot, as an [`Instruction`] carries it. Instructions are
+/// the largest static table a program holds — a live-view app is ~60k of them, replicated
+/// per worker — so an instruction is packed into a single `u32`, and 24 bits is what is
+/// left for the operand once the opcode takes a byte. Real programs stay four orders of
+/// magnitude below that ceiling (the largest operand across the example suite is ~3,000),
+/// and a denser stream also means more instructions per cache line in the dispatch loop.
 pub type Id = u32;
 
-/// A relative jump, in instructions. `i32` for the same reason as [`Id`].
+/// A relative jump, in instructions, counted from the instruction *after* the jump — so
+/// `Jump(0)` is a no-op that falls through. Stored sign-extended in the same 24 bits as
+/// an [`Id`], giving a range of ±8M instructions.
 pub type Offset = i32;
 
+/// What an [`Instruction`] does. The operand's meaning is per-opcode and documented on
+/// each constructor; opcodes with no operand ignore it (and carry zero).
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Instruction {
-    Constant(Id),
+pub enum Opcode {
+    Constant,
     Pop,
     Duplicate,
-    Pick(Id),
-    Rotate(Id),
-    Reset(Id),
-    Load(Id),
+    Pick,
+    Rotate,
+    Reset,
+    Load,
     Store,
-    Tuple(Id),
-    /// Pop a tuple; push the field at the given position. Emitted where the static type
-    /// pins the field's position (a concrete tuple, or a union agreeing on one).
-    GetPositional(Id),
-    /// Pop a tuple; push the field whose *name* is the given field-name id, resolved
-    /// against the tuple's own type at runtime via the precomputed offset table. Emitted
-    /// where the static type doesn't pin a position — a partial type's field, or a union
-    /// whose members carry the field at different positions.
-    GetNamed(Id),
-    IsType(Id),
-    Jump(Offset),
-    JumpIf(Offset),
+    Tuple,
+    Nil,
+    Ok,
+    GetPositional,
+    GetNamed,
+    IsType,
+    Jump,
+    JumpIf,
     Call,
-    TailCall(bool),
-    Function(Id),
-    /// Push a builtin value by id. The optional type id is a type-consuming builtin's
-    /// explicit type argument (`__data_decode__<'t>`), resolved to a concrete type at
-    /// compile time and carried on the pushed value for the implementation to read.
-    Builtin(Id, Option<Id>),
-    Equal(Id),
+    TailCall,
+    Recurse,
+    Function,
+    Builtin,
+    Equal,
     Not,
-    /// Pop an annotation value, then a tuple/function carrier; push the carrier with the
-    /// annotation attached under the given key id (copy-on-annotate).
-    Annotate(Id),
-    /// Pop a carrier; push its annotation under the given key id, or nil. The optional
-    /// type id is the checked form's expected shape (`x:('t)key`): a carried entry
-    /// incompatible with it also answers nil, via the same table `IsType` consults.
-    GetAnnotation(Id, Option<Id>),
-    /// Debug builds only: if the top of the stack is a nil result not yet carrying an
-    /// `origin` annotation, stamp it with this site's provenance (see `SiteTable`).
-    /// Fresh-only, so a propagating failure keeps its original site. No-op otherwise.
-    Stamp(Id),
+    Annotate,
+    GetAnnotation,
+    Stamp,
     Spawn,
     Send,
     Self_,
     Select,
-    Process(Id, Id), // (process_id, function_index)
-    /// Sample a process's current state (`?p`): pop a process
-    /// value, push its state. No runtime test — the state type is statically known
-    /// (inferred at spawns; enforced by strict state subtyping at declared boundaries).
+    Process,
     State,
-    /// The body of a function whose code was reclaimed: liveness said nothing could
-    /// call it, so executing this is a reclamation bug — it aborts the process loudly
-    /// rather than returning garbage. Never emitted by the compiler; written into
-    /// stubbed slots by `Program::reclaim_code`.
     Reclaimed,
+}
+
+impl Opcode {
+    /// Every opcode, in discriminant order — `ALL[op as usize] == op` (asserted in tests),
+    /// which is what makes the decode below a single indexed load.
+    pub const ALL: [Opcode; 33] = [
+        Opcode::Constant,
+        Opcode::Pop,
+        Opcode::Duplicate,
+        Opcode::Pick,
+        Opcode::Rotate,
+        Opcode::Reset,
+        Opcode::Load,
+        Opcode::Store,
+        Opcode::Tuple,
+        Opcode::Nil,
+        Opcode::Ok,
+        Opcode::GetPositional,
+        Opcode::GetNamed,
+        Opcode::IsType,
+        Opcode::Jump,
+        Opcode::JumpIf,
+        Opcode::Call,
+        Opcode::TailCall,
+        Opcode::Recurse,
+        Opcode::Function,
+        Opcode::Builtin,
+        Opcode::Equal,
+        Opcode::Not,
+        Opcode::Annotate,
+        Opcode::GetAnnotation,
+        Opcode::Stamp,
+        Opcode::Spawn,
+        Opcode::Send,
+        Opcode::Self_,
+        Opcode::Select,
+        Opcode::Process,
+        Opcode::State,
+        Opcode::Reclaimed,
+    ];
+}
+
+/// One instruction, packed into a word: an 8-bit opcode and a 24-bit operand.
+///
+/// Fixed width is deliberate. Every pass that rewrites table ids — the environment merging
+/// a compiled REPL line, the linker loading a module artifact, the tree shaker renumbering
+/// — rewrites operands in place, which a variable-length encoding would turn into a
+/// re-assembly of the whole stream.
+///
+/// Build one through the named constructors, never by hand: [`Instruction::tuple`] and
+/// [`Instruction::pick`] normalise their operands, and the rest keep the debug-build
+/// range check in one place.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Instruction(u32);
+
+impl Instruction {
+    const OPERAND_BITS: u32 = 24;
+    const OPERAND_MASK: u32 = (1 << Self::OPERAND_BITS) - 1;
+
+    /// The widest table id or slot an instruction can name.
+    pub const OPERAND_MAX: usize = Self::OPERAND_MASK as usize;
+
+    fn new(opcode: Opcode, operand: u32) -> Instruction {
+        Instruction(((opcode as u32) << Self::OPERAND_BITS) | (operand & Self::OPERAND_MASK))
+    }
+
+    /// An opcode that takes no operand.
+    fn bare(opcode: Opcode) -> Instruction {
+        Instruction::new(opcode, 0)
+    }
+
+    /// An opcode carrying a table id or slot.
+    ///
+    /// The range check is unconditional, not a `debug_assert`: overflowing the field
+    /// would silently truncate to a *valid-looking* id pointing at the wrong table entry,
+    /// and instructions are built once at compile time, never in the dispatch loop, so
+    /// the check costs nothing that matters.
+    fn with_id(opcode: Opcode, id: usize) -> Instruction {
+        assert!(
+            id <= Self::OPERAND_MAX,
+            "instruction operand {id} exceeds {} bits — this program is too large to encode",
+            Self::OPERAND_BITS
+        );
+        Instruction::new(opcode, id as u32)
+    }
+
+    /// An opcode carrying a relative jump. Range-checked like [`Self::with_id`].
+    fn with_offset(opcode: Opcode, offset: Offset) -> Instruction {
+        let limit = 1 << (Self::OPERAND_BITS - 1);
+        assert!(
+            offset >= -limit && offset < limit,
+            "jump offset {offset} exceeds {} bits — this function is too large to encode",
+            Self::OPERAND_BITS
+        );
+        Instruction::new(opcode, (offset as u32) & Self::OPERAND_MASK)
+    }
+
+    /// What this instruction does.
+    pub fn opcode(self) -> Opcode {
+        Opcode::ALL[(self.0 >> Self::OPERAND_BITS) as usize]
+    }
+
+    /// The table id or slot this instruction carries. Zero for an operand-less opcode.
+    pub fn operand(self) -> Id {
+        self.0 & Self::OPERAND_MASK
+    }
+
+    /// The relative jump this instruction carries, sign-extended from its 24 bits.
+    pub fn offset(self) -> Offset {
+        ((self.0 << (32 - Self::OPERAND_BITS)) as i32) >> (32 - Self::OPERAND_BITS)
+    }
+
+    /// The same instruction with its operand replaced — how the id-remapping passes
+    /// rewrite a table reference without decoding the opcode.
+    pub fn with_operand(self, id: usize) -> Instruction {
+        Instruction::with_id(self.opcode(), id)
+    }
+
+    /// Push the constant at this index.
+    pub fn constant(constant_id: usize) -> Instruction {
+        Instruction::with_id(Opcode::Constant, constant_id)
+    }
+
+    /// Discard the top of the stack.
+    pub fn pop() -> Instruction {
+        Instruction::bare(Opcode::Pop)
+    }
+
+    /// Push a copy of the top of the stack.
+    pub fn duplicate() -> Instruction {
+        Instruction::bare(Opcode::Duplicate)
+    }
+
+    /// Push a copy of the value `depth` slots below the top. Depth zero is
+    /// [`Instruction::duplicate`], which is much the commonest case and has its own
+    /// opcode; normalising here is what keeps `Pick` non-zero.
+    pub fn pick(depth: usize) -> Instruction {
+        match depth {
+            0 => Instruction::duplicate(),
+            other => Instruction::with_id(Opcode::Pick, other),
+        }
+    }
+
+    /// Move the value `count - 1` slots below the top to the top, sliding the rest down.
+    /// `Rotate(2)` swaps the top pair.
+    pub fn rotate(count: usize) -> Instruction {
+        debug_assert!(count >= 2, "Rotate({count}) does nothing");
+        Instruction::with_id(Opcode::Rotate, count)
+    }
+
+    /// Drop every local from `slot` upward, leaving the frame's earlier bindings — how a
+    /// block's scope ends.
+    pub fn reset(slot: usize) -> Instruction {
+        Instruction::with_id(Opcode::Reset, slot)
+    }
+
+    /// Push the frame-relative local at this slot.
+    pub fn load(slot: usize) -> Instruction {
+        Instruction::with_id(Opcode::Load, slot)
+    }
+
+    /// Move the top of the stack into the frame's next local slot.
+    pub fn store() -> Instruction {
+        Instruction::bare(Opcode::Store)
+    }
+
+    /// Pop this tuple type's arity worth of fields (the topmost is its last field) and
+    /// push the tuple. Nil and `Ok` are specialised to [`Instruction::nil`] and
+    /// [`Instruction::ok`]: together they are the majority of all tuple construction, and
+    /// neither pops anything.
+    pub fn tuple(tuple_id: usize) -> Instruction {
+        match tuple_id {
+            NIL => Instruction::nil(),
+            OK => Instruction::ok(),
+            other => Instruction::with_id(Opcode::Tuple, other),
+        }
+    }
+
+    /// Push nil.
+    pub fn nil() -> Instruction {
+        Instruction::bare(Opcode::Nil)
+    }
+
+    /// Push `Ok`.
+    pub fn ok() -> Instruction {
+        Instruction::bare(Opcode::Ok)
+    }
+
+    /// Pop a tuple; push the field at this position. Emitted where the static type pins
+    /// the field's position (a concrete tuple, or a union agreeing on one).
+    pub fn get_positional(index: usize) -> Instruction {
+        Instruction::with_id(Opcode::GetPositional, index)
+    }
+
+    /// Pop a tuple; push the field with this name, its offset resolved against the
+    /// tuple's own type at runtime. Emitted where the static type doesn't pin a position
+    /// — a partial type's field, or a union whose members carry it at different offsets.
+    pub fn get_named(name_id: usize) -> Instruction {
+        Instruction::with_id(Opcode::GetNamed, name_id)
+    }
+
+    /// Pop a value; push `Ok` if it inhabits this type, nil otherwise.
+    pub fn is_type(type_id: usize) -> Instruction {
+        Instruction::with_id(Opcode::IsType, type_id)
+    }
+
+    /// Jump unconditionally.
+    pub fn jump(offset: Offset) -> Instruction {
+        Instruction::with_offset(Opcode::Jump, offset)
+    }
+
+    /// Pop a value; jump if it is not nil.
+    pub fn jump_if(offset: Offset) -> Instruction {
+        Instruction::with_offset(Opcode::JumpIf, offset)
+    }
+
+    /// Call the callable on top of the stack with the argument beneath it.
+    pub fn call() -> Instruction {
+        Instruction::bare(Opcode::Call)
+    }
+
+    /// Tail-call the callable on top of the stack with the argument beneath it (`^f`,
+    /// `^~`), replacing the current frame.
+    pub fn tail_call() -> Instruction {
+        Instruction::bare(Opcode::TailCall)
+    }
+
+    /// Re-enter the current frame with the argument on top of the stack (`^`), keeping
+    /// its function and captures. Shares no stack shape with [`Instruction::tail_call`],
+    /// which is why the two are separate opcodes.
+    pub fn recurse() -> Instruction {
+        Instruction::bare(Opcode::Recurse)
+    }
+
+    /// Pop this function's captures; push the closure.
+    pub fn function(function_id: usize) -> Instruction {
+        Instruction::with_id(Opcode::Function, function_id)
+    }
+
+    /// Push a builtin value. A type-consuming builtin's explicit type argument
+    /// (`__data_decode__<'t>`) belongs to the *entry* this names rather than to the
+    /// instruction: each instantiation is its own builtin-table entry.
+    pub fn builtin(builtin_id: usize) -> Instruction {
+        Instruction::with_id(Opcode::Builtin, builtin_id)
+    }
+
+    /// Pop two values; push `Ok` if they are structurally equal, nil otherwise. The
+    /// result is a truth flag rather than the compared value, so equal nils stay
+    /// distinguishable from a failed comparison.
+    pub fn equal() -> Instruction {
+        Instruction::bare(Opcode::Equal)
+    }
+
+    /// Pop a value; push `Ok` if it is nil, nil otherwise.
+    pub fn not() -> Instruction {
+        Instruction::bare(Opcode::Not)
+    }
+
+    /// Pop an annotation value, then a tuple/function carrier; push the carrier with the
+    /// annotation attached under this key (copy-on-annotate).
+    pub fn annotate(key: usize) -> Instruction {
+        Instruction::with_id(Opcode::Annotate, key)
+    }
+
+    /// Pop a carrier; push its annotation under this key, or nil. Total: a value that
+    /// cannot carry annotations answers nil too. The checked form (`x:('t)key`) compiles
+    /// to this followed by a test against the expected shape.
+    pub fn get_annotation(key: usize) -> Instruction {
+        Instruction::with_id(Opcode::GetAnnotation, key)
+    }
+
+    /// Debug builds only: if the top of the stack is a nil result not yet carrying an
+    /// `origin` annotation, stamp it with this site's provenance. Fresh-only, so a
+    /// propagating failure keeps its original site; a no-op on anything else.
+    pub fn stamp(site_id: usize) -> Instruction {
+        Instruction::with_id(Opcode::Stamp, site_id)
+    }
+
+    /// Pop a function value, then an argument; spawn a process and push its pid.
+    pub fn spawn() -> Instruction {
+        Instruction::bare(Opcode::Spawn)
+    }
+
+    /// Pop a process value, then a message; send it and push the process back.
+    pub fn send() -> Instruction {
+        Instruction::bare(Opcode::Send)
+    }
+
+    /// Push the running process's own pid.
+    pub fn self_() -> Instruction {
+        Instruction::bare(Opcode::Self_)
+    }
+
+    /// Pop a source or tuple of sources; race them and push the winner's result.
+    pub fn select() -> Instruction {
+        Instruction::bare(Opcode::Select)
+    }
+
+    /// Pop an integer process id; push a process value with that id and this root
+    /// function index. REPL-only: it is how a session names a pid it has already seen
+    /// (`@1`). The id arrives as an ordinary constant rather than a second operand, so it
+    /// rides the constants table that already remaps and tree-shakes.
+    pub fn process(function_id: usize) -> Instruction {
+        Instruction::with_id(Opcode::Process, function_id)
+    }
+
+    /// Pop a process value; push its current state (`?p`). No runtime test — the state
+    /// type is statically known.
+    pub fn state() -> Instruction {
+        Instruction::bare(Opcode::State)
+    }
+
+    /// The body of a function whose code was reclaimed: liveness said nothing could call
+    /// it, so executing this is a reclamation bug — it aborts the process loudly rather
+    /// than returning garbage. Never emitted by the compiler; written into stubbed slots
+    /// by `Program::reclaim_code`.
+    pub fn reclaimed() -> Instruction {
+        Instruction::bare(Opcode::Reclaimed)
+    }
+}
+
+impl std::fmt::Debug for Instruction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let opcode = self.opcode();
+        match opcode {
+            Opcode::Jump | Opcode::JumpIf => write!(f, "{opcode:?}({})", self.offset()),
+            Opcode::Pop
+            | Opcode::Duplicate
+            | Opcode::Store
+            | Opcode::Nil
+            | Opcode::Ok
+            | Opcode::Call
+            | Opcode::TailCall
+            | Opcode::Recurse
+            | Opcode::Equal
+            | Opcode::Not
+            | Opcode::Spawn
+            | Opcode::Send
+            | Opcode::Self_
+            | Opcode::Select
+            | Opcode::State
+            | Opcode::Reclaimed => write!(f, "{opcode:?}"),
+            _ => write!(f, "{opcode:?}({})", self.operand()),
+        }
+    }
 }

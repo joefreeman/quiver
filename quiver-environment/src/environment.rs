@@ -1133,6 +1133,11 @@ impl<E: Effect> Environment<E> {
                 name: builtin_info.name.clone(),
                 param_type: remap_type_id(builtin_info.param_type, &remaps.types),
                 result_type: remap_type_id(builtin_info.result_type, &remaps.types),
+                // Part of the entry's identity, so it must be remapped before the
+                // registration below dedupes on it.
+                type_argument: builtin_info
+                    .type_argument
+                    .map(|id| remap_type_id(id, &remaps.types)),
             };
             let new_idx = self.program.register_builtin_info(remapped_info);
             remaps.builtins.insert(old_idx, new_idx);

@@ -1,5 +1,5 @@
 use crate::binary::BinaryData;
-use crate::bytecode::{ConcreteType, Constant, Function, Instruction};
+use crate::bytecode::{ConcreteType, Constant, Function, Instruction, Opcode};
 use crate::effects::Effect;
 use crate::error::{Error, Operation};
 use crate::process::{
@@ -95,83 +95,11 @@ pub struct ProgramUpdate {
     pub canonical_tuples: Arc<Vec<usize>>,
 }
 
-/// Instruction type for profiling statistics (groups parameterized instructions)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum InstructionType {
-    Constant,
-    Pop,
-    Duplicate,
-    Pick,
-    Rotate,
-    Reset,
-    Load,
-    Store,
-    Tuple,
-    GetPositional,
-    GetNamed,
-    IsType,
-    Jump,
-    JumpIf,
-    Call,
-    TailCall,
-    Function,
-    Builtin,
-    Equal,
-    Not,
-    Annotate,
-    GetAnnotation,
-    Stamp,
-    Spawn,
-    Send,
-    Self_,
-    Select,
-    Process,
-    State,
-    Reclaimed,
-}
-
-impl InstructionType {
-    fn from_instruction(instr: &Instruction) -> Self {
-        match instr {
-            Instruction::Constant(_) => InstructionType::Constant,
-            Instruction::Pop => InstructionType::Pop,
-            Instruction::Duplicate => InstructionType::Duplicate,
-            Instruction::Pick(_) => InstructionType::Pick,
-            Instruction::Rotate(_) => InstructionType::Rotate,
-            Instruction::Reset(_) => InstructionType::Reset,
-            Instruction::Load(_) => InstructionType::Load,
-            Instruction::Store => InstructionType::Store,
-            Instruction::Tuple(_) => InstructionType::Tuple,
-            Instruction::GetPositional(_) => InstructionType::GetPositional,
-            Instruction::GetNamed(_) => InstructionType::GetNamed,
-            Instruction::IsType(_) => InstructionType::IsType,
-            Instruction::Jump(_) => InstructionType::Jump,
-            Instruction::JumpIf(_) => InstructionType::JumpIf,
-            Instruction::Call => InstructionType::Call,
-            Instruction::TailCall(_) => InstructionType::TailCall,
-            Instruction::Function(_) => InstructionType::Function,
-            Instruction::Builtin(..) => InstructionType::Builtin,
-            Instruction::Equal(_) => InstructionType::Equal,
-            Instruction::Not => InstructionType::Not,
-            Instruction::Annotate(_) => InstructionType::Annotate,
-            Instruction::GetAnnotation(..) => InstructionType::GetAnnotation,
-            Instruction::Stamp(_) => InstructionType::Stamp,
-            Instruction::Spawn => InstructionType::Spawn,
-            Instruction::Send => InstructionType::Send,
-            Instruction::Self_ => InstructionType::Self_,
-            Instruction::Select => InstructionType::Select,
-            Instruction::Process(_, _) => InstructionType::Process,
-            Instruction::State => InstructionType::State,
-            Instruction::Reclaimed => InstructionType::Reclaimed,
-        }
-    }
-}
-
 /// Execution statistics for profiling
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionStats {
     /// Statistics by instruction type: (count, total_time_ns)
-    pub instruction_stats: HashMap<InstructionType, (u64, u64)>,
+    pub instruction_stats: HashMap<Opcode, (u64, u64)>,
 
     /// Per-builtin statistics by index: (count, total_time_ns)
     pub builtin_stats: HashMap<usize, (u64, u64)>,
@@ -274,6 +202,9 @@ pub struct Executor<E: Effect> {
     // Purity classes, indexed by builtin_id (parallel to `builtins`) — the dispatch
     // site's purity gate reads these before invoking.
     builtin_purities: Vec<crate::builtins::Purity>,
+    // Explicit type arguments, indexed by builtin_id (parallel to `builtins`). `Some` only
+    // for an instantiated type-consuming builtin; the value `Builtin` pushes carries it.
+    builtin_type_arguments: Vec<Option<usize>>,
     /// Whether this executor drives compile-time execution (a program's top level and
     /// module bodies), which must be deterministic: `Purity::HostRead` builtins are
     /// rejected. Set only by the sync driver; runtime workers leave it false.
@@ -871,6 +802,7 @@ impl<E: Effect> Executor<E> {
             builtins: vec![],
             builtin_impls: vec![],
             builtin_purities: vec![],
+            builtin_type_arguments: vec![],
             compile_time: false,
             tuples: vec![0, 0], // NIL and OK have 0 fields
             // Full infos for the same two pre-seeded tuples (updates skip them), keeping
@@ -1526,6 +1458,7 @@ impl<E: Effect> Executor<E> {
             self.builtins.clear();
             self.builtin_impls.clear();
             self.builtin_purities.clear();
+            self.builtin_type_arguments.clear();
         }
         for b in infos.iter() {
             self.builtin_impls
@@ -1536,6 +1469,7 @@ impl<E: Effect> Executor<E> {
                     .get_purity(&b.name)
                     .unwrap_or(crate::builtins::Purity::Pure),
             );
+            self.builtin_type_arguments.push(b.type_argument);
             self.builtins.push(b.name.clone());
         }
         self.resources = update.resources;
@@ -1795,13 +1729,13 @@ impl<E: Effect> Executor<E> {
     /// (rather than the hot, process-as-local fast path).
     fn is_cold(instruction: Instruction) -> bool {
         matches!(
-            instruction,
-            Instruction::Spawn
-                | Instruction::Send
-                | Instruction::Self_
-                | Instruction::Select
-                | Instruction::Process(_, _)
-                | Instruction::State
+            instruction.opcode(),
+            Opcode::Spawn
+                | Opcode::Send
+                | Opcode::Self_
+                | Opcode::Select
+                | Opcode::Process
+                | Opcode::State
         )
     }
 
@@ -1828,49 +1762,52 @@ impl<E: Effect> Executor<E> {
             None
         };
 
-        // Operands widen back to `usize` here: they are `u32` in the instruction stream to
+        // Operands widen back to `usize` here: they are 24 bits in the instruction stream to
         // keep it dense (see `bytecode::Id`), but every consumer indexes a table or a stack.
-        let result = match instruction {
-            Instruction::Constant(index) => self.handle_constant(proc, index as usize),
-            Instruction::Pop => self.handle_pop(proc),
-            Instruction::Duplicate => self.handle_duplicate(proc),
-            Instruction::Pick(n) => self.handle_pick(proc, n as usize),
-            Instruction::Rotate(n) => self.handle_rotate(proc, n as usize),
-            Instruction::Load(index) => self.handle_load(proc, index as usize),
-            Instruction::Store => self.handle_store(proc),
-            Instruction::Tuple(type_id) => self.handle_tuple(proc, type_id as usize),
-            Instruction::GetPositional(index) => self.handle_get_positional(proc, index as usize),
-            Instruction::GetNamed(name_id) => self.handle_get_named(proc, name_id as usize),
-            Instruction::IsType(type_id) => self.handle_is_type(proc, type_id as usize),
-            Instruction::Jump(offset) => self.handle_jump(proc, offset as isize),
-            Instruction::JumpIf(offset) => self.handle_jump_if(proc, offset as isize),
-            Instruction::Call => self.handle_call(proc, pid),
-            Instruction::TailCall(recurse) => self.handle_tail_call(proc, recurse),
-            Instruction::Function(function_index) => {
-                self.handle_function(proc, function_index as usize)
-            }
-            Instruction::Reset(index) => self.handle_reset(proc, index as usize),
-            Instruction::Builtin(index, type_argument) => {
-                self.handle_builtin(proc, index as usize, type_argument.map(|id| id as usize))
-            }
-            Instruction::Equal(count) => self.handle_equal(proc, count as usize),
-            Instruction::Not => self.handle_not(proc),
-            Instruction::Annotate(key) => self.handle_annotate(proc, key as usize),
-            Instruction::GetAnnotation(key, check) => {
-                self.handle_get_annotation(proc, key as usize, check.map(|id| id as usize))
-            }
-            Instruction::Stamp(site) => self.handle_stamp(proc, site as usize),
+        let operand = instruction.operand() as usize;
+        let result = match instruction.opcode() {
+            Opcode::Constant => self.handle_constant(proc, operand),
+            Opcode::Pop => self.handle_pop(proc),
+            Opcode::Duplicate => self.handle_duplicate(proc),
+            Opcode::Pick => self.handle_pick(proc, operand),
+            Opcode::Rotate => self.handle_rotate(proc, operand),
+            Opcode::Load => self.handle_load(proc, operand),
+            Opcode::Store => self.handle_store(proc),
+            Opcode::Tuple => self.handle_tuple(proc, operand),
+            Opcode::Nil => self.handle_push(proc, Value::nil()),
+            Opcode::Ok => self.handle_push(proc, Value::ok()),
+            Opcode::GetPositional => self.handle_get_positional(proc, operand),
+            Opcode::GetNamed => self.handle_get_named(proc, operand),
+            Opcode::IsType => self.handle_is_type(proc, operand),
+            Opcode::Jump => self.handle_jump(proc, instruction.offset() as isize),
+            Opcode::JumpIf => self.handle_jump_if(proc, instruction.offset() as isize),
+            Opcode::Call => self.handle_call(proc, pid),
+            Opcode::TailCall => self.handle_tail_call(proc),
+            Opcode::Recurse => self.handle_recurse(proc),
+            Opcode::Function => self.handle_function(proc, operand),
+            Opcode::Reset => self.handle_reset(proc, operand),
+            Opcode::Builtin => self.handle_builtin(proc, operand),
+            Opcode::Equal => self.handle_equal(proc),
+            Opcode::Not => self.handle_not(proc),
+            Opcode::Annotate => self.handle_annotate(proc, operand),
+            Opcode::GetAnnotation => self.handle_get_annotation(proc, operand),
+            Opcode::Stamp => self.handle_stamp(proc, operand),
             // Liveness said nothing could reach this code; abort the process loudly
             // rather than return garbage.
-            Instruction::Reclaimed => Err(Error::Panic(
+            Opcode::Reclaimed => Err(Error::Panic(
                 "reclaimed code invoked (code-collection liveness bug)".to_string(),
             )),
-            _ => unreachable!("cold instruction routed to execute_hot"),
+            Opcode::Spawn
+            | Opcode::Send
+            | Opcode::Self_
+            | Opcode::Select
+            | Opcode::Process
+            | Opcode::State => unreachable!("cold instruction routed to execute_hot"),
         };
 
         if let Some(start) = start {
             let elapsed = start.elapsed().as_nanos() as u64;
-            let instr_type = InstructionType::from_instruction(&instruction);
+            let instr_type = instruction.opcode();
             let entry = self
                 .stats
                 .instruction_stats
@@ -1900,21 +1837,19 @@ impl<E: Effect> Executor<E> {
             None
         };
 
-        let result = match instruction {
-            Instruction::Spawn => self.handle_spawn(pid),
-            Instruction::Send => self.handle_send(pid),
-            Instruction::Self_ => self.handle_self(pid),
-            Instruction::Select => self.handle_select(pid, current_time_ms),
-            Instruction::Process(process_id, function_index) => {
-                self.handle_process_ref(pid, process_id as usize, function_index as usize)
-            }
-            Instruction::State => self.handle_state(pid),
+        let result = match instruction.opcode() {
+            Opcode::Spawn => self.handle_spawn(pid),
+            Opcode::Send => self.handle_send(pid),
+            Opcode::Self_ => self.handle_self(pid),
+            Opcode::Select => self.handle_select(pid, current_time_ms),
+            Opcode::Process => self.handle_process_ref(pid, instruction.operand() as usize),
+            Opcode::State => self.handle_state(pid),
             _ => unreachable!("hot instruction routed to execute_cold"),
         };
 
         if let Some(start) = start {
             let elapsed = start.elapsed().as_nanos() as u64;
-            let instr_type = InstructionType::from_instruction(&instruction);
+            let instr_type = instruction.opcode();
             let entry = self
                 .stats
                 .instruction_stats
@@ -1976,6 +1911,20 @@ impl<E: Effect> Executor<E> {
             None => Value::Binary(self.cached_constant_binary(index)?),
         };
 
+        self.push_value(proc, value);
+
+        if let Some(frame) = proc.frames.last_mut() {
+            frame.counter += 1;
+        }
+        Ok(None)
+    }
+
+    /// Push a value that needs no operands off the stack (`Nil`, `Ok`).
+    fn handle_push(
+        &mut self,
+        proc: &mut Process,
+        value: Value,
+    ) -> Result<Option<Action<E>>, Error> {
         self.push_value(proc, value);
 
         if let Some(frame) = proc.frames.last_mut() {
@@ -2201,20 +2150,14 @@ impl<E: Effect> Executor<E> {
         &mut self,
         proc: &mut Process,
         key: usize,
-        check: Option<usize>,
     ) -> Result<Option<Action<E>>, Error> {
         let carrier = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
         // Total: a value that cannot carry annotations (or doesn't carry this key) yields
         // nil, so retrieval composes with union carriers like `'int | []`. The checked
-        // form additionally gates the entry on its expected shape — an incompatible entry
-        // answers nil too, exactly as an ascription pattern fails to nil.
+        // form's shape gate is a separate `IsType` the compiler emits after this.
         let annotation = carrier
             .get_annotation(key)
-            .filter(|value| match check {
-                Some(type_id) => self.check_type_compatible(value, type_id),
-                None => true,
-            })
             .cloned()
             .unwrap_or_else(Value::nil);
         self.push_value(proc, annotation);
@@ -2594,60 +2537,58 @@ impl<E: Effect> Executor<E> {
         }
     }
 
-    fn handle_tail_call(
-        &mut self,
-        proc: &mut Process,
-        recurse: bool,
-    ) -> Result<Option<Action<E>>, Error> {
-        if recurse {
-            let argument = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
-            self.record_state(proc, &argument);
-            let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
-            let locals_base = frame.locals_base;
-            let captures_count = frame.captures_count;
-            let function_index = frame.function_index;
+    /// Re-enter the current frame with a fresh argument (`^`), keeping its function and
+    /// captures.
+    fn handle_recurse(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
+        let argument = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+        self.record_state(proc, &argument);
+        let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
+        let locals_base = frame.locals_base;
+        let captures_count = frame.captures_count;
+        let function_index = frame.function_index;
 
-            // Clear current frame's locals, but keep captures (releasing what's dropped).
-            self.truncate_locals(proc, locals_base + captures_count);
+        // Clear current frame's locals, but keep captures (releasing what's dropped).
+        self.truncate_locals(proc, locals_base + captures_count);
 
-            self.push_value(proc, argument);
-            *proc.frames.last_mut().unwrap() =
-                Frame::new(function_index, locals_base, captures_count);
+        self.push_value(proc, argument);
+        *proc.frames.last_mut().unwrap() = Frame::new(function_index, locals_base, captures_count);
 
-            // Don't increment counter - frame was reset to 0
-            Ok(None)
-        } else {
-            let function_value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
-            let argument = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+        // Don't increment counter - frame was reset to 0
+        Ok(None)
+    }
 
-            match function_value {
-                Value::Function(function_index, captures) => {
-                    // Verify function exists
-                    self.get_function(function_index)
-                        .ok_or(Error::FunctionUndefined(function_index))?;
+    /// Replace the current frame with a call to a function value (`^f`, `^~`).
+    fn handle_tail_call(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
+        let function_value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+        let argument = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
-                    self.record_state(proc, &argument);
-                    let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
-                    let locals_base = frame.locals_base;
+        match function_value {
+            Value::Function(function_index, captures) => {
+                // Verify function exists
+                self.get_function(function_index)
+                    .ok_or(Error::FunctionUndefined(function_index))?;
 
-                    // Clear current frame's locals (releasing the old captures/bindings).
-                    self.truncate_locals(proc, locals_base);
+                self.record_state(proc, &argument);
+                let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
+                let locals_base = frame.locals_base;
 
-                    // Extend with captures for new function
-                    let captures_count = captures.len();
-                    for capture in captures.iter() {
-                        self.push_local(proc, capture.clone());
-                    }
+                // Clear current frame's locals (releasing the old captures/bindings).
+                self.truncate_locals(proc, locals_base);
 
-                    self.push_value(proc, argument);
-                    *proc.frames.last_mut().unwrap() =
-                        Frame::new(function_index, locals_base, captures_count);
-
-                    // Don't increment counter - frame was reset to 0
-                    Ok(None)
+                // Extend with captures for new function
+                let captures_count = captures.len();
+                for capture in captures.iter() {
+                    self.push_local(proc, capture.clone());
                 }
-                _ => Err(Error::CallInvalid),
+
+                self.push_value(proc, argument);
+                *proc.frames.last_mut().unwrap() =
+                    Frame::new(function_index, locals_base, captures_count);
+
+                // Don't increment counter - frame was reset to 0
+                Ok(None)
             }
+            _ => Err(Error::CallInvalid),
         }
     }
 
@@ -2699,14 +2640,14 @@ impl<E: Effect> Executor<E> {
         &mut self,
         proc: &mut Process,
         index: usize,
-        type_argument: Option<usize>,
     ) -> Result<Option<Action<E>>, Error> {
         // Verify builtin exists
         if index >= self.builtins.len() {
             return Err(Error::BuiltinUndefined(index));
         }
-        // Push builtin by index (no heap references); a type-consuming builtin's
-        // explicit type argument rides the value to its eventual call.
+        // Push builtin by index (no heap references). The entry's type argument, if it is
+        // an instantiated type-consuming builtin, rides the value to its eventual call.
+        let type_argument = self.builtin_type_arguments[index];
         self.push_value(proc, Value::builtin_typed(index, type_argument));
 
         if let Some(frame) = proc.frames.last_mut() {
@@ -2715,28 +2656,19 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_equal(
-        &mut self,
-        proc: &mut Process,
-        count: usize,
-    ) -> Result<Option<Action<E>>, Error> {
-        if count > proc.stack.len() {
-            return Err(Error::StackUnderflow);
-        }
-        let mut values = Vec::with_capacity(count);
-        for _ in 0..count {
-            values.push(self.pop_value(proc).ok_or(Error::StackUnderflow)?);
-        }
-        values.reverse();
-
-        let first = &values[0];
-        let all_equal = values.iter().all(|value| self.values_equal(first, value));
+    fn handle_equal(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
+        let right = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+        let left = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
         // The result is a truth flag (the pattern compiler follows every Equal with
         // Not + a conditional jump), so success must be Ok even when the compared
         // values are themselves nil — pushing the compared value would make "equal
         // nils" indistinguishable from "not equal".
-        let result = if all_equal { Value::ok() } else { Value::nil() };
+        let result = if self.values_equal(&left, &right) {
+            Value::ok()
+        } else {
+            Value::nil()
+        };
 
         self.push_value(proc, result);
 
@@ -2877,16 +2809,26 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
+    /// Push a named process value (`@1` in the REPL): the target's id is on the stack as
+    /// an integer, the root function index is the operand.
     fn handle_process_ref(
         &mut self,
         pid: ProcessId,
-        process_id: usize,
         function_index: usize,
     ) -> Result<Option<Action<E>>, Error> {
         let process = self
             .get_process_mut(pid)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
+        let process_id = match process.stack.pop().ok_or(Error::StackUnderflow)? {
+            Value::Int(id) if id >= 0 => id as usize,
+            other => {
+                return Err(Error::TypeMismatch {
+                    expected: "process id".to_string(),
+                    found: other.type_name().to_string(),
+                });
+            }
+        };
         process
             .stack
             .push(Value::Process(process_id, function_index));

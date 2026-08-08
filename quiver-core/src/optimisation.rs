@@ -1,4 +1,4 @@
-use crate::bytecode::{Bytecode, Function, Id, Instruction, Site, SiteTable};
+use crate::bytecode::{Bytecode, Function, Id, Instruction, Opcode, Site, SiteTable};
 use crate::types::{BuiltinInfo, TupleTypeInfo, Type};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -182,23 +182,34 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
     let mut used_builtins: HashSet<usize> = HashSet::new();
     let mut used_resources: HashSet<String> = HashSet::new();
 
-    // Always keep NIL and OK tuples (indices 0 and 1)
-    collect_tuple_refs(
-        0,
-        &bytecode.types,
-        &bytecode.tuples,
-        &mut used_types,
-        &mut used_tuples,
-        &mut used_resources,
-    );
-    collect_tuple_refs(
-        1,
-        &bytecode.types,
-        &bytecode.tuples,
-        &mut used_types,
-        &mut used_tuples,
-        &mut used_resources,
-    );
+    // Always keep the NIL and OK tuples (indices 0 and 1). The `Nil` and `Ok` instructions
+    // that build them carry no operand, so nothing else marks them — including the
+    // `Type::Tuple` wrappers `IsType` reads, which the `Tuple` arm below marks for every
+    // other tuple it constructs.
+    for tuple_id in [crate::types::NIL, crate::types::OK] {
+        collect_tuple_refs(
+            tuple_id,
+            &bytecode.types,
+            &bytecode.tuples,
+            &mut used_types,
+            &mut used_tuples,
+            &mut used_resources,
+        );
+        if let Some(type_id) = bytecode
+            .types
+            .iter()
+            .position(|t| matches!(t, Type::Tuple(tid) if *tid == tuple_id))
+        {
+            collect_type_refs(
+                type_id,
+                &bytecode.types,
+                &bytecode.tuples,
+                &mut used_types,
+                &mut used_tuples,
+                &mut used_resources,
+            );
+        }
+    }
 
     // The debug site table's values are built by the executor, not by instructions, so
     // its module-name constants and value tuples must be kept (and later remapped) here.
@@ -245,17 +256,17 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
         );
 
         for instruction in &function.instructions {
-            match instruction {
-                Instruction::Function(id) => {
-                    queue.push_back(*id as usize);
+            let id = instruction.operand() as usize;
+            match instruction.opcode() {
+                Opcode::Function => {
+                    queue.push_back(id);
                 }
-                Instruction::Constant(id) => {
-                    used_constants.insert(*id as usize);
+                Opcode::Constant => {
+                    used_constants.insert(id);
                 }
-                Instruction::Tuple(id) => {
-                    let id = &(*id as usize);
+                Opcode::Tuple => {
                     collect_tuple_refs(
-                        *id,
+                        id,
                         &bytecode.types,
                         &bytecode.tuples,
                         &mut used_types,
@@ -266,7 +277,7 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                     if let Some(type_id) = bytecode
                         .types
                         .iter()
-                        .position(|t| matches!(t, Type::Tuple(tid) if *tid == *id))
+                        .position(|t| matches!(t, Type::Tuple(tid) if *tid == id))
                     {
                         collect_type_refs(
                             type_id,
@@ -278,9 +289,9 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                         );
                     }
                 }
-                Instruction::IsType(id) | Instruction::GetAnnotation(_, Some(id)) => {
+                Opcode::IsType => {
                     collect_type_refs(
-                        *id as usize,
+                        id,
                         &bytecode.types,
                         &bytecode.tuples,
                         &mut used_types,
@@ -288,23 +299,13 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                         &mut used_resources,
                     );
                 }
-                Instruction::Builtin(id, type_argument) => {
-                    used_builtins.insert(*id as usize);
-                    // A type-consuming builtin's explicit type argument is a type
-                    // reference like IsType's: keep its closure alive through stripping.
-                    if let Some(type_id) = type_argument {
-                        collect_type_refs(
-                            *type_id as usize,
-                            &bytecode.types,
-                            &bytecode.tuples,
-                            &mut used_types,
-                            &mut used_tuples,
-                            &mut used_resources,
-                        );
-                    }
+                Opcode::Builtin => {
+                    // The entry's own type argument is collected with its param/result
+                    // types, in the pass over `used_builtins` below.
+                    used_builtins.insert(id);
                 }
-                Instruction::Process(_, func_id) => {
-                    queue.push_back(*func_id as usize);
+                Opcode::Process => {
+                    queue.push_back(id);
                 }
                 _ => {}
             }
@@ -332,6 +333,18 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                 &mut used_tuples,
                 &mut used_resources,
             );
+            // An instantiated type-consuming builtin's type argument is a type reference
+            // like `IsType`'s: keep its closure alive through stripping.
+            if let Some(type_argument) = builtin.type_argument {
+                collect_type_refs(
+                    type_argument,
+                    &bytecode.types,
+                    &bytecode.tuples,
+                    &mut used_types,
+                    &mut used_tuples,
+                    &mut used_resources,
+                );
+            }
         }
     }
 
@@ -448,22 +461,19 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
             let new_instructions: Vec<Instruction> = old_func
                 .instructions
                 .iter()
-                .map(|instr| match instr {
-                    Instruction::Function(id) => Instruction::Function(remap(&function_remap, *id)),
-                    Instruction::Constant(id) => Instruction::Constant(remap(&constant_remap, *id)),
-                    Instruction::Tuple(id) => Instruction::Tuple(remap(&tuple_remap, *id)),
-                    Instruction::IsType(id) => Instruction::IsType(remap(&type_remap, *id)),
-                    Instruction::GetAnnotation(key, Some(id)) => {
-                        Instruction::GetAnnotation(*key, Some(remap(&type_remap, *id)))
-                    }
-                    Instruction::Builtin(id, type_argument) => Instruction::Builtin(
-                        remap(&builtin_remap, *id),
-                        type_argument.map(|t| remap(&type_remap, t)),
-                    ),
-                    Instruction::Process(pid, fid) => {
-                        Instruction::Process(*pid, remap(&function_remap, *fid))
-                    }
-                    other => *other,
+                .map(|instr| {
+                    // A fixed-width operand rewrite: the opcode is preserved, so a
+                    // renumbered `Tuple` cannot become `Nil`/`Ok` behind the shaker's back
+                    // (those carry no operand, and tuples 0/1 are pinned anyway).
+                    let table = match instr.opcode() {
+                        Opcode::Function | Opcode::Process => &function_remap,
+                        Opcode::Constant => &constant_remap,
+                        Opcode::Tuple => &tuple_remap,
+                        Opcode::IsType => &type_remap,
+                        Opcode::Builtin => &builtin_remap,
+                        _ => return *instr,
+                    };
+                    instr.with_operand(remap(table, instr.operand()) as usize)
                 })
                 .collect();
             Function {
@@ -513,6 +523,9 @@ pub fn tree_shake(bytecode: Bytecode, entry: usize) -> Bytecode {
                 result_type: *type_remap
                     .get(&old_builtin.result_type)
                     .unwrap_or(&old_builtin.result_type),
+                type_argument: old_builtin
+                    .type_argument
+                    .map(|id| *type_remap.get(&id).unwrap_or(&id)),
             }
         })
         .collect();

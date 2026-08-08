@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::ast;
 use quiver_core::{
-    bytecode::{Constant, Id, Instruction},
+    bytecode::{Constant, Instruction},
     program::Program,
     types::{Type, TypeLookup},
 };
@@ -105,8 +105,8 @@ type AccessPath = Vec<Access>;
 /// Emit the instruction for one access-path step.
 fn emit_access(codegen: &mut InstructionBuilder, access: Access) {
     codegen.add_instruction(match access {
-        Access::Position(index) => Instruction::GetPositional(index as Id),
-        Access::Named(name) => Instruction::GetNamed(name as Id),
+        Access::Position(index) => Instruction::get_positional(index),
+        Access::Named(name) => Instruction::get_named(name),
     });
 }
 
@@ -301,33 +301,33 @@ pub fn generate_pattern_code(
         for requirement in &binding_set.requirements {
             match &requirement.check {
                 RuntimeCheck::Path(other_path) => {
-                    codegen.add_instruction(Instruction::Duplicate);
+                    codegen.add_instruction(Instruction::duplicate());
                     for &access in &requirement.path {
                         emit_access(codegen, access);
                     }
-                    codegen.add_instruction(Instruction::Pick(1));
+                    codegen.add_instruction(Instruction::pick(1));
                     for &access in other_path {
                         emit_access(codegen, access);
                     }
-                    codegen.add_instruction(Instruction::Equal(2));
+                    codegen.add_instruction(Instruction::equal());
                 }
                 RuntimeCheck::TypeId(type_id) => {
                     generate_value_access(codegen, &requirement.path);
-                    codegen.add_instruction(Instruction::IsType(*type_id as Id));
+                    codegen.add_instruction(Instruction::is_type(*type_id));
                 }
                 RuntimeCheck::Literal(literal) => {
                     generate_value_access(codegen, &requirement.path);
                     match literal {
                         ast::Literal::Integer(val) => {
                             let idx = program.register_constant(Constant::Integer(val.clone()));
-                            codegen.add_instruction(Instruction::Constant(idx as Id));
+                            codegen.add_instruction(Instruction::constant(idx));
                         }
                         ast::Literal::Binary(bytes) => {
                             let idx = program.register_constant(Constant::Binary(bytes.clone()));
-                            codegen.add_instruction(Instruction::Constant(idx as Id));
+                            codegen.add_instruction(Instruction::constant(idx));
                         }
                     }
-                    codegen.add_instruction(Instruction::Equal(2));
+                    codegen.add_instruction(Instruction::equal());
                 }
                 RuntimeCheck::Pin { load, steps } => {
                     generate_value_access(codegen, &requirement.path);
@@ -341,15 +341,15 @@ pub fn generate_pattern_code(
                         }
                         PinLoad::Parameter => super::scopes::get_function_parameter(scopes)?.1,
                     };
-                    codegen.add_instruction(Instruction::Load(index as Id));
+                    codegen.add_instruction(Instruction::load(index));
                     for &step in steps {
                         emit_access(codegen, step);
                     }
-                    codegen.add_instruction(Instruction::Equal(2));
+                    codegen.add_instruction(Instruction::equal());
                 }
             }
 
-            codegen.add_instruction(Instruction::Not);
+            codegen.add_instruction(Instruction::not());
             if is_last {
                 codegen.emit_jump_if_to_addr(fail_addr);
             } else {
@@ -365,7 +365,7 @@ pub fn generate_pattern_code(
         sorted_bindings.sort_by(|a, b| a.name.cmp(&b.name));
         for binding in sorted_bindings {
             generate_value_access(codegen, &binding.path);
-            codegen.add_instruction(Instruction::Store);
+            codegen.add_instruction(Instruction::store());
         }
 
         // Jump to end (unless this is the last set)
@@ -389,7 +389,7 @@ pub fn generate_pattern_code(
 }
 
 fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) {
-    codegen.add_instruction(Instruction::Duplicate);
+    codegen.add_instruction(Instruction::duplicate());
     for &access in path {
         emit_access(codegen, access);
     }

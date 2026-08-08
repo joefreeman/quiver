@@ -41,7 +41,7 @@ use crate::compiler::{
 };
 use crate::resolver::{ModuleId, ModuleResolver, PackageId, PackageResolver, std_module_names};
 use quiver_core::builtins::BuiltinRegistry;
-use quiver_core::bytecode::{Function, Id, IdRemaps, Instruction, Site};
+use quiver_core::bytecode::{Function, IdRemaps, Instruction, Opcode, Site};
 use quiver_core::effects::Effect;
 use quiver_core::program::{Constant, Program};
 use quiver_core::types::{TupleTypeInfo, Type};
@@ -82,8 +82,11 @@ pub struct ModuleArtifact {
     /// own-function indices) ascending — artifact function ids assigned in that
     /// flattened order.
     pub imports: Vec<(ModuleId, Vec<usize>)>,
-    /// Referenced builtins by name; artifact builtin ids index this list.
-    pub builtins: Vec<String>,
+    /// Referenced builtins; artifact builtin ids index this list. Nominal — resolved
+    /// against the host registry at link time — except for an instantiated
+    /// type-consuming builtin, whose type argument is artifact-local and re-interned
+    /// with the rest.
+    pub builtins: Vec<ArtifactBuiltin>,
     /// Failure-provenance sites (debug artifacts; empty in release ones).
     pub sites: Vec<Site>,
     /// The evaluated module value, in artifact space.
@@ -113,6 +116,16 @@ pub struct ArtifactNamespace {
 pub struct AliasEntry {
     pub parameters: Vec<String>,
     pub type_id: usize,
+}
+
+/// One referenced builtin: its registry name, plus the artifact-local type argument that
+/// distinguishes an instantiated type-consuming builtin (`__data_decode__<'t>`) from the
+/// bare one. The pair is what the linker registers, so distinct instantiations stay
+/// distinct entries in the session.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactBuiltin {
+    pub name: String,
+    pub type_argument: Option<usize>,
 }
 
 impl ModuleArtifact {
@@ -515,6 +528,11 @@ fn drain(
                     .sites[site_id];
                 closure.constants.insert(site.module_constant);
             }
+            Item::Builtin(builtin_id) => {
+                if let Some(type_argument) = program.get_builtins()[builtin_id].type_argument {
+                    add_type(type_argument, closure, queue);
+                }
+            }
         }
     }
     Ok(())
@@ -837,10 +855,16 @@ pub(crate) fn extract(
         remaps.functions.insert(function_id, import_base + position);
     }
 
-    let builtin_names: Vec<String> = closure
+    let builtin_names: Vec<ArtifactBuiltin> = closure
         .builtins
         .iter()
-        .map(|&builtin_id| program.get_builtins()[builtin_id].name.clone())
+        .map(|&builtin_id| {
+            let info = &program.get_builtins()[builtin_id];
+            ArtifactBuiltin {
+                name: info.name.clone(),
+                type_argument: info.type_argument.map(|id| remaps.types[&id]),
+            }
+        })
         .collect();
     remaps.builtins = closure.builtins.index();
 
@@ -976,11 +1000,21 @@ enum Item {
     Tuple(usize),
     Function(usize),
     Site(usize),
+    Builtin(usize),
 }
 
 fn add_type(type_id: usize, closure: &mut Closure, queue: &mut Vec<Item>) {
     if closure.types.insert(type_id) {
         queue.push(Item::Type(type_id));
+    }
+}
+
+/// Record a builtin, and queue it so that an instantiated type-consuming builtin's type
+/// argument joins the type closure — it is a type reference the instruction stream does
+/// not carry, so nothing else would reach it.
+fn add_builtin(builtin_id: usize, closure: &mut Closure, queue: &mut Vec<Item>) {
+    if closure.builtins.insert(builtin_id) {
+        queue.push(Item::Builtin(builtin_id));
     }
 }
 
@@ -1073,7 +1107,7 @@ fn collect_value(value: &Value, closure: &mut Closure, queue: &mut Vec<Item>) {
             collect_payload(payload, closure, queue);
         }
         Value::Builtin(builtin_id, payload) => {
-            closure.builtins.insert(*builtin_id);
+            add_builtin(*builtin_id, closure, queue);
             if let Some(payload) = payload {
                 collect_payload(payload, closure, queue);
             }
@@ -1101,32 +1135,22 @@ fn collect_payload(
 }
 
 fn collect_instruction(instruction: &Instruction, closure: &mut Closure, queue: &mut Vec<Item>) {
-    match instruction {
-        Instruction::Constant(constant_id) => {
-            closure.constants.insert(*constant_id as usize);
+    let id = instruction.operand() as usize;
+    match instruction.opcode() {
+        Opcode::Constant => {
+            closure.constants.insert(id);
         }
-        Instruction::Function(function_id) => add_function(*function_id as usize, closure, queue),
-        Instruction::Builtin(builtin_id, type_argument) => {
-            closure.builtins.insert(*builtin_id as usize);
-            if let Some(type_id) = type_argument {
-                add_type(*type_id as usize, closure, queue);
-            }
+        Opcode::Function => add_function(id, closure, queue),
+        Opcode::Builtin => add_builtin(id, closure, queue),
+        Opcode::Tuple => add_tuple(id, closure, queue),
+        Opcode::IsType => add_type(id, closure, queue),
+        Opcode::GetNamed => {
+            closure.field_names.insert(id);
         }
-        Instruction::Tuple(tuple_id) => add_tuple(*tuple_id as usize, closure, queue),
-        Instruction::IsType(type_id) => add_type(*type_id as usize, closure, queue),
-        Instruction::GetNamed(name_id) => {
-            closure.field_names.insert(*name_id as usize);
+        Opcode::Annotate | Opcode::GetAnnotation => {
+            closure.annotation_keys.insert(id);
         }
-        Instruction::Annotate(key) => {
-            closure.annotation_keys.insert(*key as usize);
-        }
-        Instruction::GetAnnotation(key, check) => {
-            closure.annotation_keys.insert(*key as usize);
-            if let Some(type_id) = check {
-                add_type(*type_id as usize, closure, queue);
-            }
-        }
-        Instruction::Stamp(site_id) => add_site(*site_id as usize, closure, queue),
+        Opcode::Stamp => add_site(id, closure, queue),
         _ => {}
     }
 }
@@ -1200,50 +1224,30 @@ fn verify(artifact: &ModuleArtifact) {
     for (position, function) in artifact.functions.iter().enumerate() {
         check("type", function.type_id, artifact.types.len());
         for instruction in &function.instructions {
-            match instruction {
-                Instruction::Constant(id) => {
-                    check("constant", *id as usize, artifact.constants.len())
-                }
-                Instruction::Function(id) => {
-                    check("function", *id as usize, function_space);
+            let id = instruction.operand() as usize;
+            match instruction.opcode() {
+                Opcode::Constant => check("constant", id, artifact.constants.len()),
+                Opcode::Function => {
+                    check("function", id, function_space);
                     // The linked program's function table must reference strictly
                     // backward (the environment merge rewrites single-pass): an own
                     // function may reference earlier own functions or any import —
                     // imports are always linked first.
-                    let valid = *id < position as Id || *id >= (artifact.functions.len()) as Id;
+                    let valid = id < position || id >= artifact.functions.len();
                     assert!(
                         valid,
                         "artifact {:?}: function {} references unregistrable function {}",
                         artifact.id, position, id
                     );
                 }
-                Instruction::Builtin(id, check_ty) => {
-                    check("builtin", *id as usize, artifact.builtins.len());
-                    if let Some(type_id) = check_ty {
-                        check("type", *type_id as usize, artifact.types.len());
-                    }
+                Opcode::Builtin => check("builtin", id, artifact.builtins.len()),
+                Opcode::Tuple => check("tuple", id, artifact.tuples.len()),
+                Opcode::IsType => check("type", id, artifact.types.len()),
+                Opcode::GetNamed => check("field name", id, artifact.field_names.len()),
+                Opcode::Annotate | Opcode::GetAnnotation => {
+                    check("annotation key", id, artifact.annotation_keys.len())
                 }
-                Instruction::Tuple(id) => check("tuple", *id as usize, artifact.tuples.len()),
-                Instruction::IsType(id) => check("type", *id as usize, artifact.types.len()),
-                Instruction::GetNamed(id) => {
-                    check("field name", *id as usize, artifact.field_names.len())
-                }
-                Instruction::Annotate(id) => check(
-                    "annotation key",
-                    *id as usize,
-                    artifact.annotation_keys.len(),
-                ),
-                Instruction::GetAnnotation(id, check_ty) => {
-                    check(
-                        "annotation key",
-                        *id as usize,
-                        artifact.annotation_keys.len(),
-                    );
-                    if let Some(type_id) = check_ty {
-                        check("type", *type_id as usize, artifact.types.len());
-                    }
-                }
-                Instruction::Stamp(id) => check("site", *id as usize, artifact.sites.len()),
+                Opcode::Stamp => check("site", id, artifact.sites.len()),
                 _ => {}
             }
         }
@@ -1311,15 +1315,21 @@ pub(crate) fn link_module<E: Effect>(
 
     // Builtins resolve by name against the host registry — the link-time capability
     // check: a host that doesn't provide a builtin refuses the module.
-    for (local, name) in artifact.builtins.iter().enumerate() {
-        if builtins.get_specs(name).is_none() {
+    for (local, builtin) in artifact.builtins.iter().enumerate() {
+        if builtins.get_specs(&builtin.name).is_none() {
             return Err(Error::FeatureUnsupported(format!(
                 "module {} requires builtin '{}', which this host does not provide",
                 artifact.id.display(),
-                name
+                builtin.name
             )));
         }
-        let session = program.register_builtin(name.clone(), builtins);
+        // The type argument re-interns like any other type reference — `remaps.types` is
+        // complete by here, and registration dedupes on the instantiated pair.
+        let session = program.register_builtin_instantiated(
+            builtin.name.clone(),
+            builtin.type_argument.map(|local| remaps.types[&local]),
+            builtins,
+        );
         remaps.builtins.insert(local, session);
     }
 

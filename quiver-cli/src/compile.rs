@@ -4,7 +4,7 @@
 
 use quiver_compiler::compiler::ModuleCache;
 use quiver_compiler::{Compiler, ModuleResolver};
-use quiver_core::bytecode::{Id, Instruction};
+use quiver_core::bytecode::Instruction;
 use quiver_core::program::Program;
 use quiver_core::types::{Type, TypeLookup};
 use std::collections::HashMap;
@@ -72,13 +72,13 @@ pub fn compile_entry(
     // other failure, stamp intact — instead of an opaque call-on-nil type error.
     let fallible = type_contains_nil(&program, compilation_result.result_type);
     if fallible {
-        entry_instructions.push(Instruction::Duplicate);
-        entry_instructions.push(Instruction::Not);
-        entry_instructions.push(Instruction::JumpIf(3));
+        entry_instructions.push(Instruction::duplicate());
+        entry_instructions.push(Instruction::not());
+        entry_instructions.push(Instruction::jump_if(3));
     }
-    entry_instructions.push(Instruction::Tuple(quiver_core::types::NIL as Id));
-    entry_instructions.push(Instruction::Rotate(2));
-    entry_instructions.push(Instruction::Call);
+    entry_instructions.push(Instruction::tuple(quiver_core::types::NIL));
+    entry_instructions.push(Instruction::rotate(2));
+    entry_instructions.push(Instruction::call());
 
     // Both the top level and the program's function execute in the root process, so the
     // entry's receive covers both.

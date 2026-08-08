@@ -182,6 +182,13 @@ pub struct BuiltinInfo {
     pub name: String,
     pub param_type: usize,
     pub result_type: usize,
+    /// A type-consuming builtin's explicit type argument (`__data_decode__<'t>`), resolved
+    /// to a concrete type at compile time. Such a builtin behaves differently per
+    /// instantiation, so each one is a distinct table entry: the pair `(name,
+    /// type_argument)` is what registration dedupes on, and the id alone identifies the
+    /// instantiation for the `Builtin` instruction that pushes it.
+    #[serde(default)]
+    pub type_argument: Option<usize>,
 }
 
 impl Type {

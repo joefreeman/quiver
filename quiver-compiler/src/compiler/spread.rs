@@ -1,6 +1,6 @@
 use crate::ast;
 use quiver_core::{
-    bytecode::{Id, Instruction},
+    bytecode::Instruction,
     program::Program,
     types::{Type, TypeLookup},
 };
@@ -89,7 +89,7 @@ fn compile_spread_source<E: quiver_core::effects::Effect>(
                 super::scopes::get_function_parameter(&compiler.scopes)?;
             compiler
                 .codegen
-                .add_instruction(Instruction::Load(param_local as Id));
+                .add_instruction(Instruction::load(param_local));
             let (type_id, _) = compiler.compile_accessor(
                 param_type,
                 access.accessors.clone(),
@@ -120,7 +120,7 @@ fn compile_spread_source<E: quiver_core::effects::Effect>(
             })?;
             compiler
                 .codegen
-                .add_instruction(Instruction::Pick((ctx.stack_offset + stack_size) as Id));
+                .add_instruction(Instruction::pick(ctx.stack_offset + stack_size));
             let (type_id, _) = compiler.compile_accessor(
                 ctx.value_type_id,
                 access.accessors.clone(),
@@ -189,9 +189,9 @@ fn compile_field_values<E: quiver_core::effects::Effect>(
                                 "Chained spread (...) requires a piped value".to_string(),
                             )
                         })?;
-                        compiler.codegen.add_instruction(Instruction::Pick(
-                            (ctx.stack_offset + stack_size) as Id,
-                        ));
+                        compiler
+                            .codegen
+                            .add_instruction(Instruction::pick(ctx.stack_offset + stack_size));
                         ctx.value_type_id
                     }
                 };
@@ -422,9 +422,7 @@ fn emit_field_extraction_code<E: quiver_core::effects::Effect>(
         match source {
             FieldSource::CompiledField(idx) => {
                 let depth = stack_size + values_added - 1 - compiled_values[*idx].stack_offset();
-                compiler
-                    .codegen
-                    .add_instruction(Instruction::Pick(depth as Id));
+                compiler.codegen.add_instruction(Instruction::pick(depth));
                 values_added += 1;
             }
             FieldSource::SpreadField {
@@ -433,12 +431,10 @@ fn emit_field_extraction_code<E: quiver_core::effects::Effect>(
             } => {
                 let depth =
                     stack_size + values_added - 1 - compiled_values[*spread_idx].stack_offset();
+                compiler.codegen.add_instruction(Instruction::pick(depth));
                 compiler
                     .codegen
-                    .add_instruction(Instruction::Pick(depth as Id));
-                compiler
-                    .codegen
-                    .add_instruction(Instruction::GetPositional(*field_idx as Id));
+                    .add_instruction(Instruction::get_positional(*field_idx));
                 values_added += 1;
             }
         }
@@ -452,8 +448,8 @@ fn emit_stack_cleanup_code<E: quiver_core::effects::Effect>(
     count: usize,
 ) {
     for _ in 0..count {
-        compiler.codegen.add_instruction(Instruction::Rotate(2));
-        compiler.codegen.add_instruction(Instruction::Pop);
+        compiler.codegen.add_instruction(Instruction::rotate(2));
+        compiler.codegen.add_instruction(Instruction::pop());
     }
 }
 
@@ -504,8 +500,8 @@ pub fn compile_tuple_with_spread<E: quiver_core::effects::Effect>(
     if let Some(ctx) = ripple_context
         && ctx.owns_value
     {
-        compiler.codegen.add_instruction(Instruction::Rotate(2));
-        compiler.codegen.add_instruction(Instruction::Pop);
+        compiler.codegen.add_instruction(Instruction::rotate(2));
+        compiler.codegen.add_instruction(Instruction::pop());
     }
 
     // Spread compilation is complex; return Unknown provenance for now
@@ -530,7 +526,7 @@ fn emit_single_variant_tuple<E: quiver_core::effects::Effect>(
         .register_tuple(tuple_name, variant.fields.clone());
     compiler
         .codegen
-        .add_instruction(Instruction::Tuple(tuple_id as Id));
+        .add_instruction(Instruction::tuple(tuple_id));
 
     emit_stack_cleanup_code(compiler, stack_size);
 
@@ -570,15 +566,13 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
 
                 // Pick the spread value and check its type
                 let depth = stack_size - 1 - spread_stack_idx;
-                compiler
-                    .codegen
-                    .add_instruction(Instruction::Pick(depth as Id));
+                compiler.codegen.add_instruction(Instruction::pick(depth));
                 // Register the tuple type as a check type (bare: IsType is row-transparent)
                 let type_id = compiler.program.register_type(Type::Tuple(spread_tuple_id));
                 compiler
                     .codegen
-                    .add_instruction(Instruction::IsType(type_id as Id));
-                compiler.codegen.add_instruction(Instruction::Not);
+                    .add_instruction(Instruction::is_type(type_id));
+                compiler.codegen.add_instruction(Instruction::not());
 
                 let fail_jump = compiler.codegen.emit_jump_if_placeholder();
                 fail_jumps.push(fail_jump);
@@ -592,7 +586,7 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
                 .register_tuple(tuple_name.clone(), variant.fields.clone());
             compiler
                 .codegen
-                .add_instruction(Instruction::Tuple(tuple_id as Id));
+                .add_instruction(Instruction::tuple(tuple_id));
             {
                 let type_id = compiler.program.register_type(Type::Tuple(tuple_id));
                 let type_id = super::annotations::exact_empty(compiler.program, type_id);
@@ -614,7 +608,7 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
                 .register_tuple(tuple_name.clone(), variant.fields.clone());
             compiler
                 .codegen
-                .add_instruction(Instruction::Tuple(tuple_id as Id));
+                .add_instruction(Instruction::tuple(tuple_id));
             {
                 let type_id = compiler.program.register_type(Type::Tuple(tuple_id));
                 let type_id = super::annotations::exact_empty(compiler.program, type_id);

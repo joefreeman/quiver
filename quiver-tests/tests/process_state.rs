@@ -131,6 +131,25 @@ fn test_declared_state_clause_grants_sampling() {
 }
 
 #[test]
+fn test_pid_message_is_filtered_by_type_not_just_accepted() {
+    // The mailbox filter must discriminate in both directions: a receive typed `'int`
+    // leaves a pid in the mailbox, and a later process-typed receive takes it. The pid is
+    // sent *first*, so a filter that accepted any message — or rejected every pid — would
+    // answer differently or hang.
+    quiver()
+        .evaluate(
+            r#"
+            g = #'int { !#'int };
+            h = @#{ ![#'int] ~> =n; ![#(@'int ?'int)] ~> =q; [n, ?q] };
+            7 ~> @g ~> h;
+            5 ~> h;
+            !h
+            "#,
+        )
+        .expect("[5, 7]");
+}
+
+#[test]
 fn test_message_received_pid_is_sampleable_with_clause() {
     // A pid received in a message typed with a `?'s` clause is bare-sampleable — and the
     // runtime message-compatibility check includes the state component (the relocated

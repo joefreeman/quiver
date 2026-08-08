@@ -1,4 +1,4 @@
-use quiver_core::bytecode::{Id, Instruction, Offset};
+use quiver_core::bytecode::{Instruction, Offset, Opcode};
 
 /// Helper struct for managing instruction generation and jumps
 pub struct InstructionBuilder {
@@ -25,14 +25,14 @@ impl InstructionBuilder {
     /// Emits a jump placeholder and returns the address to patch later
     pub fn emit_jump_placeholder(&mut self) -> usize {
         let addr = self.instructions.len();
-        self.add_instruction(Instruction::Jump(0));
+        self.add_instruction(Instruction::jump(0));
         addr
     }
 
     /// Emits a conditional jump placeholder and returns the address to patch later (jumps on truthy)
     pub fn emit_jump_if_placeholder(&mut self) -> usize {
         let addr = self.instructions.len();
-        self.add_instruction(Instruction::JumpIf(0));
+        self.add_instruction(Instruction::jump_if(0));
         addr
     }
 
@@ -45,10 +45,10 @@ impl InstructionBuilder {
     /// Patches a jump instruction to target a specific address
     pub fn patch_jump_to_addr(&mut self, jump_addr: usize, target_addr: usize) {
         let offset = (target_addr as Offset) - (jump_addr as Offset) - 1;
-        self.instructions[jump_addr] = match &self.instructions[jump_addr] {
-            Instruction::Jump(_) => Instruction::Jump(offset),
-            Instruction::JumpIf(_) => Instruction::JumpIf(offset),
-            _ => panic!("Cannot patch non-jump instruction"),
+        self.instructions[jump_addr] = match self.instructions[jump_addr].opcode() {
+            Opcode::Jump => Instruction::jump(offset),
+            Opcode::JumpIf => Instruction::jump_if(offset),
+            other => panic!("Cannot patch non-jump instruction {other:?}"),
         };
     }
 
@@ -56,14 +56,14 @@ impl InstructionBuilder {
     pub fn emit_jump_to_addr(&mut self, addr: usize) {
         let current_addr = self.instructions.len();
         let offset = (addr as Offset) - (current_addr as Offset) - 1;
-        self.add_instruction(Instruction::Jump(offset));
+        self.add_instruction(Instruction::jump(offset));
     }
 
     /// Emits a conditional jump that immediately targets the given address
     pub fn emit_jump_if_to_addr(&mut self, addr: usize) {
         let current_addr = self.instructions.len();
         let offset = (addr as Offset) - (current_addr as Offset) - 1;
-        self.add_instruction(Instruction::JumpIf(offset));
+        self.add_instruction(Instruction::jump_if(offset));
     }
 
     /// Emits the common pattern Duplicate -> Not -> JumpIf (returns the jump address for patching),
@@ -71,24 +71,24 @@ impl InstructionBuilder {
     /// nil step while threading the (non-nil) value into the next step, and to keep a condition's
     /// value available to its consequence.
     pub fn emit_duplicate_jump_if_nil(&mut self) -> usize {
-        self.add_instruction(Instruction::Duplicate);
-        self.add_instruction(Instruction::Not);
+        self.add_instruction(Instruction::duplicate());
+        self.add_instruction(Instruction::not());
         self.emit_jump_if_placeholder()
     }
 
     /// Emits Rotate followed by Pop - common pattern for cleaning up stack values
     pub fn emit_rotate_pop(&mut self, rotate_count: usize) {
-        self.add_instruction(Instruction::Rotate(rotate_count as Id));
-        self.add_instruction(Instruction::Pop);
+        self.add_instruction(Instruction::rotate(rotate_count));
+        self.add_instruction(Instruction::pop());
     }
 
     /// Emits type check and branch pattern: Pick -> IsType -> Not -> JumpIf
     /// Returns the jump address for patching later
     /// Used when branching based on type matching
     pub fn emit_type_check_branch(&mut self, depth: usize, type_id: usize) -> usize {
-        self.add_instruction(Instruction::Pick(depth as Id));
-        self.add_instruction(Instruction::IsType(type_id as Id));
-        self.add_instruction(Instruction::Not);
+        self.add_instruction(Instruction::pick(depth));
+        self.add_instruction(Instruction::is_type(type_id));
+        self.add_instruction(Instruction::not());
         self.emit_jump_if_placeholder()
     }
 }
