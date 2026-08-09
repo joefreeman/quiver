@@ -105,7 +105,6 @@ impl Runner {
             workers.push(Box::new(spawn_worker(
                 quiver_cli::native_transport::SystemClock,
                 builtins.clone(),
-                false,
                 i as u16,
                 waker.clone(),
             )));
@@ -296,7 +295,7 @@ impl Runner {
         let result = (|| -> Result<(), String> {
             let builtins = quiver_cli::build_builtin_registry();
             let ast = quiver_compiler::parse(&source).map_err(|e| format!("{e}"))?;
-            let (program, entry) = quiver_cli::compile::compile_entry(
+            let (program, module_cache, entry) = quiver_cli::compile::compile_entry(
                 ast,
                 &resolver_for(path),
                 &builtins,
@@ -308,18 +307,32 @@ impl Runner {
                 Some(Rc::clone(&self.artifact_store)),
             )
             .map_err(|e| format!("{e}"))?;
-            let bytecode = program.to_bytecode_optimized(entry);
+            // A unit, like every other path: the chapter sessions beside this one already
+            // link their modules once into the shared environment, and a program block
+            // should reach that same code rather than merge a private copy of it.
+            let unit = quiver_compiler::extract_unit(&program, &module_cache, Some(entry), 0)
+                .map_err(|e| format!("{e}"))?;
+            let store = module_cache
+                .artifact_store
+                .as_ref()
+                .expect("the runner attaches one");
+            let modules = quiver_compiler::module_closure(store, &unit)
+                .map_err(|key| format!("no stored artifact for module {key:016x}"))?;
             let mut env = self.environment.lock().unwrap();
+            for (key, artifact) in &modules {
+                env.link_module_unit(*key, &artifact.unit, &builtins)
+                    .map_err(|e| format!("{e:?}"))?;
+            }
             let pid = env
-                .start_process(Some(bytecode))
+                .start_process_unit(&unit, &builtins)
                 .map_err(|e| format!("{e:?}"))?;
             let request = env
                 .request_result(pid, None)
                 .map_err(|e| format!("{e:?}"))?;
             drop(env);
             match self.wait(request) {
-                RequestResult::Result(Ok(_), _) => Ok(()),
-                RequestResult::Result(Err(error), _) => Err(error.crash_message()),
+                RequestResult::Result(Ok(_)) => Ok(()),
+                RequestResult::Result(Err(error)) => Err(error.crash_message()),
                 _ => Err("unexpected result".to_string()),
             }
         })();
@@ -406,8 +419,8 @@ impl Runner {
         };
 
         match self.wait(request) {
-            RequestResult::Result(Ok(value), _) => Ok(Some(value)),
-            RequestResult::Result(Err(error), _) => Err(Fault::Runtime(error.crash_message())),
+            RequestResult::Result(Ok(value)) => Ok(Some(value)),
+            RequestResult::Result(Err(error)) => Err(Fault::Runtime(error.crash_message())),
             _ => Err(Fault::Runtime("unexpected result".to_string())),
         }
     }

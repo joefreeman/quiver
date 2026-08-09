@@ -81,7 +81,7 @@ pub fn worker_main() {
                     let cmd_receiver = WebCommandReceiver::new(command_queue_for_init.clone());
                     let builtins = crate::builtins::web_builtins();
                     let evt_sender = evt_sender_for_closure.borrow_mut().take().unwrap();
-                    let worker = Worker::new(cmd_receiver, evt_sender, builtins, false, worker_id);
+                    let worker = Worker::new(cmd_receiver, evt_sender, builtins, worker_id);
 
                     *initialized_clone.borrow_mut() = true;
 

@@ -10,7 +10,9 @@ pub mod resolver;
 pub mod simplify;
 
 pub use artifact::{
-    ArtifactStore, ModuleArtifact, compiler_fingerprint, module_key, warm_std_store,
+    ArtifactStore, CompiledProgram, CompiledUnit, ModuleArtifact, Registration, UnitError,
+    compiler_fingerprint, extract_program, extract_unit, link_module, link_program, link_unit,
+    module_closure, module_key, resolve_imports, resolve_imports_from, warm_std_store,
 };
 pub use compiler::Compiler;
 pub use format::format_program;

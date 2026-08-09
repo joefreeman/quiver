@@ -13,7 +13,9 @@
 //! ```text
 //! GET    /status                        → StatusResponse
 //! POST   /processes                     → CreateResponse     (pure allocation)
-//! POST   /processes/{id}/resume         ResumeRequest → Outcome; 409 while busy
+//! POST   /processes/{id}/resume         ResumeRequest → Outcome; 409 while busy,
+//!                                       424 + MissingModules when a named module is
+//!                                       neither held nor attached
 //! POST   /processes/{id}/compact        CompactRequest
 //! POST   /processes/{id}/cancel
 //! DELETE /processes/{id}                stop + ownership cascade
@@ -70,13 +72,36 @@ pub struct CreateResponse {
     pub id: u64,
 }
 
+/// What a resume hands the server to run.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ResumePayload {
+    /// A self-contained tree-shaken program: everything the line reaches, every time.
+    Bytecode(quiver_core::bytecode::Bytecode),
+    /// The line's own relocatable code, plus the units of any modules it imports that
+    /// this client has not already sent to this server — dependency-first, in link
+    /// order. The server links each once and the line names them by key thereafter.
+    Unit {
+        unit: quiver_compiler::CompiledUnit,
+        modules: Vec<(u64, quiver_compiler::CompiledUnit)>,
+    },
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResumeRequest {
-    pub bytecode: quiver_core::bytecode::Bytecode,
+    pub payload: ResumePayload,
     /// Local slots to keep when the result is delivered (a REPL line's bindings);
     /// `None` keeps everything.
     #[serde(default)]
     pub keep: Option<Vec<usize>>,
+}
+
+/// The `424` body: module keys the unit names that the server does not hold and the
+/// request did not carry — the client's record of what it has sent is stale, most
+/// likely because a code sweep reclaimed a module nothing was using. Resend those
+/// modules and retry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissingModules {
+    pub missing: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

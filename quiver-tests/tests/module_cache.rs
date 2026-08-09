@@ -52,8 +52,8 @@ fn eval_line(
                     virtual_time.fetch_add(1, Ordering::Relaxed);
                 }
                 match environment.poll_request(request_id) {
-                    Ok(Some(quiver_environment::RequestResult::Result(Ok(_), _))) => break,
-                    Ok(Some(quiver_environment::RequestResult::Result(Err(e), _))) => {
+                    Ok(Some(quiver_environment::RequestResult::Result(Ok(_)))) => break,
+                    Ok(Some(quiver_environment::RequestResult::Result(Err(e)))) => {
                         panic!("runtime error: {:?}", e)
                     }
                     Ok(None) => {
@@ -111,7 +111,6 @@ fn run_session(
         workers.push(Box::new(spawn_worker(
             quiver::native_transport::SteppedClock::new(virtual_time_ms.clone()),
             builtins_clone,
-            false,
             i as u16,
             waker.clone(),
         )));
@@ -243,6 +242,124 @@ fn build_artifacts(debug: bool) -> Rc<quiver_compiler::ArtifactStore> {
     let store = warm_store(debug);
     WARMED.with(|w| w.borrow_mut().insert(debug, store.clone()));
     store
+}
+
+/// Compile `source` against `modules` in a hermetic session, answering the artifacts it
+/// produced.
+fn project_store(
+    modules: std::collections::HashMap<Vec<String>, String>,
+    source: &str,
+) -> Rc<quiver_compiler::ArtifactStore> {
+    use quiver_compiler::compiler::{Bindings, ModuleCache};
+    let store = Rc::new(quiver_compiler::ArtifactStore::in_memory());
+    let resolver = PackageResolver::memory(modules);
+    let mut program = quiver_core::program::Program::new();
+    let mut module_cache = ModuleCache::new();
+    module_cache.artifact_store = Some(store.clone());
+    let nil = program.register_type(quiver_core::types::Type::nil());
+    let parsed = quiver_compiler::parse(source).expect("parse");
+    quiver_compiler::Compiler::compile(
+        parsed,
+        &Bindings::default(),
+        Default::default(),
+        &mut module_cache,
+        &resolver,
+        &mut program,
+        nil,
+        &std::collections::HashMap::new(),
+        &builtins(),
+        None,
+        options(false),
+    )
+    .unwrap_or_else(|e| panic!("compile: {:?}", e.error));
+    store
+}
+
+/// The key an import group names, for the dependency called `name`.
+fn import_key(store: &quiver_compiler::ArtifactStore, module: &str, dependency: &str) -> u64 {
+    let artifact = store
+        .entries()
+        .into_iter()
+        .find(|(_, a)| a.id.name == vec![module.to_string()])
+        .unwrap_or_else(|| panic!("no artifact for %{module}"))
+        .1;
+    artifact
+        .unit
+        .imports
+        .iter()
+        .find(|(id, _, _)| id.name == vec![dependency.to_string()])
+        .unwrap_or_else(|| panic!("%{module} does not import %{dependency}"))
+        .1
+}
+
+#[test]
+fn import_keys_name_the_stored_dependency() {
+    // Every import group's key must be the key its dependency's own artifact is stored
+    // under: the table says *which version* of a module it was compiled against, and a
+    // linker outside the import pipeline has nothing else to check.
+    let store = build_artifacts(false);
+    let by_id: std::collections::HashMap<_, _> = store
+        .entries()
+        .into_iter()
+        .map(|(key, artifact)| (artifact.id.clone(), key))
+        .collect();
+    let mut checked = 0;
+    for (_, artifact) in store.entries() {
+        for (dependency, key, _) in &artifact.unit.imports {
+            let stored = by_id.get(dependency).unwrap_or_else(|| {
+                panic!(
+                    "{} imports {}, which has no artifact",
+                    artifact.id.display(),
+                    dependency.display()
+                )
+            });
+            assert_eq!(
+                *stored,
+                *key,
+                "{} names key {:016x} for {}, stored under {:016x}",
+                artifact.id.display(),
+                key,
+                dependency.display(),
+                stored
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no import groups to check");
+}
+
+#[test]
+fn a_dependency_change_rekeys_its_dependents_import() {
+    // The invariant the key buys: two modules named %a with different content are
+    // different dependencies, and %b's artifact says which one it was built against.
+    // Name-based resolution alone cannot tell them apart, and the function indices line
+    // up either way — so the mis-link would be silent.
+    let build = |a: &str| {
+        let mut modules = std::collections::HashMap::new();
+        modules.insert(vec!["a".to_string()], a.to_string());
+        modules.insert(vec!["b".to_string()], "[g: #'int { %a.f $ }]".to_string());
+        project_store(modules, "%b.g 1")
+    };
+    let first = build("[f: #'int { [$, 1] ~> __integer_add__ }]");
+    let second = build("[f: #'int { [$, 2] ~> __integer_add__ }]");
+
+    let first_key = import_key(&first, "b", "a");
+    let second_key = import_key(&second, "b", "a");
+    assert_ne!(
+        first_key, second_key,
+        "%b's import of %a must be re-keyed when %a's source changes"
+    );
+
+    // And each names the %a actually stored beside it.
+    for (store, expected) in [(&first, first_key), (&second, second_key)] {
+        let stored = store
+            .entries()
+            .into_iter()
+            .find(|(_, a)| a.id.name == vec!["a".to_string()])
+            .expect("%a artifact")
+            .0;
+        assert_eq!(stored, expected);
+    }
 }
 
 #[test]

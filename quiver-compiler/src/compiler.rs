@@ -4884,7 +4884,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             bytecode,
             self.builtins,
             false,
-            false,
             self.fuel,
             self.cancel.as_deref(),
         ) {
@@ -5125,7 +5124,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let (expr_value, executor) = quiver_core::execute_bytecode_sync_with(
             bytecode,
             &registry,
-            false,
             false,
             self.fuel,
             self.cancel.as_deref(),

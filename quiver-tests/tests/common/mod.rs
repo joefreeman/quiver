@@ -61,10 +61,10 @@ fn evaluate(
                 }
 
                 match environment.poll_request(request_id) {
-                    Ok(Some(quiver_environment::RequestResult::Result(Ok(value), _))) => {
+                    Ok(Some(quiver_environment::RequestResult::Result(Ok(value)))) => {
                         break Ok(Some(value));
                     }
-                    Ok(Some(quiver_environment::RequestResult::Result(Err(e), _))) => {
+                    Ok(Some(quiver_environment::RequestResult::Result(Err(e)))) => {
                         break Err(ReplError::Runtime(e));
                     }
                     Ok(Some(_)) => {
@@ -323,7 +323,6 @@ impl TestBuilder {
                 workers.push(Box::new(spawn_worker(
                     quiver::native_transport::SystemClock,
                     builtins_clone,
-                    false, // Don't enable profiling in tests
                     i as u16,
                     waker.clone(),
                 )));
@@ -331,7 +330,6 @@ impl TestBuilder {
                 workers.push(Box::new(spawn_worker(
                     quiver::native_transport::SteppedClock::new(virtual_time_ms.clone()),
                     builtins_clone,
-                    false, // Don't enable profiling in tests
                     i as u16,
                     waker.clone(),
                 )));

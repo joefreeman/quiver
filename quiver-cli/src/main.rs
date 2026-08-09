@@ -5,18 +5,15 @@ use quiver_core::bytecode;
 use quiver_core::format;
 use quiver_core::program::Program;
 use quiver_core::types::Type;
-use quiver_environment::{Environment, WorkerHandle};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal, Read};
 
 mod diagnostics;
-use quiver_cli::{build_builtin_registry, create_effect_backend};
+use quiver_cli::build_builtin_registry;
 mod repl_cli;
 mod server_cli;
 mod test_cli;
-use quiver_cli::native_transport;
-use quiver_cli::spawn_worker;
 use repl_cli::ReplCli;
 
 #[derive(Parser)]
@@ -52,9 +49,6 @@ enum Commands {
 
         #[arg(short, long)]
         quiet: bool,
-
-        #[arg(long)]
-        profile: bool,
 
         /// Release build: skip failure-provenance stamps (`run` compiles debug by default).
         #[arg(long)]
@@ -126,9 +120,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             input,
             eval,
             quiet,
-            profile,
             release,
-        }) => run_command(input, eval, quiet, profile, release)?,
+        }) => run_command(input, eval, quiet, release)?,
         Some(Commands::Inspect { input }) => inspect_command(input)?,
         Some(Commands::Format { input, eval, check }) => format_command(input, eval, check)?,
         Some(Commands::Test { input }) => test_cli::test_command(input)?,
@@ -206,6 +199,7 @@ fn compile_command(
     // Build registry from core modules and network builtins
     let builtins = build_builtin_registry();
     let resolver = entry_resolver(resolver_path.as_deref());
+    let store = std::rc::Rc::new(quiver_compiler::ArtifactStore::cache());
 
     // Compile and extract entry function
     // Note: compile_command allows programs that don't evaluate to a function
@@ -213,19 +207,21 @@ fn compile_command(
         Ok(ast) => ast,
         Err(e) => handle_parse_error(e, &source, &source_id),
     };
-    let (program, entry) = match quiver_cli::compile::compile_entry(
+    let (program, module_cache, entry) = match quiver_cli::compile::compile_entry(
         parsed.clone(),
         &resolver,
         &builtins,
         options.clone(),
-        None,
+        Some(std::rc::Rc::clone(&store)),
     ) {
-        Ok((program, entry)) => (program, Some(entry)),
+        Ok((program, module_cache, entry)) => (program, module_cache, Some(entry)),
         Err(_) => {
-            // If it doesn't evaluate to a function, compile without an entry point
+            // Not executable: compile the top level alone, so the result is still
+            // inspectable. The unit then has no entry rather than no content.
             let ast = parsed;
             let mut program = Program::new();
             let mut module_cache = ModuleCache::new();
+            module_cache.artifact_store = Some(std::rc::Rc::clone(&store));
             let nil_type_id = program.register_type(Type::nil());
             Compiler::compile(
                 ast,
@@ -247,17 +243,18 @@ fn compile_command(
                 ),
                 None => format!("Compile error: {:?}", e.error),
             })?;
-            (program, None)
+            (program, module_cache, None)
         }
     };
 
-    let bytecode = match entry {
-        Some(entry_fn) => program.to_bytecode_optimized(entry_fn),
-        None => program.to_bytecode(None),
-    };
+    // A `.qx` is a self-contained program: this compile's own code, plus the units of
+    // every module it imports. `own_floor` is 0 — the program is freshly compiled, so
+    // everything no module owns is its own.
+    let compiled = quiver_compiler::extract_program(&program, &module_cache, entry, 0)
+        .map_err(|e| format!("Cannot produce a linkable program: {e}"))?;
     // Compact, not pretty: this is machine output — `quiv inspect` is the readable view,
     // and indentation was over half the file.
-    let json = serde_json::to_string(&bytecode)?;
+    let json = serde_json::to_string(&compiled)?;
 
     if let Some(output_path) = output {
         fs::write(output_path, json)?;
@@ -354,45 +351,24 @@ fn run_command(
     input: Option<String>,
     eval: Option<String>,
     quiet: bool,
-    profile: bool,
     release: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let debug = !release;
 
-    // Profiling measures a dedicated runtime — per-worker instrumentation the shared
-    // server cannot switch on per request — so it keeps the in-process path. Every
-    // ordinary run goes through the server.
-    if profile {
-        if let Some(code) = eval {
-            compile_execute(&code, None, quiet, profile, debug)?;
-        } else if let Some(path) = input {
-            let content = fs::read_to_string(&path)?;
-            if path.ends_with(".qx") {
-                execute_bytecode(&content, quiet, profile)?;
-            } else {
-                compile_execute(&content, Some(&path), quiet, profile, debug)?;
-            }
-        } else {
-            let mut buffer = String::new();
-            io::stdin().read_to_string(&mut buffer)?;
-            compile_execute(&buffer, None, quiet, profile, debug)?;
-        }
-        return Ok(());
-    }
-
     // Compile client-side (parse and compile errors are local, with the usual
-    // diagnostics), or take bytecode as given; the server only ever sees bytecode.
-    let bytecode = {
+    // diagnostics), or take a compiled program as given. Either way the server is handed
+    // a unit and the modules it imports, and links each once.
+    let compiled = {
         let (source, source_id, path): (String, String, Option<String>) = if let Some(code) = eval {
             (code, "eval".to_string(), None)
         } else if let Some(path) = input {
             let content = fs::read_to_string(&path)?;
             if path.ends_with(".qx") {
-                let bytecode: bytecode::Bytecode = serde_json::from_str(&content)?;
-                if bytecode.entry.is_none() {
-                    return Err("Bytecode has no entry point".into());
+                let compiled: quiver_compiler::CompiledProgram = serde_json::from_str(&content)?;
+                if compiled.unit.entry.is_none() {
+                    return Err("Compiled program has no entry point".into());
                 }
-                run_on_server(bytecode, quiet)?;
+                run_on_server(compiled, quiet)?;
                 return Ok(());
             } else if path.ends_with(".qv") {
                 (content, path.clone(), Some(path))
@@ -405,14 +381,15 @@ fn run_command(
         } else {
             let mut buffer = String::new();
             io::stdin().read_to_string(&mut buffer)?;
-            // Try to parse as bytecode first
+            // Try to parse as a compiled program first
             if buffer.trim_start().starts_with('{')
-                && let Ok(bytecode) = serde_json::from_str::<bytecode::Bytecode>(&buffer)
+                && let Ok(compiled) =
+                    serde_json::from_str::<quiver_compiler::CompiledProgram>(&buffer)
             {
-                if bytecode.entry.is_none() {
-                    return Err("Bytecode has no entry point".into());
+                if compiled.unit.entry.is_none() {
+                    return Err("Compiled program has no entry point".into());
                 }
-                run_on_server(bytecode, quiet)?;
+                run_on_server(compiled, quiet)?;
                 return Ok(());
             }
             (buffer, "stdin".to_string(), None)
@@ -429,25 +406,26 @@ fn run_command(
             ..Default::default()
         };
         let store = std::rc::Rc::new(quiver_compiler::ArtifactStore::cache());
-        let (program, entry) = quiver_cli::compile::compile_entry(
+        let (program, module_cache, entry) = quiver_cli::compile::compile_entry(
             ast,
             &resolver,
             &build_builtin_registry(),
             options,
             Some(store),
         )?;
-        program.to_bytecode_optimized(entry)
+        quiver_compiler::extract_program(&program, &module_cache, Some(entry), 0)
+            .map_err(|e| format!("Cannot produce a linkable program: {e}"))?
     };
 
-    run_on_server(bytecode, quiet)
+    run_on_server(compiled, quiet)
 }
 
-/// Execute compiled bytecode on the shared server: create a root process, resume it
-/// with the program, delete it afterwards. Ctrl-C cancels the run (the server stops
+/// Execute a compiled program on the shared server: create a root process, resume it
+/// with the program's unit and the modules it imports, delete it afterwards. Ctrl-C cancels the run (the server stops
 /// the root, the resume answers `Interrupted`) and still deletes — lifecycle is
 /// explicit now that nothing ties it to a connection.
 fn run_on_server(
-    bytecode: bytecode::Bytecode,
+    compiled: quiver_compiler::CompiledProgram,
     quiet: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use quiver_cli::protocol::Outcome;
@@ -486,7 +464,16 @@ fn run_on_server(
         });
     }
 
-    let outcome = client.resume(pid, bytecode, None);
+    // A one-shot run has no record of what this server holds, so it attaches the whole
+    // closure and lets the server skip the keys it already has.
+    let outcome = client.resume(
+        pid,
+        quiver_cli::protocol::ResumePayload::Unit {
+            unit: compiled.unit,
+            modules: compiled.modules,
+        },
+        None,
+    );
     let _ = client.delete_process(pid);
 
     match outcome.map_err(|e| e.to_string())? {
@@ -516,262 +503,6 @@ fn run_on_server(
     }
     Ok(())
 }
-
-fn compile_execute(
-    source: &str,
-    input_path: Option<&str>,
-    quiet: bool,
-    profile: bool,
-    debug: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Build registry from core modules and network builtins
-    let builtins = build_builtin_registry();
-    let resolver = entry_resolver(input_path);
-    let options = quiver_compiler::compiler::CompileOptions {
-        debug,
-        source_name: input_path
-            .map(|path| {
-                std::path::Path::new(path)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.to_string())
-            })
-            .unwrap_or_else(|| "main".to_string()),
-        ..Default::default()
-    };
-
-    // Compile and extract entry function (this will error if not a function)
-    let ast = match parse(source) {
-        Ok(ast) => ast,
-        Err(e) => handle_parse_error(e, source, &options.source_name),
-    };
-    let (program, entry) =
-        quiver_cli::compile::compile_entry(ast, &resolver, &builtins, options, None)?;
-
-    // Convert to bytecode
-    let bytecode = program.to_bytecode_optimized(entry);
-
-    // Execute using shared bytecode execution path
-    execute_bytecode_with_environment(bytecode, quiet, profile)
-}
-
-/// Execute bytecode using the Environment architecture with multi-worker support and effects.
-/// This is the unified execution path for both direct bytecode and compiled source.
-fn execute_bytecode_with_environment(
-    bytecode: bytecode::Bytecode,
-    quiet: bool,
-    profile: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if bytecode.entry.is_none() {
-        return Err("Bytecode has no entry point".into());
-    }
-
-    // Create workers
-    let num_workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2);
-
-    let builtins = build_builtin_registry();
-
-    // One wake signal for every worker: the environment loop blocks on it instead of polling.
-    let (waker, wake) = native_transport::wake_channel();
-
-    let mut workers: Vec<Box<dyn WorkerHandle<quiver_io::NativeEffect>>> = Vec::new();
-    for i in 0..num_workers {
-        workers.push(Box::new(spawn_worker(
-            native_transport::SystemClock,
-            builtins.clone(),
-            profile,
-            i as u16,
-            waker.clone(),
-        )));
-    }
-
-    // Create environment with effect backend
-    let effect_backend = create_effect_backend();
-    let mut environment = Environment::<quiver_io::NativeEffect>::new(workers);
-    environment.set_runtime_declarations(builtins.runtime_declarations().clone());
-
-    if let Some(backend) = effect_backend {
-        environment.set_effect_backend(backend);
-    }
-
-    // Extract data before consuming bytecode
-    let builtin_names: Vec<String> = bytecode.builtins.iter().map(|b| b.name.clone()).collect();
-
-    // Start process from bytecode
-    let start_time = std::time::Instant::now();
-    let process_id = environment
-        .start_process(Some(bytecode))
-        .map_err(|e| format!("Failed to start process: {:?}", e))?;
-
-    // Request the result
-    let request_id = environment
-        .request_result(process_id, None)
-        .map_err(|e| format!("Failed to request result: {:?}", e))?;
-
-    // Event loop. Every message the environment routes crosses this loop, so how it idles is on
-    // the latency of every spawn, await and select wake — hence the wake signal.
-    loop {
-        let did_work = environment.step().unwrap_or(false);
-
-        match environment.poll_request(request_id) {
-            Ok(Some(quiver_environment::RequestResult::Result(Ok(value), stats))) => {
-                let wall_time = start_time.elapsed();
-
-                // Print profiling report if enabled
-                if let Some(stats) = stats {
-                    print_bytecode_profile_report(&stats, &builtin_names, wall_time);
-                }
-
-                // Check if result is NIL tuple (exit with error). Debug builds stamp nil
-                // results with their failure site — surface it before exiting.
-                // Formatting uses the environment's merged program: the authoritative
-                // id space for the value (the loaded bytecode's ids were remapped).
-                if value.is_nil() {
-                    if !quiet && let Some(origin) = environment.describe_origin(&value) {
-                        eprintln!("[]  ({origin})");
-                    }
-                    std::process::exit(1);
-                }
-
-                // Print the result. Nil already returned above, so this prints every
-                // value the program can answer with — `Ok` included, since a program
-                // whose last step is a successful match has `Ok` as its result and
-                // printing nothing reads as "no output" rather than "matched".
-                if !quiet {
-                    println!("{}", environment.format_value(&value));
-                }
-
-                return Ok(());
-            }
-            Ok(Some(quiver_environment::RequestResult::Result(Err(e), _))) => {
-                return Err(format!("Runtime error: {}", e.crash_message()).into());
-            }
-            Ok(Some(_)) => {
-                return Err("Unexpected result type".into());
-            }
-            Ok(None) => {
-                if !did_work {
-                    wake.wait(environment.io_in_flight());
-                }
-            }
-            Err(e) => return Err(format!("Environment error: {:?}", e).into()),
-        }
-    }
-}
-
-fn execute_bytecode(
-    bytecode_json: &str,
-    quiet: bool,
-    profile: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let bytecode: bytecode::Bytecode = serde_json::from_str(bytecode_json)?;
-
-    if bytecode.entry.is_none() {
-        return Err("Bytecode has no entry point".into());
-    }
-
-    execute_bytecode_with_environment(bytecode, quiet, profile)
-}
-
-/// Print a profile report for bytecode execution (without full Program type info).
-/// Uses builtin names from the bytecode instead of looking them up in Program.
-fn print_bytecode_profile_report(
-    stats: &quiver_core::executor::ExecutionStats,
-    builtin_names: &[String],
-    wall_time: std::time::Duration,
-) {
-    // Calculate totals
-    let total_instr_count: u64 = stats.instruction_stats.values().map(|(c, _)| c).sum();
-    let total_instr_time: u64 = stats.instruction_stats.values().map(|(_, t)| t).sum();
-    let total_builtin_count: u64 = stats.builtin_stats.values().map(|(c, _)| c).sum();
-    let total_builtin_time: u64 = stats.builtin_stats.values().map(|(_, t)| t).sum();
-
-    let wall_ms = wall_time.as_secs_f64() * 1000.0;
-    let exec_ms = (total_instr_time + total_builtin_time) as f64 / 1_000_000.0;
-    let exec_percent = if wall_ms > 0.0 {
-        (exec_ms / wall_ms) * 100.0
-    } else {
-        0.0
-    };
-
-    eprintln!(
-        "Total time: {:.2}ms (execution: {:.2}ms; {:.1}%)",
-        wall_ms, exec_ms, exec_percent
-    );
-
-    // Instructions sorted by time
-    if !stats.instruction_stats.is_empty() {
-        let mut instrs: Vec<_> = stats.instruction_stats.iter().collect();
-        instrs.sort_by_key(|(_, (_, time))| std::cmp::Reverse(*time));
-
-        eprintln!(
-            "\nInstructions ({}; {:.2}ms):",
-            total_instr_count,
-            total_instr_time as f64 / 1_000_000.0
-        );
-        for (instr_type, (count, time)) in instrs.iter().take(10) {
-            let time_percent = if total_instr_time > 0 {
-                (*time as f64 / total_instr_time as f64) * 100.0
-            } else {
-                0.0
-            };
-            let avg_ns = time.checked_div(*count).unwrap_or(0);
-            eprintln!(
-                "  {:?}: {} calls, {:.3}ms ({:.1}%), avg {:.0}ns",
-                instr_type,
-                count,
-                *time as f64 / 1_000_000.0,
-                time_percent,
-                avg_ns
-            );
-        }
-    }
-
-    // Builtins sorted by time
-    if !stats.builtin_stats.is_empty() {
-        let mut builtins: Vec<_> = stats.builtin_stats.iter().collect();
-        builtins.sort_by_key(|(_, (_, time))| std::cmp::Reverse(*time));
-
-        eprintln!(
-            "\nBuiltins ({}; {:.2}ms):",
-            total_builtin_count,
-            total_builtin_time as f64 / 1_000_000.0
-        );
-        for (builtin_idx, (count, time)) in builtins.iter().take(10) {
-            let builtin_name = builtin_names
-                .get(**builtin_idx)
-                .map(|s| s.as_str())
-                .unwrap_or("<unknown>");
-            let time_percent = if total_builtin_time > 0 {
-                (*time as f64 / total_builtin_time as f64) * 100.0
-            } else {
-                0.0
-            };
-            let avg_ns = time.checked_div(*count).unwrap_or(0);
-            eprintln!(
-                "  {}: {} calls, {:.3}ms ({:.1}%), avg {:.0}ns",
-                builtin_name,
-                count,
-                *time as f64 / 1_000_000.0,
-                time_percent,
-                avg_ns
-            );
-        }
-    }
-
-    // Memory peaks
-    if stats.peak_stack_size > 0 || stats.peak_locals_size > 0 || stats.peak_frame_count > 0 {
-        eprintln!("\nMemory peaks:");
-        eprintln!("  Stack: {}", stats.peak_stack_size);
-        eprintln!("  Locals: {}", stats.peak_locals_size);
-        eprintln!("  Frames: {}", stats.peak_frame_count);
-    }
-
-    eprintln!();
-}
-
 fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let content = if let Some(path) = input {
         fs::read_to_string(&path)?
@@ -781,7 +512,14 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
         buffer
     };
 
-    let bytecode_data: bytecode::Bytecode = serde_json::from_str(&content)?;
+    // A `.qx` is relocatable code, so it is linked into a fresh program before being
+    // rendered: the ids shown are the ones a host would assign it.
+    let compiled: quiver_compiler::CompiledProgram = serde_json::from_str(&content)?;
+    let mut program = Program::new();
+    let entry_id =
+        quiver_compiler::link_program(&compiled, &mut program, &build_builtin_registry())
+            .map_err(|e| format!("Cannot link the program: {e:?}"))?;
+    let bytecode_data = program.to_bytecode(entry_id);
 
     println!("Constants:");
     for (i, constant) in bytecode_data.constants.iter().enumerate() {

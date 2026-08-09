@@ -9,6 +9,7 @@
 
 use quiver_cli::client::Client;
 use quiver_cli::protocol::Outcome;
+use quiver_cli::protocol::{MissingModules, ResumePayload};
 use quiver_environment::LineCompiler;
 use quiver_io::NativeEffect;
 use std::io::{Read, Write};
@@ -103,8 +104,16 @@ impl Session {
             .compiler
             .commit_line(compiled)
             .expect("expected executable code");
+        // This harness drives the protocol directly and never opted into units.
+        let quiver_environment::LinePayload::Bytecode(bytecode) = committed.payload else {
+            unreachable!("units are opt-in per driver");
+        };
         self.client
-            .resume(self.pid, committed.bytecode, Some(committed.keep_indices))
+            .resume(
+                self.pid,
+                ResumePayload::Bytecode(bytecode),
+                Some(committed.keep_indices),
+            )
             .expect("resume failed")
     }
 
@@ -119,7 +128,7 @@ impl Session {
 fn program(source: &str) -> quiver_core::bytecode::Bytecode {
     let ast = quiver_compiler::parse(source).expect("parse failed");
     let resolver = quiver_compiler::PackageResolver::inline();
-    let (program, entry) = quiver_cli::compile::compile_entry(
+    let (program, _module_cache, entry) = quiver_cli::compile::compile_entry(
         ast,
         &resolver,
         &quiver_cli::build_builtin_registry(),
@@ -170,7 +179,9 @@ fn concurrent_sessions_evaluate_and_run_independently() {
                 let outcome = client
                     .resume(
                         pid,
-                        program(&format!("#{{ [{n}, 1] ~> __integer_add__ }}")),
+                        ResumePayload::Bytecode(program(&format!(
+                            "#{{ [{n}, 1] ~> __integer_add__ }}"
+                        ))),
                         None,
                     )
                     .expect("resume failed");
@@ -210,7 +221,13 @@ fn cancel_interrupts_and_a_fresh_session_recovers() {
     let pid = client.create_process().expect("create failed");
     let spinner = std::thread::spawn({
         let client = client.clone();
-        move || client.resume(pid, program("#{ f = #[] { ^ [] }; f [] }"), None)
+        move || {
+            client.resume(
+                pid,
+                ResumePayload::Bytecode(program("#{ f = #[] { ^ [] }; f [] }")),
+                None,
+            )
+        }
     });
     std::thread::sleep(Duration::from_millis(300));
     client.cancel(pid).expect("cancel failed");
@@ -232,11 +249,17 @@ fn concurrent_resumes_answer_conflict() {
     let pid = client.create_process().expect("create failed");
     let spinner = std::thread::spawn({
         let client = client.clone();
-        move || client.resume(pid, program("#{ f = #[] { ^ [] }; f [] }"), None)
+        move || {
+            client.resume(
+                pid,
+                ResumePayload::Bytecode(program("#{ f = #[] { ^ [] }; f [] }")),
+                None,
+            )
+        }
     });
     std::thread::sleep(Duration::from_millis(300));
     // Resumes are serialized per process: an overlapping one is refused.
-    let overlap = client.resume(pid, program("#{ 1 }"), None);
+    let overlap = client.resume(pid, ResumePayload::Bytecode(program("#{ 1 }")), None);
     assert!(
         overlap.as_ref().is_err_and(|e| e.is_conflict()),
         "expected 409, got {overlap:?}"
@@ -259,7 +282,13 @@ fn abandoned_processes_stay_visible_and_collectable() {
     let pid = client.create_process().expect("create failed");
     let _abandoned = std::thread::spawn({
         let client = client.clone();
-        move || client.resume(pid, program("#{ f = #[] { ^ [] }; f [] }"), None)
+        move || {
+            client.resume(
+                pid,
+                ResumePayload::Bytecode(program("#{ f = #[] { ^ [] }; f [] }")),
+                None,
+            )
+        }
     });
     std::thread::sleep(Duration::from_millis(300));
 
@@ -367,7 +396,7 @@ fn exe() -> PathBuf {
 fn quick_value(client: &Client, source: &str) -> String {
     let pid = client.create_process().expect("create failed");
     let outcome = client
-        .resume(pid, program(source), None)
+        .resume(pid, ResumePayload::Bytecode(program(source)), None)
         .expect("resume failed");
     client.delete_process(pid).expect("delete failed");
     match outcome {
@@ -466,4 +495,164 @@ fn takeover_replaces_an_incompatible_server() {
     );
     client.shutdown().expect("shutdown failed");
     mock.join().unwrap();
+}
+
+/// A session that ships units, mirroring `ReplCli::send_line`: attach only what this
+/// server has not been given, and correct the record from a `424`.
+struct UnitSession {
+    client: Client,
+    compiler: LineCompiler<NativeEffect>,
+    pid: u64,
+    sent: std::collections::HashSet<u64>,
+}
+
+impl UnitSession {
+    fn open(server: &Server) -> Self {
+        let client = server.client();
+        let pid = client.create_process().expect("create failed");
+        let mut compiler = LineCompiler::new(
+            Box::new(quiver_compiler::PackageResolver::inline()),
+            quiver_cli::build_builtin_registry(),
+        );
+        compiler.set_artifact_store(std::rc::Rc::new(quiver_compiler::ArtifactStore::cache()));
+        compiler.accept_units(true);
+        UnitSession {
+            client,
+            compiler,
+            pid,
+            sent: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Compile a line and answer its unit payload, without sending it.
+    fn compile(
+        &mut self,
+        source: &str,
+    ) -> (
+        quiver_compiler::CompiledUnit,
+        Vec<(u64, quiver_compiler::CompiledUnit)>,
+        Vec<usize>,
+    ) {
+        let prepared = self.compiler.prepare(source).expect("prepare failed");
+        self.client
+            .compact(self.pid, prepared.compact_keep().to_vec())
+            .expect("compact failed");
+        let compiled = self.compiler.compile(prepared).expect("compile failed");
+        let committed = self
+            .compiler
+            .commit_line(compiled)
+            .expect("expected executable code");
+        match committed.payload {
+            quiver_environment::LinePayload::Unit { unit, modules } => (
+                unit,
+                modules
+                    .iter()
+                    .map(|(key, artifact)| (*key, artifact.unit.clone()))
+                    .collect(),
+                committed.keep_indices,
+            ),
+            quiver_environment::LinePayload::Bytecode(_) => {
+                panic!("expected a unit payload for `{source}`")
+            }
+        }
+    }
+}
+
+#[test]
+fn a_unit_resume_links_its_modules_and_names_them_thereafter() {
+    let server = Server::start(&[]);
+    let mut session = UnitSession::open(&server);
+
+    // First line: the server holds nothing, so everything it needs rides along.
+    let (unit, modules, keep) = session.compile("%num.mul [7, 6]");
+    assert!(!modules.is_empty(), "a first line must carry its modules");
+    let outcome = session
+        .client
+        .resume(
+            session.pid,
+            ResumePayload::Unit {
+                unit,
+                modules: modules.clone(),
+            },
+            Some(keep),
+        )
+        .expect("resume failed");
+    match outcome {
+        Outcome::Value { rendered, .. } => assert_eq!(rendered, "42"),
+        other => panic!("expected 42, got {other:?}"),
+    }
+    session.sent.extend(modules.iter().map(|(key, _)| *key));
+
+    // Second line: the same modules are already there, so it names them and sends none.
+    let (unit, modules, keep) = session.compile("%num.mul [6, 6]");
+    let attach: Vec<_> = modules
+        .iter()
+        .filter(|(key, _)| !session.sent.contains(key))
+        .cloned()
+        .collect();
+    assert!(
+        attach.is_empty(),
+        "the second line must not resend modules the server holds"
+    );
+    let outcome = session
+        .client
+        .resume(
+            session.pid,
+            ResumePayload::Unit {
+                unit,
+                modules: attach,
+            },
+            Some(keep),
+        )
+        .expect("resume failed");
+    match outcome {
+        Outcome::Value { rendered, .. } => assert_eq!(rendered, "36"),
+        other => panic!("expected 36, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_stale_sent_record_is_answered_with_the_missing_keys() {
+    // A client that believes the server holds modules it does not — the state a code
+    // sweep leaves behind — must be told exactly which, and succeed on the retry.
+    let server = Server::start(&[]);
+    let mut session = UnitSession::open(&server);
+    let (unit, modules, keep) = session.compile("%num.mul [7, 6]");
+
+    let error = session
+        .client
+        .resume(
+            session.pid,
+            ResumePayload::Unit {
+                unit: unit.clone(),
+                modules: Vec::new(),
+            },
+            Some(keep.clone()),
+        )
+        .expect_err("a unit naming unheld modules must be refused");
+    let quiver_cli::client::RequestError::Http { status, body } = error else {
+        panic!("expected an HTTP error, got {error}");
+    };
+    assert_eq!(status, 424);
+    let missing: MissingModules = serde_json::from_str(&body).expect("a MissingModules body");
+    let expected: std::collections::HashSet<u64> = modules.iter().map(|(key, _)| *key).collect();
+    assert!(
+        missing.missing.iter().all(|key| expected.contains(key)),
+        "the server must name keys the line actually imports"
+    );
+    assert!(!missing.missing.is_empty());
+
+    // The retry carries them and succeeds.
+    let outcome = session
+        .client
+        .resume(
+            session.pid,
+            ResumePayload::Unit { unit, modules },
+            Some(keep),
+        )
+        .expect("retry failed");
+    match outcome {
+        Outcome::Value { rendered, .. } => assert_eq!(rendered, "42"),
+        other => panic!("expected 42, got {other:?}"),
+    }
 }

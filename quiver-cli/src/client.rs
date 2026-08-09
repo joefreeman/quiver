@@ -67,6 +67,71 @@ impl From<std::io::Error> for ConnectError {
     }
 }
 
+/// Wire tracing, off unless `QUIV_TRACE` is set: `1` for a line per request with its
+/// body size, `full` to dump the bodies as well. The only way to see what a resume
+/// actually carries — a line's own code, or that plus the units of modules this server
+/// has not been given yet.
+#[derive(Clone, Copy, PartialEq)]
+enum Trace {
+    Off,
+    Sizes,
+    Full,
+}
+
+impl Trace {
+    fn current() -> Self {
+        match std::env::var("QUIV_TRACE").as_deref() {
+            Ok("full") => Trace::Full,
+            Ok("" | "0") | Err(_) => Trace::Off,
+            Ok(_) => Trace::Sizes,
+        }
+    }
+
+    fn request(self, method: &str, path: &str, body: Option<&[u8]>) {
+        if self == Trace::Off {
+            return;
+        }
+        let body = body.unwrap_or(&[]);
+        eprintln!("→ {method} {path} {} B{}", body.len(), summarise(body));
+        if self == Trace::Full && !body.is_empty() {
+            eprintln!("{}", String::from_utf8_lossy(body));
+        }
+    }
+
+    fn response(self, status: u16, body: &[u8]) {
+        if self == Trace::Off {
+            return;
+        }
+        eprintln!("← {status} {} B", body.len());
+        if self == Trace::Full && !body.is_empty() {
+            eprintln!("{}", String::from_utf8_lossy(body));
+        }
+    }
+}
+
+/// What a resume body is, without deserialising it: which payload arm, and how many
+/// module units ride along.
+fn summarise(body: &[u8]) -> String {
+    let Ok(request) = serde_json::from_slice::<ResumeRequest>(body) else {
+        return String::new();
+    };
+    match request.payload {
+        crate::protocol::ResumePayload::Bytecode(bytecode) => {
+            format!(
+                "  bytecode: {} functions, {} types",
+                bytecode.functions.len(),
+                bytecode.types.len()
+            )
+        }
+        crate::protocol::ResumePayload::Unit { unit, modules } => format!(
+            "  unit: {} own functions, {} imports; {} module unit(s) attached",
+            unit.functions.len(),
+            unit.imports.iter().map(|(_, _, i)| i.len()).sum::<usize>(),
+            modules.len()
+        ),
+    }
+}
+
 /// A non-2xx answer, or the transport failing under a request.
 #[derive(Debug)]
 pub enum RequestError {
@@ -118,6 +183,8 @@ impl Client {
         body: Option<&[u8]>,
         fingerprint: bool,
     ) -> std::io::Result<(u16, Vec<u8>)> {
+        let trace = Trace::current();
+        trace.request(method, path, body);
         let mut stream = UnixStream::connect(&self.socket)?;
         let mut head = format!("{method} {path} HTTP/1.1\r\nHost: quiv\r\nConnection: close\r\n");
         if fingerprint {
@@ -178,6 +245,7 @@ impl Client {
                 body
             }
         };
+        trace.response(status, &body);
         Ok((status, body))
     }
 
@@ -227,10 +295,10 @@ impl Client {
     pub fn resume(
         &self,
         id: u64,
-        bytecode: quiver_core::bytecode::Bytecode,
+        payload: crate::protocol::ResumePayload,
         keep: Option<Vec<usize>>,
     ) -> Result<Outcome, RequestError> {
-        let body = serde_json::to_vec(&ResumeRequest { bytecode, keep })
+        let body = serde_json::to_vec(&ResumeRequest { payload, keep })
             .map_err(|e| RequestError::Io(std::io::Error::other(e)))?;
         self.json("POST", &format!("/processes/{id}/resume"), Some(&body))
     }

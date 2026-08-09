@@ -32,7 +32,6 @@ fn session() -> (Environment<NativeEffect>, Repl<NativeEffect>) {
         workers.push(Box::new(spawn_worker(
             quiver::native_transport::SteppedClock::new(virtual_time.clone()),
             builtins.clone(),
-            false,
             i as u16,
             waker.clone(),
         )));
@@ -121,7 +120,7 @@ fn stop_resolves_blocked_evaluation_with_killed() {
         .expect("stop_process failed");
 
     match poll(&mut environment, request_id) {
-        RequestResult::Result(Err(Error::Killed), _) => {}
+        RequestResult::Result(Err(Error::Killed)) => {}
         other => panic!("expected the Killed error, got {other:?}"),
     }
 }
@@ -139,7 +138,7 @@ fn stop_tears_down_spawned_children() {
         .stop_process(session_pid)
         .expect("stop_process failed");
     match poll(&mut environment, request_id) {
-        RequestResult::Result(Err(Error::Killed), _) => {}
+        RequestResult::Result(Err(Error::Killed)) => {}
         other => panic!("expected the Killed error, got {other:?}"),
     }
 
@@ -159,7 +158,7 @@ fn stop_sleeping_session_clears_persistence_and_cascades() {
     // child outlives it, still owned across the sleep.
     let request_id = begin(&mut environment, &mut repl, "child = @#{ !'int }; 1");
     match poll(&mut environment, request_id) {
-        RequestResult::Result(Ok(_), _) => {}
+        RequestResult::Result(Ok(_)) => {}
         other => panic!("expected a value, got {other:?}"),
     }
     let child = await_child(&mut environment, session_pid, ProcessStatus::Waiting);

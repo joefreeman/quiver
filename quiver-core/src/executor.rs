@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// How one of the program's growing tables reaches a worker.
 ///
@@ -93,67 +92,6 @@ pub struct ProgramUpdate {
     /// For each tuple_id, a canonical *value-shape* id (same name + field labels). Lets `==`
     /// treat structurally-identical tuples built via different paths as equal.
     pub canonical_tuples: Arc<Vec<usize>>,
-}
-
-/// Execution statistics for profiling
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ExecutionStats {
-    /// Statistics by instruction type: (count, total_time_ns)
-    pub instruction_stats: HashMap<Opcode, (u64, u64)>,
-
-    /// Per-builtin statistics by index: (count, total_time_ns)
-    pub builtin_stats: HashMap<usize, (u64, u64)>,
-
-    /// Peak stack size across all processes
-    pub peak_stack_size: usize,
-
-    /// Peak locals size across all processes
-    pub peak_locals_size: usize,
-
-    /// Peak frame count across all processes
-    pub peak_frame_count: usize,
-}
-
-impl ExecutionStats {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Merge another ExecutionStats into this one (for aggregating from multiple executors)
-    pub fn merge(&mut self, other: &ExecutionStats) {
-        for (key, (count, time)) in &other.instruction_stats {
-            let entry = self.instruction_stats.entry(*key).or_insert((0, 0));
-            entry.0 += count;
-            entry.1 += time;
-        }
-        for (idx, (count, time)) in &other.builtin_stats {
-            let entry = self.builtin_stats.entry(*idx).or_insert((0, 0));
-            entry.0 += count;
-            entry.1 += time;
-        }
-        // Take max of peaks
-        self.peak_stack_size = self.peak_stack_size.max(other.peak_stack_size);
-        self.peak_locals_size = self.peak_locals_size.max(other.peak_locals_size);
-        self.peak_frame_count = self.peak_frame_count.max(other.peak_frame_count);
-    }
-
-    /// Update peak memory statistics if current values exceed previous peaks
-    pub fn update_peaks(&mut self, stack_size: usize, locals_size: usize, frame_count: usize) {
-        self.peak_stack_size = self.peak_stack_size.max(stack_size);
-        self.peak_locals_size = self.peak_locals_size.max(locals_size);
-        self.peak_frame_count = self.peak_frame_count.max(frame_count);
-    }
-
-    pub fn total_instructions(&self) -> u64 {
-        self.instruction_stats
-            .values()
-            .map(|(count, _)| count)
-            .sum()
-    }
-
-    pub fn total_time_ns(&self) -> u64 {
-        self.instruction_stats.values().map(|(_, time)| time).sum()
-    }
 }
 
 /// Result of processing a select source
@@ -252,8 +190,6 @@ pub struct Executor<E: Effect> {
     // Builtin registry for executing builtin functions
     builtins_registry: crate::builtins::BuiltinRegistry<E>,
     // Profiling
-    pub stats: ExecutionStats,
-    profile: bool,
     // Ref generation: worker_id (upper 16 bits) combined with counter (lower 48 bits)
     worker_id: u16,
     next_ref: u64,
@@ -779,11 +715,7 @@ impl<E: Effect> Executor<E> {
         (functions, constants)
     }
 
-    pub fn new(
-        builtins_registry: crate::builtins::BuiltinRegistry<E>,
-        profile: bool,
-        worker_id: u16,
-    ) -> Self {
+    pub fn new(builtins_registry: crate::builtins::BuiltinRegistry<E>, worker_id: u16) -> Self {
         // Pre-initialize with NIL (index 0) and OK (index 1) tuple arities.
         // This matches Program::new() so incremental updates are consistent.
         Self {
@@ -835,8 +767,6 @@ impl<E: Effect> Executor<E> {
             changed_tuple: None,
             stream_table: None,
             builtins_registry,
-            stats: ExecutionStats::new(),
-            profile,
             worker_id,
             next_ref: 0,
         }
@@ -1756,16 +1686,10 @@ impl<E: Effect> Executor<E> {
         pid: ProcessId,
         instruction: Instruction,
     ) -> Result<Option<Action<E>>, Error> {
-        let start = if self.profile {
-            Some(Instant::now())
-        } else {
-            None
-        };
-
         // Operands widen back to `usize` here: they are 24 bits in the instruction stream to
         // keep it dense (see `bytecode::Id`), but every consumer indexes a table or a stack.
         let operand = instruction.operand() as usize;
-        let result = match instruction.opcode() {
+        match instruction.opcode() {
             Opcode::Constant => self.handle_constant(proc, operand),
             Opcode::Pop => self.handle_pop(proc),
             Opcode::Duplicate => self.handle_duplicate(proc),
@@ -1803,24 +1727,7 @@ impl<E: Effect> Executor<E> {
             | Opcode::Select
             | Opcode::Process
             | Opcode::State => unreachable!("cold instruction routed to execute_hot"),
-        };
-
-        if let Some(start) = start {
-            let elapsed = start.elapsed().as_nanos() as u64;
-            let instr_type = instruction.opcode();
-            let entry = self
-                .stats
-                .instruction_stats
-                .entry(instr_type)
-                .or_insert((0, 0));
-            entry.0 += 1;
-            entry.1 += elapsed;
-
-            self.stats
-                .update_peaks(proc.stack.len(), proc.locals.len(), proc.frames.len());
         }
-
-        result
     }
 
     /// Cold path: control/concurrency ops that need the process in the map (and may touch
@@ -1831,13 +1738,7 @@ impl<E: Effect> Executor<E> {
         instruction: Instruction,
         current_time_ms: u64,
     ) -> Result<Option<Action<E>>, Error> {
-        let start = if self.profile {
-            Some(Instant::now())
-        } else {
-            None
-        };
-
-        let result = match instruction.opcode() {
+        match instruction.opcode() {
             Opcode::Spawn => self.handle_spawn(pid),
             Opcode::Send => self.handle_send(pid),
             Opcode::Self_ => self.handle_self(pid),
@@ -1845,29 +1746,7 @@ impl<E: Effect> Executor<E> {
             Opcode::Process => self.handle_process_ref(pid, instruction.operand() as usize),
             Opcode::State => self.handle_state(pid),
             _ => unreachable!("hot instruction routed to execute_cold"),
-        };
-
-        if let Some(start) = start {
-            let elapsed = start.elapsed().as_nanos() as u64;
-            let instr_type = instruction.opcode();
-            let entry = self
-                .stats
-                .instruction_stats
-                .entry(instr_type)
-                .or_insert((0, 0));
-            entry.0 += 1;
-            entry.1 += elapsed;
-
-            if let Some(process) = self.processes.get(&pid) {
-                self.stats.update_peaks(
-                    process.stack.len(),
-                    process.locals.len(),
-                    process.frames.len(),
-                );
-            }
         }
-
-        result
     }
 
     /// Resolve a binary constant to owned bytes, materialising and caching them on first use so
@@ -2383,12 +2262,6 @@ impl<E: Effect> Executor<E> {
                     }
                 }
 
-                let start = if self.profile {
-                    Some(Instant::now())
-                } else {
-                    None
-                };
-
                 // The context wraps the step-local `proc` (out of the map for the
                 // slice) and the executor; its verbs mutate the caller's record and
                 // queue at most one routed action.
@@ -2399,13 +2272,6 @@ impl<E: Effect> Executor<E> {
                     let action = ctx.take_action();
                     (result, action)
                 };
-
-                if let Some(start) = start {
-                    let elapsed = start.elapsed().as_nanos() as u64;
-                    let entry = self.stats.builtin_stats.entry(builtin_id).or_insert((0, 0));
-                    entry.0 += 1;
-                    entry.1 += elapsed;
-                }
 
                 match result? {
                     crate::builtins::Completion::Value(value) => {
@@ -3958,7 +3824,7 @@ mod process_adjacency_tests {
     }
 
     fn executor() -> Executor<TestEffect> {
-        Executor::new(BuiltinRegistry::new(), false, 0)
+        Executor::new(BuiltinRegistry::new(), 0)
     }
 
     fn pid(id: ProcessId) -> Value {
@@ -4085,7 +3951,7 @@ mod awaiting_lifecycle_tests {
     }
 
     fn executor() -> Executor<TestEffect> {
-        Executor::new(BuiltinRegistry::new(), false, 0)
+        Executor::new(BuiltinRegistry::new(), 0)
     }
 
     fn adjacency(ex: &Executor<TestEffect>, pid: ProcessId) -> ProcessAdjacency {
@@ -4218,7 +4084,7 @@ mod annotation_tests {
     }
 
     fn executor() -> Executor<TestEffect> {
-        Executor::new(BuiltinRegistry::new(), false, 0)
+        Executor::new(BuiltinRegistry::new(), 0)
     }
 
     #[test]
@@ -4362,7 +4228,7 @@ mod reactive_notification_tests {
     }
 
     fn executor() -> Executor<TestEffect> {
-        Executor::new(BuiltinRegistry::new(), false, 0)
+        Executor::new(BuiltinRegistry::new(), 0)
     }
 
     /// A target process at a root frame (so `record_state` fires) with the given state.

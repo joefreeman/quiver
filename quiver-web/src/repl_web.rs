@@ -697,7 +697,7 @@ impl Environment {
         result: RequestResult,
     ) {
         match result {
-            RequestResult::Result(Ok(value), _) => {
+            RequestResult::Result(Ok(value)) => {
                 // The JS bridge speaks `(Value, heap)`; a wire value renders to that pair.
                 let (core, heap) = value.for_display();
                 callback.invoke(crate::types::Result::ok(Some(EvaluationResult {
@@ -706,7 +706,7 @@ impl Environment {
                     result_type: callback.result_type.clone(),
                 })));
             }
-            RequestResult::Result(Err(e), _) => {
+            RequestResult::Result(Err(e)) => {
                 // A `Killed` result can only come from a host stop (`Repl.interrupt`) —
                 // no in-language kill reaches a persistent session process — so report
                 // it as the interruption it is rather than a runtime error.

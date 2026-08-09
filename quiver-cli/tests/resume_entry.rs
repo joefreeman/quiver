@@ -20,7 +20,6 @@ fn environment() -> Environment<NativeEffect> {
         workers.push(Box::new(spawn_worker(
             quiver_cli::native_transport::SteppedClock::new(virtual_time.clone()),
             builtins.clone(),
-            false,
             i as u16,
             waker.clone(),
         )));
@@ -33,7 +32,7 @@ fn environment() -> Environment<NativeEffect> {
 fn compile(source: &str) -> quiver_core::bytecode::Bytecode {
     let ast = quiver_compiler::parse(source).expect("parse failed");
     let resolver = quiver_compiler::PackageResolver::inline();
-    let (program, entry) = quiver_cli::compile::compile_entry(
+    let (program, _module_cache, entry) = quiver_cli::compile::compile_entry(
         ast,
         &resolver,
         &quiver_cli::build_builtin_registry(),
@@ -49,7 +48,7 @@ fn await_result(environment: &mut Environment<NativeEffect>, request: u64) -> St
     loop {
         environment.step().expect("step failed");
         match environment.poll_request(request).expect("poll failed") {
-            Some(RequestResult::Result(Ok(value), _)) => return environment.format_value(&value),
+            Some(RequestResult::Result(Ok(value))) => return environment.format_value(&value),
             Some(other) => panic!("unexpected result: {other:?}"),
             None => {
                 assert!(Instant::now() < deadline, "request never resolved");

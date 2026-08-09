@@ -1,13 +1,13 @@
 use crate::WorkerId;
 use crate::messages::{Command, Event, SubscriptionKind, SubscriptionPayload};
 use crate::transport::WorkerHandle;
+use quiver_compiler::CompiledUnit;
 use quiver_compiler::compiler::{
     Bindings, Scope, ScopeKind, TypeAliasDef, resolve_type_alias_for_display,
 };
+use quiver_compiler::resolver::ModuleId;
 use quiver_core::bytecode::{Bytecode, Constant, Function};
-use quiver_core::compatibility::{
-    CompatibilityInput, CompatibilityTables, compute_canonical_tuples, compute_field_offsets,
-};
+use quiver_core::compatibility::{CompatibilityInput, CompatibilityTables};
 use quiver_core::effects::{Effect, EffectBackend, ResultTupleInfo};
 use quiver_core::executor::{ProgramUpdate, TableUpdate};
 use quiver_core::process::{
@@ -123,7 +123,7 @@ fn collect_request_result_refs(
     constants: &mut HashSet<usize>,
 ) {
     match result {
-        RequestResult::Result(Ok(value), _) => value.collect_code_refs(functions, constants),
+        RequestResult::Result(Ok(value)) => value.collect_code_refs(functions, constants),
         RequestResult::Locals(values) => {
             for value in values {
                 value.collect_code_refs(functions, constants);
@@ -323,8 +323,17 @@ pub enum EnvironmentError {
     FunctionNotFound(usize),
 
     // Data operations
-    LocalNotFound { process_id: ProcessId, index: usize },
+    LocalNotFound {
+        process_id: ProcessId,
+        index: usize,
+    },
     HeapData(String),
+
+    /// A unit named a module key the environment does not hold. The caller must send
+    /// that module's unit and retry — the environment sources code only from requests.
+    ModuleNotLinked(u64),
+    /// Linking a unit failed (a builtin this host does not provide, most likely).
+    Link(String),
 
     // Communication
     WorkerCommunication(String),
@@ -363,6 +372,10 @@ impl std::fmt::Display for EnvironmentError {
                 )
             }
             EnvironmentError::HeapData(msg) => write!(f, "heap data: {}", msg),
+            EnvironmentError::ModuleNotLinked(key) => {
+                write!(f, "module {key:016x} is not linked in this environment")
+            }
+            EnvironmentError::Link(message) => write!(f, "link failed: {message}"),
             EnvironmentError::WorkerCommunication(msg) => {
                 write!(f, "worker communication: {}", msg)
             }
@@ -385,10 +398,7 @@ impl std::error::Error for EnvironmentError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestResult {
-    Result(
-        Result<WireValue, quiver_core::error::Error>,
-        Option<quiver_core::executor::ExecutionStats>,
-    ),
+    Result(Result<WireValue, quiver_core::error::Error>),
     Statuses(HashMap<ProcessId, ProcessStatus>),
     WorkerInfo(Vec<quiver_core::process::WorkerInfo>),
     ProcessTypes(HashMap<ProcessId, (Type, usize)>),
@@ -485,6 +495,15 @@ pub struct Environment<E: Effect> {
     spawns_since_collection: usize,
     collection_threshold: usize,
     reclaimed_total: usize,
+    /// Module units linked into this program, keyed by artifact key: the session
+    /// function ids of each module's own functions, in its own index order — what an
+    /// importing unit's entries resolve through.
+    ///
+    /// In memory only, and populated solely by what clients send: the environment has no
+    /// artifact store and never sources code from anywhere but the request that needs it.
+    /// A code sweep may stub a linked module nothing references, at which point its entry
+    /// is dropped and the next request naming that key must send it again.
+    linked_modules: HashMap<u64, Vec<usize>>,
     // Code-reclamation state: growth since the last code sweep drives the trigger, the
     // request flag forces one on the next round, and the totals are metric/test hooks.
     code_registered_since_sweep: usize,
@@ -515,6 +534,7 @@ impl<E: Effect> Environment<E> {
             spawns_since_collection: 0,
             collection_threshold: DEFAULT_COLLECTION_THRESHOLD,
             reclaimed_total: 0,
+            linked_modules: HashMap::new(),
             code_registered_since_sweep: 0,
             code_collection_threshold: DEFAULT_CODE_COLLECTION_THRESHOLD,
             code_collection_requested: false,
@@ -669,7 +689,24 @@ impl<E: Effect> Environment<E> {
             Some(bc) => Some(self.merge_bytecode(bc)?),
             None => None,
         };
+        self.start_process_at(function_index)
+    }
 
+    /// Start a process on a unit rather than on bytecode: link it (its imports must
+    /// already be linked — see [`Self::link_module_unit`]) and start at its entry.
+    pub fn start_process_unit(
+        &mut self,
+        unit: &CompiledUnit,
+        builtins: &quiver_core::builtins::BuiltinRegistry<E>,
+    ) -> Result<ProcessId, EnvironmentError> {
+        let function_index = self.link_entry_unit(unit, builtins)?;
+        self.start_process_at(Some(function_index))
+    }
+
+    fn start_process_at(
+        &mut self,
+        function_index: Option<usize>,
+    ) -> Result<ProcessId, EnvironmentError> {
         let pid = self.allocate_process_id();
         let worker_id = pid % self.workers.len(); // Round-robin
 
@@ -692,7 +729,43 @@ impl<E: Effect> Environment<E> {
     ) -> Result<(), EnvironmentError> {
         // Merge bytecode and get remapped function index
         let function_index = self.merge_bytecode(bytecode)?;
+        self.resume_process_at(pid, function_index)
+    }
 
+    /// Resume a process on a unit rather than on bytecode: link it (its imports must
+    /// already be linked — see [`Self::link_module_unit`]) and resume at its entry.
+    pub fn resume_process_unit(
+        &mut self,
+        pid: ProcessId,
+        unit: &CompiledUnit,
+        builtins: &quiver_core::builtins::BuiltinRegistry<E>,
+    ) -> Result<(), EnvironmentError> {
+        let function_index = self.link_entry_unit(unit, builtins)?;
+        self.resume_process_at(pid, function_index)
+    }
+
+    /// Link a unit that has an entry point, answering the session function id to run.
+    /// Unlike a module's unit this is not memoised: a line is compiled once and run
+    /// once, and its functions are ordinary code the sweep may reclaim when nothing
+    /// references them any more.
+    fn link_entry_unit(
+        &mut self,
+        unit: &CompiledUnit,
+        builtins: &quiver_core::builtins::BuiltinRegistry<E>,
+    ) -> Result<usize, EnvironmentError> {
+        let entry = unit
+            .entry
+            .ok_or_else(|| EnvironmentError::Link("unit has no entry point".to_string()))?;
+        let resolved = self.resolve_unit_imports(unit)?;
+        let own_map = self.link_and_ship(unit, "unit", &resolved, builtins)?;
+        Ok(own_map[entry])
+    }
+
+    fn resume_process_at(
+        &mut self,
+        pid: ProcessId,
+        function_index: usize,
+    ) -> Result<(), EnvironmentError> {
         let worker_id = self
             .process_router
             .get(&pid)
@@ -706,6 +779,110 @@ impl<E: Effect> Environment<E> {
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 
         Ok(())
+    }
+
+    /// The module keys this unit imports that the environment does not hold, in the
+    /// order the unit names them. An empty answer means the unit can be linked.
+    pub fn missing_modules(&self, unit: &CompiledUnit) -> Vec<(ModuleId, u64)> {
+        let mut missing = Vec::new();
+        for (module, key, _) in &unit.imports {
+            if !self.linked_modules.contains_key(key) && !missing.iter().any(|(_, k)| k == key) {
+                missing.push((module.clone(), *key));
+            }
+        }
+        missing
+    }
+
+    /// Whether a module's unit is already linked under `key`.
+    pub fn holds_module(&self, key: u64) -> bool {
+        self.linked_modules.contains_key(&key)
+    }
+
+    /// Link a module's unit under its artifact `key`, so units importing it can resolve
+    /// their entries. Idempotent — a key already held is a no-op — and every module this
+    /// one imports must already be linked, which is what [`Self::missing_modules`] asks
+    /// for.
+    ///
+    /// Functions register through the structural interner rather than by appending. A
+    /// module linked here has no artifact to attribute, and interning is what lets a
+    /// re-link after a code sweep revive the very slots that were stubbed instead of
+    /// stranding them.
+    pub fn link_module_unit(
+        &mut self,
+        key: u64,
+        unit: &CompiledUnit,
+        builtins: &quiver_core::builtins::BuiltinRegistry<E>,
+    ) -> Result<(), EnvironmentError> {
+        if self.linked_modules.contains_key(&key) {
+            return Ok(());
+        }
+        let resolved = self.resolve_unit_imports(unit)?;
+        let own_map =
+            self.link_and_ship(unit, &format!("module {key:016x}"), &resolved, builtins)?;
+        self.linked_modules.insert(key, own_map);
+        Ok(())
+    }
+
+    /// Resolve a unit's import entries through the modules already linked here. Only a
+    /// key this environment does not hold is answerable — the caller sends that module
+    /// and retries.
+    fn resolve_unit_imports(&self, unit: &CompiledUnit) -> Result<Vec<usize>, EnvironmentError> {
+        quiver_compiler::resolve_imports_from(unit, &self.linked_modules)
+            .map_err(EnvironmentError::ModuleNotLinked)
+    }
+
+    /// Link a unit and ship whatever it added to the workers, answering the session ids
+    /// of its own functions.
+    fn link_and_ship(
+        &mut self,
+        unit: &CompiledUnit,
+        label: &str,
+        resolved: &[usize],
+        builtins: &quiver_core::builtins::BuiltinRegistry<E>,
+    ) -> Result<Vec<usize>, EnvironmentError> {
+        let old_constants_len = self.program.get_constants().len();
+        let old_functions_len = self.program.get_functions().len();
+        let old_tuples_len = self.program.get_tuples().len();
+        let old_builtins_len = self.program.get_builtins().len();
+        let old_types_len = self.program.get_types().len();
+
+        let remaps = quiver_compiler::link_unit(
+            unit,
+            label,
+            &mut self.program,
+            resolved,
+            builtins,
+            quiver_compiler::Registration::Intern,
+        )
+        .map_err(|error| EnvironmentError::Link(format!("{error:?}")))?;
+        let own_map: Vec<usize> = (0..unit.functions.len())
+            .map(|local| remaps.functions[&local])
+            .collect();
+
+        // Same bookkeeping a merge does: revived stubs must reach append-only workers
+        // explicitly, and everything this link touched is outside the round's dead set.
+        let (revived_functions, revived_constants) = self.program.take_revived();
+        if let Some(state) = self.collection.as_mut() {
+            state
+                .code_exclusion_functions
+                .extend(remaps.functions.values().copied());
+            state
+                .code_exclusion_constants
+                .extend(remaps.constants.values().copied());
+        }
+        self.code_registered_since_sweep += (self.program.get_functions().len()
+            - old_functions_len)
+            + (self.program.get_constants().len() - old_constants_len);
+        self.send_program_update(
+            old_constants_len,
+            old_functions_len,
+            old_tuples_len,
+            old_types_len,
+            old_builtins_len,
+            revived_functions,
+            revived_constants,
+        )?;
+        Ok(own_map)
     }
 
     /// Stop a host-started (persistent) process: the host-side sibling of `%proc.kill`,
@@ -724,8 +901,7 @@ impl<E: Effect> Environment<E> {
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))
     }
 
-    /// Request a process result (async operation)
-    /// Stats are included in the response if the executor has profiling enabled.
+    /// Request a process result (async operation).
     /// `keep_locals` is the REPL's keep-set (see [`Command::GetResult`]); pass `None` for
     /// non-REPL callers that have no orphaned locals to reclaim.
     pub fn request_result(
@@ -1261,13 +1437,15 @@ impl<E: Effect> Environment<E> {
                 functions: self.program.get_functions(),
                 builtins: self.program.get_builtins(),
                 resource_names: &resource_names,
+                field_names: self.program.get_field_names(),
             };
 
             // Extend the incrementally-maintained compatibility tables to the merged
             // program; workers receive them whole and replace their copies.
             self.compatibility.update(&input);
             if std::env::var("QUIVER_VERIFY_COMPAT").is_ok() {
-                self.compatibility.assert_matches_full(&input);
+                let reclaimed = self.program.stubbed_counts() != (0, 0);
+                self.compatibility.assert_matches_full(&input, reclaimed);
             }
             // Built once and wrapped once. `update_cmd.clone()` below runs per worker, so
             // without the `Arc` each of these tables was deep-copied N times into N identical
@@ -1277,11 +1455,11 @@ impl<E: Effect> Environment<E> {
             let type_compatibility = Arc::new(self.compatibility.type_compatibility.clone());
             let function_param_compatibility = Arc::new(self.compatibility.function_params.clone());
             let builtin_param_compatibility = Arc::new(self.compatibility.builtin_params.clone());
-            let canonical_tuples = Arc::new(compute_canonical_tuples(self.program.get_tuples()));
-            let field_offsets = Arc::new(compute_field_offsets(
-                self.program.get_field_names(),
-                self.program.get_tuples(),
-            ));
+            // Maintained incrementally alongside the compatibility tables: both are pure
+            // functions of append-only registries, so rebuilding them per update was
+            // O(program) work for an O(delta) change.
+            let canonical_tuples = Arc::new(self.compatibility.canonical_tuples.clone());
+            let field_offsets = Arc::new(self.compatibility.field_offsets.clone());
 
             // Shape the growing tables to the transport. Where the workers are threads, each
             // takes the whole merged table by pointer and they all reference one allocation —
@@ -1348,13 +1526,17 @@ impl<E: Effect> Environment<E> {
     /// merge.
     pub fn verify_compatibility_tables(&self) {
         let resource_names = self.program.collect_resource_names();
-        self.compatibility.assert_matches_full(&CompatibilityInput {
-            types: self.program.get_types(),
-            tuples: self.program.get_tuples(),
-            functions: self.program.get_functions(),
-            builtins: self.program.get_builtins(),
-            resource_names: &resource_names,
-        });
+        self.compatibility.assert_matches_full(
+            &CompatibilityInput {
+                types: self.program.get_types(),
+                tuples: self.program.get_tuples(),
+                functions: self.program.get_functions(),
+                builtins: self.program.get_builtins(),
+                resource_names: &resource_names,
+                field_names: self.program.get_field_names(),
+            },
+            self.program.stubbed_counts() != (0, 0),
+        );
     }
 
     fn handle_event(&mut self, event: Event<E>) -> Result<(), EnvironmentError> {
@@ -1374,11 +1556,9 @@ impl<E: Effect> Environment<E> {
             Event::ProcessResults { awaiter, results } => {
                 self.handle_process_results(awaiter, results)
             }
-            Event::ResultResponse {
-                request_id,
-                result,
-                stats,
-            } => self.handle_result_response(request_id, result, stats),
+            Event::ResultResponse { request_id, result } => {
+                self.handle_result_response(request_id, result)
+            }
             Event::StatusesResponse { request_id, result } => {
                 self.handle_statuses_response(request_id, result)
             }
@@ -1387,9 +1567,6 @@ impl<E: Effect> Environment<E> {
             }
             Event::ProcessTypesResponse { request_id, result } => {
                 self.handle_process_types_response(request_id, result)
-            }
-            Event::StatsResponse { request_id, result } => {
-                self.handle_stats_response(request_id, result)
             }
             Event::InfoResponse { request_id, result } => {
                 self.handle_info_response(request_id, result)
@@ -1740,6 +1917,15 @@ impl<E: Effect> Environment<E> {
 
         let before = self.program.stubbed_counts();
         self.program.reclaim_code(&dead_functions, &dead_constants);
+        // A linked module whose functions have been stubbed is no longer linked: drop the
+        // entry so the next request naming that key is answered with "send it again"
+        // rather than resolving imports onto reclaimed stubs. Re-linking the same content
+        // revives the very slots that were stubbed, so this costs a re-send, not growth.
+        self.linked_modules.retain(|_, functions| {
+            !functions
+                .iter()
+                .any(|index| self.program.function_stubbed(*index))
+        });
         let after = self.program.stubbed_counts();
         self.code_reclaimed_functions_total += after.0 - before.0;
         self.code_reclaimed_constants_total += after.1 - before.1;
@@ -2031,11 +2217,9 @@ impl<E: Effect> Environment<E> {
         &mut self,
         request_id: u64,
         result: Result<WireValue, quiver_core::error::Error>,
-        stats: Option<quiver_core::executor::ExecutionStats>,
     ) -> Result<(), EnvironmentError> {
-        // Stats come directly from the worker that executed the process
         self.pending_requests
-            .insert(request_id, Some(RequestResult::Result(result, stats)));
+            .insert(request_id, Some(RequestResult::Result(result)));
         Ok(())
     }
 
@@ -2258,16 +2442,6 @@ impl<E: Effect> Environment<E> {
                 (pid, (process_type, function_index))
             })
             .collect()
-    }
-
-    fn handle_stats_response(
-        &mut self,
-        _request_id: u64,
-        _result: Result<quiver_core::executor::ExecutionStats, EnvironmentError>,
-    ) -> Result<(), EnvironmentError> {
-        // Stats are now bundled with results from the worker directly
-        // This handler is kept for completeness but shouldn't be called
-        Ok(())
     }
 
     fn handle_info_response(

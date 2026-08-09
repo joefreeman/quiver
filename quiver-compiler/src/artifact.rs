@@ -15,8 +15,9 @@
 //! references (transitively closed) and the linker re-interns them into a session's
 //! program. Only functions and builtins are nominal: the artifact's function id
 //! space is its own functions, then its imports — a table naming `(module, that
-//! module's own index)`, grouped by module, every named module lying in the
-//! artifact's transitive value-import closure and hence covered by its key — and
+//! module's artifact key, that module's own index)`, grouped by module, every named
+//! module lying in the artifact's transitive value-import closure and hence covered
+//! by its key — and
 //! builtins are named strings resolved against the host registry at link time (which
 //! is where capability checking happens: a host that doesn't provide a builtin
 //! refuses to link a module requiring it).
@@ -55,44 +56,66 @@ pub fn compiler_fingerprint() -> &'static str {
     env!("QUIVER_COMPILER_FINGERPRINT")
 }
 
-/// A compiled module in artifact-local id space. Pure canonical data: every
-/// collection is a vector in deterministic order, so equal modules serialize to
-/// equal bytes.
+/// Relocatable compiled code in unit-local id space: the value-like tables it
+/// references, the functions it owns, and an import table naming everything else. Pure
+/// canonical data — every collection is a vector in deterministic order, so equal units
+/// serialize to equal bytes.
+///
+/// Both halves of the system produce one: a module compile produces the unit inside its
+/// [`ModuleArtifact`], and a REPL line or program entry produces a standalone one. It is
+/// the only thing the linker links.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ModuleArtifact {
-    pub id: ModuleId,
-    /// Value-like tables. References within them are artifact-local and point
-    /// strictly downward (the program's registration order is topological, and
-    /// extraction preserves it).
+pub struct CompiledUnit {
+    /// Value-like tables. References within them are unit-local and point strictly
+    /// downward (the program's registration order is topological, and extraction
+    /// preserves it).
     pub types: Vec<Type>,
     pub tuples: Vec<TupleTypeInfo>,
     pub constants: Vec<Constant>,
     pub annotation_keys: Vec<String>,
     pub field_names: Vec<String>,
-    /// `(artifact tuple id, field index)` pairs marked label-omittable.
+    /// `(unit tuple id, field index)` pairs marked label-omittable.
     pub omittable_labels: Vec<(usize, usize)>,
-    /// The functions the module's own compile registered, in registration order —
-    /// artifact function ids `0..functions.len()`, the positions other modules'
-    /// import entries reference. Identical in every session: the compiler's dedup
-    /// floor keeps a module's functions its own even when structurally identical to
-    /// another module's.
+    /// The functions this compile registered, in registration order — unit function ids
+    /// `0..functions.len()`, the positions other modules' import entries reference.
+    /// Identical in every session: the compiler's dedup floor keeps a module's functions
+    /// its own even when structurally identical to another module's.
     pub functions: Vec<Function>,
     /// Imported functions, grouped by module and continuing the id space after
     /// [`Self::functions`]: groups in `ModuleId` order, entries (the *dependency's*
-    /// own-function indices) ascending — artifact function ids assigned in that
-    /// flattened order.
-    pub imports: Vec<(ModuleId, Vec<usize>)>,
-    /// Referenced builtins; artifact builtin ids index this list. Nominal — resolved
-    /// against the host registry at link time — except for an instantiated
-    /// type-consuming builtin, whose type argument is artifact-local and re-interned
-    /// with the rest.
+    /// own-function indices) ascending — unit function ids assigned in that flattened
+    /// order.
+    ///
+    /// Each group names the dependency's **artifact key** as well as its id. Within the
+    /// compiler's own import pipeline the id alone would do: keys are Merkle-recursive,
+    /// so a module could not have been keyed unless its dependency's key resolved, and
+    /// the session holding it necessarily linked that exact version. The key makes the
+    /// requirement explicit rather than implicit, which is what a linker outside that
+    /// pipeline needs — it cannot assume one module per name.
+    pub imports: Vec<(ModuleId, u64, Vec<usize>)>,
+    /// Referenced builtins; unit builtin ids index this list. Nominal — resolved against
+    /// the host registry at link time — except for an instantiated type-consuming
+    /// builtin, whose type argument is unit-local and re-interned with the rest.
     pub builtins: Vec<ArtifactBuiltin>,
-    /// Failure-provenance sites (debug artifacts; empty in release ones).
+    /// Failure-provenance sites (debug builds; empty in release ones).
     pub sites: Vec<Site>,
-    /// The evaluated module value, in artifact space.
+    /// The function to run, for a unit that is a program entry or a REPL line. `None`
+    /// for a module: its wrapper runs at compile time and is not part of what ships —
+    /// the resulting value is, on the artifact.
+    pub entry: Option<usize>,
+}
+
+/// A compiled module: its [`CompiledUnit`], plus the compile-time metadata only a module
+/// has. Stored under a content key (see [`module_key`]) and consumed by the compiler
+/// alone — what reaches a runtime is [`Self::unit`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModuleArtifact {
+    pub id: ModuleId,
+    pub unit: CompiledUnit,
+    /// The evaluated module value, in unit space.
     pub value: Value,
     pub module_type: Type,
-    /// Return-type dispatch tables (see `CachedModule`), in artifact space:
+    /// Return-type dispatch tables (see `CachedModule`), in unit space:
     /// function id → `(guard type, result type)` branches.
     pub fn_case_tables: Vec<(usize, Vec<(usize, usize)>)>,
     /// Callable type id → dispatch function id.
@@ -128,22 +151,22 @@ pub struct ArtifactBuiltin {
     pub type_argument: Option<usize>,
 }
 
-impl ModuleArtifact {
-    /// The modules this artifact's function imports name, in group order.
+impl CompiledUnit {
+    /// The modules this unit's function imports name, in group order.
     pub fn dependencies(&self) -> Vec<ModuleId> {
         self.imports
             .iter()
-            .map(|(module, _)| module.clone())
+            .map(|(module, _, _)| module.clone())
             .collect()
     }
 
-    /// The size of the artifact's function id space (own + imports).
+    /// The size of the unit's function id space (own + imports).
     fn function_space(&self) -> usize {
         self.functions.len()
             + self
                 .imports
                 .iter()
-                .map(|(_, indices)| indices.len())
+                .map(|(_, _, indices)| indices.len())
                 .sum::<usize>()
     }
 }
@@ -450,17 +473,28 @@ enum FunctionClass {
     Foreign,
 }
 
-fn classify(
-    function_id: usize,
-    id: &ModuleId,
-    eligible: &HashSet<ModuleId>,
-    module_cache: &ModuleCache,
-) -> FunctionClass {
-    match module_cache.function_owners.get(&function_id) {
-        Some((owner, _)) if owner == id => FunctionClass::Own,
-        Some((owner, index)) if eligible.contains(owner) => {
-            FunctionClass::Import(owner.clone(), *index)
+/// Whose functions an extraction is collecting.
+enum Owner<'a> {
+    /// A module's: its own functions are the ones it registered, and it may import only
+    /// from its transitive value-import closure, which its key covers.
+    Module {
+        id: &'a ModuleId,
+        eligible: &'a HashSet<ModuleId>,
+    },
+    /// A unit with no module identity — a REPL line, a program entry. It owns every
+    /// function no module claims, and may import from any module the session linked,
+    /// because its import entries name keys rather than relying on a covering key.
+    Unit,
+}
+
+fn classify(function_id: usize, owner: &Owner, module_cache: &ModuleCache) -> FunctionClass {
+    match (owner, module_cache.function_owners.get(&function_id)) {
+        (Owner::Module { id, .. }, Some((holder, _))) if holder == *id => FunctionClass::Own,
+        (Owner::Module { eligible, .. }, Some((holder, index))) if eligible.contains(holder) => {
+            FunctionClass::Import(holder.clone(), *index)
         }
+        (Owner::Unit, Some((holder, index))) => FunctionClass::Import(holder.clone(), *index),
+        (Owner::Unit, None) => FunctionClass::Own,
         _ => FunctionClass::Foreign,
     }
 }
@@ -485,8 +519,7 @@ struct Uncacheable;
 fn drain(
     queue: &mut Vec<Item>,
     closure: &mut Closure,
-    id: &ModuleId,
-    eligible: &HashSet<ModuleId>,
+    owner: &Owner,
     program: &Program,
     module_cache: &ModuleCache,
 ) -> Result<(), Uncacheable> {
@@ -508,19 +541,17 @@ fn drain(
                     add_type(*field_type, closure, queue);
                 }
             }
-            Item::Function(function_id) => {
-                match classify(function_id, id, eligible, module_cache) {
-                    FunctionClass::Own => {
-                        let function = &program.get_functions()[function_id];
-                        add_type(function.type_id, closure, queue);
-                        for instruction in &function.instructions {
-                            collect_instruction(instruction, closure, queue);
-                        }
+            Item::Function(function_id) => match classify(function_id, owner, module_cache) {
+                FunctionClass::Own => {
+                    let function = &program.get_functions()[function_id];
+                    add_type(function.type_id, closure, queue);
+                    for instruction in &function.instructions {
+                        collect_instruction(instruction, closure, queue);
                     }
-                    FunctionClass::Import(..) => {}
-                    FunctionClass::Foreign => return Err(Uncacheable),
                 }
-            }
+                FunctionClass::Import(..) => {}
+                FunctionClass::Foreign => return Err(Uncacheable),
+            },
             Item::Site(site_id) => {
                 let site = &program
                     .debug_sites()
@@ -661,6 +692,7 @@ pub(crate) fn extract(
         .value_closures
         .get(id)
         .expect("module value closure must be recorded before extraction");
+    let owner = &Owner::Module { id, eligible };
 
     // Seed the closure from the module's roots and chase type/tuple/site/own-
     // function references to a fixpoint. Imported functions and builtins are
@@ -675,37 +707,13 @@ pub(crate) fn extract(
     // reachable entities are numbered before a later function's.
     for &function_id in &module_cache.module_functions[id] {
         add_function(function_id, &mut closure, &mut queue);
-        drain(
-            &mut queue,
-            &mut closure,
-            id,
-            eligible,
-            program,
-            module_cache,
-        )
-        .ok()?;
+        drain(&mut queue, &mut closure, owner, program, module_cache).ok()?;
     }
     // 2. The module value, then its type.
     collect_value(&cached.value, &mut closure, &mut queue);
-    drain(
-        &mut queue,
-        &mut closure,
-        id,
-        eligible,
-        program,
-        module_cache,
-    )
-    .ok()?;
+    drain(&mut queue, &mut closure, owner, program, module_cache).ok()?;
     collect_type(&cached.module_type, &mut closure, &mut queue);
-    drain(
-        &mut queue,
-        &mut closure,
-        id,
-        eligible,
-        program,
-        module_cache,
-    )
-    .ok()?;
+    drain(&mut queue, &mut closure, owner, program, module_cache).ok()?;
     // 3. The namespace: default alias, then named aliases by name.
     let mut named_aliases: Vec<(&String, &TypeAliasDef)> = namespace.named.iter().collect();
     named_aliases.sort_by_key(|(name, _)| (*name).clone());
@@ -715,22 +723,14 @@ pub(crate) fn extract(
         .chain(named_aliases.iter().map(|(_, def)| *def))
     {
         add_type(def.type_id, &mut closure, &mut queue);
-        drain(
-            &mut queue,
-            &mut closure,
-            id,
-            eligible,
-            program,
-            module_cache,
-        )
-        .ok()?;
+        drain(&mut queue, &mut closure, owner, program, module_cache).ok()?;
     }
     // 4. Dispatch tables. Their map keys are session ids, so entries order by the
     // canonical function classification — and, for the type-keyed tables, by the
     // type's first-reach position (or a structural fingerprint for a type nothing
     // else reached; sort keys snapshot before any entry's traversal mutates state).
     let fn_key = |function_id: usize| -> FnSortKey {
-        match classify(function_id, id, eligible, module_cache) {
+        match classify(function_id, owner, module_cache) {
             FunctionClass::Own => FnSortKey::Own(module_cache.function_owners[&function_id].1),
             FunctionClass::Import(module, index) => FnSortKey::Import(module, index),
             // The delta capture filters foreign-owned dispatch entries.
@@ -755,15 +755,7 @@ pub(crate) fn extract(
             add_type(*guard, &mut closure, &mut queue);
             add_type(*result, &mut closure, &mut queue);
         }
-        drain(
-            &mut queue,
-            &mut closure,
-            id,
-            eligible,
-            program,
-            module_cache,
-        )
-        .ok()?;
+        drain(&mut queue, &mut closure, owner, program, module_cache).ok()?;
     }
     type CaseEntry = (usize, usize, FnSortKey, TypeSortKey);
     let mut case_entries: Vec<CaseEntry> = cached
@@ -782,15 +774,7 @@ pub(crate) fn extract(
     for (type_id, function_id, ..) in case_entries {
         add_type(type_id, &mut closure, &mut queue);
         add_function(function_id, &mut closure, &mut queue);
-        drain(
-            &mut queue,
-            &mut closure,
-            id,
-            eligible,
-            program,
-            module_cache,
-        )
-        .ok()?;
+        drain(&mut queue, &mut closure, owner, program, module_cache).ok()?;
     }
     let mut param_keys: Vec<(usize, TypeSortKey)> = cached
         .callable_type_params
@@ -800,15 +784,7 @@ pub(crate) fn extract(
     param_keys.sort_by_key(|(_, key)| *key);
     for (type_id, _) in param_keys {
         add_type(type_id, &mut closure, &mut queue);
-        drain(
-            &mut queue,
-            &mut closure,
-            id,
-            eligible,
-            program,
-            module_cache,
-        )
-        .ok()?;
+        drain(&mut queue, &mut closure, owner, program, module_cache).ok()?;
     }
 
     // Partition the function closure. Own functions take artifact ids by
@@ -819,7 +795,7 @@ pub(crate) fn extract(
     let own_ids: Vec<usize> = module_cache.module_functions[id].clone();
     let mut import_entries: Vec<(ModuleId, usize, usize)> = Vec::new();
     for &function_id in closure.functions.iter() {
-        match classify(function_id, id, eligible, module_cache) {
+        match classify(function_id, owner, module_cache) {
             FunctionClass::Own => {}
             FunctionClass::Import(module, index) => {
                 import_entries.push((module, index, function_id));
@@ -828,11 +804,17 @@ pub(crate) fn extract(
         }
     }
     import_entries.sort();
-    let mut imports: Vec<(ModuleId, Vec<usize>)> = Vec::new();
+    let mut imports: Vec<(ModuleId, u64, Vec<usize>)> = Vec::new();
     for (module, dep_index, _) in &import_entries {
         match imports.last_mut() {
-            Some((last, indices)) if last == module => indices.push(*dep_index),
-            _ => imports.push((module.clone(), vec![*dep_index])),
+            Some((last, _, indices)) if last == module => indices.push(*dep_index),
+            _ => {
+                // The dependency's key is memoised by the recursive computation that
+                // keyed this module, so a miss means the module was never keyable —
+                // extract nothing rather than store an artifact that cannot be checked.
+                let key = *module_cache.key_cache.get(module)?;
+                imports.push((module.clone(), key, vec![*dep_index]));
+            }
         }
     }
 
@@ -878,8 +860,7 @@ pub(crate) fn extract(
         }
     };
 
-    let artifact = ModuleArtifact {
-        id: id.clone(),
+    let unit = CompiledUnit {
         types: closure
             .types
             .iter()
@@ -939,6 +920,14 @@ pub(crate) fn extract(
                 }
             })
             .collect(),
+        // A module's wrapper runs at compile time; the artifact carries its value.
+        entry: None,
+    };
+    verify(&unit, &id.display());
+
+    let artifact = ModuleArtifact {
+        id: id.clone(),
+        unit,
         value: cached.value.remap_ids(&remaps),
         module_type: cached.module_type.remap_ids(&remaps),
         fn_case_tables: {
@@ -991,8 +980,291 @@ pub(crate) fn extract(
             },
         },
     };
-    verify(&artifact);
     Some(artifact)
+}
+
+/// Why a unit could not be extracted.
+#[derive(Debug)]
+pub enum UnitError {
+    /// A function owned by no module, registered before this compile, is reachable from
+    /// the entry. Nothing outside this session can name such a function, so the unit
+    /// could not be linked anywhere else. It does not happen — references to earlier
+    /// compiles' code go through session locals, never the function table, and the
+    /// caller holds the program's dedup floor at `own_floor` so interning cannot place
+    /// one of this compile's own functions below it either.
+    EscapedReference(usize),
+    /// The entry itself is owned by a module — its instructions and type interned onto
+    /// one of that module's functions — so the unit has no own function to enter at.
+    EntryNotOwned(usize),
+    /// A referenced module has no artifact key (hidden, or unresolvable), so the import
+    /// entry could not name a version.
+    UnkeyedImport(ModuleId),
+    /// The session compiled without an artifact store, so no module can be named.
+    NoArtifactStore,
+    /// A module in the import closure has no stored artifact, so the closure cannot be
+    /// bundled.
+    MissingArtifact(u64),
+}
+
+impl std::fmt::Display for UnitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnitError::EscapedReference(id) => {
+                write!(f, "function {id} is reachable but owned by no compile")
+            }
+            UnitError::EntryNotOwned(id) => write!(f, "the entry {id} is owned by a module"),
+            UnitError::UnkeyedImport(module) => {
+                write!(f, "{} has no artifact key", module.display())
+            }
+            UnitError::NoArtifactStore => write!(f, "no artifact store"),
+            UnitError::MissingArtifact(key) => {
+                write!(f, "no stored artifact for module {key:016x}")
+            }
+        }
+    }
+}
+
+/// A self-contained compiled program: an entry unit plus the units of every module it
+/// imports, transitively, deepest first. Everything a host needs in order to link and run
+/// it, with nothing to look up — which is what a `.qx` file holds.
+///
+/// The closure is **bundled whole, not shaken**. A module's unit is the linkable identity
+/// its key names, so trimming it would both falsify the key and cost a host the ability to
+/// recognise a module it already holds. Shaking happens at the other boundary: the entry
+/// unit carries only what it reaches, and stops at module edges.
+///
+/// A future compile option can instead inline imports into the entry unit — the extraction
+/// walk claiming module functions as its own and shaking them to the entry — which lands
+/// here as an empty [`Self::modules`] and an empty import table. No format change: a
+/// consumer links what it is given either way.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CompiledProgram {
+    pub unit: CompiledUnit,
+    /// `(artifact key, that module's unit)`, dependencies before dependents — the order a
+    /// host must link them in.
+    pub modules: Vec<(u64, CompiledUnit)>,
+}
+
+/// The transitive closure of the modules `unit` imports, deepest first. Answers the key
+/// of the first module with no stored artifact — which means nothing could name a version
+/// of it, so the closure cannot be assembled.
+pub fn module_closure(
+    store: &ArtifactStore,
+    unit: &CompiledUnit,
+) -> Result<Vec<(u64, Rc<ModuleArtifact>)>, u64> {
+    fn collect(
+        key: u64,
+        store: &ArtifactStore,
+        seen: &mut HashSet<u64>,
+        out: &mut Vec<(u64, Rc<ModuleArtifact>)>,
+    ) -> Result<(), u64> {
+        if !seen.insert(key) {
+            return Ok(());
+        }
+        let artifact = store.load(key).ok_or(key)?;
+        for (_, dependency, _) in &artifact.unit.imports {
+            collect(*dependency, store, seen, out)?;
+        }
+        out.push((key, artifact));
+        Ok(())
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for (_, key, _) in &unit.imports {
+        collect(*key, store, &mut seen, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// Extract a self-contained [`CompiledProgram`] from a compile: the unit reachable from
+/// `entry`, plus its bundled module closure.
+pub fn extract_program(
+    program: &Program,
+    module_cache: &ModuleCache,
+    entry: Option<usize>,
+    own_floor: usize,
+) -> Result<CompiledProgram, UnitError> {
+    let unit = extract_unit(program, module_cache, entry, own_floor)?;
+    let store = module_cache
+        .artifact_store
+        .as_ref()
+        .ok_or(UnitError::NoArtifactStore)?;
+    let modules = module_closure(store, &unit).map_err(UnitError::MissingArtifact)?;
+    Ok(CompiledProgram {
+        unit,
+        modules: modules
+            .into_iter()
+            .map(|(key, artifact)| (key, artifact.unit.clone()))
+            .collect(),
+    })
+}
+
+/// Extract the unit reachable from `entry_function`: a compiled fragment with no module
+/// identity, in unit-local id space. `own_floor` is the function-table length before this
+/// compile — any unowned function below it is an escaped reference, so a caller
+/// extracting from a session that outlives one compile must hold the program's function
+/// dedup floor there (as `LineCompiler::prepare` does).
+///
+/// A `None` entry seeds from every function no module owns, which is the unit form of a
+/// program that does not evaluate to something runnable: nothing to enter at, but still
+/// inspectable.
+pub fn extract_unit(
+    program: &Program,
+    module_cache: &ModuleCache,
+    entry_function: Option<usize>,
+    own_floor: usize,
+) -> Result<CompiledUnit, UnitError> {
+    let owner = &Owner::Unit;
+    let mut closure = Closure::default();
+    let mut queue: Vec<Item> = Vec::new();
+    match entry_function {
+        Some(entry) => add_function(entry, &mut closure, &mut queue),
+        None => {
+            for id in 0..program.get_functions().len() {
+                if matches!(classify(id, owner, module_cache), FunctionClass::Own) {
+                    add_function(id, &mut closure, &mut queue);
+                }
+            }
+        }
+    }
+    if drain(&mut queue, &mut closure, owner, program, module_cache).is_err() {
+        unreachable!("a unit owns every function no module claims, so nothing is foreign");
+    }
+
+    let mut own_ids: Vec<usize> = Vec::new();
+    let mut import_entries: Vec<(ModuleId, usize, usize)> = Vec::new();
+    for &function_id in closure.functions.iter() {
+        match classify(function_id, owner, module_cache) {
+            FunctionClass::Own => own_ids.push(function_id),
+            FunctionClass::Import(module, index) => {
+                import_entries.push((module, index, function_id))
+            }
+            FunctionClass::Foreign => unreachable!("a unit has no foreign class"),
+        }
+    }
+    // Ascending session id is registration order, which is topological: a function can
+    // only reference ones registered before it.
+    own_ids.sort_unstable();
+    if let Some(&lowest) = own_ids.first()
+        && lowest < own_floor
+    {
+        return Err(UnitError::EscapedReference(lowest));
+    }
+
+    import_entries.sort();
+    let mut imports: Vec<(ModuleId, u64, Vec<usize>)> = Vec::new();
+    for (module, dep_index, _) in &import_entries {
+        match imports.last_mut() {
+            Some((last, _, indices)) if last == module => indices.push(*dep_index),
+            _ => {
+                let key = *module_cache
+                    .key_cache
+                    .get(module)
+                    .ok_or_else(|| UnitError::UnkeyedImport(module.clone()))?;
+                imports.push((module.clone(), key, vec![*dep_index]));
+            }
+        }
+    }
+
+    let mut remaps = IdRemaps {
+        types: closure.types.index(),
+        tuples: closure.tuples.index(),
+        constants: closure.constants.index(),
+        annotation_keys: closure.annotation_keys.index(),
+        field_names: closure.field_names.index(),
+        sites: closure.sites.index(),
+        ..IdRemaps::default()
+    };
+    for (position, &function_id) in own_ids.iter().enumerate() {
+        remaps.functions.insert(function_id, position);
+    }
+    let import_base = own_ids.len();
+    for (position, &(_, _, function_id)) in import_entries.iter().enumerate() {
+        remaps.functions.insert(function_id, import_base + position);
+    }
+    let builtins: Vec<ArtifactBuiltin> = closure
+        .builtins
+        .iter()
+        .map(|&builtin_id| {
+            let info = &program.get_builtins()[builtin_id];
+            ArtifactBuiltin {
+                name: info.name.clone(),
+                type_argument: info.type_argument.map(|id| remaps.types[&id]),
+            }
+        })
+        .collect();
+    remaps.builtins = closure.builtins.index();
+
+    let entry = match entry_function {
+        Some(entry) => Some(
+            own_ids
+                .iter()
+                .position(|&id| id == entry)
+                .ok_or(UnitError::EntryNotOwned(entry))?,
+        ),
+        None => None,
+    };
+
+    let unit = CompiledUnit {
+        types: closure
+            .types
+            .iter()
+            .map(|&type_id| program.get_types()[type_id].remap_ids(&remaps))
+            .collect(),
+        tuples: closure
+            .tuples
+            .iter()
+            .map(|&tuple_id| program.get_tuples()[tuple_id].remap_ids(&remaps))
+            .collect(),
+        constants: closure
+            .constants
+            .iter()
+            .map(|&id| program.get_constants()[id].clone())
+            .collect(),
+        annotation_keys: closure
+            .annotation_keys
+            .iter()
+            .map(|&id| program.get_annotation_keys()[id].clone())
+            .collect(),
+        field_names: closure
+            .field_names
+            .iter()
+            .map(|&id| program.get_field_names()[id].clone())
+            .collect(),
+        omittable_labels: closure
+            .tuples
+            .iter()
+            .flat_map(|&tuple_id| {
+                let local = remaps.tuples[&tuple_id];
+                let field_count = program.get_tuples()[tuple_id].fields.len();
+                (0..field_count)
+                    .filter(move |&field| {
+                        quiver_core::types::TypeLookup::label_omittable(program, tuple_id, field)
+                    })
+                    .map(move |field| (local, field))
+            })
+            .collect(),
+        functions: own_ids
+            .iter()
+            .map(|&id| program.get_functions()[id].clone().remap_ids(&remaps))
+            .collect(),
+        imports,
+        builtins,
+        sites: closure
+            .sites
+            .iter()
+            .map(|&site_id| {
+                let site = &program.debug_sites().expect("site table").sites[site_id];
+                Site {
+                    module_constant: remaps.constants[&site.module_constant],
+                    ..site.clone()
+                }
+            })
+            .collect(),
+        entry,
+    };
+    verify(&unit, "unit");
+    Ok(unit)
 }
 
 enum Item {
@@ -1158,23 +1430,23 @@ fn collect_instruction(instruction: &Instruction, closure: &mut Closure, queue: 
 /// Fail-fast self-containment check: every reference inside the artifact must land
 /// inside its tables (a violation means the extraction closure missed something —
 /// linking would silently corrupt a session).
-fn verify(artifact: &ModuleArtifact) {
-    let function_space = artifact.function_space();
+fn verify(unit: &CompiledUnit, label: &str) {
+    let function_space = unit.function_space();
     let check = |what: &str, id: usize, len: usize| {
         assert!(
             id < len,
-            "artifact {:?}: {} reference {} outside table (len {})",
-            artifact.id,
+            "{}: {} reference {} outside table (len {})",
+            label,
             what,
             id,
             len
         );
     };
     let check_type_shallow = |ty: &Type| match ty {
-        Type::Tuple(tuple_id) => check("tuple", *tuple_id, artifact.tuples.len()),
+        Type::Tuple(tuple_id) => check("tuple", *tuple_id, unit.tuples.len()),
         Type::Partial { fields, .. } => {
             for (_, type_id) in fields {
-                check("type", *type_id, artifact.types.len());
+                check("type", *type_id, unit.types.len());
             }
         }
         Type::Callable {
@@ -1187,19 +1459,19 @@ fn verify(artifact: &ModuleArtifact) {
                 .into_iter()
                 .chain(states.iter())
             {
-                check("type", *type_id, artifact.types.len());
+                check("type", *type_id, unit.types.len());
             }
         }
         Type::Union(members) => {
             for member in members {
-                check("type", *member, artifact.types.len());
+                check("type", *member, unit.types.len());
             }
         }
         Type::Annotated { base, entries, .. } => {
-            check("type", *base, artifact.types.len());
+            check("type", *base, unit.types.len());
             for (key, value) in entries {
-                check("annotation key", *key, artifact.annotation_keys.len());
-                check("type", *value, artifact.types.len());
+                check("annotation key", *key, unit.annotation_keys.len());
+                check("type", *value, unit.types.len());
             }
         }
         Type::Process {
@@ -1208,104 +1480,112 @@ fn verify(artifact: &ModuleArtifact) {
             state,
         } => {
             for type_id in [send, receive, state].into_iter().flatten() {
-                check("type", *type_id, artifact.types.len());
+                check("type", *type_id, unit.types.len());
             }
         }
         _ => {}
     };
-    for ty in &artifact.types {
+    for ty in &unit.types {
         check_type_shallow(ty);
     }
-    for info in &artifact.tuples {
+    for info in &unit.tuples {
         for (_, type_id) in &info.fields {
-            check("type", *type_id, artifact.types.len());
+            check("type", *type_id, unit.types.len());
         }
     }
-    for (position, function) in artifact.functions.iter().enumerate() {
-        check("type", function.type_id, artifact.types.len());
+    for (position, function) in unit.functions.iter().enumerate() {
+        check("type", function.type_id, unit.types.len());
         for instruction in &function.instructions {
             let id = instruction.operand() as usize;
             match instruction.opcode() {
-                Opcode::Constant => check("constant", id, artifact.constants.len()),
+                Opcode::Constant => check("constant", id, unit.constants.len()),
                 Opcode::Function => {
                     check("function", id, function_space);
                     // The linked program's function table must reference strictly
                     // backward (the environment merge rewrites single-pass): an own
                     // function may reference earlier own functions or any import —
                     // imports are always linked first.
-                    let valid = id < position || id >= artifact.functions.len();
+                    let valid = id < position || id >= unit.functions.len();
                     assert!(
                         valid,
-                        "artifact {:?}: function {} references unregistrable function {}",
-                        artifact.id, position, id
+                        "{}: function {} references unregistrable function {}",
+                        label, position, id
                     );
                 }
-                Opcode::Builtin => check("builtin", id, artifact.builtins.len()),
-                Opcode::Tuple => check("tuple", id, artifact.tuples.len()),
-                Opcode::IsType => check("type", id, artifact.types.len()),
-                Opcode::GetNamed => check("field name", id, artifact.field_names.len()),
+                Opcode::Builtin => check("builtin", id, unit.builtins.len()),
+                Opcode::Tuple => check("tuple", id, unit.tuples.len()),
+                Opcode::IsType => check("type", id, unit.types.len()),
+                Opcode::GetNamed => check("field name", id, unit.field_names.len()),
                 Opcode::Annotate | Opcode::GetAnnotation => {
-                    check("annotation key", id, artifact.annotation_keys.len())
+                    check("annotation key", id, unit.annotation_keys.len())
                 }
-                Opcode::Stamp => check("site", id, artifact.sites.len()),
+                Opcode::Stamp => check("site", id, unit.sites.len()),
                 _ => {}
             }
         }
     }
-    for site in &artifact.sites {
-        check("constant", site.module_constant, artifact.constants.len());
+    for site in &unit.sites {
+        check("constant", site.module_constant, unit.constants.len());
     }
 }
 
-/// Link an artifact into a session, leaving `module_cache` holding the module
-/// exactly as a from-source compile would. `expected` is the module the caller
-/// resolved and keyed — a mismatch means a key collision or a corrupted store file,
-/// caught here rather than silently linking an unrequested module. The module's
-/// dependencies must already be cached in the session with their function maps
-/// recorded — the import pipeline guarantees this for both linked and
-/// source-compiled dependencies, so a missing map is an invariant violation, not a
-/// fallback case.
-pub(crate) fn link_module<E: Effect>(
-    artifact: &ModuleArtifact,
-    expected: &ModuleId,
+/// How a unit's own functions enter the session's function table.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Registration {
+    /// Append, never collapsing onto structurally identical entries. A module's
+    /// functions must stay its own regardless of session history, or its identity —
+    /// and every import index pointing at it — would depend on what compiled first.
+    Append,
+    /// Structural interning. Correct only where there is no attribution to protect:
+    /// a unit with no module identity, whose functions nothing else names.
+    Intern,
+}
+
+/// Link a unit's tables and functions into a session, answering the id remap.
+///
+/// `resolved_imports` supplies one session function id per entry of [`CompiledUnit::imports`],
+/// in the same flattened order — the caller decides how an import resolves, which is what
+/// keeps this usable by a runtime that has no `ModuleCache`. [`resolve_imports`] builds it
+/// from a compiler session; a host holding its own `key → functions` map builds it from
+/// that.
+pub fn link_unit<E: Effect>(
+    unit: &CompiledUnit,
+    label: &str,
     program: &mut Program,
-    module_cache: &mut ModuleCache,
+    resolved_imports: &[usize],
     builtins: &BuiltinRegistry<E>,
-) -> Result<(), Error> {
-    assert_eq!(
-        artifact.id, *expected,
-        "artifact key resolved to a different module — key collision or corrupted store"
-    );
+    registration: Registration,
+) -> Result<IdRemaps, Error> {
     // Re-intern the value-like tables, building the artifact-local → session remap.
     // Types and tuples are mutually recursive, so intern on demand with memoisation
     // (references form a DAG — recursion markers are relative, never table cycles).
     let mut remaps = IdRemaps::default();
-    for (local, constant) in artifact.constants.iter().enumerate() {
+    for (local, constant) in unit.constants.iter().enumerate() {
         let session = program.register_constant(constant.clone());
         remaps.constants.insert(local, session);
     }
-    for (local, key) in artifact.annotation_keys.iter().enumerate() {
+    for (local, key) in unit.annotation_keys.iter().enumerate() {
         let session = program.register_annotation_key(key);
         remaps.annotation_keys.insert(local, session);
     }
-    for (local, name) in artifact.field_names.iter().enumerate() {
+    for (local, name) in unit.field_names.iter().enumerate() {
         let session = program.register_field_name(name);
         remaps.field_names.insert(local, session);
     }
-    intern_types_and_tuples(artifact, program, &mut remaps);
+    intern_types_and_tuples(unit, program, &mut remaps);
     // Every linked tuple must also have its `Type::Tuple` wrapper entry: the runtime
     // compatibility tables represent a concrete tuple by that entry, so a tuple
     // without one is invisible to every `IsType` test. A from-source compile
     // registers the wrapper while typing the construction, but the artifact closure
     // only carries types the module's code references by type id — a tuple that is
     // constructed yet never referenced as a type would otherwise arrive untestable.
-    for local in 0..artifact.tuples.len() {
+    for local in 0..unit.tuples.len() {
         program.register_type(Type::Tuple(remaps.tuples[&local]));
     }
-    for (local_tuple, field) in &artifact.omittable_labels {
+    for (local_tuple, field) in &unit.omittable_labels {
         program.mark_label_omittable(remaps.tuples[local_tuple], *field);
     }
-    for (local, site) in artifact.sites.iter().enumerate() {
+    for (local, site) in unit.sites.iter().enumerate() {
         let session = program.register_debug_site(Site {
             module_constant: remaps.constants[&site.module_constant],
             ..site.clone()
@@ -1315,12 +1595,11 @@ pub(crate) fn link_module<E: Effect>(
 
     // Builtins resolve by name against the host registry — the link-time capability
     // check: a host that doesn't provide a builtin refuses the module.
-    for (local, builtin) in artifact.builtins.iter().enumerate() {
+    for (local, builtin) in unit.builtins.iter().enumerate() {
         if builtins.get_specs(&builtin.name).is_none() {
             return Err(Error::FeatureUnsupported(format!(
-                "module {} requires builtin '{}', which this host does not provide",
-                artifact.id.display(),
-                builtin.name
+                "{} requires builtin '{}', which this host does not provide",
+                label, builtin.name
             )));
         }
         // The type argument re-interns like any other type reference — `remaps.types` is
@@ -1333,44 +1612,188 @@ pub(crate) fn link_module<E: Effect>(
         remaps.builtins.insert(local, session);
     }
 
-    // Imported functions resolve through the dependencies' function maps.
-    let own_count = artifact.functions.len();
-    let mut import_position = own_count;
-    for (module, dep_own_indices) in &artifact.imports {
+    // Imports continue the id space after the unit's own functions, in the flattened
+    // order `resolved_imports` mirrors.
+    let own_count = unit.functions.len();
+    assert_eq!(
+        resolved_imports.len(),
+        unit.function_space() - own_count,
+        "{label}: {} resolved imports for {} entries",
+        resolved_imports.len(),
+        unit.function_space() - own_count
+    );
+    for (position, &session) in resolved_imports.iter().enumerate() {
+        remaps.functions.insert(own_count + position, session);
+    }
+
+    // Own functions register in order: each may reference only earlier own functions or
+    // imports, so the remap is complete before it is rewritten. Checked explicitly —
+    // `IdRemaps::map` falls back to identity, so a forward reference would silently
+    // mis-link rather than fail. `verify` vouches for this at extraction; a stored unit
+    // could still arrive corrupted.
+    //
+    // Registering in order (rather than precomputing ids and appending) is what lets
+    // `Intern` collapse onto an existing entry, and is sound for both policies because
+    // the references point strictly backward.
+    for (local, function) in unit.functions.iter().enumerate() {
+        for instruction in &function.instructions {
+            if instruction.opcode() == Opcode::Function {
+                let target = instruction.operand() as usize;
+                assert!(
+                    remaps.functions.contains_key(&target),
+                    "{label}: function {local} references function {target} before it is \
+                     linked — the backward-reference contract does not hold"
+                );
+            }
+        }
+        let remapped = function.clone().remap_ids(&remaps);
+        let session = match registration {
+            Registration::Append => program.push_function(remapped),
+            Registration::Intern => program.register_function(remapped),
+        };
+        remaps.functions.insert(local, session);
+    }
+
+    Ok(remaps)
+}
+
+/// Resolve a unit's import entries through a `key → its own functions' session ids` map,
+/// as a runtime holding linked modules keeps. Answers the first key the map does not hold;
+/// an index past the end of a held module's map is not answerable — the key is
+/// content-addressed, so no resend could produce anything different — and panics.
+pub fn resolve_imports_from(
+    unit: &CompiledUnit,
+    linked: &HashMap<u64, Vec<usize>>,
+) -> Result<Vec<usize>, u64> {
+    let mut resolved = Vec::with_capacity(unit.function_space() - unit.functions.len());
+    for (_, key, indices) in &unit.imports {
+        let map = linked.get(key).ok_or(*key)?;
+        for index in indices {
+            resolved.push(*map.get(*index).unwrap_or_else(|| {
+                panic!(
+                    "module {key:016x} holds {} functions but a unit names index {index} — \
+                     key collision or a corrupted unit",
+                    map.len()
+                )
+            }));
+        }
+    }
+    Ok(resolved)
+}
+
+/// Link a self-contained [`CompiledProgram`] into `program` — its modules first, in the
+/// order given, then the entry unit — answering the session id of the entry, or `None` for
+/// a program that has none.
+///
+/// Everything interns: a program linked this way has no module attribution to protect,
+/// and nothing else will name its functions by index.
+pub fn link_program<E: Effect>(
+    compiled: &CompiledProgram,
+    program: &mut Program,
+    builtins: &BuiltinRegistry<E>,
+) -> Result<Option<usize>, Error> {
+    let mut linked: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (key, unit) in &compiled.modules {
+        let label = format!("module {key:016x}");
+        let resolved = resolve_imports_from(unit, &linked).map_err(|missing| {
+            Error::FeatureUnsupported(format!(
+                "{label} imports {missing:016x}, which the program does not carry"
+            ))
+        })?;
+        let remaps = link_unit(
+            unit,
+            &label,
+            program,
+            &resolved,
+            builtins,
+            Registration::Intern,
+        )?;
+        linked.insert(
+            *key,
+            (0..unit.functions.len())
+                .map(|local| remaps.functions[&local])
+                .collect(),
+        );
+    }
+    let resolved = resolve_imports_from(&compiled.unit, &linked).map_err(|missing| {
+        Error::FeatureUnsupported(format!(
+            "the program imports {missing:016x}, which it does not carry"
+        ))
+    })?;
+    let remaps = link_unit(
+        &compiled.unit,
+        "program",
+        program,
+        &resolved,
+        builtins,
+        Registration::Intern,
+    )?;
+    Ok(compiled.unit.entry.map(|entry| remaps.functions[&entry]))
+}
+
+/// Resolve a unit's imports against a compiler session: every named module must already
+/// be linked with its function map recorded, which the import pipeline guarantees for
+/// both linked and source-compiled dependencies — so a missing map is an invariant
+/// violation, not a fallback case.
+pub fn resolve_imports(unit: &CompiledUnit, module_cache: &ModuleCache, label: &str) -> Vec<usize> {
+    let mut resolved = Vec::with_capacity(unit.function_space() - unit.functions.len());
+    for (module, key, dep_own_indices) in &unit.imports {
+        // The name resolves a module; the key resolves a *version* of it. A session may
+        // hold two modules with the same name (different projects, or a project and its
+        // dependency), so linking the wrong one is a real possibility rather than a
+        // theoretical one — and it would corrupt silently, since function indices line up
+        // either way.
+        if let Some(&linked) = module_cache.key_cache.get(module) {
+            assert_eq!(
+                linked,
+                *key,
+                "linking {label}: import {} is keyed {key:016x} but the session linked {linked:016x}",
+                module.display()
+            );
+        }
         let dep_map = module_cache
             .module_functions
             .get(module)
             .unwrap_or_else(|| {
                 panic!(
-                    "linking {}: dependency {} is cached without a function map — \
+                    "linking {label}: dependency {} is cached without a function map — \
                      the import pipeline must record one for every cached module",
-                    artifact.id.display(),
                     module.display()
                 )
             });
-        for dep_own_index in dep_own_indices {
-            remaps
-                .functions
-                .insert(import_position, dep_map[*dep_own_index]);
-            import_position += 1;
-        }
+        resolved.extend(dep_own_indices.iter().map(|index| dep_map[*index]));
     }
+    resolved
+}
 
-    // The module's functions register by append (`push_function`) — never collapsing
-    // onto other modules' structurally identical ones, so ownership attribution
-    // stays session-history-independent; structural collapse is the runtime merge's
-    // job. Their references point strictly backward (earlier own functions, or
-    // imports linked before this module — `verify` vouched at extraction), keeping
-    // the program table single-pass-rewritable for the environment merge.
-    let base = program.get_functions().len();
-    for own_index in 0..own_count {
-        remaps.functions.insert(own_index, base + own_index);
-    }
-    let mut own_map: Vec<usize> = Vec::with_capacity(own_count);
-    for function in &artifact.functions {
-        let session = program.push_function(function.clone().remap_ids(&remaps));
-        own_map.push(session);
-    }
+/// Link an artifact into a session, leaving `module_cache` holding the module exactly as
+/// a from-source compile would. `expected` is the module the caller resolved and keyed —
+/// a mismatch means a key collision or a corrupted store file, caught here rather than
+/// silently linking an unrequested module.
+pub fn link_module<E: Effect>(
+    artifact: &ModuleArtifact,
+    expected: &ModuleId,
+    program: &mut Program,
+    module_cache: &mut ModuleCache,
+    builtins: &BuiltinRegistry<E>,
+) -> Result<(), Error> {
+    assert_eq!(
+        artifact.id, *expected,
+        "artifact key resolved to a different module — key collision or corrupted store"
+    );
+    let label = artifact.id.display();
+    let resolved = resolve_imports(&artifact.unit, module_cache, &label);
+    let remaps = link_unit(
+        &artifact.unit,
+        &label,
+        program,
+        &resolved,
+        builtins,
+        Registration::Append,
+    )?;
+    let own_map: Vec<usize> = (0..artifact.unit.functions.len())
+        .map(|local| remaps.functions[&local])
+        .collect();
     for (index, &function_id) in own_map.iter().enumerate() {
         module_cache
             .function_owners
@@ -1381,10 +1804,10 @@ pub(crate) fn link_module<E: Effect>(
         .insert(artifact.id.clone(), own_map);
     // The linked module's value closure mirrors the source-compile record: its
     // import-table modules plus their closures (all cached before it).
-    module_cache.record_value_closure(&artifact.id, artifact.dependencies());
+    module_cache.record_value_closure(&artifact.id, artifact.unit.dependencies());
 
-    // Install the cached module and namespace, exactly as a from-source compile
-    // would have left them.
+    // Install the cached module and namespace, exactly as a from-source compile would
+    // have left them.
     let cached = CachedModule {
         value: artifact.value.remap_ids(&remaps),
         module_type: artifact.module_type.remap_ids(&remaps),
@@ -1436,29 +1859,25 @@ pub(crate) fn link_module<E: Effect>(
 
 /// Intern the artifact's types and tuples into the session program, on demand with
 /// memoisation (the two tables reference each other).
-fn intern_types_and_tuples(
-    artifact: &ModuleArtifact,
-    program: &mut Program,
-    remaps: &mut IdRemaps,
-) {
+fn intern_types_and_tuples(unit: &CompiledUnit, program: &mut Program, remaps: &mut IdRemaps) {
     fn intern_type(
         local: usize,
-        artifact: &ModuleArtifact,
+        unit: &CompiledUnit,
         program: &mut Program,
         remaps: &mut IdRemaps,
     ) -> usize {
         if let Some(&session) = remaps.types.get(&local) {
             return session;
         }
-        let ty = &artifact.types[local];
+        let ty = &unit.types[local];
         // Intern children first so the remap covers every reference.
         match ty {
             Type::Tuple(tuple_id) => {
-                intern_tuple(*tuple_id, artifact, program, remaps);
+                intern_tuple(*tuple_id, unit, program, remaps);
             }
             Type::Partial { fields, .. } => {
                 for (_, type_id) in fields {
-                    intern_type(*type_id, artifact, program, remaps);
+                    intern_type(*type_id, unit, program, remaps);
                 }
             }
             Type::Callable {
@@ -1471,18 +1890,18 @@ fn intern_types_and_tuples(
                     .into_iter()
                     .chain(states.iter())
                 {
-                    intern_type(type_id, artifact, program, remaps);
+                    intern_type(type_id, unit, program, remaps);
                 }
             }
             Type::Union(members) => {
                 for member in members {
-                    intern_type(*member, artifact, program, remaps);
+                    intern_type(*member, unit, program, remaps);
                 }
             }
             Type::Annotated { base, entries, .. } => {
-                intern_type(*base, artifact, program, remaps);
+                intern_type(*base, unit, program, remaps);
                 for (_, value) in entries {
-                    intern_type(*value, artifact, program, remaps);
+                    intern_type(*value, unit, program, remaps);
                 }
             }
             Type::Process {
@@ -1491,7 +1910,7 @@ fn intern_types_and_tuples(
                 state,
             } => {
                 for &type_id in [send, receive, state].into_iter().flatten() {
-                    intern_type(type_id, artifact, program, remaps);
+                    intern_type(type_id, unit, program, remaps);
                 }
             }
             _ => {}
@@ -1503,26 +1922,26 @@ fn intern_types_and_tuples(
 
     fn intern_tuple(
         local: usize,
-        artifact: &ModuleArtifact,
+        unit: &CompiledUnit,
         program: &mut Program,
         remaps: &mut IdRemaps,
     ) -> usize {
         if let Some(&session) = remaps.tuples.get(&local) {
             return session;
         }
-        let info = &artifact.tuples[local];
+        let info = &unit.tuples[local];
         for (_, type_id) in &info.fields {
-            intern_type(*type_id, artifact, program, remaps);
+            intern_type(*type_id, unit, program, remaps);
         }
         let session = program.register_tuple(info.name.clone(), info.remap_ids(remaps).fields);
         remaps.tuples.insert(local, session);
         session
     }
 
-    for local in 0..artifact.types.len() {
-        intern_type(local, artifact, program, remaps);
+    for local in 0..unit.types.len() {
+        intern_type(local, unit, program, remaps);
     }
-    for local in 0..artifact.tuples.len() {
-        intern_tuple(local, artifact, program, remaps);
+    for local in 0..unit.tuples.len() {
+        intern_tuple(local, unit, program, remaps);
     }
 }

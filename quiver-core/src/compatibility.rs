@@ -102,6 +102,8 @@ pub struct CompatibilityInput<'a> {
     pub builtins: &'a [BuiltinInfo],
     /// Resource type names (index = resource_type_id)
     pub resource_names: &'a [String],
+    /// Interned field names (index = field name id), for `field_offsets`.
+    pub field_names: &'a [String],
 }
 
 /// A `Type::Process`'s components — (send, receive, state) — as an index key.
@@ -205,6 +207,47 @@ pub fn compute_canonical_tuples(tuples: &[TupleTypeInfo]) -> Vec<usize> {
         .collect()
 }
 
+impl CompatibilityTables {
+    /// Extend `canonical_tuples` and `field_offsets` over whatever the program has
+    /// grown by. Both are pure functions of append-only tables, so a rebuild per update
+    /// is pure waste — and a costly one once whole modules link, where the tables are
+    /// several times larger than a tree-shaken merge left them.
+    fn extend_tuple_tables(&mut self, input: &CompatibilityInput) {
+        for id in self.canonical_tuples.len()..input.tuples.len() {
+            let info = &input.tuples[id];
+            let labels: Vec<Option<String>> =
+                info.fields.iter().map(|(label, _)| label.clone()).collect();
+            let canonical = *self.shapes.entry((info.name.clone(), labels)).or_insert(id);
+            self.canonical_tuples.push(canonical);
+        }
+
+        // A new tuple appends one cell to every existing name's row...
+        for (name_id, row) in self.field_offsets.iter_mut().enumerate() {
+            let name = &input.field_names[name_id];
+            for id in row.len()..input.tuples.len() {
+                row.push(field_offset(&input.tuples[id], name));
+            }
+        }
+        // ... and a new name needs a row over every tuple.
+        for name_id in self.field_offsets.len()..input.field_names.len() {
+            let name = &input.field_names[name_id];
+            self.field_offsets.push(
+                input
+                    .tuples
+                    .iter()
+                    .map(|info| field_offset(info, name))
+                    .collect(),
+            );
+        }
+    }
+}
+
+fn field_offset(info: &TupleTypeInfo, name: &str) -> Option<usize> {
+    info.fields
+        .iter()
+        .position(|(field, _)| field.as_deref() == Some(name))
+}
+
 /// Compute parameter compatibility for mailbox filtering.
 /// For each function and builtin, computes which ConcreteTypes are compatible with its parameter type.
 /// Returns (function_param_compatibility, builtin_param_compatibility).
@@ -267,12 +310,21 @@ pub struct CompatibilityTables {
     pub function_params: Vec<HashSet<ConcreteType>>,
     /// Per-builtin parameter compatibility, as `compute_param_compatibility` returns.
     pub builtin_params: Vec<HashSet<ConcreteType>>,
+    /// Canonical value-shape id per tuple, as `compute_canonical_tuples` returns.
+    pub canonical_tuples: Vec<usize>,
+    /// The shape → lowest-id map behind `canonical_tuples`. Kept so appending tuples
+    /// costs one lookup each rather than a rebuild: existing entries can never change,
+    /// since the map holds the *lowest* id for a shape and ids only ever grow.
+    shapes: HashMap<(Option<String>, Vec<Option<String>>), usize>,
+    /// `[field name id][tuple id]` offsets, as `compute_field_offsets` returns.
+    pub field_offsets: Vec<Vec<Option<usize>>>,
 }
 
 impl CompatibilityTables {
     /// Extend the tables to cover `input`, which must describe an append-only extension
     /// of the program covered by the previous call (the environment's merged program).
     pub fn update(&mut self, input: &CompatibilityInput) {
+        self.extend_tuple_tables(input);
         let lookup = TypeLookupImpl::new(input.types, input.tuples, input.functions);
         let index = TypeIndex::build(input, &lookup);
 
@@ -431,12 +483,37 @@ impl CompatibilityTables {
     /// Assert the incremental tables equal a from-scratch computation over `input`.
     /// For validation runs (opt-in, e.g. behind an environment variable) — a mismatch
     /// is a bug in `update`.
-    pub fn assert_matches_full(&self, input: &CompatibilityInput) {
+    ///
+    /// `reclaimed` says the program has had code stubbed. `type_compatibility` is keyed
+    /// by the pattern types `IsType` instructions name, and reclamation empties the
+    /// instructions while leaving the types in place — so the incremental table keeps
+    /// entries a recompute over the stubbed program no longer derives. That is not drift
+    /// but the point: reviving stubbed code must not have to rebuild them. The check
+    /// weakens to containment rather than lapsing. Every other table is untouched by
+    /// reclamation — a stub keeps its type, and tuples and field names are never
+    /// reclaimed — so those stay exact either way.
+    pub fn assert_matches_full(&self, input: &CompatibilityInput, reclaimed: bool) {
+        let type_compatibility = compute_type_compatibility(input);
         assert_eq!(
-            self.type_compatibility,
-            compute_type_compatibility(input),
-            "incremental type_compatibility diverged from full recomputation"
+            self.type_compatibility.len(),
+            type_compatibility.len(),
+            "incremental type_compatibility covers a different type table"
         );
+        if reclaimed {
+            for (pattern, expected) in type_compatibility.iter().enumerate() {
+                assert!(
+                    expected.is_subset(&self.type_compatibility[pattern]),
+                    "incremental type_compatibility is missing entries for pattern type \
+                     {pattern}: {:?}",
+                    expected.difference(&self.type_compatibility[pattern])
+                );
+            }
+        } else {
+            assert_eq!(
+                self.type_compatibility, type_compatibility,
+                "incremental type_compatibility diverged from full recomputation"
+            );
+        }
         let (function_params, builtin_params) = compute_param_compatibility(input);
         assert_eq!(
             self.function_params, function_params,
@@ -445,6 +522,16 @@ impl CompatibilityTables {
         assert_eq!(
             self.builtin_params, builtin_params,
             "incremental builtin_params diverged from full recomputation"
+        );
+        assert_eq!(
+            self.canonical_tuples,
+            compute_canonical_tuples(input.tuples),
+            "incremental canonical_tuples diverged from full recomputation"
+        );
+        assert_eq!(
+            self.field_offsets,
+            compute_field_offsets(input.field_names, input.tuples),
+            "incremental field_offsets diverged from full recomputation"
         );
     }
 }

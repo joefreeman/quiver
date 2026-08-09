@@ -51,6 +51,11 @@ impl std::fmt::Display for ReplError {
 pub struct PreparedLine {
     epoch: u64,
     parsed: quiver_compiler::ast::Sequence,
+    /// The program's function count before this line compiles: everything registered
+    /// from here on is the line's own, which is what unit extraction needs to know.
+    /// [`LineCompiler::prepare`] sets the program's dedup floor to match, so interning
+    /// cannot place one of this line's functions below it.
+    own_floor: usize,
     /// The keep-set produced by the binding re-alignment, for the host to apply to
     /// the session process's locals.
     compact_keep: Vec<usize>,
@@ -80,9 +85,44 @@ impl PreparedLine {
     }
 }
 
+/// Build a unit payload for the line's entry, or `None` to fall back to bytecode.
+///
+/// `None` covers three cases, all of which mean "nothing here could name a version of
+/// some module the line reaches": no artifact store attached, an extraction that found a
+/// reference nothing outside the session can name, or an imported module with no stored
+/// artifact (it was hidden by an undeclared reference, so it was never extractable).
+fn unit_payload(
+    program: &Program,
+    module_cache: &ModuleCache,
+    entry: usize,
+    own_floor: usize,
+) -> Option<LinePayload> {
+    let store = module_cache.artifact_store.as_ref()?;
+    let unit = quiver_compiler::extract_unit(program, module_cache, Some(entry), own_floor).ok()?;
+    // The closure is kept as artifacts rather than owned units: in-process the host links
+    // straight from them, so nothing is cloned until a driver has to put one on a wire.
+    let modules = quiver_compiler::module_closure(store, &unit).ok()?;
+    Some(LinePayload::Unit { unit, modules })
+}
+
+/// What a line hands the host to run.
+pub enum LinePayload {
+    /// Relocatable code, plus the modules it imports in dependency order — each to be
+    /// linked once per host, then named by key thereafter. Preferred whenever the
+    /// compiler can supply every module the line reaches.
+    Unit {
+        unit: quiver_compiler::CompiledUnit,
+        modules: Vec<(u64, Rc<quiver_compiler::ModuleArtifact>)>,
+    },
+    /// A self-contained tree-shaken program. The fallback: no artifact store attached,
+    /// or a module the line reaches has no artifact (it was hidden by an undeclared
+    /// reference, so nothing could name a version of it).
+    Bytecode(Bytecode),
+}
+
 /// A line compiled by [`LineCompiler::compile`]: the session state it produces,
-/// staged but not yet applied, plus the bytecode to run (`None` for a line with
-/// nothing to execute, such as type definitions alone). Dropping it without
+/// staged but not yet applied, plus what to run (`None` for a line with nothing to
+/// execute, such as type definitions alone). Dropping it without
 /// [`LineCompiler::commit_line`] leaves the session exactly as it was.
 pub struct CompiledLine {
     epoch: u64,
@@ -91,14 +131,22 @@ pub struct CompiledLine {
     tables: SessionTables,
     module_cache: ModuleCache,
     last_result_type: Type,
-    bytecode: Option<Bytecode>,
+    payload: Option<LinePayload>,
+}
+
+impl CompiledLine {
+    /// What this line will hand the host, before committing — for drivers that need to
+    /// size or inspect it.
+    pub fn payload(&self) -> Option<&LinePayload> {
+        self.payload.as_ref()
+    }
 }
 
 /// What a committed line asks of the host: resume the session process with the
 /// bytecode, and hand the keep-set to the result request so the line's orphaned
 /// locals are released at delivery. `None` when the line had nothing to execute.
 pub struct CommittedLine {
-    pub bytecode: Bytecode,
+    pub payload: LinePayload,
     pub keep_indices: Vec<usize>,
 }
 
@@ -122,6 +170,11 @@ pub struct LineCompiler<E: Effect> {
     resolver: Box<dyn ModuleResolver>,
     builtins: quiver_core::builtins::BuiltinRegistry<E>,
     options: quiver_compiler::compiler::CompileOptions,
+    /// Whether the driver can run a [`LinePayload::Unit`]. Off by default: a driver that
+    /// cannot link units — one speaking a protocol that carries only bytecode — must not
+    /// be handed one. Bytecode remains the fallback either way, for lines whose modules
+    /// cannot all be supplied.
+    accepts_units: bool,
 }
 
 impl<E: Effect> LineCompiler<E> {
@@ -139,7 +192,19 @@ impl<E: Effect> LineCompiler<E> {
             resolver,
             builtins,
             options: quiver_compiler::compiler::CompileOptions::default(),
+            accepts_units: false,
         }
+    }
+
+    /// Declare that this driver can link and run units (see [`LinePayload`]).
+    pub fn accept_units(&mut self, accepts: bool) {
+        self.accepts_units = accepts;
+    }
+
+    /// The host's builtin registry, which linking a unit needs in order to resolve the
+    /// builtins it names.
+    pub fn builtins(&self) -> &quiver_core::builtins::BuiltinRegistry<E> {
+        &self.builtins
     }
 
     /// Set the compilation mode for subsequent evaluations (debug builds stamp nil
@@ -188,10 +253,20 @@ impl<E: Effect> LineCompiler<E> {
         // Convert last_result_type from Type to type ID for the compiler
         let last_result_type_id = program.register_type(self.last_result_type.clone());
 
+        // Nothing this line registers may collapse onto a function an earlier line
+        // registered. Unit extraction identifies the line's own functions as "registered
+        // at or above this floor", and structural interning would otherwise hand a line
+        // identical to an earlier one that line's ids — leaving it apparently owning
+        // nothing it could name. Module compiles raise the floor again for their own
+        // (attribution) reasons and restore this one after.
+        let own_floor = program.get_functions().len();
+        program.set_function_dedup_floor(own_floor);
+
         self.line_epoch += 1;
         Ok(PreparedLine {
             epoch: self.line_epoch,
             parsed,
+            own_floor,
             compact_keep,
             program,
             module_cache,
@@ -211,6 +286,7 @@ impl<E: Effect> LineCompiler<E> {
         let PreparedLine {
             epoch,
             parsed,
+            own_floor,
             compact_keep: _,
             mut program,
             mut module_cache,
@@ -245,7 +321,7 @@ impl<E: Effect> LineCompiler<E> {
 
         // Only create a function wrapper if we have instructions to execute (a line of
         // type definitions alone has none)
-        let bytecode = if !instructions.is_empty() {
+        let payload = if !instructions.is_empty() {
             // Register the callable type for this REPL wrapper function
             // Use the receive type extracted from the expression (allows REPL to receive messages)
             let callable_type_id = program.register_type(Type::Callable {
@@ -261,12 +337,19 @@ impl<E: Effect> LineCompiler<E> {
                 type_id: callable_type_id,
             };
             let function_index = program.register_function(function);
-            // Tree-shaken: the payload is the line's own closure — everything the
-            // wrapper statically reaches — not the whole session program. Earlier
-            // lines' code is already merged (append-only, with content-driven
-            // revival), and values reach it through the heap, not through this
-            // bytecode.
-            Some(program.to_bytecode_optimized(function_index))
+            // A unit if every module the line reaches can be supplied, so the host links
+            // each once and the line ships only its own code. Otherwise a tree-shaken
+            // program: the line's own closure — everything the wrapper statically
+            // reaches — not the whole session. Either way earlier lines' code is already
+            // in the host, and values reach it through the heap rather than the payload.
+            Some(
+                self.accepts_units
+                    .then(|| unit_payload(&program, &module_cache, function_index, own_floor))
+                    .flatten()
+                    .unwrap_or_else(|| {
+                        LinePayload::Bytecode(program.to_bytecode_optimized(function_index))
+                    }),
+            )
         } else {
             None
         };
@@ -278,7 +361,7 @@ impl<E: Effect> LineCompiler<E> {
             tables: result.tables,
             module_cache,
             last_result_type: result_type,
-            bytecode,
+            payload,
         })
     }
 
@@ -298,8 +381,8 @@ impl<E: Effect> LineCompiler<E> {
         self.module_cache = line.module_cache;
         self.last_result_type = line.last_result_type;
 
-        line.bytecode.map(|bytecode| CommittedLine {
-            bytecode,
+        line.payload.map(|payload| CommittedLine {
+            payload,
             keep_indices: self.keep_indices(),
         })
     }
@@ -435,10 +518,13 @@ impl<E: Effect> Repl<E> {
     ) -> Result<Self, ReplError> {
         // Create a sleeping process ready for resume
         let pid = env.start_process(None).map_err(ReplError::Environment)?;
+        // An in-process driver links units directly, so it takes that path.
 
+        let mut compiler = LineCompiler::new(resolver, builtins);
+        compiler.accept_units(true);
         Ok(Self {
             repl_process_id: Some(pid),
-            compiler: LineCompiler::new(resolver, builtins),
+            compiler,
         })
     }
 
@@ -456,6 +542,11 @@ impl<E: Effect> Repl<E> {
     /// See [`LineCompiler::reload_modules`].
     pub fn reload_modules(&mut self, resolver: Box<dyn ModuleResolver>) {
         self.compiler.reload_modules(resolver);
+    }
+
+    /// See [`LineCompiler::accept_units`].
+    pub fn accept_units(&mut self, accepts: bool) {
+        self.compiler.accept_units(accepts);
     }
 
     /// See [`LineCompiler::set_artifact_store`].
@@ -525,23 +616,48 @@ impl<E: Effect> Repl<E> {
         env: &mut Environment<E>,
         line: CompiledLine,
     ) -> Result<Option<u64>, ReplError> {
-        let Some(committed) = self.compiler.commit_line(line) else {
+        let Some(CommittedLine {
+            payload,
+            keep_indices,
+        }) = self.compiler.commit_line(line)
+        else {
             return Ok(None);
         };
 
-        // Create or resume the REPL process
-        let repl_process_id = match self.repl_process_id {
-            Some(pid) => {
-                // Resume existing process with new function
-                // resume_process will push the previous result from process.result onto the stack
-                env.resume_process(pid, committed.bytecode)
+        // A unit's modules are offered on every line, not only the first: the host holds
+        // each under its content key and skips the ones it has, so a line whose module
+        // a code sweep reclaimed re-links it here rather than failing.
+        if let LinePayload::Unit { modules, .. } = &payload {
+            for (key, artifact) in modules {
+                env.link_module_unit(*key, &artifact.unit, self.compiler.builtins())
+                    .map_err(ReplError::Environment)?;
+            }
+        }
+
+        // Create or resume the REPL process. Resuming pushes the previous result from
+        // `process.result` onto the stack, which is the line's input.
+        let repl_process_id = match (self.repl_process_id, payload) {
+            (Some(pid), LinePayload::Unit { unit, .. }) => {
+                env.resume_process_unit(pid, &unit, self.compiler.builtins())
                     .map_err(ReplError::Environment)?;
                 pid
             }
-            None => {
-                // Create the persistent REPL process on first evaluation
+            (Some(pid), LinePayload::Bytecode(bytecode)) => {
+                env.resume_process(pid, bytecode)
+                    .map_err(ReplError::Environment)?;
+                pid
+            }
+            // The persistent REPL process, created on first evaluation.
+            (None, LinePayload::Unit { unit, .. }) => {
                 let pid = env
-                    .start_process(Some(committed.bytecode))
+                    .start_process_unit(&unit, self.compiler.builtins())
+                    .map_err(ReplError::Environment)?;
+                self.repl_process_id = Some(pid);
+                pid
+            }
+            (None, LinePayload::Bytecode(bytecode)) => {
+                let pid = env
+                    .start_process(Some(bytecode))
                     .map_err(ReplError::Environment)?;
                 self.repl_process_id = Some(pid);
                 pid
@@ -553,7 +669,7 @@ impl<E: Effect> Repl<E> {
         // is the GC early-release; the next line's pre-compile compaction still does the
         // correctness-critical re-indexing, so the two are not redundant.
         let request_id = env
-            .request_result(repl_process_id, Some(committed.keep_indices))
+            .request_result(repl_process_id, Some(keep_indices))
             .map_err(ReplError::Environment)?;
 
         Ok(Some(request_id))

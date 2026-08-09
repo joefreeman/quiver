@@ -257,7 +257,6 @@ impl Progress {
 pub fn spawn_worker<C: WorkerClock>(
     clock: C,
     builtins: quiver_core::builtins::BuiltinRegistry<NativeEffect>,
-    profile: bool,
     worker_id: u16,
     waker: Waker,
 ) -> NativeWorkerHandle {
@@ -284,13 +283,8 @@ pub fn spawn_worker<C: WorkerClock>(
                 waker,
             };
 
-            let mut worker = Worker::<NativeEffect, _, _>::new(
-                cmd_receiver,
-                evt_sender,
-                builtins,
-                profile,
-                worker_id,
-            );
+            let mut worker =
+                Worker::<NativeEffect, _, _>::new(cmd_receiver, evt_sender, builtins, worker_id);
 
             // Run the worker loop
             loop {

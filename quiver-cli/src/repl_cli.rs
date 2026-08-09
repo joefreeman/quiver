@@ -13,7 +13,7 @@
 
 use colored::Colorize;
 use quiver_cli::client::Client;
-use quiver_cli::protocol::Outcome;
+use quiver_cli::protocol::{MissingModules, Outcome, ResumePayload};
 use quiver_compiler::{PackageResolver, find_project_root};
 use quiver_environment::{LineCompiler, ReplError};
 use quiver_io::NativeEffect;
@@ -44,6 +44,12 @@ pub struct ReplCli {
     client: Client,
     compiler: LineCompiler<NativeEffect>,
     artifact_store: Rc<quiver_compiler::ArtifactStore>,
+    /// Module keys this client has handed the server. An optimistic cache, not a source
+    /// of truth: the server may reclaim a module nothing references, and says so with a
+    /// `424` that this set is then corrected from. Scoped to the connection, and the
+    /// per-request fingerprint check means a replaced server is rejected outright rather
+    /// than silently inheriting the record.
+    sent_modules: std::collections::HashSet<u64>,
     /// The server-side session process. Atomic and shared with the cancel thread,
     /// which must target whichever process a reset most recently created.
     process_id: Arc<AtomicU64>,
@@ -111,6 +117,7 @@ impl ReplCli {
             client,
             compiler: LineCompiler::new(session_resolver(), quiver_cli::build_builtin_registry()),
             artifact_store,
+            sent_modules: std::collections::HashSet::new(),
             process_id,
             interrupt,
             in_flight,
@@ -133,6 +140,79 @@ impl ReplCli {
             });
         self.compiler
             .set_artifact_store(Rc::clone(&self.artifact_store));
+        // The protocol carries units, so the compiler may produce them.
+        self.compiler.accept_units(true);
+    }
+
+    /// Send a committed line, attaching only the module units this server has not been
+    /// given yet. The sent-set is an optimistic cache: if the server has since reclaimed
+    /// a module nothing was using, it answers `424` naming the keys, and the retry
+    /// carries the whole closure.
+    fn send_line(
+        &mut self,
+        pid: u64,
+        committed: quiver_environment::CommittedLine,
+    ) -> Result<Outcome, quiver_cli::client::RequestError> {
+        let keep = Some(committed.keep_indices);
+        let (unit, modules) = match committed.payload {
+            quiver_environment::LinePayload::Bytecode(bytecode) => {
+                return self
+                    .client
+                    .resume(pid, ResumePayload::Bytecode(bytecode), keep);
+            }
+            quiver_environment::LinePayload::Unit { unit, modules } => (unit, modules),
+        };
+
+        let attach = |sent: &std::collections::HashSet<u64>, all: bool| {
+            modules
+                .iter()
+                .filter(|(key, _)| all || !sent.contains(key))
+                .map(|(key, artifact)| (*key, artifact.unit.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        let attached = attach(&self.sent_modules, false);
+        let sending: Vec<u64> = attached.iter().map(|(key, _)| *key).collect();
+        let outcome = self.client.resume(
+            pid,
+            ResumePayload::Unit {
+                unit: unit.clone(),
+                modules: attached,
+            },
+            keep.clone(),
+        );
+        match outcome {
+            Err(quiver_cli::client::RequestError::Http { status: 424, body }) => {
+                // Stale record: forget everything we thought this server held for the
+                // named keys, then resend the closure. One retry is enough — the second
+                // request carries every module the line needs.
+                if let Ok(missing) = serde_json::from_str::<MissingModules>(&body) {
+                    for key in missing.missing {
+                        self.sent_modules.remove(&key);
+                    }
+                }
+                let attached = attach(&self.sent_modules, true);
+                let sending: Vec<u64> = attached.iter().map(|(key, _)| *key).collect();
+                let outcome = self.client.resume(
+                    pid,
+                    ResumePayload::Unit {
+                        unit,
+                        modules: attached,
+                    },
+                    keep,
+                );
+                if outcome.is_ok() {
+                    self.sent_modules.extend(sending);
+                }
+                outcome
+            }
+            other => {
+                if other.is_ok() {
+                    self.sent_modules.extend(sending);
+                }
+                other
+            }
+        }
     }
 
     fn banner(&self) {
@@ -266,9 +346,7 @@ impl ReplCli {
 
         // Ship the line; the cancel thread covers the wait.
         self.in_flight.store(true, Ordering::Relaxed);
-        let outcome = self
-            .client
-            .resume(pid, committed.bytecode, Some(committed.keep_indices));
+        let outcome = self.send_line(pid, committed);
         self.in_flight.store(false, Ordering::Relaxed);
         self.interrupt.store(false, Ordering::Relaxed);
 

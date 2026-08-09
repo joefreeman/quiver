@@ -19,9 +19,8 @@ use std::sync::Arc;
 pub fn execute_bytecode_sync<E: Effect>(
     bytecode: Bytecode,
     builtins: &crate::builtins::BuiltinRegistry<E>,
-    profile: bool,
 ) -> Result<(Value, Executor<E>), Error> {
-    execute_bytecode_sync_with(bytecode, builtins, profile, true, u64::MAX, None)
+    execute_bytecode_sync_with(bytecode, builtins, true, u64::MAX, None)
 }
 
 /// As [`execute_bytecode_sync`], but `param_compat` controls whether parameter-compatibility
@@ -40,7 +39,6 @@ pub fn execute_bytecode_sync<E: Effect>(
 pub fn execute_bytecode_sync_with<E: Effect>(
     bytecode: Bytecode,
     builtins: &crate::builtins::BuiltinRegistry<E>,
-    profile: bool,
     param_compat: bool,
     fuel: u64,
     cancel: Option<&std::sync::atomic::AtomicBool>,
@@ -50,7 +48,7 @@ pub fn execute_bytecode_sync_with<E: Effect>(
         .ok_or_else(|| Error::InvalidArgument("Bytecode has no entry point".to_string()))?;
 
     // Use worker_id 0 for single-threaded execution
-    let mut executor = Executor::new(builtins.clone(), profile, 0);
+    let mut executor = Executor::new(builtins.clone(), 0);
     // Compile-time execution must be deterministic: host-state reads (clock, entropy)
     // are rejected at the builtin dispatch site.
     executor.compile_time = true;
@@ -67,6 +65,7 @@ pub fn execute_bytecode_sync_with<E: Effect>(
         functions: &bytecode.functions,
         builtins: &bytecode.builtins,
         resource_names: &bytecode.resources,
+        field_names: &bytecode.field_names,
     };
 
     let type_compatibility = compute_type_compatibility(&input);

@@ -12,13 +12,16 @@ use std::collections::HashMap;
 /// Compile source into a Program and a nilary entry function: the program's top level,
 /// followed by a call of the function it evaluates to. The top level thus runs at boot, in
 /// the root process — compilation never executes user code.
+///
+/// The `ModuleCache` comes back with the program: unit extraction needs it to tell the
+/// compile's own functions from the modules it imported, and to name a version of each.
 pub fn compile_entry(
     ast: quiver_compiler::ast::Sequence,
     resolver: &dyn ModuleResolver,
     builtins: &quiver_core::builtins::BuiltinRegistry<quiver_io::NativeEffect>,
     options: quiver_compiler::compiler::CompileOptions,
     artifact_store: Option<std::rc::Rc<quiver_compiler::ArtifactStore>>,
-) -> Result<(Program, usize), Box<dyn std::error::Error>> {
+) -> Result<(Program, ModuleCache, usize), Box<dyn std::error::Error>> {
     let mut program = Program::new();
     let mut module_cache = ModuleCache::new();
     module_cache.artifact_store = artifact_store;
@@ -103,7 +106,7 @@ pub fn compile_entry(
         type_id: callable_type_id,
     });
 
-    Ok((program, entry))
+    Ok((program, module_cache, entry))
 }
 
 /// The callable the program's top level evaluates to: its (result, receive) type ids,

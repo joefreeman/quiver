@@ -126,9 +126,6 @@ pub enum Command<E: Effect> {
         keep_indices: Vec<usize>,
     },
 
-    /// Request execution statistics
-    GetExecutionStats { request_id: u64 },
-
     /// Install a standing subscription. The worker pushes a `SubscriptionUpdate` immediately (the
     /// initial snapshot) and again on every subsequent change until unsubscribed. The same
     /// `subscription_id` is used across all workers a subscription fans out to.
@@ -283,7 +280,6 @@ pub enum Event<E: Effect> {
     ResultResponse {
         request_id: u64,
         result: Result<WireValue, quiver_core::error::Error>,
-        stats: Option<quiver_core::executor::ExecutionStats>,
     },
 
     /// Response to GetStatuses
@@ -314,12 +310,6 @@ pub enum Event<E: Effect> {
     LocalsResponse {
         request_id: u64,
         result: LocalsResult,
-    },
-
-    /// Response to GetExecutionStats
-    StatsResponse {
-        request_id: u64,
-        result: Result<quiver_core::executor::ExecutionStats, crate::environment::EnvironmentError>,
     },
 
     /// Push for a standing subscription: the worker's current view of the observed state. Carries

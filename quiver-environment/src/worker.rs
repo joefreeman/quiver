@@ -103,11 +103,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         receiver: R,
         sender: S,
         builtins: quiver_core::builtins::BuiltinRegistry<E>,
-        profile: bool,
         worker_id: u16,
     ) -> Self {
         Self {
-            executor: Executor::new(builtins, profile, worker_id),
+            executor: Executor::new(builtins, worker_id),
             pending_result_requests: HashMap::new(),
             subscriptions: HashMap::new(),
             worker_id: worker_id as crate::WorkerId,
@@ -330,9 +329,6 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 keep_indices,
             } => {
                 self.compact_locals(process_id, keep_indices)?;
-            }
-            Command::GetExecutionStats { request_id } => {
-                self.get_execution_stats(request_id)?;
             }
             Command::Subscribe {
                 subscription_id,
@@ -765,11 +761,6 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             self.executor.release_orphan_locals(process_id, keep);
         }
 
-        let stats = if self.executor.stats.total_instructions() > 0 {
-            Some(self.executor.stats.clone())
-        } else {
-            None
-        };
         let process = self.executor.get_process(process_id).unwrap();
         let result = match process.result.as_ref().unwrap() {
             Ok(value) => Ok(self
@@ -779,11 +770,8 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             // Unboxed on the way out: the reported form carries the error by value.
             Err(error) => Err((**error).clone()),
         };
-        self.sender.send(Event::ResultResponse {
-            request_id,
-            result,
-            stats,
-        })?;
+        self.sender
+            .send(Event::ResultResponse { request_id, result })?;
 
         Ok(())
     }
@@ -889,15 +877,6 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         if !self.executor.replace_locals(process_id, new_locals) {
             return Err(EnvironmentError::ProcessNotFound(process_id));
         }
-        Ok(())
-    }
-
-    fn get_execution_stats(&mut self, request_id: u64) -> Result<(), EnvironmentError> {
-        let stats = self.executor.stats.clone();
-        self.sender.send(Event::StatsResponse {
-            request_id,
-            result: Ok(stats),
-        })?;
         Ok(())
     }
 
@@ -1020,11 +999,6 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                         }
                     }
                 }
-                let stats = if self.executor.stats.total_instructions() > 0 {
-                    Some(self.executor.stats.clone())
-                } else {
-                    None
-                };
                 // Move the result into the final response rather than copying it for every
                 // one: a clone is a full deep copy of the value, and there is normally exactly
                 // one requester.
@@ -1036,11 +1010,8 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     } else {
                         std::mem::replace(&mut result, Ok(WireValue::nil()))
                     };
-                    self.sender.send(Event::ResultResponse {
-                        request_id,
-                        result,
-                        stats: stats.clone(),
-                    })?;
+                    self.sender
+                        .send(Event::ResultResponse { request_id, result })?;
                 }
             }
         }

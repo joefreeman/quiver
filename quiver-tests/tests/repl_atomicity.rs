@@ -27,7 +27,6 @@ fn session() -> (Environment<NativeEffect>, Repl<NativeEffect>) {
         workers.push(Box::new(spawn_worker(
             quiver::native_transport::SteppedClock::new(virtual_time.clone()),
             builtins.clone(),
-            false,
             i as u16,
             waker.clone(),
         )));
@@ -80,8 +79,8 @@ fn eval_split(
     let compiled = repl.compile(prepared).expect("compile failed");
     let request_id = repl.commit(environment, compiled).expect("commit failed")?;
     match poll(environment, request_id) {
-        RequestResult::Result(Ok(value), _) => Some(environment.format_value(&value)),
-        RequestResult::Result(Err(e), _) => panic!("evaluation failed: {e:?} for: {source}"),
+        RequestResult::Result(Ok(value)) => Some(environment.format_value(&value)),
+        RequestResult::Result(Err(e)) => panic!("evaluation failed: {e:?} for: {source}"),
         _ => panic!("unexpected result type for: {source}"),
     }
 }

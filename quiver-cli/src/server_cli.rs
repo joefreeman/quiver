@@ -20,12 +20,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use quiver_cli::native_transport::Progress;
 use quiver_cli::protocol::{
-    CompactRequest, CreateResponse, FINGERPRINT_HEADER, Outcome, PROTOCOL_VERSION, ResumeRequest,
-    StatusResponse, pidfile_path,
+    CompactRequest, CreateResponse, FINGERPRINT_HEADER, MissingModules, Outcome, PROTOCOL_VERSION,
+    ResumePayload, ResumeRequest, StatusResponse, pidfile_path,
 };
 use quiver_cli::spawn_worker;
 use quiver_core::process::ProcessId;
 use quiver_core::wire::WireValue;
+use quiver_environment::EnvironmentError;
 use quiver_environment::{Environment, RequestResult, WorkerHandle};
 use quiver_io::NativeEffect;
 use std::collections::HashMap;
@@ -72,7 +73,6 @@ pub fn server_command(
         workers.push(Box::new(spawn_worker(
             quiver_cli::native_transport::SystemClock,
             builtins.clone(),
-            false,
             i as u16,
             waker.clone(),
         )));
@@ -108,21 +108,6 @@ pub fn server_command(
                 wake.wait(in_flight);
             }
         }
-    });
-
-    // Warm the artifact store with std in the background: clients compile, so this
-    // serves *their* first imports — through the shared cache directory.
-    thread::spawn(|| {
-        let store = std::rc::Rc::new(quiver_compiler::ArtifactStore::cache());
-        quiver_compiler::warm_std_store(
-            &store,
-            &quiver_cli::build_builtin_registry(),
-            quiver_compiler::compiler::CompileOptions {
-                debug: true,
-                source_name: "std".to_string(),
-                ..Default::default()
-            },
-        );
     });
 
     println!("quiv server listening on {}", socket_path.display());
@@ -316,12 +301,42 @@ fn run_resume(
     control.cancel.store(false, Ordering::Relaxed);
     let request_id = {
         let mut env = state.environment.lock().unwrap();
-        env.resume_process(pid, request.bytecode)
-            .map_err(internal)?;
+        match request.payload {
+            ResumePayload::Bytecode(bytecode) => {
+                env.resume_process(pid, bytecode).map_err(internal)?;
+            }
+            ResumePayload::Unit { unit, modules } => {
+                let builtins = quiver_cli::build_builtin_registry();
+                // Link what the client attached, deepest dependency first. A module it
+                // believed we held may have been reclaimed since, in which case its own
+                // imports come up short — collect those keys rather than failing, so one
+                // answer names everything the client must resend.
+                let mut missing: Vec<u64> = Vec::new();
+                for (key, module) in &modules {
+                    match env.link_module_unit(*key, module, &builtins) {
+                        Ok(()) => {}
+                        Err(EnvironmentError::ModuleNotLinked(key)) => missing.push(key),
+                        Err(e) => return Err(internal(e)),
+                    }
+                }
+                missing.extend(env.missing_modules(&unit).into_iter().map(|(_, key)| key));
+                if !missing.is_empty() {
+                    missing.sort_unstable();
+                    missing.dedup();
+                    return Err((
+                        StatusCode::FAILED_DEPENDENCY,
+                        axum::Json(MissingModules { missing }),
+                    )
+                        .into_response());
+                }
+                env.resume_process_unit(pid, &unit, &builtins)
+                    .map_err(internal)?;
+            }
+        }
         env.request_result(pid, request.keep).map_err(internal)?
     };
     match wait_for(state, request_id, Some((pid, &control.cancel))) {
-        Ok(RequestResult::Result(Ok(value), _)) => {
+        Ok(RequestResult::Result(Ok(value))) => {
             if control.cancel.load(Ordering::Relaxed) {
                 // The cancel raced completion; the process was stopped either way,
                 // so report the interruption deterministically.
@@ -330,7 +345,7 @@ fn run_resume(
                 Ok(render(state, &value))
             }
         }
-        Ok(RequestResult::Result(Err(e), _)) => {
+        Ok(RequestResult::Result(Err(e))) => {
             if control.cancel.load(Ordering::Relaxed) {
                 Ok(Outcome::Interrupted)
             } else {
