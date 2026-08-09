@@ -188,3 +188,89 @@ fn stop_sleeping_session_clears_persistence_and_cascades() {
         );
     }
 }
+
+/// Like [`session`], with the network builtins attached and a real io_uring backend,
+/// so a program can hold a live listener when it is stopped.
+fn io_session() -> (Environment<NativeEffect>, Repl<NativeEffect>) {
+    let virtual_time = Arc::new(AtomicU64::new(0));
+    let mut builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
+        &quiver_core::builtins::core_modules(),
+    );
+    for module in quiver_core::builtins::io_modules() {
+        module(&mut builtins);
+    }
+    quiver_io::attach_network_builtins(&mut builtins);
+    let (waker, _wake) = quiver::native_transport::wake_channel();
+    let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
+    for i in 0..2 {
+        workers.push(Box::new(spawn_worker(
+            quiver::native_transport::SteppedClock::new(virtual_time.clone()),
+            builtins.clone(),
+            i as u16,
+            waker.clone(),
+        )));
+    }
+    let mut environment = Environment::<NativeEffect>::new(workers);
+    environment.set_runtime_declarations(builtins.runtime_declarations().clone());
+    environment.set_effect_backend(Box::new(
+        quiver_io::NativeEffectBackend::new(64).expect("io_uring backend"),
+    ));
+    let resolver = Box::new(PackageResolver::memory(HashMap::new()));
+    let repl = Repl::new(&mut environment, resolver, builtins).expect("failed to create REPL");
+    (environment, repl)
+}
+
+#[test]
+fn stop_releases_a_listener_with_an_accept_in_flight() {
+    // A submitted io_uring accept holds its own reference to the listening socket, so
+    // closing the fd alone leaves the port bound — accepting connections into a backlog
+    // nothing drains, so connects hang instead of being refused. The stop's resource
+    // sweep must cancel the in-flight accept for the close to release the port.
+    let (mut environment, mut repl) = io_session();
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+        probe.local_addr().expect("addr").port()
+    };
+    let request_id = begin(
+        &mut environment,
+        &mut repl,
+        &format!("[{port}, 16] ~> __tcp_listen__ ~> =(\\TcpListener)l; __tcp_listener_accept__ l"),
+    );
+    // Bind-probe readiness: the wildcard listener makes a local bind fail, without
+    // connecting — a connect would complete the very accept that must stay in flight.
+    // Then wait for the accept itself to reach the ring: the bug needs an operation in
+    // flight at close time, and the effect takes a few more steps to route.
+    let address = format!("127.0.0.1:{port}");
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        environment.step().expect("environment step failed");
+        if std::net::TcpListener::bind(&address).is_err() && environment.io_in_flight() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the accept never got in flight");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    environment
+        .stop_process(repl.process_id())
+        .expect("stop_process failed");
+    match poll(&mut environment, request_id) {
+        RequestResult::Result(Err(Error::Killed)) => {}
+        other => panic!("expected the Killed error, got {other:?}"),
+    }
+
+    // Released means bindable again — not merely closed in this process's fd table
+    // while the cancelled-too-late accept keeps the kernel socket alive.
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        environment.step().expect("environment step failed");
+        if std::net::TcpListener::bind(&address).is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the port is still bound after the stop"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}

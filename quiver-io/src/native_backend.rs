@@ -108,7 +108,11 @@ pub enum IoOpType {
         buffer: Vec<u8>, // Keep buffer alive for the duration of the async operation
     },
     Flush,
-    Accept,
+    Accept {
+        /// The listener, so a close can cancel the in-flight accept (see
+        /// `cancel_inflight`).
+        resource_id: ResourceId,
+    },
     Connect {
         socket: Socket,
         peer_addr: SocketAddr,
@@ -159,6 +163,48 @@ enum ArmedOp {
 }
 
 impl NativeEffectBackend {
+    /// Cancel every in-flight io_uring operation touching `resource_id` — select-armed
+    /// stream reads and pending effect operations alike. A submitted operation holds its
+    /// own reference to the underlying *file*, so closing the fd without this leaves the
+    /// kernel object alive until the operation completes — which an idle accept never
+    /// does: a closed listener's socket would stay bound, accepting connections into a
+    /// backlog nothing drains. The cancelled operations complete with `-ECANCELED`
+    /// through the ordinary handlers, whose events and completions are dropped at
+    /// routing when the owner is gone. The cancel's own completion carries user data 0,
+    /// which no operation uses (ids start at 1), so the drain loop ignores it.
+    fn cancel_inflight(&mut self, resource_id: ResourceId) {
+        let mut targets: Vec<u64> = self
+            .armed
+            .iter()
+            .filter(|(_, op)| match op {
+                ArmedOp::Read {
+                    resource_id: rid, ..
+                }
+                | ArmedOp::Accept { resource_id: rid } => *rid == resource_id,
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        targets.extend(self.pending.iter().filter_map(|(&id, (_, op))| match op {
+            IoOpType::Accept { resource_id: rid } if *rid == resource_id => Some(id),
+            IoOpType::Tls {
+                resource_id: rid, ..
+            } if *rid == resource_id => Some(id),
+            _ => None,
+        }));
+        if targets.is_empty() {
+            return;
+        }
+        for target in targets {
+            let cancel = opcode::AsyncCancel::new(target).build().user_data(0);
+            // Best-effort: a full submission queue means the operation survives to its
+            // natural completion, which is the pre-cancel behaviour.
+            unsafe {
+                let _ = self.ring.submission().push(&cancel);
+            }
+        }
+        let _ = self.ring.submit();
+    }
+
     /// Create a new native effect backend with the specified io_uring queue depth
     pub fn new(queue_depth: u32) -> Result<Self, Error> {
         let ring = IoUringRing::new(queue_depth)
@@ -503,7 +549,7 @@ impl EffectBackend for NativeEffectBackend {
                         completions.push((process_id, self.handle_flush_completion(result_code)));
                     }
 
-                    IoOpType::Accept => {
+                    IoOpType::Accept { .. } => {
                         completions.push((process_id, self.handle_accept_completion(result_code)));
                     }
 
@@ -618,9 +664,10 @@ impl EffectBackend for NativeEffectBackend {
     }
 
     fn close_resource(&mut self, resource_id: ResourceId) {
-        // Remove resource from registry - Drop impl will close the FD. An armed read
-        // on the closed fd completes with an error; its event is dropped at routing
-        // (the owner is gone too).
+        // Cancel in-flight operations first, then remove the resource — the Drop impl
+        // closes the fd, but only the cancel releases the kernel object an operation
+        // still references.
+        self.cancel_inflight(resource_id);
         self.resources.remove(&resource_id);
         self.armed_resources.remove(&resource_id);
     }
@@ -1308,8 +1355,10 @@ impl NativeEffectBackend {
             .submit()
             .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
 
-        self.pending
-            .insert(completion_id, (process_id, IoOpType::Accept));
+        self.pending.insert(
+            completion_id,
+            (process_id, IoOpType::Accept { resource_id }),
+        );
 
         Ok(None)
     }
@@ -1332,7 +1381,9 @@ impl NativeEffectBackend {
             return self.tls_drive(process_id, resource_id, TlsGoal::Close, None);
         }
 
-        // Remove the resource - Socket will be dropped and closed automatically
+        // Cancel any armed read (a select's timeout leaves one in flight), then remove
+        // the resource - Socket will be dropped and closed automatically
+        self.cancel_inflight(resource_id);
         self.resources
             .remove(&resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
@@ -1345,7 +1396,9 @@ impl NativeEffectBackend {
         &mut self,
         resource_id: ResourceId,
     ) -> Result<Option<EffectResult>, Error> {
-        // Remove the resource - Listener will be dropped and closed automatically
+        // Cancel any armed accept (a select source's), then remove the resource — the
+        // Drop impl closes the fd, the cancel releases the kernel socket it pins.
+        self.cancel_inflight(resource_id);
         self.resources
             .remove(&resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
