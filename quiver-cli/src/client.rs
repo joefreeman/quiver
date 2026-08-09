@@ -109,27 +109,19 @@ impl Trace {
     }
 }
 
-/// What a resume body is, without deserialising it: which payload arm, and how many
-/// module units ride along.
+/// What a resume body is, without deserialising it into the session: the unit's shape,
+/// and how many module units ride along.
 fn summarise(body: &[u8]) -> String {
     let Ok(request) = serde_json::from_slice::<ResumeRequest>(body) else {
         return String::new();
     };
-    match request.payload {
-        crate::protocol::ResumePayload::Bytecode(bytecode) => {
-            format!(
-                "  bytecode: {} functions, {} types",
-                bytecode.functions.len(),
-                bytecode.types.len()
-            )
-        }
-        crate::protocol::ResumePayload::Unit { unit, modules } => format!(
-            "  unit: {} own functions, {} imports; {} module unit(s) attached",
-            unit.functions.len(),
-            unit.imports.iter().map(|(_, _, i)| i.len()).sum::<usize>(),
-            modules.len()
-        ),
-    }
+    let crate::protocol::ResumePayload { unit, modules } = request.payload;
+    format!(
+        "  unit: {} own functions, {} imports; {} module unit(s) attached",
+        unit.functions.len(),
+        unit.imports.iter().map(|(_, _, i)| i.len()).sum::<usize>(),
+        modules.len()
+    )
 }
 
 /// A non-2xx answer, or the transport failing under a request.

@@ -568,10 +568,9 @@ impl Opcode {
 
 /// One instruction, packed into a word: an 8-bit opcode and a 24-bit operand.
 ///
-/// Fixed width is deliberate. Every pass that rewrites table ids — the environment merging
-/// a compiled REPL line, the linker loading a module artifact, the tree shaker renumbering
-/// — rewrites operands in place, which a variable-length encoding would turn into a
-/// re-assembly of the whole stream.
+/// Fixed width is deliberate. Every pass that rewrites table ids — the linker loading a
+/// unit or a module artifact into a session — rewrites operands in place, which a
+/// variable-length encoding would turn into a re-assembly of the whole stream.
 ///
 /// Build one through the named constructors, never by hand: [`Instruction::tuple`] and
 /// [`Instruction::pick`] normalise their operands, and the rest keep the debug-build
@@ -826,7 +825,7 @@ impl Instruction {
     /// Pop an integer process id; push a process value with that id and this root
     /// function index. REPL-only: it is how a session names a pid it has already seen
     /// (`@1`). The id arrives as an ordinary constant rather than a second operand, so it
-    /// rides the constants table that already remaps and tree-shakes.
+    /// rides the constants table that linking already remaps.
     pub fn process(function_id: usize) -> Instruction {
         Instruction::with_id(Opcode::Process, function_id)
     }

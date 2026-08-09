@@ -1,8 +1,8 @@
-//! The run-as-one-line-session claim (docs plan, phase 4.5): a program compiled by
-//! `compile_entry` is executable by the same convention as a REPL line — create a
-//! fresh persistent process, resume it with the tree-shaken bytecode, await the
-//! result. This is the convention the protocol's only code-bearing verb (`resume`)
-//! relies on, so it gets a direct test rather than an assumption.
+//! The run-as-one-line-session claim: a program compiled by `compile_entry` is
+//! executable by the same convention as a REPL line — create a fresh persistent
+//! process, resume it with its compiled unit, await the result. This is the
+//! convention the protocol's only code-bearing verb (`resume`) relies on, so it
+//! gets a direct test rather than an assumption.
 
 use quiver_cli::spawn_worker;
 use quiver_environment::{Environment, RequestResult, WorkerHandle};
@@ -29,10 +29,10 @@ fn environment() -> Environment<NativeEffect> {
     environment
 }
 
-fn compile(source: &str) -> quiver_core::bytecode::Bytecode {
+fn compile(source: &str) -> quiver_compiler::CompiledUnit {
     let ast = quiver_compiler::parse(source).expect("parse failed");
     let resolver = quiver_compiler::PackageResolver::inline();
-    let (program, _module_cache, entry) = quiver_cli::compile::compile_entry(
+    let (program, module_cache, entry) = quiver_cli::compile::compile_entry(
         ast,
         &resolver,
         &quiver_cli::build_builtin_registry(),
@@ -40,7 +40,13 @@ fn compile(source: &str) -> quiver_core::bytecode::Bytecode {
         None,
     )
     .expect("compile failed");
-    program.to_bytecode_optimized(entry)
+    quiver_compiler::extract_unit(
+        &program,
+        &module_cache,
+        Some(entry),
+        0,
+        quiver_compiler::Imports::Inline,
+    )
 }
 
 fn await_result(environment: &mut Environment<NativeEffect>, request: u64) -> String {
@@ -61,11 +67,15 @@ fn await_result(environment: &mut Environment<NativeEffect>, request: u64) -> St
 #[test]
 fn a_program_is_a_one_line_session() {
     let mut environment = environment();
-    // Pure allocation, no bytecode — the protocol's POST /processes.
-    let pid = environment.start_process(None).expect("start failed");
+    // Pure allocation, nothing to run yet — the protocol's POST /processes.
+    let pid = environment.start_process().expect("start failed");
     // The one code-bearing verb: resume with a compiled program.
     environment
-        .resume_process(pid, compile("#{ [40, 2] ~> __integer_add__ }"))
+        .resume_process_unit(
+            pid,
+            &compile("#{ [40, 2] ~> __integer_add__ }"),
+            &quiver_cli::build_builtin_registry(),
+        )
         .expect("resume failed");
     let request = environment
         .request_result(pid, None)
@@ -78,14 +88,14 @@ fn the_process_survives_for_another_resume() {
     // A run root is a persistent process: after its program completes it sleeps, and
     // a further resume works — which is also what makes run and REPL the same shape.
     let mut environment = environment();
-    let pid = environment.start_process(None).expect("start failed");
+    let pid = environment.start_process().expect("start failed");
     for expected in ["42", "9"] {
         let source = match expected {
             "42" => "#{ [40, 2] ~> __integer_add__ }",
             _ => "#{ [4, 5] ~> __integer_add__ }",
         };
         environment
-            .resume_process(pid, compile(source))
+            .resume_process_unit(pid, &compile(source), &quiver_cli::build_builtin_registry())
             .expect("resume failed");
         let request = environment
             .request_result(pid, None)
@@ -99,9 +109,13 @@ fn top_level_work_runs_on_resume() {
     // The entry runs the program's top level in the root process before calling the
     // function it evaluates to — bindings made there feed the program body.
     let mut environment = environment();
-    let pid = environment.start_process(None).expect("start failed");
+    let pid = environment.start_process().expect("start failed");
     environment
-        .resume_process(pid, compile("x = 40\n#{ [x, 2] ~> __integer_add__ }"))
+        .resume_process_unit(
+            pid,
+            &compile("x = 40\n#{ [x, 2] ~> __integer_add__ }"),
+            &quiver_cli::build_builtin_registry(),
+        )
         .expect("resume failed");
     let request = environment
         .request_result(pid, None)

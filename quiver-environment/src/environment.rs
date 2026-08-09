@@ -6,7 +6,9 @@ use quiver_compiler::compiler::{
     Bindings, Scope, ScopeKind, TypeAliasDef, resolve_type_alias_for_display,
 };
 use quiver_compiler::resolver::ModuleId;
-use quiver_core::bytecode::{Bytecode, Constant, Function};
+#[cfg(test)]
+use quiver_core::bytecode::Bytecode;
+use quiver_core::bytecode::{Constant, Function};
 use quiver_core::compatibility::{CompatibilityInput, CompatibilityTables};
 use quiver_core::effects::{Effect, EffectBackend, ResultTupleInfo};
 use quiver_core::executor::{ProgramUpdate, TableUpdate};
@@ -61,9 +63,9 @@ struct CollectionState {
     /// Code roots accumulated during `CollectingCode`.
     code_functions: HashSet<usize>,
     code_constants: HashSet<usize>,
-    /// Ids a mid-round `merge_bytecode` touched (its full remap image, revivals
-    /// included): the merged code may reference them statically, and the workers'
-    /// walk cannot have seen it — excluded from this round's dead set.
+    /// Ids a mid-round link touched (its full remap image, revivals included): the
+    /// linked code may reference them statically, and the workers' walk cannot have
+    /// seen it — excluded from this round's dead set.
     code_exclusion_functions: HashSet<usize>,
     code_exclusion_constants: HashSet<usize>,
 }
@@ -136,10 +138,6 @@ fn collect_request_result_refs(
         }
         _ => {}
     }
-}
-
-fn remap_type_id(id: usize, type_remap: &HashMap<usize, usize>) -> usize {
-    *type_remap.get(&id).unwrap_or(&id)
 }
 
 /// Deep-copy a type from a source id space (`src_types` / `src_tuples`) into `program`,
@@ -604,7 +602,7 @@ impl<E: Effect> Environment<E> {
     pub fn set_effect_backend(&mut self, backend: Box<dyn EffectBackend<E = E>>) {
         self.effect_backend = Some(backend);
         // Hand the backend the type ids it needs for any program already loaded (the backend may
-        // be attached after the program). Re-pushed on each subsequent merge; see merge_bytecode.
+        // be attached after the program). Re-pushed whenever new code links.
         self.push_type_ids_to_backend();
     }
 
@@ -681,19 +679,13 @@ impl<E: Effect> Environment<E> {
 
     /// Start a new persistent process, returns assigned ProcessId
     /// If bytecode is None, creates a sleeping process ready for resume (used by REPL)
-    pub fn start_process(
-        &mut self,
-        bytecode: Option<Bytecode>,
-    ) -> Result<ProcessId, EnvironmentError> {
-        let function_index = match bytecode {
-            Some(bc) => Some(self.merge_bytecode(bc)?),
-            None => None,
-        };
-        self.start_process_at(function_index)
+    /// Create a sleeping process with nothing to run yet, ready for a resume.
+    pub fn start_process(&mut self) -> Result<ProcessId, EnvironmentError> {
+        self.start_process_at(None)
     }
 
-    /// Start a process on a unit rather than on bytecode: link it (its imports must
-    /// already be linked — see [`Self::link_module_unit`]) and start at its entry.
+    /// Start a process on a unit: link it (its imports must already be linked — see
+    /// [`Self::link_module_unit`]) and start at its entry.
     pub fn start_process_unit(
         &mut self,
         unit: &CompiledUnit,
@@ -721,18 +713,7 @@ impl<E: Effect> Environment<E> {
         Ok(pid)
     }
 
-    /// Resume a sleeping persistent process
-    pub fn resume_process(
-        &mut self,
-        pid: ProcessId,
-        bytecode: Bytecode,
-    ) -> Result<(), EnvironmentError> {
-        // Merge bytecode and get remapped function index
-        let function_index = self.merge_bytecode(bytecode)?;
-        self.resume_process_at(pid, function_index)
-    }
-
-    /// Resume a process on a unit rather than on bytecode: link it (its imports must
+    /// Resume a sleeping persistent process on a unit: link it (its imports must
     /// already be linked — see [`Self::link_module_unit`]) and resume at its entry.
     pub fn resume_process_unit(
         &mut self,
@@ -1237,149 +1218,6 @@ impl<E: Effect> Environment<E> {
         let id = self.next_request_id;
         self.next_request_id += 1;
         id
-    }
-
-    /// Merge bytecode into the environment's accumulated state with deduplication
-    /// Returns the remapped entry function index
-    fn merge_bytecode(&mut self, bytecode: Bytecode) -> Result<usize, EnvironmentError> {
-        let entry_fn = bytecode.entry.expect("Bytecode must have an entry point");
-
-        // Track old sizes for computing deltas
-        let old_constants_len = self.program.get_constants().len();
-        let old_functions_len = self.program.get_functions().len();
-        let old_tuples_len = self.program.get_tuples().len();
-        let old_builtins_len = self.program.get_builtins().len();
-        let old_types_len = self.program.get_types().len();
-
-        // Build remapping tables using Program::register_* methods
-        let mut remaps = quiver_core::bytecode::IdRemaps::default();
-
-        // Merge constants using Program::register_constant
-        for (old_idx, constant) in bytecode.constants.iter().enumerate() {
-            let new_idx = self.program.register_constant(constant.clone());
-            remaps.constants.insert(old_idx, new_idx);
-        }
-
-        // Merge annotation keys by name, so Annotate/GetAnnotation key ids stay aligned
-        // when several independently-compiled programs share the environment.
-        for (old_idx, name) in bytecode.annotation_keys.iter().enumerate() {
-            let new_idx = self.program.register_annotation_key(name);
-            remaps.annotation_keys.insert(old_idx, new_idx);
-        }
-
-        // Merge field names by name, so GetNamed ids stay aligned across merged programs.
-        for (old_idx, name) in bytecode.field_names.iter().enumerate() {
-            let new_idx = self.program.register_field_name(name);
-            remaps.field_names.insert(old_idx, new_idx);
-        }
-
-        // Merge types and tuples. They are mutually recursive (a type may reference tuples and
-        // vice versa), so we import every node via `import_type` / `import_tuple`, which import
-        // each node's dependencies before registering it. Iterating over all indices guarantees
-        // every source index ends up in the remap tables (including those reachable only through
-        // function instructions), and memoisation keeps repeated visits cheap.
-        let src = TypeSource {
-            types: &bytecode.types,
-            tuples: &bytecode.tuples,
-            annotation_keys: &bytecode.annotation_keys,
-        };
-        for old_idx in 0..bytecode.types.len() {
-            import_type(
-                &mut self.program,
-                &src,
-                &mut remaps.types,
-                &mut remaps.tuples,
-                old_idx,
-            );
-        }
-        for old_idx in 0..bytecode.tuples.len() {
-            import_tuple(
-                &mut self.program,
-                &src,
-                &mut remaps.types,
-                &mut remaps.tuples,
-                old_idx,
-            );
-        }
-
-        // Merge builtins using Program::register_builtin_info
-        for (old_idx, builtin_info) in bytecode.builtins.iter().enumerate() {
-            // Remap type ID references within the builtin info
-            let remapped_info = quiver_core::types::BuiltinInfo {
-                name: builtin_info.name.clone(),
-                param_type: remap_type_id(builtin_info.param_type, &remaps.types),
-                result_type: remap_type_id(builtin_info.result_type, &remaps.types),
-                // Part of the entry's identity, so it must be remapped before the
-                // registration below dedupes on it.
-                type_argument: builtin_info
-                    .type_argument
-                    .map(|id| remap_type_id(id, &remaps.types)),
-            };
-            let new_idx = self.program.register_builtin_info(remapped_info);
-            remaps.builtins.insert(old_idx, new_idx);
-        }
-
-        // Merge the failure-provenance sites (debug builds): each site is re-registered
-        // with its module-name constant remapped, so `Stamp` ids can be remapped below.
-        // `register_debug_site` re-derives the table's key/tuple ids in this program,
-        // where the same names/shapes deduplicate to the ids imported above.
-        if let Some(table) = &bytecode.debug {
-            for (old_idx, site) in table.sites.iter().enumerate() {
-                let new_idx = self
-                    .program
-                    .register_debug_site(quiver_core::bytecode::Site {
-                        module_constant: *remaps
-                            .constants
-                            .get(&site.module_constant)
-                            .unwrap_or(&site.module_constant),
-                        ..site.clone()
-                    });
-                remaps.sites.insert(old_idx, new_idx);
-            }
-        }
-
-        // Merge functions (type_id is remapped by remap_function)
-        for (old_idx, function) in bytecode.functions.iter().enumerate() {
-            let remapped_function = function.clone().remap_ids(&remaps);
-
-            let new_idx = self.program.register_function(remapped_function);
-            remaps.functions.insert(old_idx, new_idx);
-        }
-
-        // Revived stubs (identical content re-registered after reclamation refilled its
-        // original slot) must reach append-only workers explicitly; a shared table
-        // already carries the new content. Mid-collection, everything this merge
-        // touched — its whole remap image — is excluded from the round's dead set: the
-        // merged instructions may reference it, and the workers' root walk predates
-        // this code running.
-        let (revived_functions, revived_constants) = self.program.take_revived();
-        if let Some(state) = self.collection.as_mut() {
-            state
-                .code_exclusion_functions
-                .extend(remaps.functions.values().copied());
-            state
-                .code_exclusion_constants
-                .extend(remaps.constants.values().copied());
-        }
-        self.code_registered_since_sweep += (self.program.get_functions().len()
-            - old_functions_len)
-            + (self.program.get_constants().len() - old_constants_len);
-
-        self.send_program_update(
-            old_constants_len,
-            old_functions_len,
-            old_tuples_len,
-            old_types_len,
-            old_builtins_len,
-            revived_functions,
-            revived_constants,
-        )?;
-
-        // Return remapped entry function index
-        Ok(*remaps
-            .functions
-            .get(&entry_fn)
-            .expect("Entry function should be in remap table"))
     }
 
     /// Refresh the derived tables over the merged program and ship every registry item
@@ -2852,7 +2690,7 @@ impl<E: Effect> Environment<E> {
 #[cfg(test)]
 impl<E: Effect> Environment<E> {
     /// Test helper: merge a bytecode's types/tuples and return the merged index of its first
-    /// tuple. Mirrors the type/tuple half of `merge_bytecode` without requiring workers.
+    /// tuple. Mirrors the type/tuple interning a link performs, without requiring workers.
     fn merge_tuples_for_test(&mut self, bytecode: Bytecode) -> usize {
         let mut type_remap: HashMap<usize, usize> = HashMap::new();
         let mut tuple_remap: HashMap<usize, usize> = HashMap::new();

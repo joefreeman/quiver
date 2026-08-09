@@ -557,7 +557,6 @@ impl Program {
     }
 
     /// Convert this program to bytecode format with an optional entry point.
-    /// Does not perform tree shaking - use `to_bytecode_optimized` for that.
     /// Type compatibility is computed when the bytecode is loaded for execution.
     pub fn to_bytecode(&self, entry: Option<usize>) -> Bytecode {
         // Collect resource names for bytecode
@@ -812,12 +811,6 @@ impl Program {
         }
         table.sites.push(site);
         table.sites.len() - 1
-    }
-
-    /// Convert this program to optimized bytecode format.
-    /// Performs tree shaking to remove unused functions, constants, and types.
-    pub fn to_bytecode_optimized(&self, entry: usize) -> Bytecode {
-        crate::optimisation::tree_shake(self.to_bytecode(Some(entry)), entry)
     }
 }
 

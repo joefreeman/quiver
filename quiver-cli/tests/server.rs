@@ -104,14 +104,18 @@ impl Session {
             .compiler
             .commit_line(compiled)
             .expect("expected executable code");
-        // This harness drives the protocol directly and never opted into units.
-        let quiver_environment::LinePayload::Bytecode(bytecode) = committed.payload else {
-            unreachable!("units are opt-in per driver");
-        };
+        // This harness attaches no store, so the payload arrives fully inlined.
+        let quiver_environment::LinePayload { unit, modules } = committed.payload;
         self.client
             .resume(
                 self.pid,
-                ResumePayload::Bytecode(bytecode),
+                ResumePayload {
+                    unit,
+                    modules: modules
+                        .iter()
+                        .map(|(key, artifact)| (*key, artifact.unit.clone()))
+                        .collect(),
+                },
                 Some(committed.keep_indices),
             )
             .expect("resume failed")
@@ -125,10 +129,10 @@ impl Session {
     }
 }
 
-fn program(source: &str) -> quiver_core::bytecode::Bytecode {
+fn program(source: &str) -> quiver_compiler::CompiledUnit {
     let ast = quiver_compiler::parse(source).expect("parse failed");
     let resolver = quiver_compiler::PackageResolver::inline();
-    let (program, _module_cache, entry) = quiver_cli::compile::compile_entry(
+    let (program, module_cache, entry) = quiver_cli::compile::compile_entry(
         ast,
         &resolver,
         &quiver_cli::build_builtin_registry(),
@@ -136,7 +140,13 @@ fn program(source: &str) -> quiver_core::bytecode::Bytecode {
         None,
     )
     .expect("compile failed");
-    program.to_bytecode_optimized(entry)
+    quiver_compiler::extract_unit(
+        &program,
+        &module_cache,
+        Some(entry),
+        0,
+        quiver_compiler::Imports::Inline,
+    )
 }
 
 #[test]
@@ -179,9 +189,10 @@ fn concurrent_sessions_evaluate_and_run_independently() {
                 let outcome = client
                     .resume(
                         pid,
-                        ResumePayload::Bytecode(program(&format!(
-                            "#{{ [{n}, 1] ~> __integer_add__ }}"
-                        ))),
+                        ResumePayload {
+                            unit: program(&format!("#{{ [{n}, 1] ~> __integer_add__ }}")),
+                            modules: Vec::new(),
+                        },
                         None,
                     )
                     .expect("resume failed");
@@ -224,7 +235,10 @@ fn cancel_interrupts_and_a_fresh_session_recovers() {
         move || {
             client.resume(
                 pid,
-                ResumePayload::Bytecode(program("#{ f = #[] { ^ [] }; f [] }")),
+                ResumePayload {
+                    unit: program("#{ f = #[] { ^ [] }; f [] }"),
+                    modules: Vec::new(),
+                },
                 None,
             )
         }
@@ -252,14 +266,24 @@ fn concurrent_resumes_answer_conflict() {
         move || {
             client.resume(
                 pid,
-                ResumePayload::Bytecode(program("#{ f = #[] { ^ [] }; f [] }")),
+                ResumePayload {
+                    unit: program("#{ f = #[] { ^ [] }; f [] }"),
+                    modules: Vec::new(),
+                },
                 None,
             )
         }
     });
     std::thread::sleep(Duration::from_millis(300));
     // Resumes are serialized per process: an overlapping one is refused.
-    let overlap = client.resume(pid, ResumePayload::Bytecode(program("#{ 1 }")), None);
+    let overlap = client.resume(
+        pid,
+        ResumePayload {
+            unit: program("#{ 1 }"),
+            modules: Vec::new(),
+        },
+        None,
+    );
     assert!(
         overlap.as_ref().is_err_and(|e| e.is_conflict()),
         "expected 409, got {overlap:?}"
@@ -285,7 +309,10 @@ fn abandoned_processes_stay_visible_and_collectable() {
         move || {
             client.resume(
                 pid,
-                ResumePayload::Bytecode(program("#{ f = #[] { ^ [] }; f [] }")),
+                ResumePayload {
+                    unit: program("#{ f = #[] { ^ [] }; f [] }"),
+                    modules: Vec::new(),
+                },
                 None,
             )
         }
@@ -396,7 +423,14 @@ fn exe() -> PathBuf {
 fn quick_value(client: &Client, source: &str) -> String {
     let pid = client.create_process().expect("create failed");
     let outcome = client
-        .resume(pid, ResumePayload::Bytecode(program(source)), None)
+        .resume(
+            pid,
+            ResumePayload {
+                unit: program(source),
+                modules: Vec::new(),
+            },
+            None,
+        )
         .expect("resume failed");
     client.delete_process(pid).expect("delete failed");
     match outcome {
@@ -515,7 +549,6 @@ impl UnitSession {
             quiver_cli::build_builtin_registry(),
         );
         compiler.set_artifact_store(std::rc::Rc::new(quiver_compiler::ArtifactStore::cache()));
-        compiler.accept_units(true);
         UnitSession {
             client,
             compiler,
@@ -542,19 +575,15 @@ impl UnitSession {
             .compiler
             .commit_line(compiled)
             .expect("expected executable code");
-        match committed.payload {
-            quiver_environment::LinePayload::Unit { unit, modules } => (
-                unit,
-                modules
-                    .iter()
-                    .map(|(key, artifact)| (*key, artifact.unit.clone()))
-                    .collect(),
-                committed.keep_indices,
-            ),
-            quiver_environment::LinePayload::Bytecode(_) => {
-                panic!("expected a unit payload for `{source}`")
-            }
-        }
+        let quiver_environment::LinePayload { unit, modules } = committed.payload;
+        (
+            unit,
+            modules
+                .iter()
+                .map(|(key, artifact)| (*key, artifact.unit.clone()))
+                .collect(),
+            committed.keep_indices,
+        )
     }
 }
 
@@ -570,7 +599,7 @@ fn a_unit_resume_links_its_modules_and_names_them_thereafter() {
         .client
         .resume(
             session.pid,
-            ResumePayload::Unit {
+            ResumePayload {
                 unit,
                 modules: modules.clone(),
             },
@@ -598,7 +627,7 @@ fn a_unit_resume_links_its_modules_and_names_them_thereafter() {
         .client
         .resume(
             session.pid,
-            ResumePayload::Unit {
+            ResumePayload {
                 unit,
                 modules: attach,
             },
@@ -623,7 +652,7 @@ fn a_stale_sent_record_is_answered_with_the_missing_keys() {
         .client
         .resume(
             session.pid,
-            ResumePayload::Unit {
+            ResumePayload {
                 unit: unit.clone(),
                 modules: Vec::new(),
             },
@@ -645,11 +674,7 @@ fn a_stale_sent_record_is_answered_with_the_missing_keys() {
     // The retry carries them and succeeds.
     let outcome = session
         .client
-        .resume(
-            session.pid,
-            ResumePayload::Unit { unit, modules },
-            Some(keep),
-        )
+        .resume(session.pid, ResumePayload { unit, modules }, Some(keep))
         .expect("retry failed");
     match outcome {
         Outcome::Value { rendered, .. } => assert_eq!(rendered, "42"),

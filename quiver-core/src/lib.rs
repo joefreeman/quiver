@@ -7,7 +7,6 @@ pub mod error;
 pub mod execute;
 pub mod executor;
 pub mod format;
-pub mod optimisation;
 pub mod process;
 pub mod program;
 pub mod types;

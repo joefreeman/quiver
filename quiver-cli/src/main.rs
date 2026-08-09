@@ -39,6 +39,12 @@ enum Commands {
         /// Debug build: stamp nil results with failure provenance (`origin` annotations).
         #[arg(long)]
         debug: bool,
+
+        /// Inline imported modules into the entry unit, shaken to what it reaches: a
+        /// smaller, self-contained output that no longer names module identities a warm
+        /// host could recognise. The default bundles each module's unit whole.
+        #[arg(long)]
+        inline: bool,
     },
 
     Run {
@@ -115,7 +121,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output,
             eval,
             debug,
-        }) => compile_command(input, output, eval, debug)?,
+            inline,
+        }) => compile_command(input, output, eval, debug, inline)?,
         Some(Commands::Run {
             input,
             eval,
@@ -180,6 +187,7 @@ fn compile_command(
     output: Option<String>,
     eval: Option<String>,
     debug: bool,
+    inline: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (source, source_id, resolver_path) = if let Some(code) = eval {
         (code, "eval".to_string(), None)
@@ -248,10 +256,15 @@ fn compile_command(
     };
 
     // A `.qx` is a self-contained program: this compile's own code, plus the units of
-    // every module it imports. `own_floor` is 0 — the program is freshly compiled, so
-    // everything no module owns is its own.
-    let compiled = quiver_compiler::extract_program(&program, &module_cache, entry, 0)
-        .map_err(|e| format!("Cannot produce a linkable program: {e}"))?;
+    // every module it imports — or, inlined, one unit with the module code shaken into
+    // it. `own_floor` is 0 — the program is freshly compiled, so everything no module
+    // owns is its own.
+    let imports = if inline {
+        quiver_compiler::Imports::Inline
+    } else {
+        quiver_compiler::Imports::Bundle
+    };
+    let compiled = quiver_compiler::extract_program(&program, &module_cache, entry, 0, imports);
     // Compact, not pretty: this is machine output — `quiv inspect` is the readable view,
     // and indentation was over half the file.
     let json = serde_json::to_string(&compiled)?;
@@ -413,8 +426,13 @@ fn run_command(
             options,
             Some(store),
         )?;
-        quiver_compiler::extract_program(&program, &module_cache, Some(entry), 0)
-            .map_err(|e| format!("Cannot produce a linkable program: {e}"))?
+        quiver_compiler::extract_program(
+            &program,
+            &module_cache,
+            Some(entry),
+            0,
+            quiver_compiler::Imports::Bundle,
+        )
     };
 
     run_on_server(compiled, quiet)
@@ -468,7 +486,7 @@ fn run_on_server(
     // closure and lets the server skip the keys it already has.
     let outcome = client.resume(
         pid,
-        quiver_cli::protocol::ResumePayload::Unit {
+        quiver_cli::protocol::ResumePayload {
             unit: compiled.unit,
             modules: compiled.modules,
         },

@@ -210,7 +210,7 @@ async fn create_process(
     State(state): State<Shared>,
 ) -> Result<axum::Json<CreateResponse>, Response> {
     let shared = Arc::clone(&state);
-    let pid = blocking(move || shared.environment.lock().unwrap().start_process(None))
+    let pid = blocking(move || shared.environment.lock().unwrap().start_process())
         .await?
         .map_err(internal)?;
     state.roots.lock().unwrap().insert(
@@ -290,7 +290,7 @@ async fn resume_process(
     Ok(axum::Json(outcome))
 }
 
-/// The blocking heart of `resume`: hand the bytecode to the process, wait on the
+/// The blocking heart of `resume`: hand the unit to the process, wait on the
 /// progress signal (stopping the root once if a cancel lands), render the outcome.
 fn run_resume(
     state: &Shared,
@@ -301,38 +301,32 @@ fn run_resume(
     control.cancel.store(false, Ordering::Relaxed);
     let request_id = {
         let mut env = state.environment.lock().unwrap();
-        match request.payload {
-            ResumePayload::Bytecode(bytecode) => {
-                env.resume_process(pid, bytecode).map_err(internal)?;
-            }
-            ResumePayload::Unit { unit, modules } => {
-                let builtins = quiver_cli::build_builtin_registry();
-                // Link what the client attached, deepest dependency first. A module it
-                // believed we held may have been reclaimed since, in which case its own
-                // imports come up short — collect those keys rather than failing, so one
-                // answer names everything the client must resend.
-                let mut missing: Vec<u64> = Vec::new();
-                for (key, module) in &modules {
-                    match env.link_module_unit(*key, module, &builtins) {
-                        Ok(()) => {}
-                        Err(EnvironmentError::ModuleNotLinked(key)) => missing.push(key),
-                        Err(e) => return Err(internal(e)),
-                    }
-                }
-                missing.extend(env.missing_modules(&unit).into_iter().map(|(_, key)| key));
-                if !missing.is_empty() {
-                    missing.sort_unstable();
-                    missing.dedup();
-                    return Err((
-                        StatusCode::FAILED_DEPENDENCY,
-                        axum::Json(MissingModules { missing }),
-                    )
-                        .into_response());
-                }
-                env.resume_process_unit(pid, &unit, &builtins)
-                    .map_err(internal)?;
+        let ResumePayload { unit, modules } = request.payload;
+        let builtins = quiver_cli::build_builtin_registry();
+        // Link what the client attached, deepest dependency first. A module it
+        // believed we held may have been reclaimed since, in which case its own
+        // imports come up short — collect those keys rather than failing, so one
+        // answer names everything the client must resend.
+        let mut missing: Vec<u64> = Vec::new();
+        for (key, module) in &modules {
+            match env.link_module_unit(*key, module, &builtins) {
+                Ok(()) => {}
+                Err(EnvironmentError::ModuleNotLinked(key)) => missing.push(key),
+                Err(e) => return Err(internal(e)),
             }
         }
+        missing.extend(env.missing_modules(&unit).into_iter().map(|(_, key)| key));
+        if !missing.is_empty() {
+            missing.sort_unstable();
+            missing.dedup();
+            return Err((
+                StatusCode::FAILED_DEPENDENCY,
+                axum::Json(MissingModules { missing }),
+            )
+                .into_response());
+        }
+        env.resume_process_unit(pid, &unit, &builtins)
+            .map_err(internal)?;
         env.request_result(pid, request.keep).map_err(internal)?
     };
     match wait_for(state, request_id, Some((pid, &control.cancel))) {

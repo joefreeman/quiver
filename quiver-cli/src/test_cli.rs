@@ -310,8 +310,13 @@ impl Runner {
             // A unit, like every other path: the chapter sessions beside this one already
             // link their modules once into the shared environment, and a program block
             // should reach that same code rather than merge a private copy of it.
-            let unit = quiver_compiler::extract_unit(&program, &module_cache, Some(entry), 0)
-                .map_err(|e| format!("{e}"))?;
+            let unit = quiver_compiler::extract_unit(
+                &program,
+                &module_cache,
+                Some(entry),
+                0,
+                quiver_compiler::Imports::Bundle,
+            );
             let store = module_cache
                 .artifact_store
                 .as_ref()

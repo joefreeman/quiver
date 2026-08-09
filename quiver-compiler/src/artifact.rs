@@ -481,10 +481,17 @@ enum Owner<'a> {
         id: &'a ModuleId,
         eligible: &'a HashSet<ModuleId>,
     },
-    /// A unit with no module identity — a REPL line, a program entry. It owns every
-    /// function no module claims, and may import from any module the session linked,
-    /// because its import entries name keys rather than relying on a covering key.
-    Unit,
+    /// A unit with no module identity — a REPL line, a program entry. It imports from
+    /// the modules in `eligible` (the ones whose artifacts can be supplied alongside
+    /// it), and owns everything else it reaches: functions no module claims, and —
+    /// inlined — the functions of any module outside the set. An empty set is a fully
+    /// inlined, self-contained unit.
+    Unit {
+        eligible: &'a HashSet<ModuleId>,
+        /// The entry is always owned, even when interning collapsed it onto a module's
+        /// function: an import entry cannot carry the entry point.
+        entry: Option<usize>,
+    },
 }
 
 fn classify(function_id: usize, owner: &Owner, module_cache: &ModuleCache) -> FunctionClass {
@@ -493,9 +500,12 @@ fn classify(function_id: usize, owner: &Owner, module_cache: &ModuleCache) -> Fu
         (Owner::Module { eligible, .. }, Some((holder, index))) if eligible.contains(holder) => {
             FunctionClass::Import(holder.clone(), *index)
         }
-        (Owner::Unit, Some((holder, index))) => FunctionClass::Import(holder.clone(), *index),
-        (Owner::Unit, None) => FunctionClass::Own,
-        _ => FunctionClass::Foreign,
+        (Owner::Module { .. }, _) => FunctionClass::Foreign,
+        (Owner::Unit { entry, .. }, _) if *entry == Some(function_id) => FunctionClass::Own,
+        (Owner::Unit { eligible, .. }, Some((holder, index))) if eligible.contains(holder) => {
+            FunctionClass::Import(holder.clone(), *index)
+        }
+        (Owner::Unit { .. }, _) => FunctionClass::Own,
     }
 }
 
@@ -984,44 +994,52 @@ pub(crate) fn extract(
 }
 
 /// Why a unit could not be extracted.
-#[derive(Debug)]
-pub enum UnitError {
-    /// A function owned by no module, registered before this compile, is reachable from
-    /// the entry. Nothing outside this session can name such a function, so the unit
-    /// could not be linked anywhere else. It does not happen — references to earlier
-    /// compiles' code go through session locals, never the function table, and the
-    /// caller holds the program's dedup floor at `own_floor` so interning cannot place
-    /// one of this compile's own functions below it either.
-    EscapedReference(usize),
-    /// The entry itself is owned by a module — its instructions and type interned onto
-    /// one of that module's functions — so the unit has no own function to enter at.
-    EntryNotOwned(usize),
-    /// A referenced module has no artifact key (hidden, or unresolvable), so the import
-    /// entry could not name a version.
-    UnkeyedImport(ModuleId),
-    /// The session compiled without an artifact store, so no module can be named.
-    NoArtifactStore,
-    /// A module in the import closure has no stored artifact, so the closure cannot be
-    /// bundled.
-    MissingArtifact(u64),
+/// How a unit treats the module functions it reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Imports {
+    /// Import from every module the session can *supply* — its artifact and the
+    /// artifacts of its transitive imports are all stored — and inline the functions of
+    /// any module it cannot. With no store attached nothing is suppliable, so this
+    /// degenerates to [`Imports::Inline`].
+    Bundle,
+    /// Import nothing: claim every reachable function as the unit's own and shake it to
+    /// the entry. A self-contained unit with an empty import table, for output that
+    /// must stand alone.
+    Inline,
 }
 
-impl std::fmt::Display for UnitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            UnitError::EscapedReference(id) => {
-                write!(f, "function {id} is reachable but owned by no compile")
-            }
-            UnitError::EntryNotOwned(id) => write!(f, "the entry {id} is owned by a module"),
-            UnitError::UnkeyedImport(module) => {
-                write!(f, "{} has no artifact key", module.display())
-            }
-            UnitError::NoArtifactStore => write!(f, "no artifact store"),
-            UnitError::MissingArtifact(key) => {
-                write!(f, "no stored artifact for module {key:016x}")
-            }
+/// The modules whose units the session can supply whole: the module is keyed, its
+/// artifact is stored, and so — recursively — is every artifact its import table names.
+/// Anything outside this set (unkeyed, hidden, or with a gap in its closure) cannot be
+/// named on a wire, so extraction inlines it instead.
+fn suppliable_modules(module_cache: &ModuleCache) -> HashSet<ModuleId> {
+    let Some(store) = module_cache.artifact_store.as_ref() else {
+        return HashSet::new();
+    };
+    fn loadable(key: u64, store: &ArtifactStore, memo: &mut HashMap<u64, bool>) -> bool {
+        if let Some(&known) = memo.get(&key) {
+            return known;
         }
+        // Seed false so a keying cycle answers unsuppliable rather than recursing.
+        memo.insert(key, false);
+        let ok = match store.load(key) {
+            Some(artifact) => artifact
+                .unit
+                .imports
+                .iter()
+                .all(|(_, dependency, _)| loadable(*dependency, store, memo)),
+            None => false,
+        };
+        memo.insert(key, ok);
+        ok
     }
+    let mut memo = HashMap::new();
+    module_cache
+        .key_cache
+        .iter()
+        .filter(|(_, key)| loadable(**key, store, &mut memo))
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// A self-contained compiled program: an entry unit plus the units of every module it
@@ -1033,10 +1051,10 @@ impl std::fmt::Display for UnitError {
 /// recognise a module it already holds. Shaking happens at the other boundary: the entry
 /// unit carries only what it reaches, and stops at module edges.
 ///
-/// A future compile option can instead inline imports into the entry unit — the extraction
-/// walk claiming module functions as its own and shaking them to the entry — which lands
-/// here as an empty [`Self::modules`] and an empty import table. No format change: a
-/// consumer links what it is given either way.
+/// [`Imports::Inline`] instead inlines imports into the entry unit — the extraction walk
+/// claiming module functions as its own and shaking them to the entry — which lands here
+/// as an empty [`Self::modules`] and an empty import table. No format change: a consumer
+/// links what it is given either way.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompiledProgram {
     pub unit: CompiledUnit,
@@ -1077,44 +1095,67 @@ pub fn module_closure(
 }
 
 /// Extract a self-contained [`CompiledProgram`] from a compile: the unit reachable from
-/// `entry`, plus its bundled module closure.
+/// `entry`, plus the bundled closure of the modules it imports ([`Imports::Bundle`]) —
+/// or nothing beyond the unit itself ([`Imports::Inline`]).
 pub fn extract_program(
     program: &Program,
     module_cache: &ModuleCache,
     entry: Option<usize>,
     own_floor: usize,
-) -> Result<CompiledProgram, UnitError> {
-    let unit = extract_unit(program, module_cache, entry, own_floor)?;
-    let store = module_cache
-        .artifact_store
-        .as_ref()
-        .ok_or(UnitError::NoArtifactStore)?;
-    let modules = module_closure(store, &unit).map_err(UnitError::MissingArtifact)?;
-    Ok(CompiledProgram {
-        unit,
-        modules: modules
+    imports: Imports,
+) -> CompiledProgram {
+    let unit = extract_unit(program, module_cache, entry, own_floor, imports);
+    let modules = if unit.imports.is_empty() {
+        Vec::new()
+    } else {
+        let store = module_cache
+            .artifact_store
+            .as_ref()
+            .expect("bundled imports require the store that made their modules suppliable");
+        module_closure(store, &unit)
+            .unwrap_or_else(|key| {
+                panic!("no stored artifact for module {key:016x} named by a bundled import")
+            })
             .into_iter()
             .map(|(key, artifact)| (key, artifact.unit.clone()))
-            .collect(),
-    })
+            .collect()
+    };
+    CompiledProgram { unit, modules }
 }
 
 /// Extract the unit reachable from `entry_function`: a compiled fragment with no module
-/// identity, in unit-local id space. `own_floor` is the function-table length before this
-/// compile — any unowned function below it is an escaped reference, so a caller
-/// extracting from a session that outlives one compile must hold the program's function
-/// dedup floor there (as `LineCompiler::prepare` does).
+/// identity, in unit-local id space. Never fails: a module reference the session cannot
+/// supply ([`Imports::Bundle`]) — or every module reference ([`Imports::Inline`]) — is
+/// inlined, the walk claiming the module's functions as the unit's own and shaking them
+/// to the entry.
 ///
-/// A `None` entry seeds from every function no module owns, which is the unit form of a
-/// program that does not evaluate to something runnable: nothing to enter at, but still
+/// `own_floor` is the function-table length before this compile. A function *no module
+/// owns* below the floor would be an escaped reference — code of an earlier compile,
+/// which nothing outside this session can name — and is asserted against: references to
+/// earlier compiles' values go through session locals, never the function table, and a
+/// caller extracting from a session that outlives one compile holds the program's
+/// function dedup floor there (as `LineCompiler::prepare` does), so interning cannot
+/// place one of this compile's own functions below it either. Module-owned functions
+/// below the floor are ordinary: that is what inlining reaches.
+///
+/// A `None` entry seeds from every owned function, which is the unit form of a program
+/// that does not evaluate to something runnable: nothing to enter at, but still
 /// inspectable.
 pub fn extract_unit(
     program: &Program,
     module_cache: &ModuleCache,
     entry_function: Option<usize>,
     own_floor: usize,
-) -> Result<CompiledUnit, UnitError> {
-    let owner = &Owner::Unit;
+    imports: Imports,
+) -> CompiledUnit {
+    let eligible = match imports {
+        Imports::Bundle => suppliable_modules(module_cache),
+        Imports::Inline => HashSet::new(),
+    };
+    let owner = &Owner::Unit {
+        eligible: &eligible,
+        entry: entry_function,
+    };
     let mut closure = Closure::default();
     let mut queue: Vec<Item> = Vec::new();
     match entry_function {
@@ -1135,7 +1176,15 @@ pub fn extract_unit(
     let mut import_entries: Vec<(ModuleId, usize, usize)> = Vec::new();
     for &function_id in closure.functions.iter() {
         match classify(function_id, owner, module_cache) {
-            FunctionClass::Own => own_ids.push(function_id),
+            FunctionClass::Own => {
+                assert!(
+                    function_id >= own_floor
+                        || module_cache.function_owners.contains_key(&function_id),
+                    "function {function_id} was registered before this compile yet no \
+                     module owns it — an escaped reference"
+                );
+                own_ids.push(function_id)
+            }
             FunctionClass::Import(module, index) => {
                 import_entries.push((module, index, function_id))
             }
@@ -1145,11 +1194,6 @@ pub fn extract_unit(
     // Ascending session id is registration order, which is topological: a function can
     // only reference ones registered before it.
     own_ids.sort_unstable();
-    if let Some(&lowest) = own_ids.first()
-        && lowest < own_floor
-    {
-        return Err(UnitError::EscapedReference(lowest));
-    }
 
     import_entries.sort();
     let mut imports: Vec<(ModuleId, u64, Vec<usize>)> = Vec::new();
@@ -1160,7 +1204,7 @@ pub fn extract_unit(
                 let key = *module_cache
                     .key_cache
                     .get(module)
-                    .ok_or_else(|| UnitError::UnkeyedImport(module.clone()))?;
+                    .expect("a bundled import names a module the session never keyed");
                 imports.push((module.clone(), key, vec![*dep_index]));
             }
         }
@@ -1195,15 +1239,12 @@ pub fn extract_unit(
         .collect();
     remaps.builtins = closure.builtins.index();
 
-    let entry = match entry_function {
-        Some(entry) => Some(
-            own_ids
-                .iter()
-                .position(|&id| id == entry)
-                .ok_or(UnitError::EntryNotOwned(entry))?,
-        ),
-        None => None,
-    };
+    let entry = entry_function.map(|entry| {
+        own_ids
+            .iter()
+            .position(|&id| id == entry)
+            .expect("the entry is always classified as the unit's own")
+    });
 
     let unit = CompiledUnit {
         types: closure
@@ -1264,7 +1305,7 @@ pub fn extract_unit(
         entry,
     };
     verify(&unit, "unit");
-    Ok(unit)
+    unit
 }
 
 enum Item {

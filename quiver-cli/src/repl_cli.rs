@@ -140,8 +140,6 @@ impl ReplCli {
             });
         self.compiler
             .set_artifact_store(Rc::clone(&self.artifact_store));
-        // The protocol carries units, so the compiler may produce them.
-        self.compiler.accept_units(true);
     }
 
     /// Send a committed line, attaching only the module units this server has not been
@@ -154,14 +152,7 @@ impl ReplCli {
         committed: quiver_environment::CommittedLine,
     ) -> Result<Outcome, quiver_cli::client::RequestError> {
         let keep = Some(committed.keep_indices);
-        let (unit, modules) = match committed.payload {
-            quiver_environment::LinePayload::Bytecode(bytecode) => {
-                return self
-                    .client
-                    .resume(pid, ResumePayload::Bytecode(bytecode), keep);
-            }
-            quiver_environment::LinePayload::Unit { unit, modules } => (unit, modules),
-        };
+        let quiver_environment::LinePayload { unit, modules } = committed.payload;
 
         let attach = |sent: &std::collections::HashSet<u64>, all: bool| {
             modules
@@ -175,7 +166,7 @@ impl ReplCli {
         let sending: Vec<u64> = attached.iter().map(|(key, _)| *key).collect();
         let outcome = self.client.resume(
             pid,
-            ResumePayload::Unit {
+            ResumePayload {
                 unit: unit.clone(),
                 modules: attached,
             },
@@ -195,7 +186,7 @@ impl ReplCli {
                 let sending: Vec<u64> = attached.iter().map(|(key, _)| *key).collect();
                 let outcome = self.client.resume(
                     pid,
-                    ResumePayload::Unit {
+                    ResumePayload {
                         unit,
                         modules: attached,
                     },

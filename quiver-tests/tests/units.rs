@@ -16,7 +16,7 @@ use quiver_core::builtins::BuiltinRegistry;
 use quiver_core::bytecode::Function;
 use quiver_core::program::Program;
 use quiver_core::types::Type;
-use quiver_environment::{Environment, LinePayload, Repl, WorkerHandle};
+use quiver_environment::{Environment, Repl, WorkerHandle};
 use quiver_io::NativeEffect;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -168,8 +168,8 @@ fn round_trip(source: &str, registration: Registration) -> (String, String) {
         &compiled.module_cache,
         Some(compiled.entry),
         compiled.own_floor,
-    )
-    .unwrap_or_else(|e| panic!("extract `{source}`: {e:?}"));
+        quiver_compiler::Imports::Bundle,
+    );
     let original = run(&compiled.program, compiled.entry);
 
     let mut fresh = Program::new();
@@ -268,8 +268,8 @@ fn resolving_imports_against_another_version_of_a_module_is_refused() {
             &built.module_cache,
             Some(built.entry),
             built.own_floor,
+            quiver_compiler::Imports::Bundle,
         )
-        .expect("extract")
     };
 
     // A fresh session holding the *other* `%a`, linked from its own artifact.
@@ -307,8 +307,8 @@ fn a_units_imports_are_a_sparse_subset_of_its_modules() {
         &compiled.module_cache,
         Some(compiled.entry),
         compiled.own_floor,
-    )
-    .expect("extract");
+        quiver_compiler::Imports::Bundle,
+    );
     let (module, key, indices) = unit
         .imports
         .iter()
@@ -344,8 +344,8 @@ fn a_compiled_program_is_self_contained() {
             &compiled.module_cache,
             Some(compiled.entry),
             compiled.own_floor,
-        )
-        .unwrap_or_else(|e| panic!("extract `{source}`: {e}"));
+            quiver_compiler::Imports::Bundle,
+        );
 
         // The closure is complete and ordered: nothing a module imports is missing, and
         // nothing arrives before what it depends on.
@@ -389,8 +389,8 @@ fn a_program_that_is_not_executable_still_extracts() {
         &compiled.module_cache,
         None,
         compiled.own_floor,
-    )
-    .expect("extract");
+        quiver_compiler::Imports::Bundle,
+    );
     assert!(unit.entry.is_none());
     assert!(!unit.constants.is_empty(), "the compile's content is there");
 
@@ -451,16 +451,16 @@ fn extraction_is_deterministic() {
         &first.module_cache,
         Some(first.entry),
         first.own_floor,
-    )
-    .expect("extract");
+        quiver_compiler::Imports::Bundle,
+    );
     let second = compile(source, false);
     let b = quiver_compiler::extract_unit(
         &second.program,
         &second.module_cache,
         Some(second.entry),
         second.own_floor,
-    )
-    .expect("extract");
+        quiver_compiler::Imports::Bundle,
+    );
     assert_eq!(
         serde_json::to_vec(&a).expect("serialize"),
         serde_json::to_vec(&b).expect("serialize"),
@@ -475,8 +475,8 @@ fn a_unit_round_trips_through_serialization() {
         &compiled.module_cache,
         Some(compiled.entry),
         compiled.own_floor,
-    )
-    .expect("extract");
+        quiver_compiler::Imports::Bundle,
+    );
     let bytes = serde_json::to_vec(&unit).expect("serialize");
     let restored: quiver_compiler::CompiledUnit =
         serde_json::from_slice(&bytes).expect("deserialize");
@@ -516,8 +516,8 @@ fn debug_units_carry_only_the_sites_they_reference() {
         &compiled.module_cache,
         Some(compiled.entry),
         compiled.own_floor,
-    )
-    .expect("extract");
+        quiver_compiler::Imports::Bundle,
+    );
     let session_sites = compiled
         .program
         .debug_sites()
@@ -579,8 +579,8 @@ fn the_environment_links_module_units_from_requests_alone() {
         &compiled.module_cache,
         Some(compiled.entry),
         compiled.own_floor,
-    )
-    .expect("extract");
+        quiver_compiler::Imports::Bundle,
+    );
     let mut environment = environment();
 
     // Nothing is linked until a request supplies it: the environment has no store.
@@ -621,8 +621,8 @@ fn a_sweep_evicts_linked_modules_and_a_re_link_revives_them() {
         &compiled.module_cache,
         Some(compiled.entry),
         compiled.own_floor,
-    )
-    .expect("extract");
+        quiver_compiler::Imports::Bundle,
+    );
     let keys = &compiled.module_cache.key_cache;
     let mut environment = environment();
     for (module, _, _) in &unit.imports {
@@ -698,7 +698,8 @@ fn process_types(
 }
 
 /// Run a line through the three-step path, so the payload it produced is observable.
-/// Answers `(the payload was a unit, the rendered result)`.
+/// Answers `(the payload imports its modules by key, the rendered result)` — a line
+/// that inlined a module instead shows an empty import table.
 fn evaluate_observing_payload(
     environment: &mut Environment<NativeEffect>,
     repl: &mut Repl<NativeEffect>,
@@ -711,12 +712,14 @@ fn evaluate_observing_payload(
     let compiled = repl
         .compile(prepared)
         .unwrap_or_else(|e| panic!("compile `{source}`: {e}"));
-    let was_unit = matches!(compiled.payload(), Some(LinePayload::Unit { .. }));
+    let bundled = compiled
+        .payload()
+        .is_some_and(|payload| !payload.unit.imports.is_empty());
     let request = repl
         .commit(environment, compiled)
         .unwrap_or_else(|e| panic!("commit `{source}`: {e}"))
         .expect("a line with something to run");
-    (was_unit, await_result(environment, request, source))
+    (bundled, await_result(environment, request, source))
 }
 
 fn evaluate(
@@ -761,27 +764,23 @@ fn the_in_process_repl_runs_lines_as_units() {
         .prepare(&mut environment, "%num.mul [7, 6]", HashMap::new())
         .expect("prepare");
     let compiled = repl.compile(prepared).expect("compile");
-    match compiled.payload() {
-        Some(LinePayload::Unit { unit, modules }) => {
-            assert!(!unit.imports.is_empty(), "the line imports %num");
+    let payload = compiled.payload().expect("a payload");
+    assert!(!payload.unit.imports.is_empty(), "the line imports %num");
+    assert!(
+        !payload.modules.is_empty(),
+        "and must carry the modules for the host to link"
+    );
+    // Dependencies first: the host links in the order given.
+    let mut linked: Vec<u64> = Vec::new();
+    for (key, artifact) in &payload.modules {
+        for (_, dependency, _) in &artifact.unit.imports {
             assert!(
-                !modules.is_empty(),
-                "and must carry the modules for the host to link"
+                linked.contains(dependency),
+                "module {} sent before its dependency",
+                artifact.id.display()
             );
-            // Dependencies first: the host links in the order given.
-            let mut linked: Vec<u64> = Vec::new();
-            for (key, artifact) in modules {
-                for (_, dependency, _) in &artifact.unit.imports {
-                    assert!(
-                        linked.contains(dependency),
-                        "module {} sent before its dependency",
-                        artifact.id.display()
-                    );
-                }
-                linked.push(*key);
-            }
         }
-        other => panic!("expected a unit payload, got {:?}", other.is_some()),
+        linked.push(*key);
     }
     drop(compiled); // uncommitted: the session is untouched
 
@@ -817,9 +816,8 @@ fn a_repeated_line_keeps_taking_the_unit_path() {
     // The steady state stage 1 exists for: the same line, over and over, shipping only
     // its own code. Its wrapper function is identical every time, so without a dedup
     // floor at the line boundary the third one interns onto the second's id — below the
-    // extraction floor, which reads as an escaped reference and drops the line silently
-    // back to bytecode. A line reached through a *binding* is the same shape one step
-    // removed, so it is covered here too.
+    // extraction floor, where it reads as an escaped reference. A line reached through
+    // a *binding* is the same shape one step removed, so it is covered here too.
     let mut environment = environment();
     let mut repl = repl_on(&mut environment, true);
 
@@ -829,13 +827,16 @@ fn a_repeated_line_keeps_taking_the_unit_path() {
         "double = #'int { %num.mul [$, 2] }",
     );
     for round in 0..4 {
-        for source in ["%num.mul [7, 6]", "double 21"] {
-            let (was_unit, rendered) =
+        // The direct reference must keep naming %num by key; the bound call reaches
+        // the earlier line's code through a session local, so its unit is legitimately
+        // import-free. Either way, a wrapper interned below the extraction floor now
+        // panics in `extract_unit`, which is what locks the dedup-floor regression.
+        for (source, bundles) in [("%num.mul [7, 6]", true), ("double 21", false)] {
+            let (bundled, rendered) =
                 evaluate_observing_payload(&mut environment, &mut repl, source);
-            assert!(
-                was_unit,
-                "round {round} of `{source}` fell back to bytecode — a repeated line must \
-                 keep shipping as a unit"
+            assert_eq!(
+                bundled, bundles,
+                "round {round} of `{source}`: expected bundles={bundles}"
             );
             assert!(rendered.contains("Int(42)"), "`{source}` gave {rendered}");
         }
@@ -843,16 +844,26 @@ fn a_repeated_line_keeps_taking_the_unit_path() {
 }
 
 #[test]
-fn a_driver_without_artifacts_falls_back_to_bytecode() {
+fn a_driver_without_artifacts_inlines_its_modules() {
     // No store means no artifacts, so nothing can name a version of the modules the line
-    // reaches. The line must still run.
+    // reaches: extraction claims their functions as the line's own instead, and the
+    // payload is a self-contained unit. The line must still run.
     let mut environment = environment();
     let mut repl = repl_on(&mut environment, false);
     let prepared = repl
         .prepare(&mut environment, "%num.mul [7, 6]", HashMap::new())
         .expect("prepare");
     let compiled = repl.compile(prepared).expect("compile");
-    assert!(matches!(compiled.payload(), Some(LinePayload::Bytecode(_))));
+    let payload = compiled.payload().expect("a payload");
+    assert!(
+        payload.unit.imports.is_empty(),
+        "nothing can be named, so nothing may be imported"
+    );
+    assert!(payload.modules.is_empty());
+    assert!(
+        !payload.unit.functions.is_empty(),
+        "the module code rides in the unit itself"
+    );
     drop(compiled);
     assert_eq!(
         evaluate(&mut environment, &mut repl, "%num.mul [7, 6]"),

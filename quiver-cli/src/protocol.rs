@@ -72,18 +72,15 @@ pub struct CreateResponse {
     pub id: u64,
 }
 
-/// What a resume hands the server to run.
+/// What a resume hands the server to run: the line's own relocatable code, plus the
+/// units of any modules it imports that this client has not already sent to this
+/// server — dependency-first, in link order. The server links each once and the line
+/// names them by key thereafter. A module the client could not supply is already
+/// inlined into the unit, so the payload is complete by construction.
 #[derive(Debug, Serialize, Deserialize)]
-pub enum ResumePayload {
-    /// A self-contained tree-shaken program: everything the line reaches, every time.
-    Bytecode(quiver_core::bytecode::Bytecode),
-    /// The line's own relocatable code, plus the units of any modules it imports that
-    /// this client has not already sent to this server — dependency-first, in link
-    /// order. The server links each once and the line names them by key thereafter.
-    Unit {
-        unit: quiver_compiler::CompiledUnit,
-        modules: Vec<(u64, quiver_compiler::CompiledUnit)>,
-    },
+pub struct ResumePayload {
+    pub unit: quiver_compiler::CompiledUnit,
+    pub modules: Vec<(u64, quiver_compiler::CompiledUnit)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
