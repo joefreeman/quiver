@@ -320,10 +320,89 @@ pub struct CompatibilityTables {
     pub field_offsets: Vec<Vec<Option<usize>>>,
 }
 
+/// The extension one [`CompatibilityTables::update`] call made — everything a holder of
+/// the previous tables needs to reach the new ones. This is what a serializing transport
+/// ships: the tables are replaced wholesale on every update, so re-encoding them per
+/// worker per update would swamp the code payload once whole modules link (measured at
+/// 3.9 KB → 128 KB per update at module scale).
+///
+/// Not purely an append: an *existing* row gains members when a newly registered
+/// concrete type satisfies its pattern or parameter type, and a row below the old
+/// length is written whole when an old type is first used as a pattern — so additions
+/// carry row indices rather than assuming the tail.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CompatibilityDelta {
+    /// New `type_compatibility` length; rows created by the resize start empty.
+    pub types_len: usize,
+    /// Members inserted into `type_compatibility` rows (new or pre-existing).
+    pub type_additions: Vec<(usize, Vec<ConcreteType>)>,
+    /// Rows appended to `function_params`, in order.
+    pub function_rows: Vec<HashSet<ConcreteType>>,
+    /// Members inserted into pre-existing `function_params` rows.
+    pub function_additions: Vec<(usize, Vec<ConcreteType>)>,
+    /// Rows appended to `builtin_params`, in order.
+    pub builtin_rows: Vec<HashSet<ConcreteType>>,
+    /// Members inserted into pre-existing `builtin_params` rows.
+    pub builtin_additions: Vec<(usize, Vec<ConcreteType>)>,
+    /// Entries appended to `canonical_tuples` (existing entries never change).
+    pub canonical_appended: Vec<usize>,
+    /// Cells appended to each pre-existing `field_offsets` row, in row order — every
+    /// old row grows by the same new-tuple range.
+    pub field_offset_extensions: Vec<Vec<Option<usize>>>,
+    /// Rows appended to `field_offsets` (full rows over every tuple).
+    pub field_offset_rows: Vec<Vec<Option<usize>>>,
+}
+
+impl CompatibilityDelta {
+    /// Extend a holder's tables — which must be exactly the state the producing
+    /// `update` call started from — to the state it ended at.
+    pub fn apply(
+        self,
+        type_compatibility: &mut Vec<HashSet<ConcreteType>>,
+        function_params: &mut Vec<HashSet<ConcreteType>>,
+        builtin_params: &mut Vec<HashSet<ConcreteType>>,
+        canonical_tuples: &mut Vec<usize>,
+        field_offsets: &mut Vec<Vec<Option<usize>>>,
+    ) {
+        type_compatibility.resize(self.types_len, HashSet::new());
+        for (row, members) in self.type_additions {
+            type_compatibility[row].extend(members);
+        }
+        for (row, members) in self.function_additions {
+            function_params[row].extend(members);
+        }
+        function_params.extend(self.function_rows);
+        for (row, members) in self.builtin_additions {
+            builtin_params[row].extend(members);
+        }
+        builtin_params.extend(self.builtin_rows);
+        canonical_tuples.extend(self.canonical_appended);
+        for (row, cells) in field_offsets.iter_mut().zip(self.field_offset_extensions) {
+            row.extend(cells);
+        }
+        field_offsets.extend(self.field_offset_rows);
+    }
+}
+
 impl CompatibilityTables {
     /// Extend the tables to cover `input`, which must describe an append-only extension
     /// of the program covered by the previous call (the environment's merged program).
-    pub fn update(&mut self, input: &CompatibilityInput) {
+    /// With `want_delta`, also answer the [`CompatibilityDelta`] this call amounts to —
+    /// requested only when a serializing transport will ship it, since capturing the
+    /// appended rows costs clones the shared-memory path has no use for.
+    pub fn update(
+        &mut self,
+        input: &CompatibilityInput,
+        want_delta: bool,
+    ) -> Option<CompatibilityDelta> {
+        let old_tuples = self.canonical_tuples.len();
+        let old_field_rows = self.field_offsets.len();
+        let old_function_rows = self.function_params.len();
+        let old_builtin_rows = self.builtin_params.len();
+        let mut type_additions: Vec<(usize, Vec<ConcreteType>)> = Vec::new();
+        let mut function_additions: Vec<(usize, Vec<ConcreteType>)> = Vec::new();
+        let mut builtin_additions: Vec<(usize, Vec<ConcreteType>)> = Vec::new();
+
         self.extend_tuple_tables(input);
         let lookup = TypeLookupImpl::new(input.types, input.tuples, input.functions);
         let index = TypeIndex::build(input, &lookup);
@@ -419,32 +498,46 @@ impl CompatibilityTables {
             };
 
             for &pattern_id in &self.pattern_ids {
+                let mut added = Vec::new();
                 for (hit, &(concrete, _)) in verdicts_for(pattern_id).iter().zip(&new_concretes) {
-                    if *hit {
-                        self.type_compatibility[pattern_id].insert(concrete);
+                    if *hit && self.type_compatibility[pattern_id].insert(concrete) && want_delta {
+                        added.push(concrete);
                     }
+                }
+                if !added.is_empty() {
+                    type_additions.push((pattern_id, added));
                 }
             }
             for (func_id, func) in input.functions.iter().enumerate().take(self.functions_len) {
                 let (parameter, _, _, _, _) = extract_function_type_info(func, input.types);
+                let mut added = Vec::new();
                 for (hit, &(concrete, _)) in verdicts_for(parameter).iter().zip(&new_concretes) {
-                    if *hit {
-                        self.function_params[func_id].insert(concrete);
+                    if *hit && self.function_params[func_id].insert(concrete) && want_delta {
+                        added.push(concrete);
                     }
+                }
+                if !added.is_empty() {
+                    function_additions.push((func_id, added));
                 }
             }
             for (builtin_id, info) in input.builtins.iter().enumerate().take(self.builtins_len) {
+                let mut added = Vec::new();
                 for (hit, &(concrete, _)) in
                     verdicts_for(info.param_type).iter().zip(&new_concretes)
                 {
-                    if *hit {
-                        self.builtin_params[builtin_id].insert(concrete);
+                    if *hit && self.builtin_params[builtin_id].insert(concrete) && want_delta {
+                        added.push(concrete);
                     }
+                }
+                if !added.is_empty() {
+                    builtin_additions.push((builtin_id, added));
                 }
             }
         }
 
         // New pattern types (only new functions can introduce them) get a full scan.
+        // The pattern id may be an *old* type id first used as a pattern now, so its
+        // delta entry is an addition at that row, not an append.
         for function in &input.functions[self.functions_len..] {
             for instruction in &function.instructions {
                 let type_id = instruction.operand() as usize;
@@ -452,8 +545,12 @@ impl CompatibilityTables {
                     && type_id < input.types.len()
                     && self.pattern_ids.insert(type_id)
                 {
-                    self.type_compatibility[type_id] =
+                    let compatible =
                         compute_compatible_concrete_types(type_id, input, &lookup, &index);
+                    if want_delta && !compatible.is_empty() {
+                        type_additions.push((type_id, compatible.iter().copied().collect()));
+                    }
+                    self.type_compatibility[type_id] = compatible;
                 }
             }
         }
@@ -478,6 +575,21 @@ impl CompatibilityTables {
         self.functions_len = input.functions.len();
         self.builtins_len = input.builtins.len();
         self.resources_len = input.resource_names.len();
+
+        want_delta.then(|| CompatibilityDelta {
+            types_len: self.type_compatibility.len(),
+            type_additions,
+            function_rows: self.function_params[old_function_rows..].to_vec(),
+            function_additions,
+            builtin_rows: self.builtin_params[old_builtin_rows..].to_vec(),
+            builtin_additions,
+            canonical_appended: self.canonical_tuples[old_tuples..].to_vec(),
+            field_offset_extensions: self.field_offsets[..old_field_rows]
+                .iter()
+                .map(|row| row[old_tuples..].to_vec())
+                .collect(),
+            field_offset_rows: self.field_offsets[old_field_rows..].to_vec(),
+        })
     }
 
     /// Assert the incremental tables equal a from-scratch computation over `input`.

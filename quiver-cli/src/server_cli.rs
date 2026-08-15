@@ -303,28 +303,18 @@ fn run_resume(
         let mut env = state.environment.lock().unwrap();
         let ResumePayload { unit, modules } = request.payload;
         let builtins = quiver_cli::build_builtin_registry();
-        // Link what the client attached, deepest dependency first. A module it
-        // believed we held may have been reclaimed since, in which case its own
-        // imports come up short — collect those keys rather than failing, so one
-        // answer names everything the client must resend. An *invalid* unit — one
-        // whose content does not hash to its key, or that is structurally malformed —
-        // is the request's own defect: refused outright, since no resend of anything
-        // could repair it.
-        let mut missing: Vec<quiver_compiler::UnitKey> = Vec::new();
-        for (key, module) in &modules {
-            match env.link_module_unit(*key, module, &builtins) {
-                Ok(()) => {}
-                Err(EnvironmentError::ModuleNotLinked(key)) => missing.push(key),
-                Err(EnvironmentError::InvalidUnit(message)) => {
-                    return Err((StatusCode::UNPROCESSABLE_ENTITY, message).into_response());
-                }
-                Err(e) => return Err(internal(e)),
+        // Link what the client attached; a stale sent-record answers 424 with the keys
+        // to resend, while an *invalid* unit — content that does not hash to its key,
+        // or malformed structure — is the request's own defect: refused outright,
+        // since no resend of anything could repair it.
+        let missing = match env.link_payload_modules(&modules, &unit, &builtins) {
+            Ok(missing) => missing,
+            Err(EnvironmentError::InvalidUnit(message)) => {
+                return Err((StatusCode::UNPROCESSABLE_ENTITY, message).into_response());
             }
-        }
-        missing.extend(env.missing_modules(&unit).into_iter().map(|(_, key)| key));
+            Err(e) => return Err(internal(e)),
+        };
         if !missing.is_empty() {
-            missing.sort_unstable();
-            missing.dedup();
             return Err((
                 StatusCode::FAILED_DEPENDENCY,
                 axum::Json(MissingModules { missing }),

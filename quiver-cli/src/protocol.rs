@@ -76,12 +76,10 @@ pub struct CreateResponse {
 /// units of any modules it imports that this client has not already sent to this
 /// server — dependency-first, in link order. The server links each once and the line
 /// names them by key thereafter. A module the client could not supply is already
-/// inlined into the unit, so the payload is complete by construction.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ResumePayload {
-    pub unit: quiver_compiler::CompiledUnit,
-    pub modules: Vec<(quiver_compiler::UnitKey, quiver_compiler::CompiledUnit)>,
-}
+/// inlined into the unit, so the payload is complete by construction. The shape is the
+/// shared [`quiver_environment::WirePayload`] — the same payload every remote driver
+/// speaks.
+pub type ResumePayload = quiver_environment::WirePayload;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResumeRequest {

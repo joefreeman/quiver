@@ -47,6 +47,35 @@ impl<T: Clone> TableUpdate<T> {
     }
 }
 
+/// How an update carries the derived compatibility tables (`IsType` sets, parameter
+/// sets, canonical tuple shapes, field offsets), shaped to the transport exactly as
+/// [`TableUpdate`] shapes the registries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CompatibilityUpdate {
+    /// The complete tables by handle — the shared-memory transport. Every worker
+    /// replaces its handles with these, so they all reference one allocation per table.
+    /// (serde's `rc` feature makes the type serializable too, so it stays uniform
+    /// across platforms; only the sharing differs.)
+    Shared {
+        /// For each type_id, the set of concrete types compatible with it.
+        type_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
+        /// For each function_id, the set of concrete types compatible with its parameter.
+        function_params: Arc<Vec<HashSet<ConcreteType>>>,
+        /// For each builtin_id, the set of concrete types compatible with its parameter.
+        builtin_params: Arc<Vec<HashSet<ConcreteType>>>,
+        /// For each tuple_id, a canonical *value-shape* id (same name + field labels),
+        /// letting `==` treat structurally-identical tuples built via different paths
+        /// as equal.
+        canonical_tuples: Arc<Vec<usize>>,
+        /// For each field-name id, each tuple_id's offset for that field (for GetNamed).
+        field_offsets: Arc<Vec<Vec<Option<usize>>>>,
+    },
+    /// The extension since the previous update — the serializing transport, where
+    /// re-encoding the whole tables per worker per update would swamp the payload.
+    /// The worker extends its own copies in place.
+    Delta(crate::compatibility::CompatibilityDelta),
+}
+
 /// Bundled program update data for incremental compilation.
 /// Contains full tuple type information for merging with Environment's Program state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,19 +89,8 @@ pub struct ProgramUpdate {
     /// Builtin information (name and resolved types)
     pub builtins: TableUpdate<BuiltinInfo>,
     pub resources: Vec<String>,
-    /// For each type_id, the set of concrete types compatible with it (for IsType checks).
-    /// Shared rather than copied: these tables are replaced wholesale on every update and are
-    /// identical in every worker, so on the native transport all workers reference one copy.
-    /// The web transport serializes (separate WASM linear memories), which serde's `rc`
-    /// feature handles — a web worker deserializes its own handle at refcount 1. The type is
-    /// therefore uniform across platforms and needs no `cfg`; only the sharing differs.
-    pub type_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
-    /// For each function_id, the set of concrete types compatible with its parameter
-    pub function_param_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
-    /// For each builtin_id, the set of concrete types compatible with its parameter
-    pub builtin_param_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
-    /// For each field-name id, each tuple_id's offset for that field (for GetNamed)
-    pub field_offsets: Arc<Vec<Vec<Option<usize>>>>,
+    /// The derived compatibility tables, whole or as a delta per the transport.
+    pub compatibility: CompatibilityUpdate,
     /// Failure-provenance sites (debug builds): the full table, from which the executor
     /// prebuilds each site's annotated-nil value. `None` leaves any existing table as is.
     pub debug: Option<crate::bytecode::SiteTable>,
@@ -89,9 +107,6 @@ pub struct ProgramUpdate {
     pub patched_functions: Vec<(usize, Function)>,
     #[serde(default)]
     pub patched_constants: Vec<(usize, Constant)>,
-    /// For each tuple_id, a canonical *value-shape* id (same name + field labels). Lets `==`
-    /// treat structurally-identical tuples built via different paths as equal.
-    pub canonical_tuples: Arc<Vec<usize>>,
 }
 
 /// Result of processing a select source
@@ -1403,11 +1418,30 @@ impl<E: Effect> Executor<E> {
             self.builtins.push(b.name.clone());
         }
         self.resources = update.resources;
-        self.canonical_tuples = update.canonical_tuples;
-        self.type_compatibility = update.type_compatibility;
-        self.function_param_compatibility = update.function_param_compatibility;
-        self.builtin_param_compatibility = update.builtin_param_compatibility;
-        self.field_offsets = update.field_offsets;
+        match update.compatibility {
+            CompatibilityUpdate::Shared {
+                type_compatibility,
+                function_params,
+                builtin_params,
+                canonical_tuples,
+                field_offsets,
+            } => {
+                self.type_compatibility = type_compatibility;
+                self.function_param_compatibility = function_params;
+                self.builtin_param_compatibility = builtin_params;
+                self.canonical_tuples = canonical_tuples;
+                self.field_offsets = field_offsets;
+            }
+            // In place: on a serializing transport nothing else holds these handles,
+            // so `make_mut` never clones.
+            CompatibilityUpdate::Delta(delta) => delta.apply(
+                Arc::make_mut(&mut self.type_compatibility),
+                Arc::make_mut(&mut self.function_param_compatibility),
+                Arc::make_mut(&mut self.builtin_param_compatibility),
+                Arc::make_mut(&mut self.canonical_tuples),
+                Arc::make_mut(&mut self.field_offsets),
+            ),
+        }
         if let Some(table) = update.debug {
             self.install_sites(&table);
         }

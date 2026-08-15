@@ -8,6 +8,7 @@ pub use environment::{Environment, EnvironmentError, RequestResult};
 pub use messages::{Command, Event, SubscriptionKind, SubscriptionPayload};
 pub use repl::{
     CommittedLine, CompiledLine, LineCompiler, LinePayload, PreparedLine, Repl, ReplError,
+    WirePayload,
 };
 pub use transport::{CommandReceiver, EventSender, WorkerHandle};
 pub use worker::Worker;

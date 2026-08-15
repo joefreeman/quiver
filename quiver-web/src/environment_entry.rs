@@ -16,10 +16,10 @@ use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 /// overshoot by one step's worth.)
 const STEP_SLICE_MS: f64 = 8.0;
 
-/// Main entry point for the worker
-/// Call this from the worker's JS context
+/// Main entry point for an environment (executor) worker — call this from the worker's
+/// JS context, where a compiler worker calls `compiler_worker_main`.
 #[wasm_bindgen]
-pub fn worker_main() {
+pub fn environment_worker_main() {
     let global = js_sys::global()
         .dyn_into::<DedicatedWorkerGlobalScope>()
         .expect("Not in a worker context");

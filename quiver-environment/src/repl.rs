@@ -131,6 +131,32 @@ pub struct LinePayload {
     )>,
 }
 
+impl LinePayload {
+    /// The payload's serializable form: module *units* under their content keys — the
+    /// artifacts stay compiler-side, a host never sees one.
+    pub fn to_wire(&self) -> WirePayload {
+        WirePayload {
+            unit: self.unit.clone(),
+            modules: self
+                .modules
+                .iter()
+                .map(|(key, artifact)| (*key, artifact.unit.clone()))
+                .collect(),
+        }
+    }
+}
+
+/// The wire form of a [`LinePayload`] — what crosses a process or network boundary to
+/// a host that links and runs it. The host validates each module unit against its
+/// content key, links the ones it lacks, and skips the rest; this is the payload shape
+/// every remote driver shares (the CLI's resume body, the web's compiler-worker
+/// output), which is what lets one host implementation serve them all.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WirePayload {
+    pub unit: quiver_compiler::CompiledUnit,
+    pub modules: Vec<(quiver_compiler::UnitKey, quiver_compiler::CompiledUnit)>,
+}
+
 /// A line compiled by [`LineCompiler::compile`]: the session state it produces,
 /// staged but not yet applied, plus what to run (`None` for a line with nothing to
 /// execute, such as type definitions alone). Dropping it without

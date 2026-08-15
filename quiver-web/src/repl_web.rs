@@ -15,7 +15,6 @@ use web_sys::Worker;
 const TS_DEFINITIONS: &'static str = r#"
 export type WorkerFactory = () => Worker;
 export type EvaluateCallback = (result: Result<EvaluationResult | null>) => void;
-export type VariablesCallback = (result: Result<Variable[]>) => void;
 export type ProcessStatusesCallback = (result: Result<Process[]>) => void;
 export type ProcessInfoCallback = (result: Result<ProcessInfo | null>) => void;
 export type WorkerInfoCallback = (result: Result<WorkerInfo[]>) => void;
@@ -87,6 +86,41 @@ export class Environment {
   unsubscribe(subscriptionId: number): void;
 
   /**
+   * Allocate a fresh persistent (session) process, sleeping and ready for `resumeProcess`.
+   * The environment half of the split-driver API: a compiler worker (`compiler_worker_main`)
+   * produces payloads, this class runs them.
+   */
+  createProcess(): number;
+
+  /**
+   * Re-align a session process's locals to a keep-set (the `compactKeep` of a compiler
+   * worker's `evaluated` response). Apply before the resume it belongs to; command order
+   * is preserved, so no ack is needed.
+   */
+  compactProcess(pid: number, keep: number[]): void;
+
+  /**
+   * Resume a session process on a compiler worker's payload (its JSON, verbatim): link the
+   * attached module units — validated against their content keys — and run the entry.
+   * Returns `{ pending: true }` when the resume is in flight (the callback will fire with
+   * the result), or `{ missing }` naming module keys this environment no longer holds —
+   * resend those and retry; the callback does not fire. Throws on an invalid payload.
+   */
+  resumeProcess(
+    pid: number,
+    payload: string,
+    keep: number[] | undefined,
+    callback: EvaluateCallback,
+  ): { pending?: boolean; missing?: string[] };
+
+  /**
+   * Stop a session process — the host-side interrupt. A pending resume callback settles
+   * with "Interrupted", everything the process spawned is torn down, and the process is
+   * gone: create a new one to continue.
+   */
+  stopProcess(pid: number): void;
+
+  /**
    * Format a value for display
    * @param value - Value to format
    * @param heap - Heap data
@@ -102,99 +136,75 @@ export class Environment {
   formatType(value: Value): string;
 }
 
-export class Repl {
-  free(): void;
-  [Symbol.dispose](): void;
+/**
+ * A request to the compiler worker (`compiler_worker_main`), sent as a JSON string over
+ * `postMessage`. Send `init` first; every request carries an `id` echoed on its response.
+ */
+export type CompilerRequest =
+  | // `debug` defaults to true: provenance and checked assertions, like the native REPL.
+    { type: "init"; id: number; files?: Record<string, string>; debug?: boolean }
+  | { type: "evaluate"; id: number; source: string }
+  | { type: "setFiles"; id: number; files: Record<string, string> }
+  | { type: "variables"; id: number }
+  | // Start the session over (fresh bindings, current files, warm caches); the caller
+    // allocates a fresh process via `createProcess` and continues.
+    { type: "reset"; id: number };
 
-  /**
-   * Create a new REPL using the given environment
-   * @param environment - Environment instance to use
-   * @param files - Optional virtual filesystem (path -> source) imports resolve against. A
-   *   `quiver.toml` entry, if present, defines the module routing table.
-   */
-  constructor(environment: Environment, files?: Record<string, string>);
-
-  /**
-   * Replace the REPL's virtual filesystem. Subsequent evaluations resolve imports against the
-   * new files; accumulated variables are preserved. Throws if a `quiver.toml` in `files` is
-   * invalid, leaving the current files in place.
-   * @param files - Virtual filesystem (path -> source)
-   */
-  setFiles(files: Record<string, string>): void;
-
-  /**
-   * Refresh the cache of process types for process references (@N)
-   * Call this before evaluate() to ensure process references work correctly
-   * @param callback - Callback invoked when types are cached (or on error)
-   */
-  refreshProcessTypes(callback: (result: Result<void>) => void): void;
-
-  /**
-   * Evaluate source code and invoke callback when result is ready
-   * Note: Call refreshProcessTypes() first if you need process references (@N) to work
-   * @param source - Quiver source code to evaluate
-   * @param callback - Callback invoked with the evaluation result
-   */
-  evaluate(source: string, callback: EvaluateCallback): void;
-
-  /**
-   * Stop this REPL's session process — the host-side interrupt for a hung or runaway
-   * evaluation. A pending evaluate callback then settles with an "Interrupted" error,
-   * and everything the session spawned is torn down with it. The session process is
-   * gone afterwards, so the Repl cannot evaluate again: replace it with a new instance.
-   */
-  interrupt(): void;
-
-  /**
-   * Get all variables defined in the REPL
-   * @param callback - Callback invoked with the list of variables
-   */
-  getVariables(callback: VariablesCallback): void;
-
-  /**
-   * The id of this REPL's persistent process.
-   */
-  readonly processId: number;
-}
-"#;
-
-/// Parse the JS `files` argument — a `Record<string, string>` of virtual path → contents, or
-/// `undefined`/`null` for an empty filesystem — into a map.
-fn parse_files(files: JsValue) -> std::result::Result<HashMap<String, String>, JsValue> {
-    if files.is_undefined() || files.is_null() {
-        Ok(HashMap::new())
-    } else {
-        serde_wasm_bindgen::from_value(files)
-            .map_err(|e| JsValue::from_str(&format!("Invalid files map: {}", e)))
+/**
+ * A response from the compiler worker, received as a JSON string. `ready` arrives once at
+ * boot. An `evaluated` response carries the session bookkeeping and the payload to hand to
+ * `Environment.resumeProcess` (or any host speaking the same payload): apply `compactKeep`
+ * via `compactProcess`, then resume with the payload JSON and `keepIndices`. A null
+ * payload means the line had nothing to run (type definitions alone).
+ */
+export type CompilerResponse =
+  | { type: "ready" }
+  | { type: "ok"; id: number }
+  | { type: "error"; id: number | null; message: string }
+  | {
+      type: "evaluated";
+      id: number;
+      compactKeep: number[];
+      keepIndices: number[];
+      /** WirePayload JSON — pass verbatim to `Environment.resumeProcess`. */
+      payload: string | null;
+      resultType: string;
     }
-}
+  | { type: "variables"; id: number; variables: Variable[] };
+"#;
 
 /// Build a resolver over an in-memory file map. A `quiver.toml` in the map defines the module
 /// routing table; without one, files resolve by path and may shadow the standard library.
-fn create_resolver(
+pub(crate) fn create_session_resolver(
     files: HashMap<String, String>,
-) -> std::result::Result<Box<PackageResolver>, JsValue> {
+) -> std::result::Result<Box<PackageResolver>, String> {
     PackageResolver::memory_files(files)
         // The browser's tag: `%http/transport` resolves to `transport.web.qv` (over `fetch`)
         // rather than `transport.native.qv` (over sockets, which do not exist here).
         .map(|resolver| Box::new(resolver.with_host_tags(vec!["web".to_string()])))
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+        .map_err(|e| e.to_string())
+}
+
+/// `resumeProcess`'s synchronous answer: the resume is in flight (the callback will
+/// fire), or the module keys the environment no longer holds. A struct rather than a
+/// `serde_json` map, deliberately: `serde_wasm_bindgen` turns maps into ES `Map`s,
+/// while the plain object the TS signature promises comes from a struct.
+#[derive(serde::Serialize)]
+struct ResumeStart {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    missing: Option<Vec<String>>,
 }
 
 /// Callback wrapper to store JS callbacks
 struct CallbackHandle {
     callback: js_sys::Function,
-    /// The formatted static result type, captured at dispatch — the compiler knows it then,
-    /// and by the time the value arrives the request is just an id.
-    result_type: Option<String>,
 }
 
 impl CallbackHandle {
     fn new(callback: js_sys::Function) -> Self {
-        Self {
-            callback,
-            result_type: None,
-        }
+        Self { callback }
     }
 
     fn invoke<T: serde::Serialize>(&self, result: crate::types::Result<T>) {
@@ -211,17 +221,6 @@ use crate::effects::WebEffect;
 pub type PumpHandle = Rc<RefCell<Option<Pump>>>;
 type SharedEnvironment = Rc<RefCell<quiver_environment::Environment<WebEffect>>>;
 type SharedCallbacks = Rc<RefCell<HashMap<u64, CallbackHandle>>>;
-type SharedProcessTypes = Rc<RefCell<HashMap<usize, (quiver_core::types::Type, usize)>>>;
-type SharedPendingEvaluations = Rc<
-    RefCell<
-        Vec<(
-            String,
-            CallbackHandle,
-            Rc<RefCell<quiver_environment::Repl<WebEffect>>>,
-        )>,
-    >,
->;
-
 /// Wake the main-thread loop if it exists yet. A no-op before `Environment::new` installs the
 /// pump, which is fine: nothing queues work against the environment before then.
 pub fn wake(handle: &PumpHandle) {
@@ -239,8 +238,6 @@ pub struct Environment {
     // Persistent callbacks for standing subscriptions. Unlike `pending_callbacks`, an entry here is
     // re-invoked on every update and only removed by `unsubscribe`.
     subscription_callbacks: SharedCallbacks,
-    cached_process_types: SharedProcessTypes,
-    pending_evaluations: SharedPendingEvaluations,
 }
 
 #[wasm_bindgen]
@@ -339,8 +336,6 @@ impl Environment {
         let environment_rc = Rc::new(RefCell::new(environment));
         let pending_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let subscription_callbacks = Rc::new(RefCell::new(HashMap::new()));
-        let cached_process_types = Rc::new(RefCell::new(HashMap::new()));
-        let pending_evaluations = Rc::new(RefCell::new(Vec::new()));
         let running = Rc::new(RefCell::new(false));
 
         // Install the event-driven main-thread loop. It starts idle (running == false); `start()`
@@ -351,8 +346,6 @@ impl Environment {
             running.clone(),
             pending_callbacks.clone(),
             subscription_callbacks.clone(),
-            cached_process_types.clone(),
-            pending_evaluations.clone(),
         ));
 
         Ok(Self {
@@ -361,28 +354,7 @@ impl Environment {
             pump,
             pending_callbacks,
             subscription_callbacks,
-            cached_process_types,
-            pending_evaluations,
         })
-    }
-
-    /// Get shared state for Repl instances (internal use)
-    fn get_shared_state(
-        &self,
-    ) -> (
-        SharedEnvironment,
-        SharedCallbacks,
-        SharedProcessTypes,
-        SharedPendingEvaluations,
-        PumpHandle,
-    ) {
-        (
-            self.environment.clone(),
-            self.pending_callbacks.clone(),
-            self.cached_process_types.clone(),
-            self.pending_evaluations.clone(),
-            self.pump.clone(),
-        )
     }
 
     /// Build the main-thread loop. Each tick advances the environment and drains ready work; the
@@ -393,20 +365,13 @@ impl Environment {
         running: Rc<RefCell<bool>>,
         pending_callbacks: SharedCallbacks,
         subscription_callbacks: SharedCallbacks,
-        cached_process_types: SharedProcessTypes,
-        pending_evaluations: SharedPendingEvaluations,
     ) -> Pump {
         Pump::new(move || {
             if !*running.borrow() {
                 return Tick::Idle;
             }
-            let did_work = Self::run_tick(
-                &environment,
-                &pending_callbacks,
-                &subscription_callbacks,
-                &cached_process_types,
-                &pending_evaluations,
-            );
+            let did_work =
+                Self::run_tick(&environment, &pending_callbacks, &subscription_callbacks);
             // If this tick did something it may have produced follow-up work; run once more. When a
             // tick finds nothing to do we go idle — the next change arrives via a wake.
             if did_work { Tick::Busy } else { Tick::Idle }
@@ -420,8 +385,6 @@ impl Environment {
         environment: &SharedEnvironment,
         pending_callbacks: &SharedCallbacks,
         subscription_callbacks: &SharedCallbacks,
-        cached_process_types: &SharedProcessTypes,
-        pending_evaluations: &SharedPendingEvaluations,
     ) -> bool {
         // Step the environment
         let mut did_work = match environment.borrow_mut().step() {
@@ -457,11 +420,6 @@ impl Environment {
             for request_id in request_ids {
                 match environment.borrow_mut().poll_request(request_id) {
                     Ok(Some(result)) => {
-                        // Cache process types if this is a ProcessTypes result
-                        if let RequestResult::ProcessTypes(ref types) = result {
-                            *cached_process_types.borrow_mut() = types.clone();
-                        }
-
                         if let Some(callback) = callbacks.remove(&request_id) {
                             callbacks_to_invoke.push((request_id, callback, result));
                         }
@@ -489,45 +447,6 @@ impl Environment {
         // result request), so inspectors reflect the post-evaluation heap with nothing to do here.
         for (_request_id, callback, result) in callbacks_to_invoke {
             Self::handle_result(&environment.borrow(), &callback, result);
-        }
-
-        // Process pending evaluations
-        let evaluations_to_process = {
-            let mut evals = pending_evaluations.borrow_mut();
-            std::mem::take(&mut *evals)
-        };
-
-        if !evaluations_to_process.is_empty() {
-            did_work = true;
-        }
-
-        for (source, callback, repl) in evaluations_to_process {
-            let process_types = cached_process_types.borrow().clone();
-
-            let outcome =
-                repl.borrow_mut()
-                    .evaluate(&mut environment.borrow_mut(), &source, process_types);
-            match outcome {
-                Ok(Some(request_id)) => {
-                    // Capture the inferred type now: the compiler has just produced it, and
-                    // the completion that arrives later carries only a value. The type is
-                    // compiler-side (REPL id space), so format it with the REPL's program,
-                    // not the environment's merged one.
-                    let mut callback = callback;
-                    callback.result_type = Some({
-                        let repl = repl.borrow();
-                        repl.format_type(repl.get_last_result_type())
-                    });
-                    pending_callbacks.borrow_mut().insert(request_id, callback);
-                }
-                Ok(None) => {
-                    callback.invoke(crate::types::Result::ok(None::<EvaluationResult>));
-                }
-                Err(e) => {
-                    callback
-                        .invoke::<EvaluationResult>(crate::types::Result::err(format!("{}", e)));
-                }
-            }
         }
 
         did_work
@@ -660,6 +579,106 @@ impl Environment {
         wake(&self.pump);
     }
 
+    /// Allocate a fresh persistent (session) process, sleeping and ready for
+    /// `resumeProcess`. The environment half of the split-driver API: a compiler
+    /// worker produces payloads, this class runs them.
+    #[wasm_bindgen(js_name = "createProcess")]
+    pub fn create_process(&mut self) -> std::result::Result<f64, JsValue> {
+        let pid = self
+            .environment
+            .borrow_mut()
+            .start_process()
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        wake(&self.pump);
+        Ok(pid as f64)
+    }
+
+    /// Re-align a session process's locals to a keep-set (the `compactKeep` of a
+    /// compiler worker's `evaluated` response) — apply before the resume it belongs to.
+    /// Command order to the process's worker is preserved, so this needs no ack.
+    #[wasm_bindgen(js_name = "compactProcess")]
+    pub fn compact_process(&mut self, pid: f64, keep: JsValue) -> std::result::Result<(), JsValue> {
+        let keep: Vec<usize> = serde_wasm_bindgen::from_value(keep)
+            .map_err(|e| JsValue::from_str(&format!("Invalid keep-set: {e}")))?;
+        self.environment
+            .borrow_mut()
+            .compact_locals(pid as usize, keep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        wake(&self.pump);
+        Ok(())
+    }
+
+    /// Resume a session process on a compiler worker's payload (its JSON, verbatim):
+    /// link the attached module units — validated against their content keys — and run
+    /// the entry, delivering the result to `callback`.
+    ///
+    /// Answers `{ pending: true }` when the resume is in flight (the callback will
+    /// fire), or `{ missing: [keys] }` when the payload names modules this environment
+    /// no longer holds — resend those and retry; the callback does not fire. An
+    /// invalid payload throws.
+    #[wasm_bindgen(js_name = "resumeProcess")]
+    pub fn resume_process(
+        &mut self,
+        pid: f64,
+        payload: String,
+        keep: JsValue,
+        callback: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let payload: quiver_environment::WirePayload = serde_json::from_str(&payload)
+            .map_err(|e| JsValue::from_str(&format!("Invalid payload: {e}")))?;
+        let keep: Option<Vec<usize>> = if keep.is_undefined() || keep.is_null() {
+            None
+        } else {
+            Some(
+                serde_wasm_bindgen::from_value(keep)
+                    .map_err(|e| JsValue::from_str(&format!("Invalid keep-set: {e}")))?,
+            )
+        };
+        let callback: js_sys::Function = callback.into();
+        let builtins = crate::builtins::web_builtins();
+
+        let request = {
+            let mut env = self.environment.borrow_mut();
+            let missing = env
+                .link_payload_modules(&payload.modules, &payload.unit, &builtins)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            if !missing.is_empty() {
+                let keys: Vec<String> = missing.iter().map(|key| key.to_string()).collect();
+                return serde_wasm_bindgen::to_value(&ResumeStart {
+                    pending: None,
+                    missing: Some(keys),
+                })
+                .map_err(|e| JsValue::from_str(&e.to_string()));
+            }
+            env.resume_process_unit(pid as usize, &payload.unit, &builtins)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            env.request_result(pid as usize, keep)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?
+        };
+        self.pending_callbacks
+            .borrow_mut()
+            .insert(request, CallbackHandle::new(callback));
+        wake(&self.pump);
+        serde_wasm_bindgen::to_value(&ResumeStart {
+            pending: Some(true),
+            missing: None,
+        })
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Stop a session process — the host-side interrupt. A pending resume callback
+    /// settles with "Interrupted", everything the process spawned is torn down, and
+    /// the process is gone: create a new one to continue.
+    #[wasm_bindgen(js_name = "stopProcess")]
+    pub fn stop_process(&mut self, pid: f64) -> std::result::Result<(), JsValue> {
+        self.environment
+            .borrow_mut()
+            .stop_process(pid as usize)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        wake(&self.pump);
+        Ok(())
+    }
+
     /// Format a value for display
     #[wasm_bindgen(js_name = "formatValue")]
     pub fn format_value(
@@ -698,12 +717,22 @@ impl Environment {
     ) {
         match result {
             RequestResult::Result(Ok(value)) => {
+                // A stamped nil's failure provenance, surfaced alongside the value the
+                // way the native REPL prints it.
+                let origin = if value.is_nil() {
+                    env.describe_origin(&value)
+                } else {
+                    None
+                };
                 // The JS bridge speaks `(Value, heap)`; a wire value renders to that pair.
                 let (core, heap) = value.for_display();
                 callback.invoke(crate::types::Result::ok(Some(EvaluationResult {
                     value: crate::types::Value::from_core_value(&core, env.get_program()),
                     heap,
-                    result_type: callback.result_type.clone(),
+                    // The compiler worker reports the line's static type in its
+                    // `evaluated` response; the caller joins the two.
+                    result_type: None,
+                    origin,
                 })));
             }
             RequestResult::Result(Err(e)) => {
@@ -739,6 +768,11 @@ impl Environment {
                     let result = info.result.map(|r| match r {
                         Ok(value) => crate::types::Result::Ok {
                             value: {
+                                let origin = if value.is_nil() {
+                                    env.describe_origin(&value)
+                                } else {
+                                    None
+                                };
                                 let (core, heap) = value.for_display();
                                 EvaluationResult {
                                     value: crate::types::Value::from_core_value(
@@ -747,6 +781,7 @@ impl Environment {
                                     ),
                                     heap,
                                     result_type: None,
+                                    origin,
                                 }
                             },
                         },
@@ -781,138 +816,11 @@ impl Environment {
                 callback.invoke(crate::types::Result::ok(js_workers));
             }
             RequestResult::ProcessTypes(_) => {
-                // Process types are cached automatically by the polling loop
-                // Just return success to the callback
-                callback.invoke::<()>(crate::types::Result::ok(()));
+                // Nothing on the web requests process types (`@N` is unsupported here).
+                callback.invoke::<()>(crate::types::Result::err(
+                    "Unexpected result type: ProcessTypes",
+                ));
             }
         }
-    }
-}
-
-#[wasm_bindgen(skip_typescript)]
-pub struct Repl {
-    environment: SharedEnvironment,
-    pending_callbacks: SharedCallbacks,
-    pending_evaluations: SharedPendingEvaluations,
-    pump: PumpHandle,
-    repl: Rc<RefCell<quiver_environment::Repl<WebEffect>>>,
-}
-
-#[wasm_bindgen]
-impl Repl {
-    /// Create a new REPL using the given environment.
-    ///
-    /// `files` is an optional `Record<string, string>` of virtual path → source (e.g. the
-    /// browser's file explorer), which becomes the in-memory package that imports resolve
-    /// against. A `quiver.toml` entry, if present, defines the module routing table.
-    #[wasm_bindgen(constructor)]
-    pub fn new(environment: &Environment, files: JsValue) -> std::result::Result<Repl, JsValue> {
-        // Set up panic hook for better error messages
-        console_error_panic_hook::set_once();
-
-        // Get shared state from environment
-        let (env_rc, callbacks_rc, _process_types_rc, evaluations_rc, pump) =
-            environment.get_shared_state();
-
-        // Create REPL
-        let resolver = create_resolver(parse_files(files)?)?;
-        let builtins = crate::builtins::web_builtins();
-        let repl = quiver_environment::Repl::new(&mut *env_rc.borrow_mut(), resolver, builtins)
-            .map_err(|e| JsValue::from_str(&format!("Failed to create REPL: {}", e)))?;
-
-        Ok(Self {
-            environment: env_rc,
-            pending_callbacks: callbacks_rc,
-            pending_evaluations: evaluations_rc,
-            pump,
-            repl: Rc::new(RefCell::new(repl)),
-        })
-    }
-
-    /// Replace the REPL's virtual filesystem, so subsequent evaluations resolve imports against
-    /// the new files (and `quiver.toml`). Accumulated variables are preserved; bindings that
-    /// already captured values from a previous version of a module keep those values. Returns an
-    /// error (without disturbing the current resolver) if a `quiver.toml` in `files` is invalid.
-    #[wasm_bindgen(js_name = "setFiles")]
-    pub fn set_files(&mut self, files: JsValue) -> std::result::Result<(), JsValue> {
-        let resolver = create_resolver(parse_files(files)?)?;
-        self.repl.borrow_mut().reload_modules(resolver);
-        Ok(())
-    }
-
-    /// Refresh the cache of process types
-    ///
-    /// Call this before evaluate() to ensure process references (@N) work correctly.
-    /// The callback will be invoked when types are ready (or on error).
-    #[wasm_bindgen(js_name = "refreshProcessTypes")]
-    pub fn refresh_process_types(&mut self, callback: JsValue) {
-        let callback: js_sys::Function = callback.into();
-
-        match self.environment.borrow_mut().request_process_types() {
-            Ok(request_id) => {
-                // The loop will cache the types and invoke the callback; wake it to do so.
-                self.pending_callbacks
-                    .borrow_mut()
-                    .insert(request_id, CallbackHandle::new(callback));
-                wake(&self.pump);
-            }
-            Err(e) => {
-                let cb = CallbackHandle::new(callback);
-                cb.invoke::<()>(crate::types::Result::err(e.to_string()));
-            }
-        }
-    }
-
-    /// Evaluate source code and invoke callback when result is ready
-    ///
-    /// Note: Call refreshProcessTypes() first if you need process references (@N) to work.
-    pub fn evaluate(&mut self, source: String, callback: JsValue) {
-        let callback: js_sys::Function = callback.into();
-
-        // Queue the evaluation to be processed by the loop (avoids RefCell borrow conflicts), then
-        // wake the loop so it dispatches it.
-        self.pending_evaluations.borrow_mut().push((
-            source,
-            CallbackHandle::new(callback),
-            self.repl.clone(),
-        ));
-        wake(&self.pump);
-    }
-
-    /// Stop this REPL's session process — the host-side interrupt for a hung or runaway
-    /// evaluation. A pending evaluate request then resolves through the normal callback
-    /// path (as an "Interrupted" error), and ownership teardown takes everything the
-    /// session spawned. The session process is gone afterwards, so a later evaluate
-    /// fails: replace this Repl with a fresh instance. Idempotent while the process's
-    /// tombstone survives.
-    pub fn interrupt(&mut self) -> std::result::Result<(), JsValue> {
-        let pid = self.repl.borrow().process_id();
-        self.environment
-            .borrow_mut()
-            .stop_process(pid)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        wake(&self.pump);
-        Ok(())
-    }
-
-    /// Get all variables (synchronous)
-    #[wasm_bindgen(js_name = "getVariables")]
-    pub fn get_variables(&self, callback: JsValue) {
-        let callback: js_sys::Function = callback.into();
-        let repl = self.repl.borrow();
-        let vars = repl.get_variables();
-        let js_vars: Vec<Variable> = vars
-            .into_iter()
-            .map(|(name, var_type)| Variable { name, var_type })
-            .collect();
-
-        let cb = CallbackHandle::new(callback);
-        cb.invoke(crate::types::Result::ok(js_vars));
-    }
-
-    /// The id of this REPL's persistent process.
-    #[wasm_bindgen(getter, js_name = "processId")]
-    pub fn process_id(&self) -> usize {
-        self.repl.borrow().process_id()
     }
 }

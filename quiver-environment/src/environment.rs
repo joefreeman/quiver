@@ -11,7 +11,7 @@ use quiver_core::bytecode::Bytecode;
 use quiver_core::bytecode::{Constant, Function};
 use quiver_core::compatibility::{CompatibilityInput, CompatibilityTables};
 use quiver_core::effects::{Effect, EffectBackend, ResultTupleInfo};
-use quiver_core::executor::{ProgramUpdate, TableUpdate};
+use quiver_core::executor::{CompatibilityUpdate, ProgramUpdate, TableUpdate};
 use quiver_core::process::{
     ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo, ProcessStatus,
 };
@@ -827,6 +827,35 @@ impl<E: Effect> Environment<E> {
         Ok(())
     }
 
+    /// Link a payload's attached modules, deepest dependency first, and answer the keys
+    /// the entry unit still needs that neither the environment nor the payload supplied
+    /// — the caller's "424": its record of what this host holds is stale, most likely
+    /// because a code sweep reclaimed a module nothing was using, and it must resend
+    /// those modules and retry. A module the caller believed held may have been
+    /// reclaimed, in which case its own imports come up short — those keys are
+    /// *collected* rather than fatal, so one answer names everything to resend. An
+    /// invalid unit is an error: the payload itself is defective, and no resend of
+    /// anything could repair it.
+    pub fn link_payload_modules(
+        &mut self,
+        modules: &[(UnitKey, CompiledUnit)],
+        unit: &CompiledUnit,
+        builtins: &quiver_core::builtins::BuiltinRegistry<E>,
+    ) -> Result<Vec<UnitKey>, EnvironmentError> {
+        let mut missing: Vec<UnitKey> = Vec::new();
+        for (key, module) in modules {
+            match self.link_module_unit(*key, module, builtins) {
+                Ok(()) => {}
+                Err(EnvironmentError::ModuleNotLinked(key)) => missing.push(key),
+                Err(e) => return Err(e),
+            }
+        }
+        missing.extend(self.missing_modules(unit).into_iter().map(|(_, key)| key));
+        missing.sort_unstable();
+        missing.dedup();
+        Ok(missing)
+    }
+
     /// Resolve a unit's import entries through the modules already linked here. A key
     /// this environment does not hold is answerable — the caller sends that module and
     /// retries — while an import index past a held module's end means the citing unit
@@ -1308,33 +1337,69 @@ impl<E: Effect> Environment<E> {
                 field_names: self.program.get_field_names(),
             };
 
-            // Extend the incrementally-maintained compatibility tables to the merged
-            // program; workers receive them whole and replace their copies.
-            self.compatibility.update(&input);
-            if std::env::var("QUIVER_VERIFY_COMPAT").is_ok() {
-                let reclaimed = self.program.stubbed_counts() != (0, 0);
-                self.compatibility.assert_matches_full(&input, reclaimed);
-            }
-            // Built once and wrapped once. `update_cmd.clone()` below runs per worker, so
-            // without the `Arc` each of these tables was deep-copied N times into N identical
-            // private copies; now the clone is a refcount bump and the natives share one copy.
-            // (The web transport serializes each command anyway, so it is unaffected either
-            // way — see `ProgramUpdate::type_compatibility`.)
-            let type_compatibility = Arc::new(self.compatibility.type_compatibility.clone());
-            let function_param_compatibility = Arc::new(self.compatibility.function_params.clone());
-            let builtin_param_compatibility = Arc::new(self.compatibility.builtin_params.clone());
-            // Maintained incrementally alongside the compatibility tables: both are pure
-            // functions of append-only registries, so rebuilding them per update was
-            // O(program) work for an O(delta) change.
-            let canonical_tuples = Arc::new(self.compatibility.canonical_tuples.clone());
-            let field_offsets = Arc::new(self.compatibility.field_offsets.clone());
-
             // Shape the growing tables to the transport. Where the workers are threads, each
             // takes the whole merged table by pointer and they all reference one allocation —
             // the duplication this removes was the largest single cost in the runtime's
             // footprint. Where a command has to be serialized, a delta is the only affordable
             // form: the whole program would otherwise be re-encoded, per worker, per update.
             let shared = self.workers.iter().all(|worker| worker.shares_memory());
+
+            // Extend the incrementally-maintained compatibility tables to the merged
+            // program, capturing the extension as a delta when a serializing transport
+            // will ship it.
+            let verify = std::env::var("QUIVER_VERIFY_COMPAT").is_ok();
+            let before = (verify && !shared).then(|| self.compatibility.clone());
+            let delta = self.compatibility.update(&input, !shared);
+            if verify {
+                let reclaimed = self.program.stubbed_counts() != (0, 0);
+                self.compatibility.assert_matches_full(&input, reclaimed);
+                // And the delta must carry a worker from the previous tables to exactly
+                // these — the contract the serializing transport rests on.
+                if let (Some(mut before), Some(delta)) = (before, delta.clone()) {
+                    delta.apply(
+                        &mut before.type_compatibility,
+                        &mut before.function_params,
+                        &mut before.builtin_params,
+                        &mut before.canonical_tuples,
+                        &mut before.field_offsets,
+                    );
+                    assert_eq!(
+                        before.type_compatibility, self.compatibility.type_compatibility,
+                        "delta drifts from the tables: type_compatibility"
+                    );
+                    assert_eq!(
+                        before.function_params, self.compatibility.function_params,
+                        "delta drifts from the tables: function_params"
+                    );
+                    assert_eq!(
+                        before.builtin_params, self.compatibility.builtin_params,
+                        "delta drifts from the tables: builtin_params"
+                    );
+                    assert_eq!(
+                        before.canonical_tuples, self.compatibility.canonical_tuples,
+                        "delta drifts from the tables: canonical_tuples"
+                    );
+                    assert_eq!(
+                        before.field_offsets, self.compatibility.field_offsets,
+                        "delta drifts from the tables: field_offsets"
+                    );
+                }
+            }
+
+            // Built once and wrapped once for the shared form: `update_cmd.clone()` below
+            // runs per worker, so without the `Arc` each table was deep-copied N times
+            // into N identical private copies; now the clone is a refcount bump and the
+            // natives share one copy.
+            let compatibility = match delta {
+                Some(delta) => CompatibilityUpdate::Delta(delta),
+                None => CompatibilityUpdate::Shared {
+                    type_compatibility: Arc::new(self.compatibility.type_compatibility.clone()),
+                    function_params: Arc::new(self.compatibility.function_params.clone()),
+                    builtin_params: Arc::new(self.compatibility.builtin_params.clone()),
+                    canonical_tuples: Arc::new(self.compatibility.canonical_tuples.clone()),
+                    field_offsets: Arc::new(self.compatibility.field_offsets.clone()),
+                },
+            };
 
             // In-place patches only matter where tables arrive as appends; a shared
             // table already carries the patched slots.
@@ -1360,11 +1425,7 @@ impl<E: Effect> Environment<E> {
                 types: table(shared, self.program.get_types(), new_types),
                 builtins: table(shared, self.program.get_builtins(), new_builtins),
                 resources: resource_names,
-                type_compatibility,
-                function_param_compatibility,
-                builtin_param_compatibility,
-                field_offsets,
-                canonical_tuples,
+                compatibility,
                 // Full snapshot: the executor rebuilds its prebuilt site values from it.
                 debug: self.program.debug_sites().cloned(),
                 runtime: Some(runtime_tables),

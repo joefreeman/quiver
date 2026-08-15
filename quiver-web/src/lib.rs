@@ -1,11 +1,12 @@
 mod backend;
 mod builtins;
+mod compiler_entry;
 mod effects;
+mod environment_entry;
 mod pump;
 mod repl_web;
 mod types;
 mod web_transport;
-mod worker_entry;
 
 // Re-export effects
 pub use effects::WebEffect;
@@ -14,8 +15,8 @@ pub use effects::WebEffect;
 pub use types::*;
 
 // Re-export main API
-pub use repl_web::Repl;
-pub use worker_entry::worker_main;
+pub use compiler_entry::compiler_worker_main;
+pub use environment_entry::environment_worker_main;
 
 use wasm_bindgen::prelude::*;
 
