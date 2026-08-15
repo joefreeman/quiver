@@ -4584,6 +4584,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         for (path, _) in modules::collect_value_imports(&parsed) {
             self.ensure_import_cached(&path, &resolved.package)?;
         }
+        // The artifact must name the dependency content this session actually linked.
+        // Equal source keys do not yet guarantee equal bytes — compiling against a
+        // linked dependency emits differently than against a source-compiled one, and
+        // concurrent sessions race their writes into a shared store — so a dependent
+        // written beside a different variant of its dependency can arrive here. That is
+        // a cache miss, not an error: fall through to the source compile, which builds
+        // against what this session holds.
+        for (module, key, _) in &artifact.unit.imports {
+            if self.module_cache.content_key(module) != Some(*key) {
+                return Ok(());
+            }
+        }
         crate::artifact::link_module(
             &artifact,
             &resolved.id,

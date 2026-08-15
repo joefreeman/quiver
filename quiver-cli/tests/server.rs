@@ -537,7 +537,7 @@ struct UnitSession {
     client: Client,
     compiler: LineCompiler<NativeEffect>,
     pid: u64,
-    sent: std::collections::HashSet<u64>,
+    sent: std::collections::HashSet<quiver_compiler::UnitKey>,
 }
 
 impl UnitSession {
@@ -563,7 +563,7 @@ impl UnitSession {
         source: &str,
     ) -> (
         quiver_compiler::CompiledUnit,
-        Vec<(u64, quiver_compiler::CompiledUnit)>,
+        Vec<(quiver_compiler::UnitKey, quiver_compiler::CompiledUnit)>,
         Vec<usize>,
     ) {
         let prepared = self.compiler.prepare(source).expect("prepare failed");
@@ -641,6 +641,50 @@ fn a_unit_resume_links_its_modules_and_names_them_thereafter() {
 }
 
 #[test]
+fn an_invalid_unit_is_refused_and_the_server_survives() {
+    // The trust boundary over the wire: a module whose content does not hash to the key
+    // it was sent under is a defect of the request, refused as 422 — and the refusal
+    // must leave the server serviceable, where the pre-validation era panicked under
+    // the environment lock and poisoned it for every request after.
+    let server = Server::start(&[]);
+    let mut session = UnitSession::open(&server);
+    let (unit, modules, keep) = session.compile("%num.mul [7, 6]");
+    assert!(!modules.is_empty(), "the line must carry modules to tamper");
+
+    let mut tampered = modules.clone();
+    tampered[0].1.field_names.push("tampered".to_string());
+    let error = session
+        .client
+        .resume(
+            session.pid,
+            ResumePayload {
+                unit: unit.clone(),
+                modules: tampered,
+            },
+            Some(keep.clone()),
+        )
+        .expect_err("a tampered module must be refused");
+    let quiver_cli::client::RequestError::Http { status, body } = error else {
+        panic!("expected an HTTP error, got {error}");
+    };
+    assert_eq!(status, 422);
+    assert!(
+        body.contains("hashes to"),
+        "the refusal names the mismatch: {body}"
+    );
+
+    // The honest payload still succeeds on the same server.
+    let outcome = session
+        .client
+        .resume(session.pid, ResumePayload { unit, modules }, Some(keep))
+        .expect("the server must survive a refused request");
+    match outcome {
+        Outcome::Value { rendered, .. } => assert_eq!(rendered, "42"),
+        other => panic!("expected 42, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_stale_sent_record_is_answered_with_the_missing_keys() {
     // A client that believes the server holds modules it does not — the state a code
     // sweep leaves behind — must be told exactly which, and succeed on the retry.
@@ -664,7 +708,8 @@ fn a_stale_sent_record_is_answered_with_the_missing_keys() {
     };
     assert_eq!(status, 424);
     let missing: MissingModules = serde_json::from_str(&body).expect("a MissingModules body");
-    let expected: std::collections::HashSet<u64> = modules.iter().map(|(key, _)| *key).collect();
+    let expected: std::collections::HashSet<quiver_compiler::UnitKey> =
+        modules.iter().map(|(key, _)| *key).collect();
     assert!(
         missing.missing.iter().all(|key| expected.contains(key)),
         "the server must name keys the line actually imports"

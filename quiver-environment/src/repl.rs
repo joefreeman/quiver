@@ -109,8 +109,11 @@ fn unit_payload(
             .artifact_store
             .as_ref()
             .expect("bundled imports require the store that made their modules suppliable");
-        quiver_compiler::module_closure(store, &unit).unwrap_or_else(|key| {
-            panic!("no stored artifact for module {key:016x} named by a bundled import")
+        quiver_compiler::module_closure(store, module_cache, &unit).unwrap_or_else(|module| {
+            panic!(
+                "no stored artifact for module {} named by a bundled import",
+                module.display()
+            )
         })
     };
     LinePayload { unit, modules }
@@ -122,7 +125,10 @@ fn unit_payload(
 /// key) is inlined into the unit instead, so the payload always runs.
 pub struct LinePayload {
     pub unit: quiver_compiler::CompiledUnit,
-    pub modules: Vec<(u64, Rc<quiver_compiler::ModuleArtifact>)>,
+    pub modules: Vec<(
+        quiver_compiler::UnitKey,
+        Rc<quiver_compiler::ModuleArtifact>,
+    )>,
 }
 
 /// A line compiled by [`LineCompiler::compile`]: the session state it produces,

@@ -13,5 +13,6 @@ num-bigint.workspace = true
 num-traits.workspace = true
 num-integer.workspace = true
 hex = "0.4.3"
+sha2 = "0.10"
 toml = "0.8"
 include_dir = "0.7"

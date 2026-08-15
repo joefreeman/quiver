@@ -306,12 +306,18 @@ fn run_resume(
         // Link what the client attached, deepest dependency first. A module it
         // believed we held may have been reclaimed since, in which case its own
         // imports come up short — collect those keys rather than failing, so one
-        // answer names everything the client must resend.
-        let mut missing: Vec<u64> = Vec::new();
+        // answer names everything the client must resend. An *invalid* unit — one
+        // whose content does not hash to its key, or that is structurally malformed —
+        // is the request's own defect: refused outright, since no resend of anything
+        // could repair it.
+        let mut missing: Vec<quiver_compiler::UnitKey> = Vec::new();
         for (key, module) in &modules {
             match env.link_module_unit(*key, module, &builtins) {
                 Ok(()) => {}
                 Err(EnvironmentError::ModuleNotLinked(key)) => missing.push(key),
+                Err(EnvironmentError::InvalidUnit(message)) => {
+                    return Err((StatusCode::UNPROCESSABLE_ENTITY, message).into_response());
+                }
                 Err(e) => return Err(internal(e)),
             }
         }
@@ -325,8 +331,13 @@ fn run_resume(
             )
                 .into_response());
         }
-        env.resume_process_unit(pid, &unit, &builtins)
-            .map_err(internal)?;
+        match env.resume_process_unit(pid, &unit, &builtins) {
+            Ok(()) => {}
+            Err(EnvironmentError::InvalidUnit(message)) => {
+                return Err((StatusCode::UNPROCESSABLE_ENTITY, message).into_response());
+            }
+            Err(e) => return Err(internal(e)),
+        }
         env.request_result(pid, request.keep).map_err(internal)?
     };
     match wait_for(state, request_id, Some((pid, &control.cancel))) {

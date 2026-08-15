@@ -276,7 +276,11 @@ fn project_store(
 }
 
 /// The key an import group names, for the dependency called `name`.
-fn import_key(store: &quiver_compiler::ArtifactStore, module: &str, dependency: &str) -> u64 {
+fn import_key(
+    store: &quiver_compiler::ArtifactStore,
+    module: &str,
+    dependency: &str,
+) -> quiver_compiler::UnitKey {
     let artifact = store
         .entries()
         .into_iter()
@@ -294,17 +298,25 @@ fn import_key(store: &quiver_compiler::ArtifactStore, module: &str, dependency: 
 
 #[test]
 fn import_keys_name_the_stored_dependency() {
-    // Every import group's key must be the key its dependency's own artifact is stored
-    // under: the table says *which version* of a module it was compiled against, and a
-    // linker outside the import pipeline has nothing else to check.
+    // Every import group's key must be the content key of its dependency's stored unit:
+    // the table says *which bytes* of a module it was compiled against, and a linker
+    // outside the import pipeline validates exactly that. The stored `content_key` must
+    // itself be honest — it is denormalized into the artifact, so a drift between it
+    // and a rehash of the unit would poison every dependent's import table.
     let store = build_artifacts(false);
     let by_id: std::collections::HashMap<_, _> = store
         .entries()
         .into_iter()
-        .map(|(key, artifact)| (artifact.id.clone(), key))
+        .map(|(_, artifact)| (artifact.id.clone(), artifact.content_key))
         .collect();
     let mut checked = 0;
     for (_, artifact) in store.entries() {
+        assert_eq!(
+            artifact.content_key,
+            quiver_compiler::unit_key(&artifact.unit),
+            "{}: stored content key does not match a rehash of its unit",
+            artifact.id.display()
+        );
         for (dependency, key, _) in &artifact.unit.imports {
             let stored = by_id.get(dependency).unwrap_or_else(|| {
                 panic!(
@@ -316,7 +328,7 @@ fn import_keys_name_the_stored_dependency() {
             assert_eq!(
                 *stored,
                 *key,
-                "{} names key {:016x} for {}, stored under {:016x}",
+                "{} names content {} for {}, stored as {}",
                 artifact.id.display(),
                 key,
                 dependency.display(),
@@ -357,7 +369,8 @@ fn a_dependency_change_rekeys_its_dependents_import() {
             .into_iter()
             .find(|(_, a)| a.id.name == vec!["a".to_string()])
             .expect("%a artifact")
-            .0;
+            .1
+            .content_key;
         assert_eq!(stored, expected);
     }
 }

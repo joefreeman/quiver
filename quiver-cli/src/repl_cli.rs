@@ -49,7 +49,7 @@ pub struct ReplCli {
     /// `424` that this set is then corrected from. Scoped to the connection, and the
     /// per-request fingerprint check means a replaced server is rejected outright rather
     /// than silently inheriting the record.
-    sent_modules: std::collections::HashSet<u64>,
+    sent_modules: std::collections::HashSet<quiver_compiler::UnitKey>,
     /// The server-side session process. Atomic and shared with the cancel thread,
     /// which must target whichever process a reset most recently created.
     process_id: Arc<AtomicU64>,
@@ -154,7 +154,7 @@ impl ReplCli {
         let keep = Some(committed.keep_indices);
         let quiver_environment::LinePayload { unit, modules } = committed.payload;
 
-        let attach = |sent: &std::collections::HashSet<u64>, all: bool| {
+        let attach = |sent: &std::collections::HashSet<quiver_compiler::UnitKey>, all: bool| {
             modules
                 .iter()
                 .filter(|(key, _)| all || !sent.contains(key))
@@ -163,7 +163,7 @@ impl ReplCli {
         };
 
         let attached = attach(&self.sent_modules, false);
-        let sending: Vec<u64> = attached.iter().map(|(key, _)| *key).collect();
+        let sending: Vec<quiver_compiler::UnitKey> = attached.iter().map(|(key, _)| *key).collect();
         let outcome = self.client.resume(
             pid,
             ResumePayload {
@@ -183,7 +183,8 @@ impl ReplCli {
                     }
                 }
                 let attached = attach(&self.sent_modules, true);
-                let sending: Vec<u64> = attached.iter().map(|(key, _)| *key).collect();
+                let sending: Vec<quiver_compiler::UnitKey> =
+                    attached.iter().map(|(key, _)| *key).collect();
                 let outcome = self.client.resume(
                     pid,
                     ResumePayload {

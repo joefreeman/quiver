@@ -174,9 +174,14 @@ fn round_trip(source: &str, registration: Registration) -> (String, String) {
 
     let mut fresh = Program::new();
     let mut fresh_cache = ModuleCache::new();
+    fresh_cache.artifact_store = Some(store());
     for (module, key, _) in &unit.imports {
         assert_eq!(
-            compiled.module_cache.key_cache[module], *key,
+            compiled
+                .module_cache
+                .content_key(module)
+                .expect("an imported module has a stored artifact"),
+            *key,
             "import key must match the compiling session's"
         );
         link_module_tree(
@@ -283,12 +288,17 @@ fn resolving_imports_against_another_version_of_a_module_is_refused() {
         .map(|(id, key)| (id.clone(), *key))
         .expect("%a is keyed");
     assert_ne!(
-        key, unit.imports[0].1,
+        other
+            .module_cache
+            .content_key(&id)
+            .expect("%a has a stored artifact"),
+        unit.imports[0].1,
         "the two %a versions must key differently, or this proves nothing"
     );
 
     let mut fresh = Program::new();
     let mut fresh_cache = ModuleCache::new();
+    fresh_cache.artifact_store = Some(Rc::clone(&other_store));
     let artifact = other_store.load(key).expect("the other %a's artifact");
     quiver_compiler::link_module(&artifact, &id, &mut fresh, &mut fresh_cache, &builtins())
         .expect("link");
@@ -314,8 +324,14 @@ fn a_units_imports_are_a_sparse_subset_of_its_modules() {
         .iter()
         .find(|(id, _, _)| id.name == vec!["num".to_string()])
         .expect("imports %num");
-    let artifact = store().load(*key).expect("%num artifact");
+    let artifact = store()
+        .load(compiled.module_cache.key_cache[module])
+        .expect("%num artifact");
     assert_eq!(artifact.id, *module);
+    assert_eq!(
+        artifact.content_key, *key,
+        "the import names the stored unit's content"
+    );
     assert!(
         indices.len() < artifact.unit.functions.len(),
         "expected a subset: {} of {}",
@@ -349,12 +365,12 @@ fn a_compiled_program_is_self_contained() {
 
         // The closure is complete and ordered: nothing a module imports is missing, and
         // nothing arrives before what it depends on.
-        let mut linked: Vec<u64> = Vec::new();
+        let mut linked: Vec<quiver_compiler::UnitKey> = Vec::new();
         for (key, unit) in &program.modules {
             for (_, dependency, _) in &unit.imports {
                 assert!(
                     linked.contains(dependency),
-                    "`{source}`: module {key:016x} precedes its dependency {dependency:016x}"
+                    "`{source}`: module {key} precedes its dependency {dependency}"
                 );
             }
             linked.push(*key);
@@ -362,7 +378,7 @@ fn a_compiled_program_is_self_contained() {
         for (_, key, _) in &program.unit.imports {
             assert!(
                 linked.contains(key),
-                "`{source}`: the entry imports {key:016x}, which is not carried"
+                "`{source}`: the entry imports {key}, which is not carried"
             );
         }
 
@@ -481,9 +497,16 @@ fn a_unit_round_trips_through_serialization() {
     let restored: quiver_compiler::CompiledUnit =
         serde_json::from_slice(&bytes).expect("deserialize");
     assert_eq!(bytes, serde_json::to_vec(&restored).expect("re-serialize"));
+    // Byte stability is what makes the content key canonical: the receiver's rehash of
+    // a deserialized unit must equal the sender's hash of the original.
+    assert_eq!(
+        quiver_compiler::unit_key(&unit),
+        quiver_compiler::unit_key(&restored)
+    );
 
     let mut fresh = Program::new();
     let mut fresh_cache = ModuleCache::new();
+    fresh_cache.artifact_store = Some(store());
     for (module, _, _) in &restored.imports {
         link_module_tree(
             module,
@@ -552,22 +575,22 @@ fn environment() -> Environment<NativeEffect> {
     environment
 }
 
-/// Link `key`'s module unit and everything it depends on into `environment`.
+/// Link `id`'s module unit and everything it depends on into `environment`, under its
+/// content key. `keys` are the session's artifact (source) keys — the store's index.
 fn link_into_environment(
     environment: &mut Environment<NativeEffect>,
     id: &ModuleId,
     keys: &HashMap<ModuleId, u64>,
 ) {
-    let key = keys[id];
-    if environment.holds_module(key) {
+    let artifact = store().load(keys[id]).expect("artifact");
+    if environment.holds_module(artifact.content_key) {
         return;
     }
-    let artifact = store().load(key).expect("artifact");
     for dependency in artifact.unit.dependencies() {
         link_into_environment(environment, &dependency, keys);
     }
     environment
-        .link_module_unit(key, &artifact.unit, &builtins())
+        .link_module_unit(artifact.content_key, &artifact.unit, &builtins())
         .unwrap_or_else(|e| panic!("link {}: {e}", id.display()));
 }
 
@@ -600,8 +623,10 @@ fn the_environment_links_module_units_from_requests_alone() {
 
     // Idempotent: re-linking a held key is a no-op, not a second copy.
     let functions = environment.get_program().get_functions().len();
-    for (_, key, _) in &unit.imports {
-        let artifact = store().load(*key).expect("artifact");
+    for (module, key, _) in &unit.imports {
+        let artifact = store()
+            .load(compiled.module_cache.key_cache[module])
+            .expect("artifact");
         environment
             .link_module_unit(*key, &artifact.unit, &builtins())
             .expect("re-link");
@@ -628,7 +653,8 @@ fn a_sweep_evicts_linked_modules_and_a_re_link_revives_them() {
     for (module, _, _) in &unit.imports {
         link_into_environment(&mut environment, module, keys);
     }
-    let linked: Vec<u64> = unit.imports.iter().map(|(_, key, _)| *key).collect();
+    let linked: Vec<quiver_compiler::UnitKey> =
+        unit.imports.iter().map(|(_, key, _)| *key).collect();
     let table_before = environment.get_program().get_functions().len();
 
     loop {
@@ -667,6 +693,113 @@ fn a_sweep_evicts_linked_modules_and_a_re_link_revives_them() {
         "re-linking identical content must revive the stubbed slots, not add new ones"
     );
     assert!(linked.iter().all(|key| environment.holds_module(*key)));
+}
+
+#[test]
+fn a_module_unit_that_does_not_match_its_key_is_refused() {
+    // The trust boundary: the environment rehashes what it is sent, so neither
+    // tampered content under an honest key (which would run as some other module's
+    // bytes) nor an honest unit under a wrong key (which would poison the map for
+    // every later session naming that key) can link. The check runs before import
+    // resolution, so it needs no dependencies in place.
+    let compiled = compile("%num.mul [7, 6]", false);
+    let unit = quiver_compiler::extract_unit(
+        &compiled.program,
+        &compiled.module_cache,
+        Some(compiled.entry),
+        compiled.own_floor,
+        quiver_compiler::Imports::Bundle,
+    );
+    let mut environment = environment();
+    let (module, key, _) = &unit.imports[0];
+    let artifact = store()
+        .load(compiled.module_cache.key_cache[module])
+        .expect("artifact");
+
+    let mut tampered = artifact.unit.clone();
+    tampered.field_names.push("tampered".to_string());
+    let error = environment
+        .link_module_unit(*key, &tampered, &builtins())
+        .expect_err("tampered content must be refused");
+    assert!(
+        matches!(
+            error,
+            quiver_environment::EnvironmentError::InvalidUnit(ref message)
+                if message.contains("hashes to")
+        ),
+        "got {error:?}"
+    );
+    assert!(!environment.holds_module(*key), "nothing may have linked");
+
+    let wrong = quiver_compiler::unit_key(&tampered);
+    let error = environment
+        .link_module_unit(wrong, &artifact.unit, &builtins())
+        .expect_err("a mismatched key must be refused");
+    assert!(
+        matches!(error, quiver_environment::EnvironmentError::InvalidUnit(_)),
+        "got {error:?}"
+    );
+    assert!(!environment.holds_module(wrong));
+
+    // The refusals left the environment serviceable: the honest tree still links.
+    for (module, key, _) in &unit.imports {
+        link_into_environment(&mut environment, module, &compiled.module_cache.key_cache);
+        assert!(environment.holds_module(*key));
+    }
+}
+
+#[test]
+fn a_malformed_unit_is_refused_and_the_environment_survives() {
+    // Structural validation turns what used to be a panic mid-link into an ordinary
+    // error: the bad request is refused, the next one is served.
+    let compiled = compile("%num.mul [7, 6]", false);
+    let extract = || {
+        quiver_compiler::extract_unit(
+            &compiled.program,
+            &compiled.module_cache,
+            Some(compiled.entry),
+            compiled.own_floor,
+            quiver_compiler::Imports::Bundle,
+        )
+    };
+    let mut environment = environment();
+
+    // An entry outside the unit's own functions.
+    let mut bad_entry = extract();
+    bad_entry.entry = Some(bad_entry.functions.len());
+    let error = environment
+        .start_process_unit(&bad_entry, &builtins())
+        .expect_err("an out-of-range entry must be refused");
+    assert!(
+        matches!(error, quiver_environment::EnvironmentError::InvalidUnit(_)),
+        "got {error:?}"
+    );
+
+    // An import citing a held module at an index past its end — well-formed in
+    // isolation, so only the link-time cross-check can catch it.
+    for (module, _, _) in &extract().imports {
+        link_into_environment(&mut environment, module, &compiled.module_cache.key_cache);
+    }
+    let mut bad_import = extract();
+    bad_import.imports[0].2[0] = 9_999;
+    let error = environment
+        .start_process_unit(&bad_import, &builtins())
+        .expect_err("an out-of-range import index must be refused");
+    assert!(
+        matches!(
+            error,
+            quiver_environment::EnvironmentError::InvalidUnit(ref message)
+                if message.contains("9999")
+        ),
+        "got {error:?}"
+    );
+
+    // And an honest line still runs.
+    let mut repl = repl_on(&mut environment, true);
+    assert_eq!(
+        evaluate(&mut environment, &mut repl, "%num.mul [7, 6]"),
+        "Int(42)"
+    );
 }
 
 fn repl_on(environment: &mut Environment<NativeEffect>, with_store: bool) -> Repl<NativeEffect> {
@@ -771,7 +904,7 @@ fn the_in_process_repl_runs_lines_as_units() {
         "and must carry the modules for the host to link"
     );
     // Dependencies first: the host links in the order given.
-    let mut linked: Vec<u64> = Vec::new();
+    let mut linked: Vec<quiver_compiler::UnitKey> = Vec::new();
     for (key, artifact) in &payload.modules {
         for (_, dependency, _) in &artifact.unit.imports {
             assert!(

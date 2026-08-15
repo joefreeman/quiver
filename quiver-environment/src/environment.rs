@@ -1,11 +1,11 @@
 use crate::WorkerId;
 use crate::messages::{Command, Event, SubscriptionKind, SubscriptionPayload};
 use crate::transport::WorkerHandle;
-use quiver_compiler::CompiledUnit;
 use quiver_compiler::compiler::{
     Bindings, Scope, ScopeKind, TypeAliasDef, resolve_type_alias_for_display,
 };
 use quiver_compiler::resolver::ModuleId;
+use quiver_compiler::{CompiledUnit, UnitKey};
 #[cfg(test)]
 use quiver_core::bytecode::Bytecode;
 use quiver_core::bytecode::{Constant, Function};
@@ -329,7 +329,12 @@ pub enum EnvironmentError {
 
     /// A unit named a module key the environment does not hold. The caller must send
     /// that module's unit and retry — the environment sources code only from requests.
-    ModuleNotLinked(u64),
+    ModuleNotLinked(UnitKey),
+    /// A received unit is not what it claims: its content does not hash to the key it
+    /// was sent under, or it is structurally malformed (references outside its tables,
+    /// forward function references, import indices past a linked module's end). Not
+    /// answerable by a resend — the payload itself must change.
+    InvalidUnit(String),
     /// Linking a unit failed (a builtin this host does not provide, most likely).
     Link(String),
 
@@ -371,8 +376,9 @@ impl std::fmt::Display for EnvironmentError {
             }
             EnvironmentError::HeapData(msg) => write!(f, "heap data: {}", msg),
             EnvironmentError::ModuleNotLinked(key) => {
-                write!(f, "module {key:016x} is not linked in this environment")
+                write!(f, "module {key} is not linked in this environment")
             }
+            EnvironmentError::InvalidUnit(message) => write!(f, "invalid unit: {message}"),
             EnvironmentError::Link(message) => write!(f, "link failed: {message}"),
             EnvironmentError::WorkerCommunication(msg) => {
                 write!(f, "worker communication: {}", msg)
@@ -493,15 +499,17 @@ pub struct Environment<E: Effect> {
     spawns_since_collection: usize,
     collection_threshold: usize,
     reclaimed_total: usize,
-    /// Module units linked into this program, keyed by artifact key: the session
+    /// Module units linked into this program, keyed by content key: the session
     /// function ids of each module's own functions, in its own index order — what an
-    /// importing unit's entries resolve through.
+    /// importing unit's entries resolve through. Every entry was validated on arrival
+    /// ([`Self::link_module_unit`] rehashes the unit against its key), so a held key
+    /// really does name the content it claims to.
     ///
     /// In memory only, and populated solely by what clients send: the environment has no
     /// artifact store and never sources code from anywhere but the request that needs it.
     /// A code sweep may stub a linked module nothing references, at which point its entry
     /// is dropped and the next request naming that key must send it again.
-    linked_modules: HashMap<u64, Vec<usize>>,
+    linked_modules: HashMap<UnitKey, Vec<usize>>,
     // Code-reclamation state: growth since the last code sweep drives the trigger, the
     // request flag forces one on the next round, and the totals are metric/test hooks.
     code_registered_since_sweep: usize,
@@ -728,12 +736,15 @@ impl<E: Effect> Environment<E> {
     /// Link a unit that has an entry point, answering the session function id to run.
     /// Unlike a module's unit this is not memoised: a line is compiled once and run
     /// once, and its functions are ordinary code the sweep may reclaim when nothing
-    /// references them any more.
+    /// references them any more. An entry unit has no key to check — it is anonymous by
+    /// design — but it is still untrusted input, so its structure is validated before
+    /// anything links it.
     fn link_entry_unit(
         &mut self,
         unit: &CompiledUnit,
         builtins: &quiver_core::builtins::BuiltinRegistry<E>,
     ) -> Result<usize, EnvironmentError> {
+        quiver_compiler::validate_unit(unit, "unit").map_err(EnvironmentError::InvalidUnit)?;
         let entry = unit
             .entry
             .ok_or_else(|| EnvironmentError::Link("unit has no entry point".to_string()))?;
@@ -764,7 +775,7 @@ impl<E: Effect> Environment<E> {
 
     /// The module keys this unit imports that the environment does not hold, in the
     /// order the unit names them. An empty answer means the unit can be linked.
-    pub fn missing_modules(&self, unit: &CompiledUnit) -> Vec<(ModuleId, u64)> {
+    pub fn missing_modules(&self, unit: &CompiledUnit) -> Vec<(ModuleId, UnitKey)> {
         let mut missing = Vec::new();
         for (module, key, _) in &unit.imports {
             if !self.linked_modules.contains_key(key) && !missing.iter().any(|(_, k)| k == key) {
@@ -775,14 +786,19 @@ impl<E: Effect> Environment<E> {
     }
 
     /// Whether a module's unit is already linked under `key`.
-    pub fn holds_module(&self, key: u64) -> bool {
+    pub fn holds_module(&self, key: UnitKey) -> bool {
         self.linked_modules.contains_key(&key)
     }
 
-    /// Link a module's unit under its artifact `key`, so units importing it can resolve
+    /// Link a module's unit under its content `key`, so units importing it can resolve
     /// their entries. Idempotent — a key already held is a no-op — and every module this
     /// one imports must already be linked, which is what [`Self::missing_modules`] asks
     /// for.
+    ///
+    /// This is the trust boundary: the unit is rehashed against the key it was sent
+    /// under and structurally validated before anything links it, so a wrong key cannot
+    /// poison the map for other sessions and a malformed unit is refused as a bad
+    /// request rather than panicking mid-link.
     ///
     /// Functions register through the structural interner rather than by appending. A
     /// module linked here has no artifact to attribute, and interning is what lets a
@@ -790,26 +806,40 @@ impl<E: Effect> Environment<E> {
     /// stranding them.
     pub fn link_module_unit(
         &mut self,
-        key: u64,
+        key: UnitKey,
         unit: &CompiledUnit,
         builtins: &quiver_core::builtins::BuiltinRegistry<E>,
     ) -> Result<(), EnvironmentError> {
         if self.linked_modules.contains_key(&key) {
             return Ok(());
         }
+        let actual = quiver_compiler::unit_key(unit);
+        if actual != key {
+            return Err(EnvironmentError::InvalidUnit(format!(
+                "module unit sent under key {key} hashes to {actual}"
+            )));
+        }
+        let label = format!("module {key}");
+        quiver_compiler::validate_unit(unit, &label).map_err(EnvironmentError::InvalidUnit)?;
         let resolved = self.resolve_unit_imports(unit)?;
-        let own_map =
-            self.link_and_ship(unit, &format!("module {key:016x}"), &resolved, builtins)?;
+        let own_map = self.link_and_ship(unit, &label, &resolved, builtins)?;
         self.linked_modules.insert(key, own_map);
         Ok(())
     }
 
-    /// Resolve a unit's import entries through the modules already linked here. Only a
-    /// key this environment does not hold is answerable — the caller sends that module
-    /// and retries.
+    /// Resolve a unit's import entries through the modules already linked here. A key
+    /// this environment does not hold is answerable — the caller sends that module and
+    /// retries — while an import index past a held module's end means the citing unit
+    /// itself is malformed.
     fn resolve_unit_imports(&self, unit: &CompiledUnit) -> Result<Vec<usize>, EnvironmentError> {
-        quiver_compiler::resolve_imports_from(unit, &self.linked_modules)
-            .map_err(EnvironmentError::ModuleNotLinked)
+        quiver_compiler::resolve_imports_from(unit, &self.linked_modules).map_err(|error| {
+            match error {
+                quiver_compiler::ImportResolveError::Missing(key) => {
+                    EnvironmentError::ModuleNotLinked(key)
+                }
+                error => EnvironmentError::InvalidUnit(error.to_string()),
+            }
+        })
     }
 
     /// Link a unit and ship whatever it added to the workers, answering the session ids

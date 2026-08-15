@@ -321,8 +321,8 @@ impl Runner {
                 .artifact_store
                 .as_ref()
                 .expect("the runner attaches one");
-            let modules = quiver_compiler::module_closure(store, &unit)
-                .map_err(|key| format!("no stored artifact for module {key:016x}"))?;
+            let modules = quiver_compiler::module_closure(store, &module_cache, &unit)
+                .map_err(|module| format!("no stored artifact for module {}", module.display()))?;
             let mut env = self.environment.lock().unwrap();
             for (key, artifact) in &modules {
                 env.link_module_unit(*key, &artifact.unit, &builtins)

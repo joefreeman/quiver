@@ -160,6 +160,17 @@ impl ModuleCache {
         own
     }
 
+    /// The content key of the module the session holds under `id`: read from its stored
+    /// artifact, resolved through the session's key cache. `None` when the module has no
+    /// stored artifact — unkeyable, hidden, or uncacheable — in which case nothing can
+    /// name it on a wire and callers inline it instead. The store's memory layer makes
+    /// this a map lookup after the first load.
+    pub fn content_key(&self, id: &ModuleId) -> Option<crate::artifact::UnitKey> {
+        let key = self.key_cache.get(id)?;
+        let store = self.artifact_store.as_ref()?;
+        Some(store.load(*key)?.content_key)
+    }
+
     /// Get cached module value
     pub fn get_cached_module(&self, id: &ModuleId) -> Option<&CachedModule> {
         self.value_cache.get(id)

@@ -80,7 +80,7 @@ pub struct CreateResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResumePayload {
     pub unit: quiver_compiler::CompiledUnit,
-    pub modules: Vec<(u64, quiver_compiler::CompiledUnit)>,
+    pub modules: Vec<(quiver_compiler::UnitKey, quiver_compiler::CompiledUnit)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,7 +98,7 @@ pub struct ResumeRequest {
 /// modules and retry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissingModules {
-    pub missing: Vec<u64>,
+    pub missing: Vec<quiver_compiler::UnitKey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

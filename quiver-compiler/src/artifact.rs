@@ -15,7 +15,7 @@
 //! references (transitively closed) and the linker re-interns them into a session's
 //! program. Only functions and builtins are nominal: the artifact's function id
 //! space is its own functions, then its imports — a table naming `(module, that
-//! module's artifact key, that module's own index)`, grouped by module, every named
+//! module's *content* key, that module's own index)`, grouped by module, every named
 //! module lying in the artifact's transitive value-import closure and hence covered
 //! by its key — and
 //! builtins are named strings resolved against the host registry at link time (which
@@ -56,6 +56,67 @@ pub fn compiler_fingerprint() -> &'static str {
     env!("QUIVER_COMPILER_FINGERPRINT")
 }
 
+/// The content key of a [`CompiledUnit`]: SHA-256 over its canonical bytes (see
+/// [`unit_key`]). This is the identity a unit is named by outside the compiler — on the
+/// wire, in a `.qx` file's module list, in import tables, and in a host's linked-module
+/// map — and unlike the source-based artifact key it is *checkable*: a host validates a
+/// received unit by rehashing it, so a wrong or colliding key is refused at the boundary
+/// instead of silently linking one client's code against another's module.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct UnitKey([u8; 32]);
+
+impl std::fmt::Display for UnitKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&hex::encode(self.0))
+    }
+}
+
+impl std::fmt::Debug for UnitKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UnitKey({})", hex::encode(self.0))
+    }
+}
+
+impl std::str::FromStr for UnitKey {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let bytes = hex::decode(text).map_err(|e| format!("invalid unit key: {e}"))?;
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| "invalid unit key: expected 32 bytes".to_string())?;
+        Ok(UnitKey(bytes))
+    }
+}
+
+impl serde::Serialize for UnitKey {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex::encode(self.0))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for UnitKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Compute a unit's content key: SHA-256 over a version prefix plus the unit's
+/// compact `serde_json` bytes — the exact representation the wire and a `.qx` carry.
+/// This is canonical because a unit is pure vector-shaped data in deterministic order
+/// (see [`CompiledUnit`]), so equal units serialize to equal bytes and a deserialized
+/// unit re-serializes to the bytes it arrived as; `quiver-tests/tests/units.rs` holds
+/// the round-trip. The prefix versions the scheme so a future canonical encoding can
+/// change every key at once rather than colliding with the old ones.
+pub fn unit_key(unit: &CompiledUnit) -> UnitKey {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"v1\0");
+    hasher.update(serde_json::to_vec(unit).expect("a unit always serializes"));
+    UnitKey(hasher.finalize().into())
+}
+
 /// Relocatable compiled code in unit-local id space: the value-like tables it
 /// references, the functions it owns, and an import table naming everything else. Pure
 /// canonical data — every collection is a vector in deterministic order, so equal units
@@ -86,13 +147,14 @@ pub struct CompiledUnit {
     /// own-function indices) ascending — unit function ids assigned in that flattened
     /// order.
     ///
-    /// Each group names the dependency's **artifact key** as well as its id. Within the
-    /// compiler's own import pipeline the id alone would do: keys are Merkle-recursive,
-    /// so a module could not have been keyed unless its dependency's key resolved, and
-    /// the session holding it necessarily linked that exact version. The key makes the
-    /// requirement explicit rather than implicit, which is what a linker outside that
-    /// pipeline needs — it cannot assume one module per name.
-    pub imports: Vec<(ModuleId, u64, Vec<usize>)>,
+    /// Each group names the dependency's **content key** ([`unit_key`] of its unit) as
+    /// well as its id. The id alone would not do for a linker outside the compiler's
+    /// import pipeline — it cannot assume one module per name — and a *source-based*
+    /// key would not do for a host that validates what it links: only a content key can
+    /// be checked against the unit it names. Since these keys are part of the unit's
+    /// serialized bytes, a unit's own content key covers its dependencies' recursively —
+    /// the Merkle composition the source-based artifact key established, carried over.
+    pub imports: Vec<(ModuleId, UnitKey, Vec<usize>)>,
     /// Referenced builtins; unit builtin ids index this list. Nominal — resolved against
     /// the host registry at link time — except for an instantiated type-consuming
     /// builtin, whose type argument is unit-local and re-interned with the rest.
@@ -112,6 +174,11 @@ pub struct CompiledUnit {
 pub struct ModuleArtifact {
     pub id: ModuleId,
     pub unit: CompiledUnit,
+    /// [`unit_key`] of [`Self::unit`], computed once at extraction. Derivable, stored so
+    /// that linking a warm session's modules does not re-serialize and re-hash every
+    /// unit; a host that receives the unit validates the key by rehashing anyway, so a
+    /// corrupt store entry is refused at the boundary rather than trusted.
+    pub content_key: UnitKey,
     /// The evaluated module value, in unit space.
     pub value: Value,
     pub module_type: Type,
@@ -237,13 +304,16 @@ impl ArtifactStore {
     }
 
     /// Insert an artifact under its key, persisting it best-effort (write-then-rename
-    /// with a per-process temp name, so concurrent writers never tear a file). Equal
-    /// keys always carry equal content, so an existing file is left untouched.
+    /// with a per-process temp name, so concurrent writers never tear a file). The
+    /// write replaces any existing file: equal source keys do *not* yet guarantee equal
+    /// bytes (a compile against a linked dependency emits differently than against a
+    /// source-compiled one), and overwriting converges the directory on the latest
+    /// session's coherent set, where skipping would pin a dependent to dependency
+    /// content the store no longer resolves — a permanent cache miss.
     pub fn save(&self, key: u64, artifact: ModuleArtifact) {
         let artifact = Rc::new(artifact);
         self.memory.borrow_mut().insert(key, artifact.clone());
         if let Some(path) = self.path(key)
-            && !path.exists()
             && let Ok(bytes) = serde_json::to_vec(&*artifact)
         {
             let tmp = path.with_extension(format!("tmp{}", std::process::id()));
@@ -814,15 +884,17 @@ pub(crate) fn extract(
         }
     }
     import_entries.sort();
-    let mut imports: Vec<(ModuleId, u64, Vec<usize>)> = Vec::new();
+    let mut imports: Vec<(ModuleId, UnitKey, Vec<usize>)> = Vec::new();
     for (module, dep_index, _) in &import_entries {
         match imports.last_mut() {
             Some((last, _, indices)) if last == module => indices.push(*dep_index),
             _ => {
-                // The dependency's key is memoised by the recursive computation that
-                // keyed this module, so a miss means the module was never keyable —
-                // extract nothing rather than store an artifact that cannot be checked.
-                let key = *module_cache.key_cache.get(module)?;
+                // The dependency's content key comes from its stored artifact. A miss
+                // means the dependency itself could not be extracted (unkeyable, hidden,
+                // or foreign-referencing), so nothing can name it — extract nothing
+                // rather than store an artifact whose imports cannot be checked. This
+                // cascades: a module is cacheable only over cacheable dependencies.
+                let key = module_cache.content_key(module)?;
                 imports.push((module.clone(), key, vec![*dep_index]));
             }
         }
@@ -934,10 +1006,12 @@ pub(crate) fn extract(
         entry: None,
     };
     verify(&unit, &id.display());
+    let content_key = unit_key(&unit);
 
     let artifact = ModuleArtifact {
         id: id.clone(),
         unit,
+        content_key,
         value: cached.value.remap_ids(&remaps),
         module_type: cached.module_type.remap_ids(&remaps),
         fn_case_tables: {
@@ -1016,29 +1090,42 @@ fn suppliable_modules(module_cache: &ModuleCache) -> HashSet<ModuleId> {
     let Some(store) = module_cache.artifact_store.as_ref() else {
         return HashSet::new();
     };
-    fn loadable(key: u64, store: &ArtifactStore, memo: &mut HashMap<u64, bool>) -> bool {
-        if let Some(&known) = memo.get(&key) {
+    // The store is keyed by *artifact* (source) key, so dependencies resolve by module
+    // id through the session's key cache; the import table's content key is asserted
+    // against the loaded artifact where the closure is actually assembled
+    // ([`module_closure`]).
+    fn loadable(
+        id: &ModuleId,
+        module_cache: &ModuleCache,
+        store: &ArtifactStore,
+        memo: &mut HashMap<ModuleId, bool>,
+    ) -> bool {
+        if let Some(&known) = memo.get(id) {
             return known;
         }
         // Seed false so a keying cycle answers unsuppliable rather than recursing.
-        memo.insert(key, false);
-        let ok = match store.load(key) {
+        memo.insert(id.clone(), false);
+        let artifact = module_cache
+            .key_cache
+            .get(id)
+            .and_then(|key| store.load(*key));
+        let ok = match artifact {
             Some(artifact) => artifact
                 .unit
                 .imports
                 .iter()
-                .all(|(_, dependency, _)| loadable(*dependency, store, memo)),
+                .all(|(dependency, _, _)| loadable(dependency, module_cache, store, memo)),
             None => false,
         };
-        memo.insert(key, ok);
+        memo.insert(id.clone(), ok);
         ok
     }
     let mut memo = HashMap::new();
     module_cache
         .key_cache
-        .iter()
-        .filter(|(_, key)| loadable(**key, store, &mut memo))
-        .map(|(id, _)| id.clone())
+        .keys()
+        .filter(|id| loadable(id, module_cache, store, &mut memo))
+        .cloned()
         .collect()
 }
 
@@ -1058,38 +1145,55 @@ fn suppliable_modules(module_cache: &ModuleCache) -> HashSet<ModuleId> {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompiledProgram {
     pub unit: CompiledUnit,
-    /// `(artifact key, that module's unit)`, dependencies before dependents — the order a
+    /// `(content key, that module's unit)`, dependencies before dependents — the order a
     /// host must link them in.
-    pub modules: Vec<(u64, CompiledUnit)>,
+    pub modules: Vec<(UnitKey, CompiledUnit)>,
 }
 
-/// The transitive closure of the modules `unit` imports, deepest first. Answers the key
-/// of the first module with no stored artifact — which means nothing could name a version
-/// of it, so the closure cannot be assembled.
+/// The transitive closure of the modules `unit` imports, deepest first, each under its
+/// content key. Artifacts load from the store by the session's *artifact* key (the
+/// store's index), and the import table's content key is asserted against what loaded —
+/// a mismatch would mean the session's record and its store disagree about a module's
+/// bytes. Answers the id of the first module with no stored artifact — nothing could
+/// name a version of it, so the closure cannot be assembled.
 pub fn module_closure(
     store: &ArtifactStore,
+    module_cache: &ModuleCache,
     unit: &CompiledUnit,
-) -> Result<Vec<(u64, Rc<ModuleArtifact>)>, u64> {
+) -> Result<Vec<(UnitKey, Rc<ModuleArtifact>)>, ModuleId> {
     fn collect(
-        key: u64,
+        id: &ModuleId,
+        content_key: UnitKey,
         store: &ArtifactStore,
-        seen: &mut HashSet<u64>,
-        out: &mut Vec<(u64, Rc<ModuleArtifact>)>,
-    ) -> Result<(), u64> {
-        if !seen.insert(key) {
+        module_cache: &ModuleCache,
+        seen: &mut HashSet<UnitKey>,
+        out: &mut Vec<(UnitKey, Rc<ModuleArtifact>)>,
+    ) -> Result<(), ModuleId> {
+        if !seen.insert(content_key) {
             return Ok(());
         }
-        let artifact = store.load(key).ok_or(key)?;
-        for (_, dependency, _) in &artifact.unit.imports {
-            collect(*dependency, store, seen, out)?;
+        let artifact = module_cache
+            .key_cache
+            .get(id)
+            .and_then(|key| store.load(*key))
+            .ok_or_else(|| id.clone())?;
+        assert_eq!(
+            artifact.content_key,
+            content_key,
+            "module {}: an import names content {content_key} but the store supplies {}",
+            id.display(),
+            artifact.content_key
+        );
+        for (dependency, key, _) in &artifact.unit.imports {
+            collect(dependency, *key, store, module_cache, seen, out)?;
         }
-        out.push((key, artifact));
+        out.push((content_key, artifact));
         Ok(())
     }
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for (_, key, _) in &unit.imports {
-        collect(*key, store, &mut seen, &mut out)?;
+    for (module, key, _) in &unit.imports {
+        collect(module, *key, store, module_cache, &mut seen, &mut out)?;
     }
     Ok(out)
 }
@@ -1112,9 +1216,12 @@ pub fn extract_program(
             .artifact_store
             .as_ref()
             .expect("bundled imports require the store that made their modules suppliable");
-        module_closure(store, &unit)
-            .unwrap_or_else(|key| {
-                panic!("no stored artifact for module {key:016x} named by a bundled import")
+        module_closure(store, module_cache, &unit)
+            .unwrap_or_else(|module| {
+                panic!(
+                    "no stored artifact for module {} named by a bundled import",
+                    module.display()
+                )
             })
             .into_iter()
             .map(|(key, artifact)| (key, artifact.unit.clone()))
@@ -1196,15 +1303,16 @@ pub fn extract_unit(
     own_ids.sort_unstable();
 
     import_entries.sort();
-    let mut imports: Vec<(ModuleId, u64, Vec<usize>)> = Vec::new();
+    let mut imports: Vec<(ModuleId, UnitKey, Vec<usize>)> = Vec::new();
     for (module, dep_index, _) in &import_entries {
         match imports.last_mut() {
             Some((last, _, indices)) if last == module => indices.push(*dep_index),
             _ => {
-                let key = *module_cache
-                    .key_cache
-                    .get(module)
-                    .expect("a bundled import names a module the session never keyed");
+                // Guaranteed for an eligible module: suppliability required its stored
+                // artifact, which is where the content key lives.
+                let key = module_cache
+                    .content_key(module)
+                    .expect("a bundled import names a module without a stored artifact");
                 imports.push((module.clone(), key, vec![*dep_index]));
             }
         }
@@ -1468,106 +1576,138 @@ fn collect_instruction(instruction: &Instruction, closure: &mut Closure, queue: 
     }
 }
 
-/// Fail-fast self-containment check: every reference inside the artifact must land
-/// inside its tables (a violation means the extraction closure missed something —
-/// linking would silently corrupt a session).
+/// Fail-fast self-containment check on extraction output: a violation means the
+/// extraction closure missed something, which is a compiler bug.
 fn verify(unit: &CompiledUnit, label: &str) {
+    if let Err(message) = validate_unit(unit, label) {
+        panic!("{message}");
+    }
+}
+
+/// Structural well-formedness of a unit: every reference inside it must land inside its
+/// tables, function references must point strictly backward, and the entry (when
+/// present) must be one of its own functions. This is the check a *trust boundary* runs
+/// on a unit it did not produce — linking a violating unit would panic mid-link or
+/// silently corrupt a session, and a host must refuse it as a bad request instead.
+///
+/// Scope: link-time soundness only. Validated bytecode can still misbehave at runtime
+/// (stack discipline is not analysed here); who may submit code at all is the host's
+/// authentication model.
+pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
     let function_space = unit.function_space();
-    let check = |what: &str, id: usize, len: usize| {
-        assert!(
-            id < len,
-            "{}: {} reference {} outside table (len {})",
-            label,
-            what,
-            id,
-            len
-        );
+    let check = |what: &str, id: usize, len: usize| -> Result<(), String> {
+        if id < len {
+            Ok(())
+        } else {
+            Err(format!(
+                "{label}: {what} reference {id} outside table (len {len})"
+            ))
+        }
     };
-    let check_type_shallow = |ty: &Type| match ty {
-        Type::Tuple(tuple_id) => check("tuple", *tuple_id, unit.tuples.len()),
-        Type::Partial { fields, .. } => {
-            for (_, type_id) in fields {
-                check("type", *type_id, unit.types.len());
+    let check_type_shallow = |ty: &Type| -> Result<(), String> {
+        match ty {
+            Type::Tuple(tuple_id) => check("tuple", *tuple_id, unit.tuples.len())?,
+            Type::Partial { fields, .. } => {
+                for (_, type_id) in fields {
+                    check("type", *type_id, unit.types.len())?;
+                }
             }
-        }
-        Type::Callable {
-            parameter,
-            result,
-            receive,
-            states,
-        } => {
-            for type_id in [parameter, result, receive]
-                .into_iter()
-                .chain(states.iter())
-            {
-                check("type", *type_id, unit.types.len());
+            Type::Callable {
+                parameter,
+                result,
+                receive,
+                states,
+            } => {
+                for type_id in [parameter, result, receive]
+                    .into_iter()
+                    .chain(states.iter())
+                {
+                    check("type", *type_id, unit.types.len())?;
+                }
             }
-        }
-        Type::Union(members) => {
-            for member in members {
-                check("type", *member, unit.types.len());
+            Type::Union(members) => {
+                for member in members {
+                    check("type", *member, unit.types.len())?;
+                }
             }
-        }
-        Type::Annotated { base, entries, .. } => {
-            check("type", *base, unit.types.len());
-            for (key, value) in entries {
-                check("annotation key", *key, unit.annotation_keys.len());
-                check("type", *value, unit.types.len());
+            Type::Annotated { base, entries, .. } => {
+                check("type", *base, unit.types.len())?;
+                for (key, value) in entries {
+                    check("annotation key", *key, unit.annotation_keys.len())?;
+                    check("type", *value, unit.types.len())?;
+                }
             }
-        }
-        Type::Process {
-            send,
-            receive,
-            state,
-        } => {
-            for type_id in [send, receive, state].into_iter().flatten() {
-                check("type", *type_id, unit.types.len());
+            Type::Process {
+                send,
+                receive,
+                state,
+            } => {
+                for type_id in [send, receive, state].into_iter().flatten() {
+                    check("type", *type_id, unit.types.len())?;
+                }
             }
+            _ => {}
         }
-        _ => {}
+        Ok(())
     };
     for ty in &unit.types {
-        check_type_shallow(ty);
+        check_type_shallow(ty)?;
     }
     for info in &unit.tuples {
         for (_, type_id) in &info.fields {
-            check("type", *type_id, unit.types.len());
+            check("type", *type_id, unit.types.len())?;
+        }
+    }
+    for (local_tuple, field) in &unit.omittable_labels {
+        check("tuple", *local_tuple, unit.tuples.len())?;
+        check(
+            "omittable field",
+            *field,
+            unit.tuples[*local_tuple].fields.len(),
+        )?;
+    }
+    for builtin in &unit.builtins {
+        if let Some(type_argument) = builtin.type_argument {
+            check("type", type_argument, unit.types.len())?;
         }
     }
     for (position, function) in unit.functions.iter().enumerate() {
-        check("type", function.type_id, unit.types.len());
+        check("type", function.type_id, unit.types.len())?;
         for instruction in &function.instructions {
             let id = instruction.operand() as usize;
             match instruction.opcode() {
-                Opcode::Constant => check("constant", id, unit.constants.len()),
+                Opcode::Constant => check("constant", id, unit.constants.len())?,
                 Opcode::Function => {
-                    check("function", id, function_space);
+                    check("function", id, function_space)?;
                     // The linked program's function table must reference strictly
                     // backward (the environment merge rewrites single-pass): an own
                     // function may reference earlier own functions or any import —
                     // imports are always linked first.
-                    let valid = id < position || id >= unit.functions.len();
-                    assert!(
-                        valid,
-                        "{}: function {} references unregistrable function {}",
-                        label, position, id
-                    );
+                    if id >= position && id < unit.functions.len() {
+                        return Err(format!(
+                            "{label}: function {position} references unregistrable function {id}"
+                        ));
+                    }
                 }
-                Opcode::Builtin => check("builtin", id, unit.builtins.len()),
-                Opcode::Tuple => check("tuple", id, unit.tuples.len()),
-                Opcode::IsType => check("type", id, unit.types.len()),
-                Opcode::GetNamed => check("field name", id, unit.field_names.len()),
+                Opcode::Builtin => check("builtin", id, unit.builtins.len())?,
+                Opcode::Tuple => check("tuple", id, unit.tuples.len())?,
+                Opcode::IsType => check("type", id, unit.types.len())?,
+                Opcode::GetNamed => check("field name", id, unit.field_names.len())?,
                 Opcode::Annotate | Opcode::GetAnnotation => {
-                    check("annotation key", id, unit.annotation_keys.len())
+                    check("annotation key", id, unit.annotation_keys.len())?
                 }
-                Opcode::Stamp => check("site", id, unit.sites.len()),
+                Opcode::Stamp => check("site", id, unit.sites.len())?,
                 _ => {}
             }
         }
     }
     for site in &unit.sites {
-        check("constant", site.module_constant, unit.constants.len());
+        check("constant", site.module_constant, unit.constants.len())?;
     }
+    if let Some(entry) = unit.entry {
+        check("entry", entry, unit.functions.len())?;
+    }
+    Ok(())
 }
 
 /// How a unit's own functions enter the session's function table.
@@ -1698,25 +1838,50 @@ pub fn link_unit<E: Effect>(
     Ok(remaps)
 }
 
-/// Resolve a unit's import entries through a `key → its own functions' session ids` map,
-/// as a runtime holding linked modules keeps. Answers the first key the map does not hold;
-/// an index past the end of a held module's map is not answerable — the key is
-/// content-addressed, so no resend could produce anything different — and panics.
+/// Why a unit's imports could not be resolved against a host's linked-module map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportResolveError {
+    /// A key the host does not hold: send that module's unit and retry.
+    Missing(UnitKey),
+    /// An import entry names a function index past the end of the module linked under
+    /// its key. The citing unit is malformed: content keys are validated at the
+    /// boundary, so no resend could change what the key holds.
+    IndexOutOfRange {
+        key: UnitKey,
+        index: usize,
+        len: usize,
+    },
+}
+
+impl std::fmt::Display for ImportResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportResolveError::Missing(key) => write!(f, "module {key} is not linked"),
+            ImportResolveError::IndexOutOfRange { key, index, len } => write!(
+                f,
+                "module {key} holds {len} functions but an import names index {index}"
+            ),
+        }
+    }
+}
+
+/// Resolve a unit's import entries through a `content key → its own functions' session
+/// ids` map, as a runtime holding linked modules keeps. Both failures are the caller's
+/// to answer: a missing key means "send that module and retry"; an out-of-range index
+/// means the citing unit itself is malformed and must be refused.
 pub fn resolve_imports_from(
     unit: &CompiledUnit,
-    linked: &HashMap<u64, Vec<usize>>,
-) -> Result<Vec<usize>, u64> {
+    linked: &HashMap<UnitKey, Vec<usize>>,
+) -> Result<Vec<usize>, ImportResolveError> {
     let mut resolved = Vec::with_capacity(unit.function_space() - unit.functions.len());
     for (_, key, indices) in &unit.imports {
-        let map = linked.get(key).ok_or(*key)?;
+        let map = linked.get(key).ok_or(ImportResolveError::Missing(*key))?;
         for index in indices {
-            resolved.push(*map.get(*index).unwrap_or_else(|| {
-                panic!(
-                    "module {key:016x} holds {} functions but a unit names index {index} — \
-                     key collision or a corrupted unit",
-                    map.len()
-                )
-            }));
+            resolved.push(*map.get(*index).ok_or(ImportResolveError::IndexOutOfRange {
+                key: *key,
+                index: *index,
+                len: map.len(),
+            })?);
         }
     }
     Ok(resolved)
@@ -1733,13 +1898,11 @@ pub fn link_program<E: Effect>(
     program: &mut Program,
     builtins: &BuiltinRegistry<E>,
 ) -> Result<Option<usize>, Error> {
-    let mut linked: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut linked: HashMap<UnitKey, Vec<usize>> = HashMap::new();
     for (key, unit) in &compiled.modules {
-        let label = format!("module {key:016x}");
-        let resolved = resolve_imports_from(unit, &linked).map_err(|missing| {
-            Error::FeatureUnsupported(format!(
-                "{label} imports {missing:016x}, which the program does not carry"
-            ))
+        let label = format!("module {key}");
+        let resolved = resolve_imports_from(unit, &linked).map_err(|error| {
+            Error::FeatureUnsupported(format!("{label}: import resolution failed: {error}"))
         })?;
         let remaps = link_unit(
             unit,
@@ -1756,10 +1919,8 @@ pub fn link_program<E: Effect>(
                 .collect(),
         );
     }
-    let resolved = resolve_imports_from(&compiled.unit, &linked).map_err(|missing| {
-        Error::FeatureUnsupported(format!(
-            "the program imports {missing:016x}, which it does not carry"
-        ))
+    let resolved = resolve_imports_from(&compiled.unit, &linked).map_err(|error| {
+        Error::FeatureUnsupported(format!("the program's import resolution failed: {error}"))
     })?;
     let remaps = link_unit(
         &compiled.unit,
@@ -1784,11 +1945,11 @@ pub fn resolve_imports(unit: &CompiledUnit, module_cache: &ModuleCache, label: &
         // dependency), so linking the wrong one is a real possibility rather than a
         // theoretical one — and it would corrupt silently, since function indices line up
         // either way.
-        if let Some(&linked) = module_cache.key_cache.get(module) {
+        if let Some(linked) = module_cache.content_key(module) {
             assert_eq!(
                 linked,
                 *key,
-                "linking {label}: import {} is keyed {key:016x} but the session linked {linked:016x}",
+                "linking {label}: import {} names content {key} but the session linked {linked}",
                 module.display()
             );
         }
