@@ -97,6 +97,20 @@ enum Commands {
         #[arg(long)]
         socket: Option<String>,
 
+        /// Additionally listen for browser clients on a loopback TCP address. Takes
+        /// `host:port` or a bare port (host defaults to 127.0.0.1); with no value at
+        /// all, 127.0.0.1:2192 (U+2192: →, the arrow — what a quiver is full of) — the
+        /// endpoint the web client suggests. Every request
+        /// must carry the bearer token written beside the socket; non-loopback
+        /// addresses are refused.
+        #[arg(long, value_name = "ADDRESS", num_args = 0..=1, default_missing_value = "2192")]
+        listen: Option<String>,
+
+        /// Allow this browser origin on the TCP listener (repeatable).
+        /// https://quiver.run and localhost origins are always allowed.
+        #[arg(long = "allow-origin")]
+        allow_origins: Vec<String>,
+
         /// Include a code phase in a reclamation round after this many function/
         /// constant registrations (a testing/tuning knob).
         #[arg(long)]
@@ -135,9 +149,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Server {
             action,
             socket,
+            listen,
+            allow_origins,
             code_collection_threshold,
         }) => match action {
-            None => server_cli::server_command(socket, code_collection_threshold)?,
+            None => server_cli::server_command(
+                socket,
+                listen,
+                allow_origins,
+                code_collection_threshold,
+            )?,
             Some(ServerAction::Status) => server_cli::status_command(socket)?,
             Some(ServerAction::Stop) => server_cli::stop_command(socket)?,
         },

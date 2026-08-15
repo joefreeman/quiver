@@ -35,8 +35,14 @@ pub const FINGERPRINT_HEADER: &str = "x-quiver-fingerprint";
 
 /// Where the server listens: `$XDG_RUNTIME_DIR/quiv` (tmpfs, per-user) or
 /// `/tmp/quiv-<uid>`. The directory is created mode 0700 — socket reachability is the
-/// authentication model, which is also why the endpoint is a unix socket and never
-/// TCP: it evaluates arbitrary bytecode.
+/// authentication model, and the endpoint evaluates arbitrary bytecode, so this is
+/// never plain TCP. The one exception is deliberate and opt-in: `quiv server --listen`
+/// adds a **loopback-only** TCP listener for browser clients (the web REPL compiling
+/// in wasm, executing here), where every request — `/status` and `/shutdown` included,
+/// so a hostile page cannot even probe — must carry `Authorization: Bearer <token>`,
+/// the token living beside the socket ([`token_path`], mode 0600) and persisting
+/// across restarts so a rebuilt server does not strand connected browsers. CORS is
+/// answered only for allowed origins, and non-loopback binds are refused outright.
 pub fn default_socket_dir() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(dir) => PathBuf::from(dir).join("quiv"),
@@ -58,6 +64,19 @@ pub fn default_socket_path() -> PathBuf {
 /// to speak the protocol.
 pub fn pidfile_path(socket: &std::path::Path) -> PathBuf {
     socket.with_extension("pid")
+}
+
+/// The bearer token for the TCP listener, beside the socket (created mode 0600,
+/// reused across restarts).
+pub fn token_path(socket: &std::path::Path) -> PathBuf {
+    socket.with_extension("token")
+}
+
+/// Where a listening server records its bound TCP endpoint (`http://127.0.0.1:<port>`),
+/// beside the socket — how tooling (and tests) discover the port when `--listen` bound
+/// port 0. Removed on shutdown.
+pub fn http_endpoint_path(socket: &std::path::Path) -> PathBuf {
+    socket.with_extension("http")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +121,66 @@ pub struct MissingModules {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactRequest {
     pub keep: Vec<usize>,
+}
+
+/// `GET /events` — the realtime inspection stream (SSE). The query names the interest
+/// set, one connection carries everything it names, and closing the connection is the
+/// unsubscribe: no control protocol, and a client whose interest changes (a different
+/// panel, a different selected process) simply reconnects with new parameters. That is
+/// safe by construction — every subscription pushes an initial snapshot and updates
+/// are last-wins, so a reconnect starts complete and missed intermediates are
+/// meaningless. One connection per client also respects the browser's per-origin
+/// connection budget, which per-subscription streams would spend.
+///
+/// Events are named `processes`, `workers` and `process`; each `data:` line is the
+/// JSON of the corresponding `*Event` type below.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EventsParams {
+    /// Stream every process's status (`event: processes`).
+    #[serde(default)]
+    pub processes: bool,
+    /// Stream worker executor snapshots (`event: workers`).
+    #[serde(default)]
+    pub workers: bool,
+    /// Stream one process's detail (`event: process`).
+    pub process: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessesEvent {
+    pub processes: Vec<ProcessSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessSummary {
+    pub id: u64,
+    pub status: quiver_core::process::ProcessStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkersEvent {
+    pub workers: Vec<quiver_core::process::WorkerInfo>,
+}
+
+/// The selected process's detail, rendered server-side: its type and result value
+/// only mean something next to the session program, which never leaves the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessEvent {
+    pub process: Option<ProcessDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessDetail {
+    pub id: u64,
+    pub status: quiver_core::process::ProcessStatus,
+    pub process_type: Option<String>,
+    pub stack_size: usize,
+    pub locals_count: usize,
+    pub frames_count: usize,
+    pub mailbox_size: usize,
+    pub persistent: bool,
+    pub result: Option<Outcome>,
+    pub heap: quiver_core::process::ProcessHeapUsage,
 }
 
 /// What a resume answered.

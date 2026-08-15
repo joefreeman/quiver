@@ -62,6 +62,27 @@ impl Server {
     }
 }
 
+impl Server {
+    /// Start with the TCP listener on an ephemeral port (the bare-port `--listen`
+    /// form, exercising the host default), answering the endpoint the server recorded
+    /// beside the socket and the bearer token it minted.
+    fn start_listening() -> (Self, String, String) {
+        let server = Self::start(&["--listen", "0"]);
+        let endpoint_file = server.socket.with_extension("http");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let endpoint = loop {
+            if let Ok(endpoint) = std::fs::read_to_string(&endpoint_file) {
+                break endpoint;
+            }
+            assert!(Instant::now() < deadline, "endpoint file never appeared");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let token = std::fs::read_to_string(server.socket.with_extension("token"))
+            .expect("token file beside the socket");
+        (server, endpoint, token)
+    }
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -69,7 +90,54 @@ impl Drop for Server {
         let _ = std::fs::remove_file(&self.socket);
         let _ = std::fs::remove_file(self.socket.with_extension("pid"));
         let _ = std::fs::remove_file(self.socket.with_extension("log"));
+        let _ = std::fs::remove_file(self.socket.with_extension("http"));
+        // The token file stays: persistence across restarts is its contract, and each
+        // test's socket path is unique, so nothing accumulates beyond the scratch dir.
     }
+}
+
+/// Minimal HTTP/1.1 over TCP for listener tests — the client library speaks only the
+/// unix socket. Answers `(status, body, lowercased headers)`.
+fn http_request(
+    endpoint: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> (u16, String, Vec<(String, String)>) {
+    let address = endpoint.strip_prefix("http://").expect("an http endpoint");
+    let mut stream = std::net::TcpStream::connect(address).expect("connect");
+    let mut request =
+        format!("{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n");
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    if let Some(body) = body {
+        request.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        ));
+    }
+    request.push_str("\r\n");
+    if let Some(body) = body {
+        request.push_str(body);
+    }
+    stream.write_all(request.as_bytes()).expect("write request");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("read response");
+    let response = String::from_utf8_lossy(&response).into_owned();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+    let mut lines = head.lines();
+    let status: u16 = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+        .expect("a status line");
+    let headers = lines
+        .filter_map(|line| line.split_once(": "))
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.to_string()))
+        .collect();
+    (status, body.to_string(), headers)
 }
 
 /// A client-side session: the CLI's own shape — a `LineCompiler` plus a server
@@ -725,4 +793,268 @@ fn a_stale_sent_record_is_answered_with_the_missing_keys() {
         Outcome::Value { rendered, .. } => assert_eq!(rendered, "42"),
         other => panic!("expected 42, got {other:?}"),
     }
+}
+
+#[test]
+fn the_tcp_listener_requires_the_token_on_every_route() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (_server, endpoint, token) = Server::start_listening();
+
+    // No token: refused — including /status, which the socket exempts. A hostile page
+    // must not even learn a server exists.
+    let (status, ..) = http_request(&endpoint, "GET", "/status", &[], None);
+    assert_eq!(status, 401);
+    let (status, ..) = http_request(
+        &endpoint,
+        "GET",
+        "/status",
+        &[("Authorization", "Bearer wrong")],
+        None,
+    );
+    assert_eq!(status, 401);
+
+    // The minted token opens it; /status stays fingerprint-exempt as on the socket.
+    let bearer = format!("Bearer {token}");
+    let (status, body, _) = http_request(
+        &endpoint,
+        "GET",
+        "/status",
+        &[("Authorization", &bearer)],
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains(quiver_compiler::compiler_fingerprint()),
+        "{body}"
+    );
+}
+
+#[test]
+fn a_browser_preflight_is_answered_with_cors_and_private_network_headers() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (_server, endpoint, _token) = Server::start_listening();
+    let preflight = |origin: &str| {
+        http_request(
+            &endpoint,
+            "OPTIONS",
+            "/processes",
+            &[
+                ("Origin", origin),
+                ("Access-Control-Request-Method", "POST"),
+                (
+                    "Access-Control-Request-Headers",
+                    "authorization,content-type,x-quiver-fingerprint",
+                ),
+                ("Access-Control-Request-Private-Network", "true"),
+            ],
+            None,
+        )
+    };
+
+    // Allowed origins are echoed, with the private-network answer newer Chrome
+    // requires for a public page reaching loopback — and no token, since preflights
+    // carry no credentials by design.
+    for origin in ["https://quiver.run", "http://localhost:3000"] {
+        let (status, _, headers) = preflight(origin);
+        assert!(status < 300, "preflight for {origin} answered {status}");
+        assert!(
+            headers
+                .iter()
+                .any(|(name, value)| name == "access-control-allow-origin" && value == origin),
+            "{origin}: {headers:?}"
+        );
+        assert!(
+            headers.iter().any(|(name, value)| {
+                name == "access-control-allow-private-network" && value == "true"
+            }),
+            "{origin}: {headers:?}"
+        );
+    }
+
+    // A foreign origin gets no CORS grant.
+    let (_, _, headers) = preflight("https://evil.example");
+    assert!(
+        !headers
+            .iter()
+            .any(|(name, _)| name == "access-control-allow-origin"),
+        "{headers:?}"
+    );
+}
+
+#[test]
+fn an_evaluation_runs_end_to_end_over_tcp() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (_server, endpoint, token) = Server::start_listening();
+    let bearer = format!("Bearer {token}");
+    let auth: Vec<(&str, &str)> = vec![
+        ("Authorization", &bearer),
+        (
+            "x-quiver-fingerprint",
+            quiver_compiler::compiler_fingerprint(),
+        ),
+    ];
+
+    let (status, body, _) = http_request(&endpoint, "POST", "/processes", &auth, Some("{}"));
+    assert_eq!(status, 200, "{body}");
+    let created: quiver_cli::protocol::CreateResponse =
+        serde_json::from_str(&body).expect("a CreateResponse");
+
+    // Compile client-side exactly as a browser's compiler worker would; no store, so
+    // the payload arrives fully inlined.
+    let mut compiler = LineCompiler::new(
+        Box::new(quiver_compiler::PackageResolver::inline()),
+        quiver_cli::build_builtin_registry(),
+    );
+    let prepared = compiler.prepare("%num.mul [7, 6]").expect("prepare");
+    let compiled = compiler.compile(prepared).expect("compile");
+    let committed = compiler.commit_line(compiled).expect("executable code");
+    let request = quiver_cli::protocol::ResumeRequest {
+        payload: committed.payload.to_wire(),
+        keep: Some(committed.keep_indices),
+    };
+    let (status, body, _) = http_request(
+        &endpoint,
+        "POST",
+        &format!("/processes/{}/resume", created.id),
+        &auth,
+        Some(&serde_json::to_string(&request).expect("serialize")),
+    );
+    assert_eq!(status, 200, "{body}");
+    let outcome: Outcome = serde_json::from_str(&body).expect("an Outcome");
+    match outcome {
+        Outcome::Value { rendered, .. } => assert_eq!(rendered, "42"),
+        other => panic!("expected 42, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_token_persists_across_restarts() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (server, _endpoint, first) = Server::start_listening();
+    let socket = server.socket.clone();
+    drop(server);
+    // Same socket path, fresh server: the browser's stored token must still open it.
+    let second = {
+        let child = Command::new(env!("CARGO_BIN_EXE_quiv"))
+            .arg("server")
+            .arg("--socket")
+            .arg(&socket)
+            .args(["--listen", "127.0.0.1:0"])
+            .spawn()
+            .expect("failed to respawn quiv server");
+        let mut server = Server { child, socket };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if std::os::unix::net::UnixStream::connect(&server.socket).is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "server never restarted");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let token =
+            std::fs::read_to_string(server.socket.with_extension("token")).expect("token file");
+        server.child.kill().ok();
+        let _ = std::fs::remove_file(server.socket.with_extension("token"));
+        token
+    };
+    assert_eq!(first, second);
+}
+
+#[test]
+fn a_non_loopback_listen_is_refused() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let socket = scratch_socket("quiv-test-nonloop");
+    let output = Command::new(env!("CARGO_BIN_EXE_quiv"))
+        .arg("server")
+        .arg("--socket")
+        .arg(&socket)
+        .args(["--listen", "0.0.0.0:0"])
+        .output()
+        .expect("run quiv server");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("loopback"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_file(&socket);
+}
+
+/// Read from an open SSE connection until `needle` appears in the accumulated text
+/// (chunked-framing noise included, which substring search tolerates).
+fn read_until(stream: &mut std::net::TcpStream, received: &mut String, needle: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut buffer = [0u8; 4096];
+    while !received.contains(needle) {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {needle}; received so far: {received}"
+        );
+        match stream.read(&mut buffer) {
+            Ok(0) => panic!("stream closed early; received: {received}"),
+            Ok(read) => received.push_str(&String::from_utf8_lossy(&buffer[..read])),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => panic!("read error: {e}"),
+        }
+    }
+}
+
+/// Open `/events` with the interest set in `query`, answering the connected stream
+/// (headers already sent, response not yet read).
+fn open_events(endpoint: &str, token: &str, query: &str) -> std::net::TcpStream {
+    let address = endpoint.strip_prefix("http://").expect("an http endpoint");
+    let mut stream = std::net::TcpStream::connect(address).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .expect("set timeout");
+    write!(
+        stream,
+        "GET /events?{query} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nx-quiver-fingerprint: {fingerprint}\r\n\r\n",
+        fingerprint = quiver_compiler::compiler_fingerprint()
+    )
+    .expect("write request");
+    stream
+}
+
+#[test]
+fn the_events_stream_pushes_process_updates() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (_server, endpoint, token) = Server::start_listening();
+    let bearer = format!("Bearer {token}");
+    let auth: Vec<(&str, &str)> = vec![
+        ("Authorization", &bearer),
+        (
+            "x-quiver-fingerprint",
+            quiver_compiler::compiler_fingerprint(),
+        ),
+    ];
+
+    // The statuses stream opens with an initial snapshot — the subscription pushes one
+    // on registration, so a (re)connecting client is complete from its first event.
+    let mut statuses = open_events(&endpoint, &token, "processes=true");
+    let mut received = String::new();
+    read_until(&mut statuses, &mut received, "event: processes");
+
+    // A process created through the ordinary API appears on the already-open stream.
+    let (status, body, _) = http_request(&endpoint, "POST", "/processes", &auth, Some("{}"));
+    assert_eq!(status, 200, "{body}");
+    let created: quiver_cli::protocol::CreateResponse =
+        serde_json::from_str(&body).expect("a CreateResponse");
+    read_until(
+        &mut statuses,
+        &mut received,
+        &format!("\"id\":{}", created.id),
+    );
+
+    // A second connection watches that process's detail, rendered server-side.
+    let mut detail = open_events(&endpoint, &token, &format!("process={}", created.id));
+    let mut received = String::new();
+    read_until(&mut detail, &mut received, "event: process");
+    read_until(&mut detail, &mut received, "\"persistent\":true");
+
+    // An empty interest set is refused rather than held open silently.
+    let (status, ..) = http_request(&endpoint, "GET", "/events", &auth, None);
+    assert_eq!(status, 400);
 }

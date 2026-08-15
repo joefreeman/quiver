@@ -20,8 +20,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use quiver_cli::native_transport::Progress;
 use quiver_cli::protocol::{
-    CompactRequest, CreateResponse, FINGERPRINT_HEADER, MissingModules, Outcome, PROTOCOL_VERSION,
-    ResumePayload, ResumeRequest, StatusResponse, pidfile_path,
+    CompactRequest, CreateResponse, EventsParams, FINGERPRINT_HEADER, MissingModules, Outcome,
+    PROTOCOL_VERSION, ProcessDetail, ProcessEvent, ProcessSummary, ProcessesEvent, ResumePayload,
+    ResumeRequest, StatusResponse, WorkersEvent, http_endpoint_path, pidfile_path, token_path,
 };
 use quiver_cli::spawn_worker;
 use quiver_core::process::ProcessId;
@@ -44,20 +45,38 @@ struct RootControl {
     busy: AtomicBool,
 }
 
+/// The `/events` fan-out: each environment subscription id maps to its SSE event name
+/// and the connection's channel. The stepping thread renders updates into here; a
+/// dropped connection removes its entries and unsubscribes.
+type Subscribers =
+    Arc<Mutex<HashMap<u64, (&'static str, tokio::sync::mpsc::UnboundedSender<SseEvent>)>>>;
+type SseEvent = axum::response::sse::Event;
+
 struct ServerState {
     environment: Arc<Mutex<Environment<NativeEffect>>>,
     progress: Arc<Progress>,
     roots: Mutex<HashMap<ProcessId, Arc<RootControl>>>,
     shutdown: tokio::sync::Notify,
+    subscribers: Subscribers,
 }
 
 type Shared = Arc<ServerState>;
 
 pub fn server_command(
     socket: Option<String>,
+    listen: Option<String>,
+    allow_origins: Vec<String>,
     code_collection_threshold: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = resolve_socket(socket);
+    // Everything the TCP listener needs, resolved before the runtime spins up so a bad
+    // address or an unwritable token file fails the start rather than surfacing later.
+    let listen = listen
+        .map(|address| -> Result<_, Box<dyn std::error::Error>> {
+            let address = parse_listen_address(&address)?;
+            Ok((address, load_or_create_token(&token_path(&socket_path))?))
+        })
+        .transpose()?;
     let listener = bind_socket(&socket_path)?;
     let pidfile = pidfile_path(&socket_path);
     std::fs::write(&pidfile, std::process::id().to_string())?;
@@ -89,14 +108,34 @@ pub fn server_command(
     let stepping_shutdown = Arc::new(AtomicBool::new(false));
     let progress = Arc::new(Progress::new());
 
+    let subscribers: Subscribers = Arc::default();
+
     let env_clone = Arc::clone(&environment);
     let shutdown_clone = Arc::clone(&stepping_shutdown);
     let progress_clone = Arc::clone(&progress);
+    let subscribers_clone = Arc::clone(&subscribers);
     let stepping = thread::spawn(move || {
         while !shutdown_clone.load(Ordering::Relaxed) {
             let did_work = env_clone
                 .lock()
-                .map(|mut env| env.step().unwrap_or(false))
+                .map(|mut env| {
+                    let did_work = env.step().unwrap_or(false);
+                    // Fan subscription updates out to their `/events` connections,
+                    // rendered under the same lock (types and values need the
+                    // environment). An update for a dropped connection is discarded.
+                    let updates = env.take_subscription_updates();
+                    if !updates.is_empty() {
+                        let subscribers = subscribers_clone.lock().unwrap();
+                        for (id, result) in updates {
+                            if let Some((name, sender)) = subscribers.get(&id)
+                                && let Some(event) = render_event(&mut env, name, result)
+                            {
+                                let _ = sender.send(event);
+                            }
+                        }
+                    }
+                    did_work
+                })
                 .unwrap_or(false);
             if did_work {
                 progress_clone.notify();
@@ -117,6 +156,7 @@ pub fn server_command(
         progress,
         roots: Mutex::new(HashMap::new()),
         shutdown: tokio::sync::Notify::new(),
+        subscribers,
     });
 
     // Fingerprint-checked API, plus the two exempt endpoints that make takeover
@@ -132,6 +172,7 @@ pub fn server_command(
         .route("/processes/{id}/cancel", post(cancel_process))
         .route("/workers", get(list_workers))
         .route("/workers/{id}", get(inspect_worker))
+        .route("/events", get(events))
         .layer(axum::middleware::from_fn(check_fingerprint));
     let router = axum::Router::new()
         .route("/status", get(status))
@@ -140,22 +181,182 @@ pub fn server_command(
         .with_state(Arc::clone(&state));
 
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async {
+    let served = runtime.block_on(async {
         listener.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(listener)?;
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move { state.shutdown.notified().await })
-            .await
-    })?;
+        let socket_server = axum::serve(listener, router.clone()).with_graceful_shutdown({
+            let state = Arc::clone(&state);
+            async move { state.shutdown.notified().await }
+        });
+        // Graceful shutdown waits for open connections, and browsers hold idle
+        // keep-alive connections to the TCP listener for minutes — so a shutdown gets
+        // a short grace period and then wins regardless. The socket path never needed
+        // this (its clients close per request), but one deadline serves both.
+        let deadline = {
+            let state = Arc::clone(&state);
+            async move {
+                state.shutdown.notified().await;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        };
+        let serve = {
+            let socket_path = socket_path.clone();
+            async move {
+                match listen {
+                    None => socket_server.await,
+                    Some((address, token)) => {
+                        // The browser endpoint: the same router, wrapped in the
+                        // bearer-token gate (innermost, so it guards every route
+                        // including the two the socket exempts — a hostile page cannot
+                        // even probe) and CORS (outermost, so preflights — which carry
+                        // no credentials by design — are answered before the token
+                        // check).
+                        let expected: Arc<str> = Arc::from(format!("Bearer {token}"));
+                        let tcp_router = router
+                            .layer(axum::middleware::from_fn(
+                                move |request: axum::extract::Request,
+                                      next: axum::middleware::Next| {
+                                    let expected = Arc::clone(&expected);
+                                    async move {
+                                        let presented = request
+                                            .headers()
+                                            .get(axum::http::header::AUTHORIZATION)
+                                            .and_then(|value| value.to_str().ok());
+                                        match presented {
+                                            Some(header) if header == expected.as_ref() => {
+                                                next.run(request).await
+                                            }
+                                            _ => StatusCode::UNAUTHORIZED.into_response(),
+                                        }
+                                    }
+                                },
+                            ))
+                            .layer(cors_layer(&allow_origins));
+                        let tcp_listener = tokio::net::TcpListener::bind(address).await?;
+                        let endpoint = format!("http://{}", tcp_listener.local_addr()?);
+                        // Recorded beside the socket so tooling can discover a port-0 bind.
+                        std::fs::write(http_endpoint_path(&socket_path), &endpoint)?;
+                        println!(
+                            "quiv server listening on {endpoint} (token in {})",
+                            token_path(&socket_path).display()
+                        );
+                        let tcp_server = axum::serve(tcp_listener, tcp_router)
+                            .with_graceful_shutdown({
+                                let state = Arc::clone(&state);
+                                async move { state.shutdown.notified().await }
+                            });
+                        tokio::try_join!(socket_server, tcp_server).map(|_| ())
+                    }
+                }
+            }
+        };
+        tokio::select! {
+            result = serve => result,
+            () = deadline => Ok(()),
+        }
+    });
 
     // Root processes die with the server (the documented blast radius); what matters
-    // is releasing the endpoint.
+    // is releasing the endpoints — on the error path too, where a failed TCP bind must
+    // not leave a stale socket file shadowing the next start.
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&pidfile);
+    let _ = std::fs::remove_file(http_endpoint_path(&socket_path));
     stepping_shutdown.store(true, Ordering::Relaxed);
     waker.wake();
     let _ = stepping.join();
+    served?;
     Ok(())
+}
+
+/// Parse `--listen`'s value: `host:port` as given, or a bare port on 127.0.0.1 — the
+/// host carries almost no information when only loopback is accepted, so it may be
+/// left off. The loopback check lives here too: this endpoint evaluates arbitrary
+/// bytecode, and serving it beyond the machine is out of scope.
+fn parse_listen_address(address: &str) -> Result<std::net::SocketAddr, String> {
+    let parsed = address
+        .parse::<std::net::SocketAddr>()
+        .or_else(|_| {
+            address
+                .parse::<u16>()
+                .map(|port| std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), port))
+        })
+        .map_err(|_| format!("--listen takes host:port or a bare port, not {address:?}"))?;
+    if !parsed.ip().is_loopback() {
+        return Err(format!(
+            "--listen must bind a loopback address (got {parsed}): this endpoint evaluates \
+             arbitrary bytecode, and serving it beyond the machine is out of scope"
+        ));
+    }
+    Ok(parsed)
+}
+
+/// Read the TCP bearer token, or mint one (32 random bytes, hex) at mode 0600. It
+/// persists across restarts deliberately: the dev loop replaces the server on every
+/// rebuild, and a per-boot token would strand every connected browser each time.
+fn load_or_create_token(path: &Path) -> std::io::Result<String> {
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        let existing = existing.trim().to_string();
+        if !existing.is_empty() {
+            return Ok(existing);
+        }
+    }
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(token.as_bytes())?;
+    Ok(token)
+}
+
+/// CORS for browser clients: the built-in allowlist (quiver.run, plus any localhost
+/// origin for locally served frontends) extended by `--allow-origin`, the headers the
+/// protocol uses, and the Private Network Access answer newer Chrome requires for a
+/// public page reaching loopback. The token remains the actual gate — Origin is
+/// defense-in-depth.
+fn cors_layer(allow_origins: &[String]) -> tower_http::cors::CorsLayer {
+    let extra: Vec<String> = allow_origins.to_vec();
+    tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::AllowOrigin::predicate(
+            move |origin, _request| {
+                origin
+                    .to_str()
+                    .is_ok_and(|origin| origin_allowed(origin, &extra))
+            },
+        ))
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::DELETE,
+        ])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderName::from_static(FINGERPRINT_HEADER),
+        ])
+        .allow_private_network(true)
+}
+
+fn origin_allowed(origin: &str, extra: &[String]) -> bool {
+    if origin == "https://quiver.run" || extra.iter().any(|allowed| allowed == origin) {
+        return true;
+    }
+    // A locally served frontend, on any port and either scheme.
+    ["http://localhost", "https://localhost", "http://127.0.0.1"]
+        .iter()
+        .any(|local| {
+            origin == *local
+                || origin
+                    .strip_prefix(local)
+                    .is_some_and(|rest| rest.starts_with(':'))
+        })
 }
 
 async fn check_fingerprint(
@@ -186,7 +387,8 @@ async fn status() -> axum::Json<StatusResponse> {
 }
 
 async fn shutdown(State(state): State<Shared>) -> StatusCode {
-    state.shutdown.notify_one();
+    // Waiters, plural: with `--listen` two serve loops wait on this.
+    state.shutdown.notify_waiters();
     StatusCode::OK
 }
 
@@ -388,6 +590,10 @@ fn wait_for(
 /// stamped nils.
 fn render(state: &Shared, value: &WireValue) -> Outcome {
     let mut env = state.environment.lock().unwrap();
+    render_value(&mut env, value)
+}
+
+fn render_value(env: &mut Environment<NativeEffect>, value: &WireValue) -> Outcome {
     let rendered = env.format_value(value);
     let type_rendered = match value {
         WireValue::Function(..) | WireValue::Builtin(..) | WireValue::Process(..) => {
@@ -407,6 +613,150 @@ fn render(state: &Shared, value: &WireValue) -> Outcome {
         origin,
         is_nil: value.is_nil(),
     }
+}
+
+/// The realtime inspection stream (see [`EventsParams`]): register the requested
+/// environment subscriptions, route their rendered updates into this connection's
+/// channel, and undo all of it when the connection drops. Each subscription pushes an
+/// initial snapshot, so the stream is complete from its first events.
+async fn events(
+    State(state): State<Shared>,
+    axum::extract::Query(params): axum::extract::Query<EventsParams>,
+) -> Result<
+    axum::response::sse::Sse<
+        impl tokio_stream::Stream<Item = Result<SseEvent, std::convert::Infallible>>,
+    >,
+    Response,
+> {
+    let mut ids: Vec<u64> = Vec::new();
+    let register = |ids: &mut Vec<u64>| -> Result<Vec<(u64, &'static str)>, EnvironmentError> {
+        let mut env = state.environment.lock().unwrap();
+        let mut named = Vec::new();
+        if params.processes {
+            let id = env.subscribe_process_statuses()?;
+            ids.push(id);
+            named.push((id, "processes"));
+        }
+        if params.workers {
+            let id = env.subscribe_worker_info()?;
+            ids.push(id);
+            named.push((id, "workers"));
+        }
+        if let Some(pid) = params.process {
+            let id = env.subscribe_process_info(pid as ProcessId)?;
+            ids.push(id);
+            named.push((id, "process"));
+        }
+        Ok(named)
+    };
+    let named = match register(&mut ids) {
+        Ok(named) => named,
+        Err(error) => {
+            // Roll back whatever did register before failing the request.
+            let mut env = state.environment.lock().unwrap();
+            for id in ids {
+                let _ = env.unsubscribe(id);
+            }
+            return Err(internal(error));
+        }
+    };
+    if named.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "nothing to stream: name processes, workers and/or a process id".to_string(),
+        )
+            .into_response());
+    }
+
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let mut subscribers = state.subscribers.lock().unwrap();
+        for (id, name) in &named {
+            subscribers.insert(*id, (name, sender.clone()));
+        }
+    }
+    // Dropping the stream drops the guard, which is the unsubscribe.
+    let guard = Unsubscriber {
+        state: Arc::clone(&state),
+        ids: named.into_iter().map(|(id, _)| id).collect(),
+    };
+    let stream = tokio_stream::StreamExt::map(
+        tokio_stream::wrappers::UnboundedReceiverStream::new(receiver),
+        move |event| {
+            let _ = &guard;
+            Ok(event)
+        },
+    );
+    Ok(axum::response::sse::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
+}
+
+/// Undoes an `/events` connection's registrations when its stream drops.
+struct Unsubscriber {
+    state: Shared,
+    ids: Vec<u64>,
+}
+
+impl Drop for Unsubscriber {
+    fn drop(&mut self) {
+        if let Ok(mut subscribers) = self.state.subscribers.lock() {
+            for id in &self.ids {
+                subscribers.remove(id);
+            }
+        }
+        if let Ok(mut env) = self.state.environment.lock() {
+            for id in &self.ids {
+                let _ = env.unsubscribe(*id);
+            }
+        }
+    }
+}
+
+/// A subscription update as an SSE event, rendered under the environment lock: types
+/// and result values only mean something next to the session program.
+fn render_event(
+    env: &mut Environment<NativeEffect>,
+    name: &str,
+    result: RequestResult,
+) -> Option<SseEvent> {
+    let payload = match result {
+        RequestResult::Statuses(statuses) => {
+            let mut processes: Vec<ProcessSummary> = statuses
+                .into_iter()
+                .map(|(id, status)| ProcessSummary {
+                    id: id as u64,
+                    status,
+                })
+                .collect();
+            processes.sort_by_key(|process| process.id);
+            serde_json::to_string(&ProcessesEvent { processes })
+        }
+        RequestResult::WorkerInfo(workers) => serde_json::to_string(&WorkersEvent { workers }),
+        RequestResult::ProcessInfo(info) => {
+            let process = info.map(|info| ProcessDetail {
+                id: info.id as u64,
+                status: info.status,
+                process_type: info
+                    .function_index
+                    .and_then(|index| env.format_process_type(index)),
+                stack_size: info.stack_size,
+                locals_count: info.locals_count,
+                frames_count: info.frames_count,
+                mailbox_size: info.mailbox_size,
+                persistent: info.persistent,
+                result: info.result.map(|result| match result {
+                    Ok(value) => render_value(env, &value),
+                    Err(error) => Outcome::Error {
+                        message: error.crash_message(),
+                    },
+                }),
+                heap: info.heap,
+            });
+            serde_json::to_string(&ProcessEvent { process })
+        }
+        _ => return None,
+    }
+    .ok()?;
+    Some(SseEvent::default().event(name).data(payload))
 }
 
 fn root_control(state: &Shared, id: u64) -> Result<Arc<RootControl>, Response> {
@@ -704,4 +1054,39 @@ pub fn stop_command(socket: Option<String>) -> Result<(), Box<dyn std::error::Er
     quiver_cli::client::stop_server(&socket)?;
     println!("stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_listen_address;
+
+    #[test]
+    fn listen_addresses_parse_with_an_optional_host() {
+        assert_eq!(
+            parse_listen_address("2192").unwrap().to_string(),
+            "127.0.0.1:2192"
+        );
+        assert_eq!(
+            parse_listen_address("0").unwrap().to_string(),
+            "127.0.0.1:0"
+        );
+        assert_eq!(
+            parse_listen_address("127.0.0.1:8500").unwrap().to_string(),
+            "127.0.0.1:8500"
+        );
+        assert_eq!(
+            parse_listen_address("[::1]:2192").unwrap().to_string(),
+            "[::1]:2192"
+        );
+        assert!(
+            parse_listen_address("0.0.0.0:2192")
+                .unwrap_err()
+                .contains("loopback")
+        );
+        assert!(
+            parse_listen_address("nonsense")
+                .unwrap_err()
+                .contains("bare port")
+        );
+    }
 }

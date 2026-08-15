@@ -25,3 +25,11 @@ use wasm_bindgen::prelude::*;
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
+
+/// The compiler build fingerprint. A remote environment must report the same build
+/// (its `/status`) for this compiler's payloads to be accepted — sent per request as
+/// the `x-quiver-fingerprint` header.
+#[wasm_bindgen]
+pub fn compiler_fingerprint() -> String {
+    quiver_compiler::compiler_fingerprint().to_string()
+}

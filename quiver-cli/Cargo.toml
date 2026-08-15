@@ -22,4 +22,8 @@ serde_json.workspace = true
 serde.workspace = true
 libc = "0.2"
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time"] }
+# CORS for the opt-in TCP listener only; the socket path never sees it.
+tower-http = { version = "0.6", features = ["cors"] }
+tokio-stream = "0.1"
+getrandom = "0.3"

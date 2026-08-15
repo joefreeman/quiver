@@ -292,13 +292,20 @@ pub fn spawn_worker<C: WorkerClock>(
 
                 match worker.step(current_time_ms) {
                     Ok(true) => {
-                        // Work was done, continue immediately
+                        // Work was done; push subscription churn, throttled, so a long
+                        // busy burst still streams observable state.
+                        let _ = worker.flush_subscriptions(clock.now_ms(), false);
                     }
                     Ok(false) => {
-                        // Nothing to run: idle however this clock says to. This used to sleep a
-                        // flat 5 ms, which cost no CPU but put those 5 ms on the latency of
-                        // every message routed here — an idle worker is precisely one about to
-                        // be handed work.
+                        // Settled: force a final subscription flush so the post-burst
+                        // state always lands (status only changes as a result of a
+                        // step, so flushing at every settle catches every transition —
+                        // the same discipline as the web worker loop). Then idle
+                        // however this clock says to. This used to sleep a flat 5 ms,
+                        // which cost no CPU but put those 5 ms on the latency of every
+                        // message routed here — an idle worker is precisely one about
+                        // to be handed work.
+                        let _ = worker.flush_subscriptions(clock.now_ms(), true);
                         worker.wait_for_commands(clock.wait_for(worker.next_timeout_ms()));
                     }
                     Err(e) => {
