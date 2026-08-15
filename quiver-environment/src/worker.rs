@@ -397,6 +397,25 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     .notify_state(process_id, state)
                     .map_err(EnvironmentError::Executor)?;
             }
+            Command::WatchProcess {
+                target,
+                function_index,
+                key,
+                caller,
+            } => {
+                // Install the registry's termination hook; refusal (an
+                // already-terminated or unknown target) is the registration's liveness
+                // check. The pending entry is echoed back for the environment to
+                // commit or refuse.
+                let alive = self.executor.add_watcher(target, Watcher::Registered);
+                self.sender.send(Event::RegistryWatched {
+                    target,
+                    function_index,
+                    key,
+                    caller,
+                    alive,
+                })?;
+            }
             Command::BeginCollection { request_id } => {
                 // Freeze stepping and ack. FIFO ordering makes this ack a barrier: the
                 // environment has already received (and routed) every event this worker
@@ -535,6 +554,11 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             }
             Action::Link { caller, target } => {
                 self.sender.send(Event::LinkAction { caller, target })?;
+            }
+            Action::Registry { caller, request } => {
+                // The caller is already parked (the dispatch site's Suspend handling).
+                self.sender
+                    .send(Event::RegistryAction { caller, request })?;
             }
         }
         Ok(())
@@ -938,6 +962,12 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     if abnormal {
                         self.sender.send(Event::KillAction { target: pid })?;
                     }
+                }
+                Watcher::Registered => {
+                    // The environment's name registry holds entries for this process:
+                    // tell it to free them. Emitted at the tombstone flush, so every
+                    // death path — completion, crash, kill, cascade — frees the name.
+                    self.sender.send(Event::RegistryExpired { pid: target })?;
                 }
                 // Reactive subscriptions are dropped by `flush_watchers`, never turned
                 // into termination events.

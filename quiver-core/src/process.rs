@@ -158,6 +158,32 @@ pub enum Action<E: Effect> {
         caller: ProcessId,
         target: ProcessId,
     },
+    /// A name-registry operation (`%registry`). The caller parks until the
+    /// environment — which owns the name table — answers with a value push.
+    Registry {
+        caller: ProcessId,
+        request: RegistryRequest,
+    },
+}
+
+/// One `%registry` operation, as carried from the calling worker to the environment.
+/// Keys travel pre-canonicalised as data-notation text: encoding at the call site
+/// rejects identity-bearing values and folds away representation differences
+/// (constant vs heap binaries, annotations), so the environment compares plain strings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RegistryRequest {
+    /// Bind `key` to the process, provided the key is free and the process still
+    /// lives. `function_index` is the pid's root function, kept for lookup type tests.
+    Register {
+        key: String,
+        pid: ProcessId,
+        function_index: usize,
+    },
+    /// Remove `key`. Answers `Ok`, or nil when the key was not bound.
+    Unregister { key: String },
+    /// Answer the pid bound to `key` at the process type `expected_type` names,
+    /// or nil when the key is unbound or the process fails the type test.
+    Lookup { key: String, expected_type: usize },
 }
 
 /// A stream resource's next event, as routed from the io backend to the owning
@@ -257,17 +283,23 @@ pub enum Watcher {
     /// tracked `?` sample (`%proc.track`); the target's `subscriber_count` mirrors how
     /// many of these it carries.
     Subscriber { pid: ProcessId },
+    /// The environment's name registry holds an entry for this process: notify the
+    /// environment at termination so the name is freed. Installed by `%registry.register`
+    /// (and, like the ownership kinds, not flushed by a persistent process's per-line
+    /// completion). References no process, so it never dangles and is never pruned.
+    Registered,
 }
 
 impl Watcher {
-    /// The process this watcher references. Used to drop stale entries when their target is
-    /// reclaimed.
-    pub fn pid(&self) -> ProcessId {
+    /// The process this watcher references, if any. Used to drop stale entries when
+    /// their target is reclaimed.
+    pub fn pid(&self) -> Option<ProcessId> {
         match self {
             Watcher::Awaiter { pid }
             | Watcher::OwnedChild { pid }
             | Watcher::Link { pid }
-            | Watcher::Subscriber { pid } => *pid,
+            | Watcher::Subscriber { pid } => Some(*pid),
+            Watcher::Registered => None,
         }
     }
 }

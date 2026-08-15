@@ -38,7 +38,7 @@ pub fn builtin_data_encode<E: Effect>(
     Ok(Completion::Value(Value::Binary(binary)))
 }
 
-fn encode_value<E: Effect>(
+pub(crate) fn encode_value<E: Effect>(
     value: &Value,
     ctx: &mut BuiltinContext<E>,
     out: &mut String,

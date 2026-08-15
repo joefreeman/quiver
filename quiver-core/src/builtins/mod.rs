@@ -1,7 +1,7 @@
 use crate::effects::Effect;
 use crate::error::{Error, Operation};
 use crate::executor::Executor;
-use crate::process::{Action, Process, ProcessId, TrackingState, Watcher};
+use crate::process::{Action, Process, ProcessId, RegistryRequest, TrackingState, Watcher};
 use crate::program::Program;
 use crate::types::Type;
 use crate::value::ResourceId;
@@ -68,6 +68,7 @@ pub mod data;
 pub mod integer;
 pub mod io;
 pub mod reference;
+pub mod registry;
 pub mod vector;
 
 /// How a builtin call resolves. The bytecode contract of a builtin call is that exactly
@@ -90,6 +91,10 @@ pub enum Completion<E: Effect> {
         function: usize,
         captures: Rc<Payload>,
     },
+    /// The result comes from the environment: the builtin queued a routed action whose
+    /// answer arrives as a host value push (`notify_value`), which delivers the result
+    /// and advances. The caller parks until then, exactly like a remote `?` sample.
+    Suspend,
 }
 
 /// What a builtin executes against: the executor (heap, constants, refs) plus verbs on
@@ -229,6 +234,19 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
         self.process.armed_resources.contains(&resource_id)
     }
 
+    /// Route a `%registry` operation to the environment, which owns the name table.
+    /// The caller parks (the accompanying completion is [`Completion::Suspend`]) until
+    /// the environment answers with a value push. Both reads and writes are refused in
+    /// restricted contexts: the table is host state, so no verdict over it is stable.
+    pub fn registry(&mut self, request: RegistryRequest) -> Result<(), Error> {
+        self.allow(Operation::Registry)?;
+        self.queue(Action::Registry {
+            caller: self.pid,
+            request,
+        });
+        Ok(())
+    }
+
     /// Enter a tracked render (`%proc.track`): until the accompanying
     /// [`Completion::Call`] frame returns and reconciles subscriptions, each `?` the
     /// caller samples registers a reactive subscription. Renders must be pure and
@@ -250,6 +268,10 @@ pub enum TypeSpec {
     Binary,
     Reference,
     Tuple(Option<&'static str>, Vec<(Option<&'static str>, TypeSpec)>),
+    /// The empty partial `()` — any tuple, nothing constrained. With `Integer` and
+    /// `Binary` in a union this spells "any data value" (identity-bearing values are
+    /// not tuples), which is what a `%registry` key parameter wants.
+    AnyTuple,
     Union(Vec<TypeSpec>),
     Process(Option<Box<TypeSpec>>, Option<Box<TypeSpec>>), // Process type: (send, receive)
     Resource(String), // Opaque resource type identifier (e.g., "File", "TcpSocket")
@@ -292,6 +314,10 @@ impl TypeSpec {
                 let tuple_id = program.register_tuple(name.map(|s| s.to_string()), fields);
                 Type::Tuple(tuple_id)
             }
+            TypeSpec::AnyTuple => Type::Partial {
+                name: None,
+                fields: vec![],
+            },
             TypeSpec::Union(specs) => {
                 let type_ids: Vec<usize> = specs
                     .iter()
@@ -1024,6 +1050,41 @@ pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     });
 }
 
+/// Register the name-registry builtins (`%registry`). The table itself lives in the
+/// environment; these signatures are universal and the implementations attach
+/// unconditionally, like `%proc`'s — no host capability is involved.
+pub fn register_registry_builtins<E: Effect>(reg: &mut BuiltinRegistry<E>) {
+    // Keys are data values: `'int | 'bin | ()`. The union statically excludes bare
+    // identity-bearing values (none of which are tuples); identity nested *inside* a
+    // tuple is rejected at runtime by key encoding.
+    let key = TypeSpec::Union(vec![
+        TypeSpec::Integer,
+        TypeSpec::Binary,
+        TypeSpec::AnyTuple,
+    ]);
+    // The capability-less process type: registration demands nothing of the pid — what
+    // a lookup grants is decided by the lookup's own type argument.
+    let pid = TypeSpec::Process(None, None);
+    let ok = TypeSpec::Tuple(Some("Ok"), vec![]);
+    let nil = TypeSpec::Tuple(None, vec![]);
+    let verdict = TypeSpec::Union(vec![ok, nil.clone()]);
+    register_builtin!(
+        reg, "registry_register", registry::builtin_registry_register, Purity::Process,
+        TypeSpec::Tuple(None, vec![(None, key.clone()), (None, pid)]) => verdict.clone()
+    );
+    register_builtin!(reg, "registry_unregister", registry::builtin_registry_unregister, Purity::Process, key.clone() => verdict);
+    // Type-consuming, like `__data_decode__<'t>`: the type argument is the process type
+    // the caller expects, and the result is that type or nil.
+    reg.register_generic(
+        "registry_lookup".to_string(),
+        coerce_builtin(registry::builtin_registry_lookup),
+        Purity::Process,
+        key,
+        TypeSpec::Union(vec![TypeSpec::Var("p"), nil]),
+        vec!["p".to_string()],
+    );
+}
+
 /// The always-available builtin modules: the pure builtins (integer/binary/vector)
 /// with their universal implementations, plus refs, control, and process management —
 /// the language runtime, independent of any host capability.
@@ -1043,6 +1104,7 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
         register_control_builtins,
         register_data_builtins,
         register_process_builtins,
+        register_registry_builtins,
     ]
 }
 

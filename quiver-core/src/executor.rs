@@ -384,7 +384,7 @@ impl<E: Effect> Executor<E> {
         for process in self.processes.values_mut() {
             let mut removed_subscribers = 0u32;
             process.watchers.retain(|watcher| {
-                let stale = reclaimed.contains(&watcher.pid());
+                let stale = watcher.pid().is_some_and(|pid| reclaimed.contains(&pid));
                 // A pruned reactive subscription must return the count to the fast path.
                 if stale && matches!(watcher, Watcher::Subscriber { .. }) {
                     removed_subscribers += 1;
@@ -2345,6 +2345,18 @@ impl<E: Effect> Executor<E> {
                             process_id: pid,
                             effect,
                         }))
+                    }
+                    crate::builtins::Completion::Suspend => {
+                        // The environment answers the queued action with a value push
+                        // (`notify_state`), which delivers the result and advances the
+                        // counter — so park exactly like a remote `?` sample. The
+                        // queueing verb already refused restricted contexts.
+                        debug_assert!(
+                            action.is_some(),
+                            "a suspending builtin must queue the action that answers it"
+                        );
+                        self.mark_sampling(pid);
+                        Ok(action)
                     }
                     crate::builtins::Completion::Call { function, captures } => {
                         // Resolve via a call: push the [.., parameter, function] shape

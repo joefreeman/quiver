@@ -1,0 +1,27 @@
+// The name registry: bind data-value keys to live processes, so processes with no
+// shared ancestor — another session on a shared environment, a detached service —
+// can find each other. Names free automatically when the process terminates (any
+// cause), so the registry only ever answers live processes; a restarted service
+// simply re-registers.
+//
+// A key is any data value — `"chat"`, `Worker[shard: 3]` — compared structurally.
+// Identity-bearing values (pids, refs, functions, resources) anywhere in a key are a
+// runtime error: a key must mean the same thing to every process that writes it.
+//
+// A lookup states the process type it expects, checked at runtime against the
+// registered process with the declared-type variance rules — you are granted exactly
+// what you spell, and a mismatch answers nil like any failed match:
+//
+//   %registry.lookup<@'msg -> 'result> "chat"
+
+[
+  register: &__registry_register__ ~> {
+    :doc "Binds a key to a process: `[key, &p] ~> %registry.register`. Answers Ok, or nil when the key is already bound or the process has already terminated. The name frees when the process terminates. A process may be registered under several keys; each key names one process."
+  },
+  unregister: &__registry_unregister__ ~> {
+    :doc "Removes a key's binding. Answers Ok, or nil when the key was not bound. Any process may unregister any key; the registered process itself is unaffected."
+  },
+  lookup: &__registry_lookup__ ~> {
+    :doc "Answers the process bound to a key, at the stated process type: `%registry.lookup<@'msg> key` has type `@'msg | []`. Nil when the key is unbound or the process does not satisfy the stated type (send contravariant, result covariant, state covariant and strict — an omitted clause is not granted). Must be instantiated where applied, like %data.decode."
+  },
+]

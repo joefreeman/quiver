@@ -1004,6 +1004,36 @@ travels upward: a child's death is only ever observed by its parent.
 %proc.link &p      // fate-sharing: either dying abnormally kills the other
 ```
 
+### The registry
+
+Pids normally travel by hand — captured at the spawn, passed in messages. Processes with
+no shared ancestor (another session on a shared environment, a detached service) instead
+meet through the **registry**: a per-environment table binding data-value keys to live
+processes. A key is any data value — `"chat"`, `Worker[shard: 3]` — compared
+structurally; a value with identity (a pid, a ref, a function) anywhere in a key is a
+runtime error.
+
+A lookup states the process type it expects — the type argument is required, like
+`%data.decode`'s — and is checked at runtime against the registered process with the
+usual variance rules, so what a name grants is exactly what the lookup spells. An
+unbound key or a failed check answers nil, like any failed match.
+
+```quiver
+p = @#{ !'int ~> %num.mul [~, 2] }
+%registry.register [Doubler, &p]           //=> Ok
+%registry.register [Doubler, &p]           //=> []   the name is taken
+%registry.lookup<@'bin> Doubler            //=> []   wrong message type
+%registry.lookup<@'int> Doubler ~> =(@'int)q
+21 ~> q
+!p                                         //=> 42
+%registry.lookup<@'int> Doubler            //=> []   freed when the process ended
+```
+
+Names free at termination — any cause, kill and cascade included — so the registry only
+ever answers live processes, and a restarted service simply re-registers. Anyone who
+already looked a pid up is unaffected: a held pid awaits and reads as usual, tombstone
+semantics included. `%registry.unregister` removes a binding early.
+
 ### Select
 
 `!` generalises to a **select** over several sources, racing them. The general form is
@@ -1290,6 +1320,7 @@ __integer_add__ [3, 4]              //=> 7
 | `%parse` | parser combinators over binary input |
 | `%meta` | the expression IR a dialect returns |
 | `%proc` | process management: `detach`, `kill`, `link`, `track` |
+| `%registry` | the per-environment name registry: `register`, `unregister`, `lookup` |
 | `%sup` | supervision: restart strategies over `%proc` |
 | `%io` | the failure vocabulary every I/O operation shares |
 | `%file` | files, via an owning process |

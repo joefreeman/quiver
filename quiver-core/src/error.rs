@@ -21,6 +21,8 @@ pub enum Operation {
     /// Minting a ref (`%ref`) — currently the only `Purity::Stateful` builtin; revisit
     /// the label if another appears.
     CreateRef,
+    /// A `%registry` operation — reads or writes the environment's name table.
+    Registry,
 }
 
 impl fmt::Display for Operation {
@@ -38,6 +40,7 @@ impl fmt::Display for Operation {
             Operation::Track => "track",
             Operation::HostRead => "host read",
             Operation::CreateRef => "ref creation",
+            Operation::Registry => "registry operation",
         })
     }
 }
@@ -151,6 +154,7 @@ impl Error {
                     Operation::Track => "running a tracked render",
                     Operation::HostRead => "reading host state",
                     Operation::CreateRef => "creating a ref",
+                    Operation::Registry => "a registry operation",
                 };
                 format!(
                     "{doing} is not supported in compile-time execution (module bodies \

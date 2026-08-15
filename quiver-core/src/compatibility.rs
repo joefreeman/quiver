@@ -149,6 +149,15 @@ pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<Con
         }
     }
 
+    // A type-consuming builtin's type argument is a runtime test too
+    // (`%registry.lookup<'p>` tests a stored pid against it), so it seeds a pattern
+    // row exactly as an `IsType` operand does.
+    for info in input.builtins {
+        if let Some(type_id) = info.type_argument {
+            pattern_type_ids.insert(type_id);
+        }
+    }
+
     // Initialize the compatibility table with entries for all pattern types
     let mut compatible_with: Vec<HashSet<ConcreteType>> = vec![HashSet::new(); input.types.len()];
 
@@ -552,6 +561,21 @@ impl CompatibilityTables {
                     }
                     self.type_compatibility[type_id] = compatible;
                 }
+            }
+        }
+
+        // A new builtin instantiation's type argument is a runtime test — a new pattern
+        // row, exactly like a fresh `IsType` operand.
+        for info in &input.builtins[self.builtins_len..] {
+            if let Some(type_id) = info.type_argument
+                && type_id < input.types.len()
+                && self.pattern_ids.insert(type_id)
+            {
+                let compatible = compute_compatible_concrete_types(type_id, input, &lookup, &index);
+                if want_delta && !compatible.is_empty() {
+                    type_additions.push((type_id, compatible.iter().copied().collect()));
+                }
+                self.type_compatibility[type_id] = compatible;
             }
         }
 

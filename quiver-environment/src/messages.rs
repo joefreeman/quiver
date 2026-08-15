@@ -3,7 +3,8 @@ use crate::environment::{LocalsResult, ProcessResultsMap};
 use quiver_core::effects::Effect;
 use quiver_core::executor::ProgramUpdate;
 use quiver_core::process::{
-    ProcessAdjacency, ProcessId, ProcessInfo, ProcessStatus, StreamEvent, WorkerInfo,
+    ProcessAdjacency, ProcessId, ProcessInfo, ProcessStatus, RegistryRequest, StreamEvent,
+    WorkerInfo,
 };
 use quiver_core::value::ResourceId;
 use quiver_core::wire::WireValue;
@@ -190,10 +191,25 @@ pub enum Command<E: Effect> {
         subscriber: ProcessId,
     },
 
-    /// Deliver a remote `?` sample to the caller that requested it
+    /// Deliver a remote `?` sample to the caller that requested it. Also the reply
+    /// path for `%registry` operations, whose parked caller resumes on the same
+    /// value push.
     NotifyState {
         process_id: ProcessId,
         state: WireValue,
+    },
+
+    /// Install a `Watcher::Registered` on `target`, on behalf of a pending
+    /// `%registry.register` — the flush of that watcher at termination is what frees
+    /// the name. Installation doubles as the liveness check: an already-terminated
+    /// target refuses, and the registration answers nil. The pending entry rides
+    /// along and is echoed back in `RegistryWatched`, keeping the environment's
+    /// handling stateless.
+    WatchProcess {
+        target: ProcessId,
+        function_index: usize,
+        key: String,
+        caller: ProcessId,
     },
 
     /// Phase 1 of a reclamation round: pause
@@ -345,6 +361,27 @@ pub enum Event<E: Effect> {
 
     /// A `?` sample read on the target's worker, headed back to the caller
     StateRead { caller: ProcessId, state: WireValue },
+
+    /// Action: a `%registry` operation, headed to the environment's name table. The
+    /// caller is parked; the environment answers with a `NotifyState` value push.
+    RegistryAction {
+        caller: ProcessId,
+        request: RegistryRequest,
+    },
+
+    /// Reply to `WatchProcess`: whether the watcher was installed (`alive`), echoing
+    /// the pending registration for the environment to commit or refuse.
+    RegistryWatched {
+        target: ProcessId,
+        function_index: usize,
+        key: String,
+        caller: ProcessId,
+        alive: bool,
+    },
+
+    /// A registered process terminated (its `Watcher::Registered` flushed): free
+    /// every name bound to it.
+    RegistryExpired { pid: ProcessId },
 
     /// Ack for `BeginCollection`: this worker is paused.
     CollectionReady {

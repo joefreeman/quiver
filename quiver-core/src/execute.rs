@@ -154,6 +154,7 @@ pub fn execute_bytecode_sync_with<E: Effect>(
                 Action::ReadState { .. } => Operation::ReadState,
                 Action::Kill { .. } => Operation::Kill,
                 Action::Link { .. } => Operation::Link,
+                Action::Registry { .. } => Operation::Registry,
             };
             return Err(Error::UnsupportedAtCompileTime { operation });
         }

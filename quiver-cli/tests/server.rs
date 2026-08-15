@@ -1058,3 +1058,87 @@ fn the_events_stream_pushes_process_updates() {
     let (status, ..) = http_request(&endpoint, "GET", "/events", &auth, None);
     assert_eq!(status, 400);
 }
+
+#[test]
+fn registry_rendezvous_across_sessions() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::start(&[]);
+
+    // Session A starts a service, detaches it (so it outlives A's teardown), and
+    // registers it under a shared name.
+    let mut a = Session::open(&server);
+    assert_eq!(
+        a.evaluate_value(
+            "svc = @#{ !'int ~> %num.mul [~, 2] }; %proc.detach &svc; \
+             %registry.register [Shared, &svc]"
+        ),
+        "Ok"
+    );
+
+    // Session B shares no bindings with A, but reaches the service by name — at the
+    // process type it states, checked at lookup.
+    let mut b = Session::open(&server);
+    assert_eq!(
+        b.evaluate_value("%registry.lookup<@'bin> Shared ~> =[]"),
+        "Ok",
+        "a lookup at the wrong send type must answer nil"
+    );
+    // The name is taken environment-wide: B's own registration answers nil.
+    assert_eq!(
+        b.evaluate_value("p = @#{ !'int }; %registry.register [Shared, &p] ~> =[]"),
+        "Ok"
+    );
+
+    // B reaches the (one-shot) service by name, serves an exchange — and the
+    // service's termination frees the name for every session, deterministically
+    // before B's await answers.
+    assert_eq!(
+        b.evaluate_value(
+            "%registry.lookup<(@'int -> 'int)> Shared ~> =((@'int -> 'int))q; 21 ~> q; !q"
+        ),
+        "42"
+    );
+    assert_eq!(b.evaluate_value("%registry.lookup<@'int> Shared ~> =[]"), "Ok");
+}
+
+#[test]
+fn registry_names_free_when_session_teardown_kills_the_service() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::start(&[]);
+
+    // Session A registers an *owned* (not detached) service: deleting A's root tears
+    // down its subtree, and the cascade's death must free the name for everyone.
+    let mut a = Session::open(&server);
+    assert_eq!(
+        a.evaluate_value("svc = @#{ !'int }; %registry.register [Owned, &svc]"),
+        "Ok"
+    );
+    let mut b = Session::open(&server);
+    assert_eq!(
+        b.evaluate_value("%registry.lookup<@'int> Owned ~> { =[] => Missing | Found }"),
+        "Found"
+    );
+
+    a.client.delete_process(a.pid).expect("delete failed");
+
+    // Teardown is asynchronous: poll until the cascade's expiry frees the name.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let value =
+            b.evaluate_value("%registry.lookup<@'int> Owned ~> { =[] => Missing | Found }");
+        if value == "Missing" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the name was never freed (last: {value})"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // The freed name is immediately reusable, from any session.
+    assert_eq!(
+        b.evaluate_value("mine = @#{ !'int }; %registry.register [Owned, &mine]"),
+        "Ok"
+    );
+}

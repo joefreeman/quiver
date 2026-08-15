@@ -8,12 +8,13 @@ use quiver_compiler::resolver::ModuleId;
 use quiver_compiler::{CompiledUnit, UnitKey};
 #[cfg(test)]
 use quiver_core::bytecode::Bytecode;
+use quiver_core::bytecode::ConcreteType;
 use quiver_core::bytecode::{Constant, Function};
 use quiver_core::compatibility::{CompatibilityInput, CompatibilityTables};
 use quiver_core::effects::{Effect, EffectBackend, ResultTupleInfo};
 use quiver_core::executor::{CompatibilityUpdate, ProgramUpdate, TableUpdate};
 use quiver_core::process::{
-    ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo, ProcessStatus,
+    ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo, ProcessStatus, RegistryRequest,
 };
 use quiver_core::program::Program;
 use quiver_core::types::{NIL, OK, Type, TypeLookup};
@@ -88,10 +89,13 @@ const DEFAULT_CODE_COLLECTION_THRESHOLD: usize = 4096;
 /// — including through a tombstone's surviving `result`/`state`, since a late `!p`/`?p`
 /// exposes those — to a fixpoint. A tombstone not reached is unobservable and collectible;
 /// this naturally sweeps cycles of mutually-referencing dead processes that refcounting can't.
-fn compute_sweep(adjacency: &[ProcessAdjacency]) -> Vec<ProcessId> {
+fn compute_sweep(adjacency: &[ProcessAdjacency], host_roots: &[ProcessId]) -> Vec<ProcessId> {
     let mut edges: HashMap<ProcessId, &[ProcessId]> = HashMap::new();
     let mut tombstones: HashSet<ProcessId> = HashSet::new();
-    let mut stack: Vec<ProcessId> = Vec::new();
+    // Environment-held pids (the `%registry` table) seed the mark set too: a pid a
+    // lookup can hand out must keep its process reachable, exactly as a pid held in a
+    // worker heap would.
+    let mut stack: Vec<ProcessId> = host_roots.to_vec();
     for entry in adjacency {
         edges.insert(entry.pid, &entry.outgoing);
         match entry.category {
@@ -492,6 +496,15 @@ pub struct Environment<E: Effect> {
     /// (the program grows append-only) and shipped whole to the workers.
     compatibility: CompatibilityTables,
 
+    /// The `%registry` name table: canonical data-notation key → `(pid, root function)`.
+    /// Entries only ever name live processes — registration installs a
+    /// `Watcher::Registered` on the target, and its termination flush frees the name —
+    /// so the table never roots a tombstone. Registered pids are process-sweep roots
+    /// (a pid a lookup can hand out must never dangle); for the *code* sweep the table
+    /// contributes nothing — string keys carry no code refs, and a pid's root-function
+    /// index is identity, not weight, exactly as in worker heaps.
+    registry: HashMap<String, (ProcessId, usize)>,
+
     // Process reclamation. At most one round runs
     // at a time; `spawns_since_collection` drives the auto-trigger, `reclaimed_total` is a
     // cumulative metric / test hook.
@@ -536,6 +549,7 @@ impl<E: Effect> Environment<E> {
             runtime_declarations: quiver_core::builtins::RuntimeDeclarations::default(),
             resource_ownership: HashMap::new(),
             compatibility: CompatibilityTables::default(),
+            registry: HashMap::new(),
             collection: None,
             spawns_since_collection: 0,
             collection_threshold: DEFAULT_COLLECTION_THRESHOLD,
@@ -1559,6 +1573,23 @@ impl<E: Effect> Environment<E> {
                     .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
                 Ok(())
             }
+            Event::RegistryAction { caller, request } => {
+                self.handle_registry_action(caller, request)
+            }
+            Event::RegistryWatched {
+                target,
+                function_index,
+                key,
+                caller,
+                alive,
+            } => self.handle_registry_watched(target, function_index, key, caller, alive),
+            Event::RegistryExpired { pid } => {
+                // The registered process terminated: free every name bound to it. A
+                // stray expiry (the entry was unregistered, or lost a registration
+                // race) finds nothing and is a no-op.
+                self.registry.retain(|_, (entry, _)| *entry != pid);
+                Ok(())
+            }
             Event::CollectionReady {
                 request_id,
                 worker_id,
@@ -1696,7 +1727,8 @@ impl<E: Effect> Environment<E> {
         let Some(mut state) = self.collection.take() else {
             return Ok(());
         };
-        let sweep = compute_sweep(&state.adjacency);
+        let registry_pids: Vec<ProcessId> = self.registry.values().map(|(pid, _)| *pid).collect();
+        let sweep = compute_sweep(&state.adjacency, &registry_pids);
 
         for pid in &sweep {
             self.process_router.remove(pid);
@@ -1939,6 +1971,111 @@ impl<E: Effect> Environment<E> {
         self.workers[*worker_id]
             .send(Command::KillProcess { id: target })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))
+    }
+
+    /// Answer a parked `%registry` caller with `result` — the `NotifyState` value push
+    /// a suspended builtin resumes on. A caller that died while parked is simply gone
+    /// (the kill purged its park entry), so a missing route drops the reply rather
+    /// than erroring.
+    fn answer_registry(
+        &mut self,
+        caller: ProcessId,
+        result: WireValue,
+    ) -> Result<(), EnvironmentError> {
+        let Some(worker_id) = self.process_router.get(&caller) else {
+            return Ok(());
+        };
+        self.workers[*worker_id]
+            .send(Command::NotifyState {
+                process_id: caller,
+                state: result,
+            })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))
+    }
+
+    /// Serve a `%registry` operation against the name table. Register is two-phase:
+    /// the entry is committed only once the target's worker confirms the termination
+    /// watcher (which doubles as the liveness check) in `handle_registry_watched`.
+    fn handle_registry_action(
+        &mut self,
+        caller: ProcessId,
+        request: RegistryRequest,
+    ) -> Result<(), EnvironmentError> {
+        match request {
+            RegistryRequest::Register {
+                key,
+                pid,
+                function_index,
+            } => {
+                // A taken key answers nil now; a free one is re-checked at commit,
+                // so of two racing registrations exactly one wins.
+                if self.registry.contains_key(&key) {
+                    return self.answer_registry(caller, WireValue::nil());
+                }
+                // An unknown (never-routed or reclaimed) process can't be watched:
+                // registering it answers nil, like any other dead target.
+                let Some(worker_id) = self.process_router.get(&pid) else {
+                    return self.answer_registry(caller, WireValue::nil());
+                };
+                self.workers[*worker_id]
+                    .send(Command::WatchProcess {
+                        target: pid,
+                        function_index,
+                        key,
+                        caller,
+                    })
+                    .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))
+            }
+            RegistryRequest::Unregister { key } => {
+                let removed = self.registry.remove(&key).is_some();
+                let verdict = if removed {
+                    WireValue::ok()
+                } else {
+                    WireValue::nil()
+                };
+                self.answer_registry(caller, verdict)
+            }
+            RegistryRequest::Lookup { key, expected_type } => {
+                // The type test is the same set-membership check `IsType` performs on
+                // a worker: the builtin's type argument seeded a compatibility row,
+                // and the pid's root function is its concrete discriminator. The
+                // variance rules (send contravariant, result covariant, state
+                // covariant and strict) were applied when the row was built.
+                let result = self
+                    .registry
+                    .get(&key)
+                    .filter(|(_, function_index)| {
+                        self.compatibility
+                            .type_compatibility
+                            .get(expected_type)
+                            .is_some_and(|row| {
+                                row.contains(&ConcreteType::Process(*function_index))
+                            })
+                    })
+                    .map(|(pid, function_index)| WireValue::Process(*pid, *function_index))
+                    .unwrap_or_else(WireValue::nil);
+                self.answer_registry(caller, result)
+            }
+        }
+    }
+
+    /// Commit or refuse a pending registration, now that the target's worker answered
+    /// the watcher installation.
+    fn handle_registry_watched(
+        &mut self,
+        target: ProcessId,
+        function_index: usize,
+        key: String,
+        caller: ProcessId,
+        alive: bool,
+    ) -> Result<(), EnvironmentError> {
+        // A dead target refuses; so does a key taken while the watcher round-tripped
+        // (the loser's stray watcher is harmless — its expiry finds no entry).
+        if !alive || self.registry.contains_key(&key) {
+            return self.answer_registry(caller, WireValue::nil());
+        }
+        self.registry.insert(key, (target, function_index));
+        self.answer_registry(caller, WireValue::ok())
     }
 
     /// Route the target-side half of a link to the target's worker.
@@ -3091,7 +3228,7 @@ mod reclamation_tests {
     }
 
     fn sweep_set(adjacency: &[ProcessAdjacency]) -> HashSet<ProcessId> {
-        compute_sweep(adjacency).into_iter().collect()
+        compute_sweep(adjacency, &[]).into_iter().collect()
     }
 
     #[test]
@@ -3146,6 +3283,15 @@ mod reclamation_tests {
         // Root holds live process 1; 1 holds tombstone 2 (awaiting/sampling 1 would expose it).
         let adj = [root(0, &[1]), root(1, &[2]), tombstone(2, &[])];
         assert!(sweep_set(&adj).is_empty());
+    }
+
+    #[test]
+    fn host_root_keeps_a_tombstone_no_process_references() {
+        // A registry-held pid roots its process even when no worker heap references it —
+        // covering the window between a registered process's death and the expiry event.
+        let adj = [root(0, &[]), tombstone(1, &[2]), tombstone(2, &[])];
+        let kept: HashSet<ProcessId> = compute_sweep(&adj, &[1]).into_iter().collect();
+        assert!(kept.is_empty());
     }
 }
 
