@@ -4,10 +4,13 @@
 //! **artifact key**, and either **link** the stored artifact for that key into the
 //! session or **compile from source** — in which case the compiler records the
 //! module's layout and extracts a fresh artifact into the store. The key is a
-//! Merkle-style hash over everything that determines compiled output — the compiler
-//! build fingerprint, the debug flag, the module's source, and the keys of every
+//! Merkle-style hash over everything *within one compiler version* that determines
+//! compiled output — the debug flag, the module's source, and the keys of every
 //! module it references (value imports, dialects, *and* type-level references) — so
-//! a store hit is valid by construction and invalidation is per-module.
+//! a store hit is valid by construction and invalidation is per-module. The compiler
+//! version itself is the store's directory layer rather than a key component: each
+//! fingerprint gets its own subdirectory, so keys never collide across versions and
+//! an old version's cache is one directory to delete.
 //!
 //! A [`ModuleArtifact`] is a compiled module in a self-contained, artifact-local id
 //! space. Value-like entities — types, tuples, constants, annotation keys, field
@@ -49,9 +52,12 @@ use quiver_core::types::{TupleTypeInfo, Type};
 use quiver_core::value::Value;
 
 /// The hash of every source that determines the compiler's behaviour (this crate and
-/// quiver-core) — one component of every artifact key. Emitted by the build script.
-/// Standard-library sources are *not* included: std modules are content-addressed
-/// individually, like any other module.
+/// quiver-core). Emitted by the build script. It scopes the artifact cache: a
+/// disk-backed [`ArtifactStore`] keeps each compiler version's artifacts in their own
+/// subdirectory named by this string, which is what keys stay valid against and what
+/// makes an old version's cache a single directory to delete. Standard-library sources
+/// are *not* included: std modules are content-addressed individually, like any other
+/// module.
 pub fn compiler_fingerprint() -> &'static str {
     env!("QUIVER_COMPILER_FINGERPRINT")
 }
@@ -242,7 +248,14 @@ impl CompiledUnit {
 /// cache directory, probed lazily per key. There is nothing to "load" up front and
 /// no attach ceremony — the store is always ready, and a missing entry simply means
 /// the module compiles from source (which then saves its artifact here).
+///
+/// On disk, every store is **scoped by compiler fingerprint**: entries live under
+/// `<base>/<fingerprint>/<key>.json`. Artifact keys deliberately do not hash the
+/// compiler version, so the directory layer is what keeps versions apart — a key from
+/// another build can never resolve here, and an obsolete version's cache is a single
+/// directory to remove.
 pub struct ArtifactStore {
+    /// The fingerprint-scoped directory entries are read from and written to.
     dir: Option<PathBuf>,
     /// `RefCell`, not `RwLock`: an artifact holds a compile-time `Value`, whose payload is
     /// `Rc`, so a store never crosses a thread and has nothing to lock against. Sharing
@@ -254,21 +267,23 @@ pub struct ArtifactStore {
 impl ArtifactStore {
     /// The user-level store, backed by `$XDG_CACHE_HOME/quiver/artifacts` (fallback
     /// `~/.cache/quiver/artifacts`). Memory-only when no cache directory is usable.
-    /// Prunes entries untouched for [`Self::MAX_AGE`] — content-addressed files can't
-    /// be invalidated by name, so age is the only signal a key is dead — and sweeps
-    /// the legacy bundle caches (`std-image-*` / `std-artifacts-*`) this store
-    /// replaced.
+    /// Opening it cleans the base directory: sibling fingerprint directories — other
+    /// compiler versions, garbage the moment this one was built — are removed outright,
+    /// as are files from the retired flat layout; within this version's own directory,
+    /// entries untouched for [`Self::MAX_AGE`] are pruned, age being the only signal a
+    /// content-addressed key is dead.
     pub fn cache() -> Self {
-        let dir = std::env::var_os("XDG_CACHE_HOME")
+        let base = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-            .map(|base| base.join("quiver").join("artifacts"))
-            .filter(|dir| std::fs::create_dir_all(dir).is_ok());
-        if let Some(dir) = &dir {
-            prune(dir);
+            .map(|base| base.join("quiver").join("artifacts"));
+        if let Some(base) = &base {
+            prune(base);
         }
         Self {
-            dir,
+            dir: base
+                .map(|base| base.join(compiler_fingerprint()))
+                .filter(|dir| std::fs::create_dir_all(dir).is_ok()),
             memory: RefCell::new(HashMap::new()),
         }
     }
@@ -282,8 +297,12 @@ impl ArtifactStore {
     }
 
     /// A store backed by an explicit directory (embedders with their own cache
-    /// layout). No pruning: the directory is the caller's to manage.
+    /// layout). Entries still live under a fingerprint subdirectory — keys do not
+    /// hash the compiler version, so the layer is load-bearing: without it, a stale
+    /// artifact from another build would *hit*, not miss. No pruning: the directory
+    /// is the caller's to manage.
     pub fn at_dir(dir: PathBuf) -> Self {
+        let dir = dir.join(compiler_fingerprint());
         Self {
             dir: Some(dir).filter(|dir| std::fs::create_dir_all(dir).is_ok()),
             memory: RefCell::new(HashMap::new()),
@@ -316,6 +335,13 @@ impl ArtifactStore {
         if let Some(path) = self.path(key)
             && let Ok(bytes) = serde_json::to_vec(&*artifact)
         {
+            // Re-create the fingerprint directory if it vanished: a newer build's
+            // `cache()` removes sibling versions' directories, and this process may be
+            // one of those versions, still running. Its saves keep working; the next
+            // newer open sweeps the directory again.
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             let tmp = path.with_extension(format!("tmp{}", std::process::id()));
             if std::fs::write(&tmp, bytes).is_ok() {
                 let _ = std::fs::rename(&tmp, &path);
@@ -343,22 +369,30 @@ impl ArtifactStore {
     }
 }
 
-fn prune(dir: &Path) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
+/// Clean the cache base directory on open. Sibling fingerprint directories are other
+/// compiler versions' caches — garbage from the moment this compiler was built, since
+/// nothing but the version that wrote them can resolve their keys — and are removed
+/// whole. Plain files at the base are the retired flat layout (pre fingerprint
+/// scoping), unreachable and removed regardless of age. Within the current version's
+/// own directory, entries fall to the [`ArtifactStore::MAX_AGE`] prune: a key goes
+/// dead when its module's source changes, and age is the only signal of that.
+fn prune(base: &Path) {
+    if let Ok(entries) = std::fs::read_dir(base) {
         for entry in entries.flatten() {
-            let stale = entry
-                .metadata()
-                .and_then(|meta| meta.modified())
-                .ok()
-                .and_then(|modified| modified.elapsed().ok())
-                .is_some_and(|age| age > ArtifactStore::MAX_AGE);
-            if stale {
-                let _ = std::fs::remove_file(entry.path());
+            let path = entry.path();
+            if path.is_dir() {
+                if entry.file_name().to_string_lossy() == compiler_fingerprint() {
+                    prune_stale_files(&path);
+                } else {
+                    let _ = std::fs::remove_dir_all(&path);
+                }
+            } else {
+                let _ = std::fs::remove_file(&path);
             }
         }
     }
     // The pre-content-addressing bundle caches lived one level up.
-    if let Some(parent) = dir.parent()
+    if let Some(parent) = base.parent()
         && let Ok(entries) = std::fs::read_dir(parent)
     {
         for entry in entries.flatten() {
@@ -373,9 +407,27 @@ fn prune(dir: &Path) {
     }
 }
 
+/// Remove files untouched for longer than [`ArtifactStore::MAX_AGE`].
+fn prune_stale_files(dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let stale = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > ArtifactStore::MAX_AGE);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 /// The artifact key of the module at `path` (resolved from `from_package`): a
-/// Merkle-style hash of the compiler fingerprint, the debug flag, the module's
-/// identity and source, and — recursively — the keys of every module it references.
+/// Merkle-style hash of the debug flag, the module's identity and source, and —
+/// recursively — the keys of every module it references. The compiler version is
+/// deliberately not hashed: the store scopes its directory by fingerprint instead.
 /// `None` when the module or a reference fails to resolve or parse, or the reference
 /// graph is cyclic; the compile path then reports the real error.
 pub fn module_key(
@@ -407,7 +459,6 @@ pub(crate) fn key_for_resolved(
     let references = collect_module_references(&parsed);
 
     let mut hasher = DefaultHasher::new();
-    compiler_fingerprint().hash(&mut hasher);
     debug.hash(&mut hasher);
     resolved.id.hash(&mut hasher);
     resolved.source.hash(&mut hasher);
@@ -2145,5 +2196,74 @@ fn intern_types_and_tuples(unit: &CompiledUnit, program: &mut Program, remaps: &
     }
     for local in 0..unit.tuples.len() {
         intern_tuple(local, unit, program, remaps);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch directory removed on drop, so a failing assertion cannot strand it.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "quiver-artifact-test-{label}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn at_dir_scopes_entries_by_fingerprint() {
+        let scratch = Scratch::new("at-dir");
+        let _store = ArtifactStore::at_dir(scratch.0.clone());
+        assert!(
+            scratch.0.join(compiler_fingerprint()).is_dir(),
+            "a disk-backed store must root its entries under the compiler fingerprint"
+        );
+    }
+
+    #[test]
+    fn opening_the_cache_cleans_other_versions_and_the_flat_layout() {
+        let scratch = Scratch::new("prune");
+        let base = scratch.0.join("artifacts");
+
+        // Another compiler version's directory, a flat-layout file, a legacy bundle
+        // beside the base — all garbage — and a fresh entry of the current version.
+        let sibling = base.join("0123456789abcdef");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("aaaaaaaaaaaaaaaa.json"), b"{}").unwrap();
+        std::fs::write(base.join("bbbbbbbbbbbbbbbb.json"), b"{}").unwrap();
+        std::fs::write(scratch.0.join("std-image-cccc.json"), b"{}").unwrap();
+        let current = base.join(compiler_fingerprint());
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(current.join("dddddddddddddddd.json"), b"{}").unwrap();
+
+        prune(&base);
+
+        assert!(!sibling.exists(), "another version's directory is removed");
+        assert!(
+            !base.join("bbbbbbbbbbbbbbbb.json").exists(),
+            "flat-layout files are removed"
+        );
+        assert!(
+            !scratch.0.join("std-image-cccc.json").exists(),
+            "legacy bundle caches are removed"
+        );
+        assert!(
+            current.join("dddddddddddddddd.json").exists(),
+            "the current version's fresh entries survive"
+        );
     }
 }
