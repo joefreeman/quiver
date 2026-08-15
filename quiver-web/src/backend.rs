@@ -41,8 +41,8 @@ pub struct WebEffectBackend {
     events: StreamEvents,
     bodies: Rc<RefCell<HashMap<ResourceId, Body>>>,
     next_resource: Rc<RefCell<ResourceId>>,
-    /// Type id of `\ByteStream`, and the tuple ids of `fetch`'s composite result. Both are
-    /// pushed by the environment — a backend has no type registry of its own.
+    /// Type id of `\ByteStream`, and the tuple ids of `http_request`'s composite result. Both
+    /// are pushed by the environment — a backend has no type registry of its own.
     body_type_id: Rc<RefCell<usize>>,
     fetch_result: Rc<RefCell<Option<ResultTupleInfo>>>,
     in_flight: Rc<RefCell<usize>>,
@@ -119,7 +119,7 @@ impl EffectBackend for WebEffectBackend {
         process_id: ProcessId,
         effect: WebEffect,
     ) -> Result<Option<EffectResult>, Error> {
-        let WebEffect::Fetch {
+        let WebEffect::HttpRequest {
             method,
             url,
             headers,
@@ -127,7 +127,7 @@ impl EffectBackend for WebEffectBackend {
         } = effect;
 
         let info = self.fetch_result.borrow().clone().ok_or_else(|| {
-            Error::InvalidArgument("no result type ids registered for `fetch`".to_string())
+            Error::InvalidArgument("no result type ids registered for `http_request`".to_string())
         })?;
         let body_type_id = *self.body_type_id.borrow();
         let completions = self.completions.clone();
@@ -187,7 +187,7 @@ impl EffectBackend for WebEffectBackend {
         if let Some(index) = resources.iter().position(|name| name == "ByteStream") {
             *self.body_type_id.borrow_mut() = index;
         }
-        if let Some((_, info)) = results.iter().find(|(name, _)| name == "fetch") {
+        if let Some((_, info)) = results.iter().find(|(name, _)| name == "http_request") {
             *self.fetch_result.borrow_mut() = Some(info.clone());
         }
     }

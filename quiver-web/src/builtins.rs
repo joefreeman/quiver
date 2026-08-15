@@ -1,12 +1,11 @@
-//! The web host's builtin capability set, and the browser implementations backing it.
-//!
-//! The capability is `fetch` plus the system builtins: entropy and clocks. Their signatures are part of the
-//! universal contract (`register_system_signatures`); this backs them for an executing web host.
-//! Like the native ones these are immediate (synchronous) builtins — `Purity::HostRead`, no effect
-//! round-trip — which is why they need no effect backend and run directly in the worker. The
-//! file and network groups stay out: a browser has no filesystem or sockets, so a program naming
-//! `__tcp_connect__` should fail to compile rather than fail to run. `fetch` takes their place —
-//! it is the browser's io floor, and the reason `%http/client` works here at all.
+//! The web host's builtin implementations: `fetch` plus the system builtins (entropy and
+//! clocks). The registry carries the *universal* signature contract — compilation is
+//! host-independent, so a program naming `__tcp_connect__` compiles here too — and what a
+//! browser can actually run is decided by what this file attaches: it has no filesystem
+//! or sockets, so the file/network/tls signatures stay unattached and a call to one
+//! errors at runtime. `fetch` is the browser's io floor, and the reason `%http/client`
+//! works here at all. The system builtins are immediate (`Purity::HostRead`, no effect
+//! round-trip), which is why they need no effect backend and run directly in the worker.
 //!
 //! Each host object is fetched off the global scope by name rather than through `window` or
 //! `DedicatedWorkerGlobalScope`, so the same code serves the worker and the main thread.
@@ -103,28 +102,21 @@ fn attach_system_builtins(registry: &mut BuiltinRegistry<WebEffect>) {
     }
 }
 
-/// The web host's registry: the language core plus the system builtins, with implementations
-/// attached. Every registry in this crate is built here — the compiler's, the environment's
-/// (for its runtime declarations), and each worker's — because a program's capability set is
-/// decided by whichever registry compiles it, and any disagreement between them means a program
-/// that compiles and then cannot run (or the reverse).
+/// The web host's registry: the universal signature contract, with the browser's
+/// implementations attached. Every registry in this crate is built here — the compiler's,
+/// the environment's (for its runtime declarations), and each worker's — so they agree on
+/// what this host backs.
 pub fn web_builtins() -> BuiltinRegistry<WebEffect> {
-    let mut registry = BuiltinRegistry::with_modules(&quiver_core::builtins::core_modules());
-    for module in quiver_core::builtins::system_modules()
-        .into_iter()
-        .chain(quiver_core::builtins::fetch_modules())
-    {
-        module(&mut registry);
-    }
+    let mut registry = BuiltinRegistry::with_modules(&quiver_core::builtins::universal_modules());
     attach_system_builtins(&mut registry);
-    attach_fetch_builtin(&mut registry);
+    attach_http_builtin(&mut registry);
     registry
 }
 
-/// `fetch` parks its process while the backend performs the request; the implementation only
-/// unpacks the four binaries into the effect.
-fn attach_fetch_builtin(registry: &mut BuiltinRegistry<WebEffect>) {
-    registry.attach_implementation("fetch", builtin_fetch);
+/// `http_request` parks its process while the backend performs the request; the
+/// implementation only unpacks the four binaries into the effect.
+fn attach_http_builtin(registry: &mut BuiltinRegistry<WebEffect>) {
+    registry.attach_implementation("http_request", builtin_http_request);
 }
 
 /// The bytes of a binary field, resolving a constant through the executor's table.
@@ -160,7 +152,7 @@ fn field_bytes(
     }
 }
 
-pub fn builtin_fetch(
+pub fn builtin_http_request(
     value: &Value,
     ctx: &mut BuiltinContext<WebEffect>,
 ) -> Result<Completion<WebEffect>, Error> {
@@ -177,7 +169,7 @@ pub fn builtin_fetch(
         });
     }
     let fields = fields.clone();
-    Ok(Completion::Effect(WebEffect::Fetch {
+    Ok(Completion::Effect(WebEffect::HttpRequest {
         method: field_bytes(&fields, 0, ctx)?,
         url: field_bytes(&fields, 1, ctx)?,
         headers: field_bytes(&fields, 2, ctx)?,

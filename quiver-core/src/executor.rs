@@ -2256,25 +2256,13 @@ impl<E: Effect> Executor<E> {
                 // A type-consuming builtin's explicit type argument, for the context.
                 let type_argument = payload.as_deref().and_then(Payload::type_argument);
 
-                // Resolve the implementation directly by id (no String clone / HashMap lookup).
-                let builtin = self
-                    .builtin_impls
-                    .get(builtin_id)
-                    .copied()
-                    .flatten()
-                    .ok_or_else(|| {
-                        let name = self
-                            .builtins
-                            .get(builtin_id)
-                            .map(String::as_str)
-                            .unwrap_or("<unknown>");
-                        Error::InvalidArgument(format!("Unrecognised builtin: {}", name))
-                    })?;
-
                 // Purity gate: reject a stateful or host-reading builtin, before it
                 // runs, wherever re-evaluation stability or determinism is assumed.
                 // (`Effect` and `Process` builtins are governed by their own gates —
-                // the effect-completion check and the context verbs.)
+                // the effect-completion check and the context verbs.) Checked before the
+                // implementation is even resolved: purity is part of the universal
+                // signature contract, so the verdict must not depend on what this host
+                // happens to attach.
                 let purity = self
                     .builtin_purities
                     .get(builtin_id)
@@ -2295,6 +2283,25 @@ impl<E: Effect> Executor<E> {
                         return Err(Error::UnsupportedAtCompileTime { operation });
                     }
                 }
+
+                // Resolve the implementation directly by id (no String clone / HashMap lookup).
+                let builtin = self
+                    .builtin_impls
+                    .get(builtin_id)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| {
+                        let name = self
+                            .builtins
+                            .get(builtin_id)
+                            .map(String::as_str)
+                            .unwrap_or("<unknown>");
+                        // Signatures are universal but implementations are the host's, so
+                        // this is where a capability the host never attached surfaces.
+                        Error::InvalidArgument(format!(
+                            "builtin __{name}__ is not available on this host"
+                        ))
+                    })?;
 
                 // The context wraps the step-local `proc` (out of the map for the
                 // slice) and the executor; its verbs mutate the caller's record and

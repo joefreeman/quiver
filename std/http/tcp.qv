@@ -1,17 +1,14 @@
-// The native HTTP transport: `%http/client`'s way onto the network, built on the TCP
-// builtins.
+// One HTTP/1.1 exchange over a TCP socket, in Quiver all the way down: resolve, connect,
+// upgrade to TLS for `https://`, serialize, read until the response parses, close.
 //
-// This is the *unsuffixed* variant — the fallback a host with no more specific one resolves
-// to. A browser cannot open a socket, so it will supply `transport.web.qv` over `fetch`
-// instead, and this file becomes `transport.native.qv`. Nothing above here changes: the
-// client sees the same `'%http.transport` either way.
+// `%http/client` does not run over this — the host's mediated `__http_request__` performs
+// its exchanges — but socket-level control has uses the mediated door cannot serve: trust
+// anchors of your own (via `%tls` directly), proxies, the request line itself. It is also
+// the vocabulary's proof: the same `%http` codecs this speaks are what `%http/server`
+// answers with.
 //
-// It runs inside the client's per-request process, so the socket it opens is owned there and
-// released by teardown even when a failure short-circuits past the explicit close.
-//
-// Both schemes are served, and by the same code: `%tls.attach` upgrades the socket in place,
-// so an `https://` connection is the same `\TcpSocket` with its reads and writes speaking
-// plaintext through the encryption — the loop below never learns which scheme it serves.
+// It expects to run inside a caller's own process, so the socket it opens is owned there
+// and released by teardown even when a failure short-circuits past the explicit close.
 
 // Read until the buffer holds a whole response. An empty read is end-of-connection, which is
 // what terminates a response framed by neither Content-Length nor chunking — and, if the
@@ -46,8 +43,15 @@ open = #'%url {
 }
 
 exchange = #[(url): '%url, (request): '%http] {
+  // A request without a Host header gains the URL's authority — an HTTP/1.1 request
+  // without one is rejected by most servers; a caller's own wins, since lookup takes the
+  // first.
+  hs = {
+    | %http.header [$request.headers, "host"] ~> ='%str => $request.headers
+    | %list.prepend [$request.headers, ["host", %url.authority $url]]
+  }
   open $url ~> =(\TcpSocket)sock
-  %tcp.write [sock, %http.serialize_request $request]
+  %tcp.write [sock, %http.serialize_request $request[..., headers: hs]]
 
   // Bound with a bare binder rather than a narrowing one: a failed read must still reach the
   // close below, and the annotated nil is what this answers.
@@ -60,6 +64,6 @@ exchange = #[(url): '%url, (request): '%http] {
 
 [
   request: &exchange ~> {
-    :doc "Performs one HTTP/1.1 exchange over TCP: resolve, connect, send, read the response, close. https:// upgrades the socket via %tls. Nil (carrying :error) on any failure."
+    :doc "Performs one HTTP/1.1 exchange over TCP: resolve, connect, send, read the response, close. https:// upgrades the socket via %tls, verifying against the host's default anchors. A request lacking a Host header gains the URL's authority. Nil (carrying :error) on any failure."
   },
 ]

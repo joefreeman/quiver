@@ -24,10 +24,7 @@ pub fn std_module_names() -> Vec<String> {
         for file in dir.files() {
             let path = file.path();
             if path.extension().is_some_and(|extension| extension == "qv") {
-                // Host variants collapse onto the module they are variants *of*: the name is
-                // what an import writes, and which file backs it is the resolver's business.
-                let stem = path.with_extension("").to_string_lossy().into_owned();
-                names.push(strip_host_tag(&stem).to_string());
+                names.push(path.with_extension("").to_string_lossy().into_owned());
             }
         }
         for sub in dir.dirs() {
@@ -217,9 +214,6 @@ struct Package {
 /// packages, and walks the filesystem to discover package boundaries on demand.
 pub struct PackageResolver {
     entry: PackageId,
-    /// The tags this host claims, most specific first. A `foo.<tag>.qv` matching one of these
-    /// wins over the unsuffixed `foo.qv`; see [`HOST_TAGS`].
-    host_tags: Vec<String>,
     packages: Mutex<HashMap<PackageId, Arc<Package>>>,
     /// Open editor buffers overlaid on disk for filesystem packages. Empty for CLI/tests.
     overlay: Arc<Overlay>,
@@ -251,17 +245,9 @@ impl PackageResolver {
         }
         Self {
             entry,
-            host_tags: vec!["native".to_string()],
             packages: Mutex::new(packages),
             overlay,
         }
-    }
-
-    /// Claim a different host's tags — the browser sets `["web"]`. Defaults to `["native"]`,
-    /// since every host but the browser is one.
-    pub fn with_host_tags(mut self, tags: Vec<String>) -> Self {
-        self.host_tags = tags;
-        self
     }
 
     /// A resolver for an in-memory package (REPL, web, tests). `modules` maps module names to
@@ -361,7 +347,6 @@ impl PackageResolver {
         // Re-home the entry now that we know its real package id.
         Self {
             entry,
-            host_tags: resolver.host_tags,
             packages: resolver.packages,
             overlay: resolver.overlay,
         }
@@ -426,21 +411,6 @@ impl PackageResolver {
         }
     }
 
-    /// Read a module file, preferring a variant specialised for this host. For `a/b.qv` and
-    /// tags `["web"]` that is `a/b.web.qv`, falling back to `a/b.qv` — so a module with no
-    /// host-specific version needs no suffix, and one that has them can still keep a shared
-    /// fallback. Answers the path actually read, since the caller derives identity from it.
-    fn read_variant(&self, vfs: &Arc<dyn Vfs>, base: &Path) -> Option<(PathBuf, String)> {
-        let stem = base.file_stem()?.to_string_lossy().into_owned();
-        for tag in &self.host_tags {
-            let candidate = base.with_file_name(format!("{stem}.{tag}.qv"));
-            if let Some(source) = vfs.read(&candidate) {
-                return Some((candidate, source));
-            }
-        }
-        vfs.read(base).map(|source| (base.to_path_buf(), source))
-    }
-
     fn try_provider(
         &self,
         pkg: &Package,
@@ -450,7 +420,7 @@ impl PackageResolver {
         match provider {
             Provider::Std => {
                 let std = self.package(&PackageId::Std).unwrap();
-                let (_, source) = self.read_variant(&std.vfs, &module_to_path(rem))?;
+                let source = std.vfs.read(&module_to_path(rem))?;
                 Some(ResolvedModule {
                     id: ModuleId {
                         package: PackageId::Std,
@@ -466,8 +436,8 @@ impl PackageResolver {
                 if rem.is_empty() {
                     return None;
                 }
-                let base = clean_path(&pkg.root.join(dir).join(module_to_path(rem)));
-                let (file, source) = self.read_variant(&pkg.vfs, &base)?;
+                let file = clean_path(&pkg.root.join(dir).join(module_to_path(rem)));
+                let source = pkg.vfs.read(&file)?;
                 let owner = self.owner_of(pkg, &file);
                 Some(ResolvedModule {
                     id: module_id(&owner, &file),
@@ -480,8 +450,8 @@ impl PackageResolver {
                 if !rem.is_empty() {
                     return None;
                 }
-                let base = clean_path(&pkg.root.join(path));
-                let (file, source) = self.read_variant(&pkg.vfs, &base)?;
+                let file = clean_path(&pkg.root.join(path));
+                let source = pkg.vfs.read(&file)?;
                 let owner = self.owner_of(pkg, &file);
                 Some(ResolvedModule {
                     id: module_id(&owner, &file),
@@ -543,27 +513,6 @@ fn origin_of(pkg: &Package, file: &Path) -> ModuleOrigin {
     }
 }
 
-/// The host tags a module file may be specialised for. A file named `foo.<tag>.qv` is a
-/// *variant* of the module `foo`, resolved only on a host that claims that tag; the
-/// unsuffixed `foo.qv` is the fallback for a host that claims none of them.
-///
-/// The set is closed deliberately. Name derivation has to tell a variant suffix from a
-/// dotted filename, and a fixed list makes that unambiguous without a per-file declaration.
-pub const HOST_TAGS: [&str; 2] = ["native", "web"];
-
-/// The module name a file belongs to, with any host-tag suffix removed: both
-/// `http/transport.native` and `http/transport.web` are the module `http/transport`.
-fn strip_host_tag(stem: &str) -> &str {
-    for tag in HOST_TAGS {
-        if let Some(base) = stem.strip_suffix(&format!(".{tag}"))
-            && !base.is_empty()
-        {
-            return base;
-        }
-    }
-    stem
-}
-
 /// `["a", "b"]` → `a/b.qv`.
 fn module_to_path(name: &[String]) -> PathBuf {
     let mut p = PathBuf::new();
@@ -586,7 +535,7 @@ fn module_id(owner: &Package, file: &Path) -> ModuleId {
         })
         .collect();
     if let Some(last) = name.last_mut() {
-        *last = strip_host_tag(last.trim_end_matches(".qv")).to_string();
+        *last = last.trim_end_matches(".qv").to_string();
     }
     ModuleId {
         package: owner.id.clone(),

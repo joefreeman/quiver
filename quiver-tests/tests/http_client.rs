@@ -1,14 +1,15 @@
 mod common;
 use common::*;
 
-// `%http/client` and `%http/transport` — the whole client stack.
+// `%http/client` (over the mediated `__http_request__` exchange) and `%http/tcp` (the
+// pure-Quiver exchange over sockets) — the whole client stack.
 //
-// The transport is picked up by import, so no test names one. Instead the *OS* is faked
-// (`with_mock_io`): the client, the transport, the codecs and the effect plumbing all run for
-// real, and only the syscalls are canned. That reaches what a live socket cannot do
-// reliably — a response split across awkward reads, a peer that never answers, a refused
-// connect, an aborting operation — while the live-server test at the bottom keeps the real
-// thing honest.
+// The *OS* is faked (`with_mock_io`): the client, the codecs and the effect plumbing all
+// run for real, and only the syscalls are canned — the mocked `http_request` even parses
+// its canned bytes with the backend's real head parser and framing decoder. That reaches
+// what a live socket cannot do reliably — a response split across awkward reads, a peer
+// that never answers, a refused connect, an aborting operation — while the live-server
+// test at the bottom keeps the real thing honest.
 
 /// A canned HTTP response, delivered as one read.
 fn serves(response: &str) -> MockIo {
@@ -27,9 +28,11 @@ fn test_client_reaches_a_server_and_parses_its_answer() {
 }
 
 #[test]
-fn test_response_is_assembled_across_arbitrary_read_boundaries() {
+fn test_tcp_response_is_assembled_across_arbitrary_read_boundaries() {
     // Reads land where the network decides. A response split mid-status-line, mid-header and
     // mid-chunk must still assemble — the case a live server will not reproduce on demand.
+    // `%http/tcp` is where Quiver code sees raw reads; the mediated client's equivalent
+    // lives in the backend, unit-tested beside its decoder.
     quiver()
         .with_mock_io(MockIo::Serves(vec![
             b"HTTP/1.1 200 ".to_vec(),
@@ -38,7 +41,12 @@ fn test_response_is_assembled_across_arbitrary_read_boundaries() {
             b"lo\r\n6\r\n wor".to_vec(),
             b"ld\r\n0\r\n\r\n".to_vec(),
         ]))
-        .evaluate(r#"%http/client.get "http://e.com/" ~> =('%http.response)r; Str[r.body]"#)
+        .evaluate(
+            r#"%url.parse "http://e.com/" ~> =('%url)u
+               %http.request [method: GET, target: %url.target u] ~> =('%http)req
+               %http/tcp.request [url: u, request: req] ~> =('%http.response)r
+               Str[r.body]"#,
+        )
         .expect(r#""hello world""#);
 }
 
@@ -80,14 +88,20 @@ fn test_a_refused_connection_is_a_value_the_caller_can_read() {
 }
 
 #[test]
-fn test_connect_falls_through_to_an_address_that_accepts() {
+fn test_tcp_connect_falls_through_to_an_address_that_accepts() {
     // The mock's resolver answers `::1` before `127.0.0.1` — an ordering real resolvers do
-    // produce for localhost — and nothing is bound on IPv6, so *every* mock test crosses a
-    // refused first address. This one names the property: taking the resolver's first
-    // answer on faith was the bug, and the transport must try the next address instead.
+    // produce for localhost — and nothing is bound on IPv6, so every `%http/tcp` mock test
+    // crosses a refused first address. This one names the property: taking the resolver's
+    // first answer on faith was the bug, and `%tcp.connect` must try the next address
+    // instead. (The mediated exchange's own fallthrough is the backend's, exercised live.)
     quiver()
         .with_mock_io(serves("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nhi"))
-        .evaluate(r#"%http/client.get "http://dual.test/" ~> =('%http.response)r; r.status"#)
+        .evaluate(
+            r#"%url.parse "http://dual.test/" ~> =('%url)u
+               %http.request [method: GET, target: "/"] ~> =('%http)req
+               %http/tcp.request [url: u, request: req] ~> =('%http.response)r
+               r.status"#,
+        )
         .expect("200");
 }
 
@@ -117,13 +131,30 @@ fn test_an_aborting_operation_is_caught_at_the_request_process() {
 
 #[test]
 fn test_a_truncated_response_is_reported_not_silently_short() {
-    // The peer hangs up mid-body. Answering the partial bytes would be the worst outcome, so
-    // end-of-connection with an incomplete parse is an error.
+    // The peer hangs up mid-body. Answering the partial bytes would be the worst outcome:
+    // the body stream fails rather than closing, the client's drain gates on the failed
+    // read, and the whole request answers the error.
     quiver()
         .with_mock_io(serves(
             "HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nshort",
         ))
         .evaluate(r#"%http/client.get "http://e.com/" ~> :('%io)error ~> =IoError(message: m); m"#)
+        .expect(r#""connection closed mid-body""#);
+}
+
+#[test]
+fn test_tcp_truncation_is_reported_not_silently_short() {
+    // The same property at the socket level, where the incomplete parse is what tells.
+    quiver()
+        .with_mock_io(serves(
+            "HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nshort",
+        ))
+        .evaluate(
+            r#"%url.parse "http://e.com/" ~> =('%url)u
+               %http.request [method: GET, target: "/"] ~> =('%http)req
+               %http/tcp.request [url: u, request: req]
+               ~> :('%io)error ~> =IoError(message: m); m"#,
+        )
         .expect(r#""connection closed mid-response""#);
 }
 
@@ -216,28 +247,15 @@ fn test_a_real_refused_connection() {
         .expect("ConnectionRefused");
 }
 
-// --- the web variant, type-checked from a native build -----------------------------------
+// --- one client, every host --------------------------------------------------------------
 //
-// This is the coverage that replaces an interface-enforcement mechanism. Nothing else in the
-// repository compiles `transport.web.qv`: a browser would, but no test runs in one. The
-// signature/implementation split exists exactly so a host can type-check code it cannot
-// execute, so a *native* test registers the browser's capability set — system builtins plus
-// `fetch`, signatures only — claims the web tag, and compiles the whole client stack against
-// it. Divergence between the two transports fails here rather than in a browser.
-
-#[test]
-fn test_the_web_variant_compiles_against_the_browser_capability_set() {
-    quiver()
-        .scoped_web()
-        .evaluate(r#"%http/transport ~> =(request: _); Ok"#)
-        .expect("Ok");
-}
+// There is no web variant to type-check anymore: `%http/client` is one code path over the
+// universal `__http_request__` signature, so compiling it under the browser's capability
+// shape proves the whole story — signatures are host-independent, and only what a call can
+// reach differs.
 
 #[test]
 fn test_the_whole_client_stack_compiles_for_the_browser() {
-    // `%http/client` binds whichever transport resolves, so this proves the web variant
-    // satisfies what the client expects of it — the check the removed interface type would
-    // have made, made by compilation instead.
     quiver()
         .scoped_web()
         .evaluate(r#"(get, post, head, request) = %http/client; Ok"#)
@@ -245,22 +263,20 @@ fn test_the_whole_client_stack_compiles_for_the_browser() {
 }
 
 #[test]
-fn test_the_browser_gets_the_web_variant_not_the_native_one() {
-    // The native transport names `__tcp_connect__`, which the browser's registry does not
-    // have — so resolving to it would be a compile error, and the test above passing is only
-    // meaningful because this one confirms which file was chosen.
+fn test_builtin_references_compile_on_every_host() {
+    // Signatures are universal: either transport's builtin compiles on both hosts, and
+    // which one a call can actually reach is decided at runtime by what is attached.
     quiver()
         .scoped_web()
         .evaluate(r#"f = &__tcp_connect__; Ok"#)
-        .expect_error_containing("not available on this host");
+        .expect("Ok");
     quiver()
         .scoped_web()
-        .evaluate(r#"f = &__fetch__; Ok"#)
+        .evaluate(r#"f = &__http_request__; Ok"#)
         .expect("Ok");
-    // ... and the native host is the mirror image.
     quiver()
-        .evaluate(r#"f = &__fetch__; Ok"#)
-        .expect_error_containing("not available on this host");
+        .evaluate(r#"f = &__http_request__; Ok"#)
+        .expect("Ok");
 }
 
 #[test]

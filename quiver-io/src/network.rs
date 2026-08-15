@@ -1,32 +1,8 @@
 use crate::effects::NativeEffect;
-use crate::util::expect_resource;
+use crate::util::{binary_bytes, expect_resource};
 use quiver_core::builtins::{BuiltinContext, BuiltinFn, BuiltinRegistry, Completion, value_to_i64};
 use quiver_core::error::Error;
-use quiver_core::value::{Binary, Value};
-
-/// The bytes of a binary value, resolving a constant through the executor's table.
-fn binary_bytes(value: &Value, ctx: &mut BuiltinContext<NativeEffect>) -> Result<Vec<u8>, Error> {
-    let Value::Binary(binary) = value else {
-        return Err(Error::TypeMismatch {
-            expected: "binary".to_string(),
-            found: value.type_name().to_string(),
-        });
-    };
-    match binary {
-        Binary::Constant(index) => match ctx
-            .executor
-            .get_constant(*index)
-            .ok_or(Error::ConstantUndefined(*index))?
-        {
-            quiver_core::bytecode::Constant::Binary(bytes) => Ok(bytes.clone()),
-            _ => Err(Error::TypeMismatch {
-                expected: "binary".to_string(),
-                found: "integer".to_string(),
-            }),
-        },
-        Binary::Data(data) => Ok(data.to_vec()),
-    }
-}
+use quiver_core::value::Value;
 
 /// dns_resolve(hostname: bin) -> Resource<DnsResolver>
 /// Start DNS resolution for a hostname (UTF-8 bytes), returning an iterator resource

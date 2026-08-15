@@ -6,10 +6,8 @@
 //! alone via [`register_io_signatures`]; an executing host registers the same signatures paired
 //! with its own implementations (e.g. `quiver-io`'s native io-uring backend, or a web backend).
 
-use super::{BuiltinContext, BuiltinFn, BuiltinRegistry, Completion, Purity, TypeSpec};
+use super::{BuiltinRegistry, Purity, TypeSpec};
 use crate::effects::Effect;
-use crate::error::Error;
-use crate::value::Value;
 
 /// The file builtins' contract: `(name, parameter, result)` for each.
 fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
@@ -218,39 +216,31 @@ fn tls_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     ]
 }
 
-/// Register the TLS builtins' signatures. Its own group: a host may have sockets without TLS,
-/// and a transport naming `__tls_attach__` should fail to compile there rather than at runtime.
+/// Register the TLS builtins' signatures. Its own group so a host with sockets but no TLS
+/// backend is representable — there, `__tls_attach__` is a signature never attached.
 pub fn register_tls_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
-    let placeholder: BuiltinFn<E> = unimplemented_builtin::<E>;
     for (name, param, result) in tls_signatures() {
-        registry.register(
-            name.to_string(),
-            placeholder,
-            Purity::Effect,
-            param,
-            fallible(result),
-        );
+        registry.register_signature(name.to_string(), Purity::Effect, param, fallible(result));
     }
     register_error_vocabulary(registry);
 }
 
-/// The fetch builtin's contract: an HTTP exchange as a single primitive.
-///
-/// This is a *browser's* floor, not a general one. A host with sockets builds HTTP in Quiver
-/// over `__tcp_*__`; a browser cannot, so it gets the whole exchange as one effect. The two
-/// are deliberately separate capability groups — a host offering both would let a program
-/// compile against `fetch` and then run somewhere it means something different.
+/// The http_request builtin's contract: an HTTP exchange as a single primitive, mediated by the
+/// host. A browser backs it with its `fetch` API — its io floor, since it cannot open a
+/// socket — and a native host backs it over its own sockets, so the capability is
+/// universal while what mediates it (redirect following, which response headers are
+/// visible) legitimately differs per host.
 ///
 /// Method and headers cross as bytes (a raw CRLF block) rather than as structured values: the
 /// backend has no type registry, so a `'%http.pairs` would mean plumbing tuple ids for `Cons`,
 /// `Nil` and `Str` through `set_type_ids` — while `%http` already has the header codec both
 /// ways. The response body is a `\ByteStream`.
-fn fetch_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
+fn http_request_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     let bin = TypeSpec::Binary;
     let int = TypeSpec::Integer;
     let body = TypeSpec::Resource("ByteStream".to_string());
     vec![(
-        "fetch",
+        "http_request",
         TypeSpec::Tuple(
             None,
             vec![
@@ -273,7 +263,7 @@ fn fetch_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
 
 /// Register `\ByteStream`: the general verb-free stream of byte chunks. A socket is a
 /// stream *and* a bundle of operations, so it earns its own kind; a source that is
-/// nothing but "chunks until a clean end" — a fetch response body today; a streamed
+/// nothing but "chunks until a clean end" — an HTTP response body today; a streamed
 /// request body or a child process's output tomorrow — is a `\ByteStream`, whatever
 /// produced it. One kind is what lets one consumer drain them all. Every capability
 /// group whose operations mint one declares it (the registration is keyed by kind, so
@@ -297,17 +287,10 @@ pub fn register_byte_stream<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     );
 }
 
-/// Register the fetch builtin's signature (no implementation) — the browser's io capability.
-pub fn register_fetch_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
-    let placeholder: BuiltinFn<E> = unimplemented_builtin::<E>;
-    for (name, param, result) in fetch_signatures() {
-        registry.register(
-            name.to_string(),
-            placeholder,
-            Purity::Effect,
-            param,
-            fallible(result),
-        );
+/// Register the http_request builtin's signature — the mediated-HTTP capability.
+pub fn register_http_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    for (name, param, result) in http_request_signatures() {
+        registry.register_signature(name.to_string(), Purity::Effect, param, fallible(result));
     }
     register_byte_stream(registry);
     register_error_vocabulary(registry);
@@ -327,16 +310,6 @@ fn system_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
         // for measuring durations; unrelated to (and steadier than) the wall clock
         ("time_monotonic", nil, int),
     ]
-}
-
-/// Placeholder implementation for an IO builtin registered for its signature only (e.g. by the
-/// language server, which type-checks but never executes). It is never called — executing hosts
-/// register real implementations against these signatures instead.
-fn unimplemented_builtin<E: Effect>(
-    _: &Value,
-    _: &mut BuiltinContext<E>,
-) -> Result<Completion<E>, Error> {
-    unreachable!("IO builtin registered for its signature only; no implementation in this host")
 }
 
 /// The network resource kinds' stream declarations: what a select on each yields.
@@ -379,15 +352,8 @@ fn register_network_streams<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 /// `__file_read__`, `%file`, `%dns`, etc. type-checks in a host that doesn't run effects. These
 /// are all `Purity::Effect`: they park the calling process while the host's backend works.
 pub fn register_io_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
-    let placeholder: BuiltinFn<E> = unimplemented_builtin::<E>;
     for (name, param, result) in file_signatures().into_iter().chain(network_signatures()) {
-        registry.register(
-            name.to_string(),
-            placeholder,
-            Purity::Effect,
-            param,
-            fallible(result),
-        );
+        registry.register_signature(name.to_string(), Purity::Effect, param, fallible(result));
     }
     register_network_streams(registry);
     register_error_vocabulary(registry);
@@ -420,14 +386,7 @@ pub fn register_error_vocabulary<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 /// so a host provides them by attaching implementations alone, with no effect backend. That makes
 /// them the one IO group a capability-poor host (a browser) can serve outright.
 pub fn register_system_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
-    let placeholder: BuiltinFn<E> = unimplemented_builtin::<E>;
     for (name, param, result) in system_signatures() {
-        registry.register(
-            name.to_string(),
-            placeholder,
-            Purity::HostRead,
-            param,
-            result,
-        );
+        registry.register_signature(name.to_string(), Purity::HostRead, param, result);
     }
 }

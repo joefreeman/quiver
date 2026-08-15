@@ -82,6 +82,17 @@ pub enum Resource {
         /// Current position in the iterator
         position: usize,
     },
+    /// An `http_request` response body: the `\ByteStream` handed back in the result. It
+    /// reads through the exchange's own socket — internal to the backend, never handed to
+    /// a process — and decodes the head's framing as the body is pulled.
+    HttpBody {
+        /// The exchange's socket (possibly TLS-upgraded); `None` once the body ended and
+        /// the socket was closed.
+        socket: Option<ResourceId>,
+        framing: crate::http::Framing,
+        /// Bytes read past the response head but not yet decoded and delivered.
+        buffered: Vec<u8>,
+    },
 }
 
 impl Resource {
@@ -93,6 +104,9 @@ impl Resource {
             Resource::Dir { .. } => panic!("Dir does not have a file descriptor"),
             Resource::DnsResolver { .. } => {
                 panic!("DnsResolver does not have a file descriptor")
+            }
+            Resource::HttpBody { .. } => {
+                panic!("HttpBody reads through its socket, not a descriptor of its own")
             }
         }
     }
@@ -124,6 +138,12 @@ pub enum IoOpType {
         goal: TlsGoal,
         io: TlsIo,
     },
+    /// A socket operation serving an `http_request` exchange; its completion feeds the
+    /// exchange's state machine — see `http_drive`.
+    Http {
+        exchange: u64,
+        io: HttpIo,
+    },
 }
 
 /// Native effect backend using io_uring for async I/O operations
@@ -148,6 +168,10 @@ pub struct NativeEffectBackend {
     armed_resources: std::collections::HashSet<ResourceId>,
     /// Completed armed reads awaiting `take_stream_events`.
     stream_events: Vec<(ResourceId, usize, StreamEvent, Vec<u8>)>,
+    /// In-flight `http_request` exchanges, up to the point their response head completes
+    /// and the parked process is answered.
+    http_exchanges: HashMap<u64, HttpExchange>,
+    next_http_id: u64,
 }
 
 /// A select-armed stream read in flight: the next-event read of a socket or listener.
@@ -159,6 +183,12 @@ enum ArmedOp {
     },
     Accept {
         resource_id: ResourceId,
+    },
+    /// A read of an `HttpBody`'s underlying socket, delivered as the *body's* event once
+    /// decoded through its framing.
+    HttpBody {
+        resource_id: ResourceId,
+        buffer: Vec<u8>,
     },
 }
 
@@ -173,6 +203,14 @@ impl NativeEffectBackend {
     /// routing when the owner is gone. The cancel's own completion carries user data 0,
     /// which no operation uses (ids start at 1), so the drain loop ignores it.
     fn cancel_inflight(&mut self, resource_id: ResourceId) {
+        // Exchanges whose internal socket is the closing resource: their ops are keyed by
+        // exchange id, so resolve the mapping first.
+        let exchanges: Vec<u64> = self
+            .http_exchanges
+            .iter()
+            .filter(|(_, exchange)| exchange.socket == Some(resource_id))
+            .map(|(&id, _)| id)
+            .collect();
         let mut targets: Vec<u64> = self
             .armed
             .iter()
@@ -180,7 +218,10 @@ impl NativeEffectBackend {
                 ArmedOp::Read {
                     resource_id: rid, ..
                 }
-                | ArmedOp::Accept { resource_id: rid } => *rid == resource_id,
+                | ArmedOp::Accept { resource_id: rid }
+                | ArmedOp::HttpBody {
+                    resource_id: rid, ..
+                } => *rid == resource_id,
             })
             .map(|(&id, _)| id)
             .collect();
@@ -189,6 +230,7 @@ impl NativeEffectBackend {
             IoOpType::Tls {
                 resource_id: rid, ..
             } if *rid == resource_id => Some(id),
+            IoOpType::Http { exchange, .. } if exchanges.contains(exchange) => Some(id),
             _ => None,
         }));
         if targets.is_empty() {
@@ -221,6 +263,8 @@ impl NativeEffectBackend {
             armed: HashMap::new(),
             armed_resources: std::collections::HashSet::new(),
             stream_events: Vec::new(),
+            http_exchanges: HashMap::new(),
+            next_http_id: 1,
         })
     }
 
@@ -267,6 +311,12 @@ impl NativeEffectBackend {
                     self.stream_events
                         .push((resource_id, socket_type, StreamEvent::Data, buffer));
                 }
+            }
+            ArmedOp::HttpBody {
+                resource_id,
+                buffer,
+            } => {
+                self.http_body_feed(resource_id, buffer, result_code);
             }
             ArmedOp::Accept { resource_id } => {
                 self.armed_resources.remove(&resource_id);
@@ -505,6 +555,12 @@ impl EffectBackend for NativeEffectBackend {
             NativeEffect::TcpSocketClose { resource_id } => {
                 self.execute_tcp_socket_close(process_id, resource_id)
             }
+            NativeEffect::HttpRequest {
+                method,
+                url,
+                headers,
+                body,
+            } => self.execute_http_request(process_id, method, url, headers, body),
         }
     }
 
@@ -579,6 +635,19 @@ impl EffectBackend for NativeEffectBackend {
                             )),
                         }
                     }
+
+                    IoOpType::Http { exchange, io } => {
+                        // Same shape as TLS: a completion feeds the exchange's state
+                        // machine, which may submit more work rather than finishing.
+                        match self.http_drive(exchange, Some((io, result_code))) {
+                            Ok(Some(result)) => completions.push((process_id, result)),
+                            Ok(None) => {}
+                            Err(e) => completions.push((
+                                process_id,
+                                Err(EffectError::InvalidArgument(format!("{e:?}"))),
+                            )),
+                        }
+                    }
                 }
             }
         }
@@ -611,6 +680,9 @@ impl EffectBackend for NativeEffectBackend {
                 _ => Arm::Read(socket.as_raw_fd()),
             },
             Some(Resource::TcpListener { socket, .. }) => Arm::Accept(socket.as_raw_fd()),
+            // A response body decodes buffered bytes first and reads its socket only when
+            // they run out; its pump owns that dance.
+            Some(Resource::HttpBody { .. }) => return self.http_body_pump(resource_id),
             Some(_) => {
                 return Err(Error::InvalidArgument(format!(
                     "Resource {} is not a stream (not selectable)",
@@ -668,8 +740,17 @@ impl EffectBackend for NativeEffectBackend {
         // closes the fd, but only the cancel releases the kernel object an operation
         // still references.
         self.cancel_inflight(resource_id);
-        self.resources.remove(&resource_id);
+        let removed = self.resources.remove(&resource_id);
         self.armed_resources.remove(&resource_id);
+        // A response body owns its exchange's socket, which no process ever saw — closing
+        // the body is the only thing that can close it.
+        if let Some(Resource::HttpBody {
+            socket: Some(socket),
+            ..
+        }) = removed
+        {
+            self.close_resource(socket);
+        }
     }
 
     fn set_type_ids(&mut self, resources: &[String], results: &[(String, ResultTupleInfo)]) {
@@ -2118,4 +2199,898 @@ fn der_certificates(bytes: &[u8]) -> Vec<Vec<u8>> {
         pos = end;
     }
     out
+}
+
+// --- HTTP ----------------------------------------------------------------------------------
+//
+// `__http_request__` is one effect for a whole exchange: resolve, connect (trying each
+// address the resolver answers), handshake TLS for `https://`, send the request, and read
+// until the response head parses — at which point the parked process is answered
+// `[status, headers, body]` and the bytes past the head become the body: an `HttpBody`
+// resource wrapping the exchange's socket, decoding the head's framing as it is pulled.
+//
+// Like TLS, the exchange is a state machine driven by completions (`http_drive`): each
+// completed socket operation is folded in, and the machine either submits the next one or
+// finishes. The socket is *internal* — no process ever holds it — created here and closed
+// when the body ends, fails, or is closed; the protocol logic (URL, request bytes, head,
+// framing) lives in `crate::http`, pure of any io.
+
+/// An in-flight exchange, up to the moment its response head completes.
+struct HttpExchange {
+    process_id: ProcessId,
+    stage: HttpStage,
+    /// Addresses still to try when the current connect attempt fails.
+    addrs: std::vec::IntoIter<SocketAddr>,
+    url: crate::http::HttpUrl,
+    method: Vec<u8>,
+    /// The serialized request. `sent` is how much has been written (plain) or handed to
+    /// rustls (TLS).
+    request: Vec<u8>,
+    sent: usize,
+    /// The internal socket resource, once a connect has succeeded.
+    socket: Option<ResourceId>,
+    /// Accumulated (decrypted) response bytes, up to the head.
+    response: Vec<u8>,
+    /// A plain socket's end-of-stream; the TLS path tracks its own in `TlsState`.
+    eof: bool,
+}
+
+enum HttpStage {
+    /// Sending the request — for TLS, this includes driving the handshake first.
+    Sending,
+    /// Reading until the response head parses.
+    Reading,
+}
+
+/// Which socket operation is in flight for an exchange.
+#[derive(Debug)]
+pub enum HttpIo {
+    Connect { socket: Socket, addr: SocketAddr },
+    Read { buffer: Vec<u8> },
+    Write,
+}
+
+/// A response head larger than this is not a response we are willing to buffer.
+const MAX_RESPONSE_HEAD: usize = 1 << 20;
+
+/// What a body pump decided, computed with the body's fields taken out of the resource map
+/// (the body and its socket both live there, and the pump needs the socket mutably).
+enum Pump {
+    Data(Vec<u8>),
+    End,
+    Read(RawFd),
+    Fail(EffectError),
+}
+
+impl NativeEffectBackend {
+    fn execute_http_request(
+        &mut self,
+        process_id: ProcessId,
+        method: Vec<u8>,
+        url: Vec<u8>,
+        headers: Vec<u8>,
+        body: Vec<u8>,
+    ) -> Result<Option<EffectResult>, Error> {
+        // A malformed URL is the caller's mistake, not the world's — a fault, exactly as
+        // an unparseable IP is for `tcp_connect`.
+        let url = crate::http::parse_url(&url).map_err(Error::InvalidArgument)?;
+        let request = crate::http::serialize_request(&url, &method, &headers, &body);
+        // Resolve, blocking — the same trade `execute_dns_resolve` makes.
+        let lookup = if url.host.contains(':') {
+            format!("[{}]:{}", url.host, url.port)
+        } else {
+            format!("{}:{}", url.host, url.port)
+        };
+        let addresses: Vec<SocketAddr> = match lookup.to_socket_addrs() {
+            Ok(addresses) => addresses.collect(),
+            Err(e) => {
+                return Ok(Some(Err(effect_error(
+                    &format!("cannot resolve '{}'", url.host),
+                    &e,
+                ))));
+            }
+        };
+        let mut addrs = addresses.into_iter();
+        let Some(first) = addrs.next() else {
+            return Ok(Some(Err(EffectError::NotFound(format!(
+                "no addresses for '{}'",
+                url.host
+            )))));
+        };
+        let exchange_id = self.next_http_id;
+        self.next_http_id += 1;
+        self.http_exchanges.insert(
+            exchange_id,
+            HttpExchange {
+                process_id,
+                stage: HttpStage::Sending,
+                addrs,
+                url,
+                method,
+                request,
+                sent: 0,
+                socket: None,
+                response: Vec::new(),
+                eof: false,
+            },
+        );
+        if let Err(e) = self.http_submit_connect(exchange_id, first) {
+            self.http_exchanges.remove(&exchange_id);
+            return Err(e);
+        }
+        Ok(None)
+    }
+
+    /// Advance an exchange after a socket completion (or, with `completed: None`, from a
+    /// standing start). Either submits the next socket operation and answers `None`, or
+    /// finishes — with the head result, or a failure.
+    fn http_drive(
+        &mut self,
+        exchange_id: u64,
+        completed: Option<(HttpIo, i32)>,
+    ) -> Result<Option<EffectResult>, Error> {
+        if !self.http_exchanges.contains_key(&exchange_id) {
+            // Finished by an earlier completion (a failure raced an in-flight op).
+            return Ok(None);
+        }
+
+        // 1. Fold in whatever just completed.
+        if let Some((io, code)) = completed {
+            match io {
+                HttpIo::Connect { socket, addr } => {
+                    if code < 0 {
+                        // Try the resolver's next address; only exhausting them is the
+                        // failure the caller sees, and it names the last attempt.
+                        drop(socket);
+                        let next = self
+                            .http_exchanges
+                            .get_mut(&exchange_id)
+                            .and_then(|exchange| exchange.addrs.next());
+                        if let Some(next) = next {
+                            self.http_submit_connect(exchange_id, next)?;
+                            return Ok(None);
+                        }
+                        let error = match -code {
+                            111 => EffectError::ConnectionRefused(format!(
+                                "Connection refused to {addr}"
+                            )),
+                            113 => EffectError::IO(format!("No route to host: {addr}")),
+                            _ => EffectError::IO(format!("Connect error: {}", -code)),
+                        };
+                        return Ok(Some(self.http_finish_err(exchange_id, error)));
+                    }
+                    // Connected: the socket becomes an internal resource — so TLS state
+                    // has a home and close/cancel cover it — upgraded in place for https.
+                    let resource_id = self.next_resource_id;
+                    self.next_resource_id += 1;
+                    self.resources.insert(
+                        resource_id,
+                        Resource::TcpSocket {
+                            socket,
+                            peer_addr: addr,
+                            tls: None,
+                        },
+                    );
+                    let (https, host) = {
+                        let exchange = self.http_exchanges.get_mut(&exchange_id).unwrap();
+                        exchange.socket = Some(resource_id);
+                        (exchange.url.https, exchange.url.host.clone())
+                    };
+                    if https {
+                        let connection = match Self::http_tls_client(&host) {
+                            Ok(connection) => connection,
+                            Err(failure) => {
+                                return Ok(Some(self.http_finish_err(exchange_id, failure)));
+                            }
+                        };
+                        if let Some(Resource::TcpSocket { tls, .. }) =
+                            self.resources.get_mut(&resource_id)
+                        {
+                            *tls = Some(TlsState::new(connection));
+                        }
+                    }
+                }
+                HttpIo::Read { buffer } => {
+                    if code < 0 {
+                        return Ok(Some(
+                            self.http_finish_err(exchange_id, completion_error("read", code)),
+                        ));
+                    }
+                    let bytes = &buffer[..code as usize];
+                    let socket_id = self.http_exchanges[&exchange_id]
+                        .socket
+                        .expect("an http read implies a socket");
+                    match self.resources.get_mut(&socket_id) {
+                        Some(Resource::TcpSocket {
+                            tls: Some(state), ..
+                        }) => {
+                            if let Err(failure) = state.ingest(bytes) {
+                                return Ok(Some(self.http_finish_err(exchange_id, failure)));
+                            }
+                            let plaintext = std::mem::take(&mut state.plaintext);
+                            self.http_exchanges
+                                .get_mut(&exchange_id)
+                                .unwrap()
+                                .response
+                                .extend(plaintext);
+                        }
+                        Some(Resource::TcpSocket { .. }) => {
+                            let exchange = self.http_exchanges.get_mut(&exchange_id).unwrap();
+                            if bytes.is_empty() {
+                                exchange.eof = true;
+                            } else {
+                                exchange.response.extend_from_slice(bytes);
+                            }
+                        }
+                        _ => return Ok(None), // closed under us; the exchange is over
+                    }
+                }
+                HttpIo::Write => {
+                    if code < 0 {
+                        return Ok(Some(
+                            self.http_finish_err(exchange_id, completion_error("write", code)),
+                        ));
+                    }
+                    let socket_id = self.http_exchanges[&exchange_id]
+                        .socket
+                        .expect("an http write implies a socket");
+                    match self.resources.get_mut(&socket_id) {
+                        Some(Resource::TcpSocket {
+                            tls: Some(state), ..
+                        }) => {
+                            state.outgoing_sent += code as usize;
+                            if state.flushed() {
+                                state.outgoing.clear();
+                                state.outgoing_sent = 0;
+                            }
+                        }
+                        Some(Resource::TcpSocket { .. }) => {
+                            self.http_exchanges.get_mut(&exchange_id).unwrap().sent +=
+                                code as usize;
+                        }
+                        _ => return Ok(None),
+                    }
+                }
+            }
+        }
+
+        // 2. Step until something is submitted or the exchange finishes.
+        self.http_step(exchange_id)
+    }
+
+    fn http_step(&mut self, exchange_id: u64) -> Result<Option<EffectResult>, Error> {
+        // What the sending stage decided, with the borrows released before acting.
+        enum Send {
+            WriteCipher,
+            WritePlain,
+            Read,
+            FeedRequest,
+            ToReading,
+            Fail(EffectError),
+        }
+        loop {
+            let exchange = self.http_exchanges.get_mut(&exchange_id).unwrap();
+            let Some(socket_id) = exchange.socket else {
+                return Ok(None); // still connecting
+            };
+            match exchange.stage {
+                HttpStage::Sending => {
+                    let (sent, len) = (exchange.sent, exchange.request.len());
+                    let act = match self.resources.get_mut(&socket_id) {
+                        Some(Resource::TcpSocket {
+                            tls: Some(state), ..
+                        }) => {
+                            if !state.flushed() {
+                                Send::WriteCipher
+                            } else if state.connection.is_handshaking() {
+                                if state.eof {
+                                    Send::Fail(tls_error("tls", "peer closed during the handshake"))
+                                } else if state.connection.wants_write() {
+                                    state.outgoing.clear();
+                                    state.outgoing_sent = 0;
+                                    match state.connection.write_tls(&mut state.outgoing) {
+                                        Ok(_) => Send::WriteCipher,
+                                        Err(e) => Send::Fail(tls_error("tls write", e)),
+                                    }
+                                } else {
+                                    Send::Read
+                                }
+                            } else if sent < len {
+                                Send::FeedRequest
+                            } else if state.connection.wants_write() {
+                                state.outgoing.clear();
+                                state.outgoing_sent = 0;
+                                match state.connection.write_tls(&mut state.outgoing) {
+                                    Ok(_) => Send::WriteCipher,
+                                    Err(e) => Send::Fail(tls_error("tls write", e)),
+                                }
+                            } else {
+                                Send::ToReading
+                            }
+                        }
+                        Some(Resource::TcpSocket { .. }) => {
+                            if sent < len {
+                                Send::WritePlain
+                            } else {
+                                Send::ToReading
+                            }
+                        }
+                        _ => return Ok(None),
+                    };
+                    match act {
+                        Send::WriteCipher => {
+                            self.http_submit_write_tls(exchange_id, socket_id)?;
+                            return Ok(None);
+                        }
+                        Send::WritePlain => {
+                            self.http_submit_write_plain(exchange_id, socket_id)?;
+                            return Ok(None);
+                        }
+                        Send::Read => {
+                            self.http_submit_read(exchange_id, socket_id)?;
+                            return Ok(None);
+                        }
+                        Send::FeedRequest => {
+                            // Hand the next slice of plaintext to rustls and drain the
+                            // ciphertext it produces. Capped, since rustls buffers.
+                            let chunk: Vec<u8> = {
+                                let exchange = self.http_exchanges.get(&exchange_id).unwrap();
+                                let end = (exchange.sent + 16384).min(len);
+                                exchange.request[exchange.sent..end].to_vec()
+                            };
+                            let outcome = {
+                                let Some(Resource::TcpSocket {
+                                    tls: Some(state), ..
+                                }) = self.resources.get_mut(&socket_id)
+                                else {
+                                    return Ok(None);
+                                };
+                                match std::io::Write::write(&mut state.connection.writer(), &chunk)
+                                {
+                                    Err(e) => Err(tls_error("tls write", e)),
+                                    Ok(n) => {
+                                        state.outgoing.clear();
+                                        state.outgoing_sent = 0;
+                                        match state.connection.write_tls(&mut state.outgoing) {
+                                            Ok(_) => Ok(n),
+                                            Err(e) => Err(tls_error("tls write", e)),
+                                        }
+                                    }
+                                }
+                            };
+                            match outcome {
+                                Ok(n) => {
+                                    self.http_exchanges.get_mut(&exchange_id).unwrap().sent += n;
+                                    self.http_submit_write_tls(exchange_id, socket_id)?;
+                                    return Ok(None);
+                                }
+                                Err(failure) => {
+                                    return Ok(Some(self.http_finish_err(exchange_id, failure)));
+                                }
+                            }
+                        }
+                        Send::ToReading => {
+                            self.http_exchanges.get_mut(&exchange_id).unwrap().stage =
+                                HttpStage::Reading;
+                            continue;
+                        }
+                        Send::Fail(failure) => {
+                            return Ok(Some(self.http_finish_err(exchange_id, failure)));
+                        }
+                    }
+                }
+                HttpStage::Reading => {
+                    if exchange.response.len() > MAX_RESPONSE_HEAD {
+                        return Ok(Some(self.http_finish_err(
+                            exchange_id,
+                            EffectError::Other("response head too large".to_string()),
+                        )));
+                    }
+                    match crate::http::parse_response_head(&exchange.response) {
+                        Err(e) => {
+                            return Ok(Some(
+                                self.http_finish_err(exchange_id, EffectError::Other(e)),
+                            ));
+                        }
+                        Ok(Some(head)) => return self.http_finish_ok(exchange_id, head).map(Some),
+                        Ok(None) => {
+                            let eof = exchange.eof
+                                || matches!(
+                                    self.resources.get(&socket_id),
+                                    Some(Resource::TcpSocket { tls: Some(state), .. }) if state.eof
+                                );
+                            if eof {
+                                return Ok(Some(self.http_finish_err(
+                                    exchange_id,
+                                    EffectError::Other(
+                                        "connection closed mid-response".to_string(),
+                                    ),
+                                )));
+                            }
+                            self.http_submit_read(exchange_id, socket_id)?;
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Finish an exchange with a failure: the socket is closed (its byte stream is dead or
+    /// meaningless), the exchange forgotten, and the parked process answered the error.
+    fn http_finish_err(&mut self, exchange_id: u64, error: EffectError) -> EffectResult {
+        if let Some(exchange) = self.http_exchanges.remove(&exchange_id)
+            && let Some(socket) = exchange.socket
+        {
+            self.close_resource(socket);
+        }
+        Err(error)
+    }
+
+    /// Finish an exchange with its parsed head: mint the body resource over the socket and
+    /// the surplus bytes, and answer `[status, headers, body]`.
+    fn http_finish_ok(
+        &mut self,
+        exchange_id: u64,
+        head: crate::http::ResponseHead,
+    ) -> Result<EffectResult, Error> {
+        let exchange = self
+            .http_exchanges
+            .remove(&exchange_id)
+            .expect("finishing an exchange that exists");
+        let socket_id = exchange.socket.expect("a parsed head implies a socket");
+        let buffered = exchange.response[head.body_start..].to_vec();
+        let framing = match crate::http::response_framing(&exchange.method, &head) {
+            Ok(framing) => framing,
+            Err(e) => {
+                self.close_resource(socket_id);
+                return Ok(Err(EffectError::Other(e)));
+            }
+        };
+        let info = self.result_info("http_request")?.clone();
+        let body_type = self.get_resource_type_id("ByteStream");
+        // A body the head already delimits to nothing needs no socket: close it now
+        // rather than holding the connection until the caller pulls the End.
+        let socket = if framing.is_complete() {
+            self.close_resource(socket_id);
+            None
+        } else {
+            Some(socket_id)
+        };
+        let body_id = self.next_resource_id;
+        self.next_resource_id += 1;
+        self.resources.insert(
+            body_id,
+            Resource::HttpBody {
+                socket,
+                framing,
+                buffered,
+            },
+        );
+        Ok(Ok(WireValue::tuple(
+            info.tuple_id,
+            vec![
+                WireValue::Int(head.status as i64),
+                WireValue::Binary(head.headers.into()),
+                WireValue::Resource(body_id, body_type),
+            ],
+        )))
+    }
+
+    /// A rustls client connection for the exchange's host, trusting the compiled-in
+    /// defaults — the same anchors an empty `roots` means for `__tls_attach__`.
+    fn http_tls_client(host: &str) -> Result<rustls::Connection, EffectError> {
+        let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+            .map_err(|e| tls_error("tls", e))?;
+        let config = Self::tls_config(&[])?;
+        rustls::ClientConnection::new(config, server_name)
+            .map(rustls::Connection::Client)
+            .map_err(|e| tls_error("tls", e))
+    }
+
+    fn http_submit_connect(&mut self, exchange_id: u64, addr: SocketAddr) -> Result<(), Error> {
+        let domain = if addr.is_ipv4() {
+            socket2::Domain::IPV4
+        } else {
+            socket2::Domain::IPV6
+        };
+        let socket = Socket::new(domain, socket2::Type::STREAM, None)
+            .map_err(|e| Error::InvalidArgument(format!("cannot create socket: {e}")))?;
+        socket
+            .set_nonblocking(true)
+            .map_err(|e| Error::InvalidArgument(format!("cannot set non-blocking: {e}")))?;
+        let completion_id = self.next_completion_id;
+        self.next_completion_id += 1;
+        let socket_addr: socket2::SockAddr = addr.into();
+        let connect_op = opcode::Connect::new(
+            types::Fd(socket.as_raw_fd()),
+            socket_addr.as_ptr(),
+            socket_addr.len(),
+        )
+        .build()
+        .user_data(completion_id);
+        unsafe {
+            self.ring
+                .submission()
+                .push(&connect_op)
+                .map_err(|e| Error::InvalidArgument(format!("Failed to submit connect: {e}")))?;
+        }
+        self.ring
+            .submit()
+            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {e}")))?;
+        let process_id = self.http_exchanges[&exchange_id].process_id;
+        self.pending.insert(
+            completion_id,
+            (
+                process_id,
+                IoOpType::Http {
+                    exchange: exchange_id,
+                    io: HttpIo::Connect { socket, addr },
+                },
+            ),
+        );
+        Ok(())
+    }
+
+    fn http_submit_read(&mut self, exchange_id: u64, socket_id: ResourceId) -> Result<(), Error> {
+        let fd = self
+            .resources
+            .get(&socket_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {socket_id} not found")))?
+            .fd();
+        let mut buffer = vec![0u8; 16384];
+        let completion_id = self.next_completion_id;
+        self.next_completion_id += 1;
+        let op = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
+            .build()
+            .user_data(completion_id);
+        unsafe {
+            self.ring
+                .submission()
+                .push(&op)
+                .map_err(|e| Error::InvalidArgument(format!("Failed to submit read: {e}")))?;
+        }
+        self.ring
+            .submit()
+            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {e}")))?;
+        let process_id = self.http_exchanges[&exchange_id].process_id;
+        self.pending.insert(
+            completion_id,
+            (
+                process_id,
+                IoOpType::Http {
+                    exchange: exchange_id,
+                    io: HttpIo::Read { buffer },
+                },
+            ),
+        );
+        Ok(())
+    }
+
+    /// Submit a write of the unsent tail of the request. The pointer aims into the
+    /// exchange's own buffer, which is stable for the life of the operation: the request
+    /// is never mutated once submitted, and a `Vec`'s heap allocation does not move with
+    /// its owner.
+    fn http_submit_write_plain(
+        &mut self,
+        exchange_id: u64,
+        socket_id: ResourceId,
+    ) -> Result<(), Error> {
+        let fd = self
+            .resources
+            .get(&socket_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {socket_id} not found")))?
+            .fd();
+        let (process_id, ptr, len) = {
+            let exchange = &self.http_exchanges[&exchange_id];
+            (
+                exchange.process_id,
+                unsafe { exchange.request.as_ptr().add(exchange.sent) },
+                exchange.request.len() - exchange.sent,
+            )
+        };
+        let completion_id = self.next_completion_id;
+        self.next_completion_id += 1;
+        let op = opcode::Write::new(types::Fd(fd), ptr, len as u32)
+            .build()
+            .user_data(completion_id);
+        unsafe {
+            self.ring
+                .submission()
+                .push(&op)
+                .map_err(|e| Error::InvalidArgument(format!("Failed to submit write: {e}")))?;
+        }
+        self.ring
+            .submit()
+            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {e}")))?;
+        self.pending.insert(
+            completion_id,
+            (
+                process_id,
+                IoOpType::Http {
+                    exchange: exchange_id,
+                    io: HttpIo::Write,
+                },
+            ),
+        );
+        Ok(())
+    }
+
+    /// Submit a write of the socket's pending ciphertext — `tls_submit_write`'s twin,
+    /// tagged for the exchange instead of a TLS goal.
+    fn http_submit_write_tls(
+        &mut self,
+        exchange_id: u64,
+        socket_id: ResourceId,
+    ) -> Result<(), Error> {
+        let (fd, ptr, len) = {
+            let resource = self
+                .resources
+                .get_mut(&socket_id)
+                .ok_or_else(|| Error::InvalidArgument(format!("Resource {socket_id} not found")))?;
+            let fd = resource.fd();
+            let Resource::TcpSocket {
+                tls: Some(state), ..
+            } = resource
+            else {
+                return Err(Error::InvalidArgument(
+                    "Resource is not a TLS-upgraded socket".into(),
+                ));
+            };
+            (
+                fd,
+                unsafe { state.outgoing.as_ptr().add(state.outgoing_sent) },
+                state.outgoing.len() - state.outgoing_sent,
+            )
+        };
+        let completion_id = self.next_completion_id;
+        self.next_completion_id += 1;
+        let op = opcode::Write::new(types::Fd(fd), ptr, len as u32)
+            .build()
+            .user_data(completion_id);
+        unsafe {
+            self.ring
+                .submission()
+                .push(&op)
+                .map_err(|e| Error::InvalidArgument(format!("Failed to submit write: {e}")))?;
+        }
+        self.ring
+            .submit()
+            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {e}")))?;
+        let process_id = self.http_exchanges[&exchange_id].process_id;
+        self.pending.insert(
+            completion_id,
+            (
+                process_id,
+                IoOpType::Http {
+                    exchange: exchange_id,
+                    io: HttpIo::Write,
+                },
+            ),
+        );
+        Ok(())
+    }
+
+    /// Serve a select on a response body: decode what is buffered, and only touch the
+    /// socket when it runs out. Pushes at most one stream event, or arms a socket read.
+    fn http_body_pump(&mut self, body_id: ResourceId) -> Result<(), Error> {
+        let body_type = self.get_resource_type_id("ByteStream");
+        // The body and its socket both live in the resource map, so take the body's
+        // fields out while the pump works and put them back before returning.
+        let Some(Resource::HttpBody {
+            mut socket,
+            mut framing,
+            mut buffered,
+        }) = self.resources.remove(&body_id)
+        else {
+            return Err(Error::InvalidArgument(format!(
+                "Resource {body_id} is not a response body"
+            )));
+        };
+        let outcome = loop {
+            match framing.decode(&mut buffered) {
+                Err(e) => break Pump::Fail(EffectError::Other(e)),
+                Ok(data) if !data.is_empty() => break Pump::Data(data),
+                Ok(_) => {}
+            }
+            if framing.is_complete() {
+                break Pump::End;
+            }
+            let Some(socket_id) = socket else {
+                break Pump::Fail(EffectError::Other("body socket is closed".to_string()));
+            };
+            match self.resources.get_mut(&socket_id) {
+                Some(Resource::TcpSocket {
+                    socket: raw, tls, ..
+                }) => match tls {
+                    Some(state) if !state.plaintext.is_empty() => {
+                        buffered.extend(std::mem::take(&mut state.plaintext));
+                    }
+                    Some(state) if state.eof => {
+                        // The end of the connection: what it means depends on the framing,
+                        // and — for a close-delimited body — on whether the close was
+                        // announced (see `TlsState::eof_event`).
+                        break match framing.on_eof() {
+                            Err(e) => Pump::Fail(EffectError::Other(e)),
+                            Ok(()) => match state.eof_event() {
+                                StreamEvent::End => Pump::End,
+                                StreamEvent::Failed { error } => Pump::Fail(error),
+                                _ => unreachable!("eof_event answers End or Failed"),
+                            },
+                        };
+                    }
+                    _ => break Pump::Read(raw.as_raw_fd()),
+                },
+                _ => break Pump::Fail(EffectError::Other("body socket is closed".to_string())),
+            }
+        };
+        match outcome {
+            Pump::Data(data) => {
+                self.resources.insert(
+                    body_id,
+                    Resource::HttpBody {
+                        socket,
+                        framing,
+                        buffered,
+                    },
+                );
+                self.stream_events
+                    .push((body_id, body_type, StreamEvent::Data, data));
+            }
+            Pump::End => {
+                if let Some(socket_id) = socket.take() {
+                    self.close_resource(socket_id);
+                }
+                self.resources.insert(
+                    body_id,
+                    Resource::HttpBody {
+                        socket: None,
+                        framing,
+                        buffered,
+                    },
+                );
+                self.stream_events
+                    .push((body_id, body_type, StreamEvent::End, vec![]));
+            }
+            Pump::Fail(error) => {
+                if let Some(socket_id) = socket.take() {
+                    self.close_resource(socket_id);
+                }
+                self.resources.insert(
+                    body_id,
+                    Resource::HttpBody {
+                        socket: None,
+                        framing,
+                        buffered,
+                    },
+                );
+                self.stream_events.push((
+                    body_id,
+                    body_type,
+                    StreamEvent::Failed { error },
+                    vec![],
+                ));
+            }
+            Pump::Read(fd) => {
+                self.resources.insert(
+                    body_id,
+                    Resource::HttpBody {
+                        socket,
+                        framing,
+                        buffered,
+                    },
+                );
+                let mut buffer = vec![0u8; 16384];
+                let completion_id = self.next_completion_id;
+                self.next_completion_id += 1;
+                let op = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
+                    .build()
+                    .user_data(completion_id);
+                let submitted = unsafe { self.ring.submission().push(&op).is_ok() }
+                    && self.ring.submit().is_ok();
+                if submitted {
+                    self.armed.insert(
+                        completion_id,
+                        ArmedOp::HttpBody {
+                            resource_id: body_id,
+                            buffer,
+                        },
+                    );
+                    self.armed_resources.insert(body_id);
+                } else {
+                    // A select that could never be answered is worse than a failed one.
+                    self.stream_events.push((
+                        body_id,
+                        body_type,
+                        StreamEvent::Failed {
+                            error: EffectError::IO("could not arm the body read".to_string()),
+                        },
+                        vec![],
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A completed armed read for a response body: fold the bytes in (through TLS when
+    /// the socket is upgraded), then pump again — which delivers an event or re-arms.
+    fn http_body_feed(&mut self, body_id: ResourceId, buffer: Vec<u8>, result_code: i32) {
+        self.armed_resources.remove(&body_id);
+        let body_type = self.get_resource_type_id("ByteStream");
+        let fail = |backend: &mut Self, error: EffectError| {
+            if let Some(Resource::HttpBody { socket, .. }) = backend.resources.get_mut(&body_id)
+                && let Some(socket_id) = socket.take()
+            {
+                backend.close_resource(socket_id);
+            }
+            backend
+                .stream_events
+                .push((body_id, body_type, StreamEvent::Failed { error }, vec![]));
+        };
+        if result_code < 0 {
+            fail(self, completion_error("read", result_code));
+            return;
+        }
+        let bytes = &buffer[..result_code as usize];
+        // Locate the socket through the body — both may have been closed while the read
+        // was in flight, in which case there is nobody to tell.
+        let Some(Resource::HttpBody { socket, .. }) = self.resources.get(&body_id) else {
+            return;
+        };
+        let Some(socket_id) = *socket else { return };
+        enum Fold {
+            Grew(Vec<u8>),
+            PlainEof,
+            TlsFailed(EffectError),
+        }
+        let fold = match self.resources.get_mut(&socket_id) {
+            Some(Resource::TcpSocket {
+                tls: Some(state), ..
+            }) => match state.ingest(bytes) {
+                Err(error) => Fold::TlsFailed(error),
+                Ok(()) => Fold::Grew(std::mem::take(&mut state.plaintext)),
+            },
+            Some(Resource::TcpSocket { .. }) if bytes.is_empty() => Fold::PlainEof,
+            Some(Resource::TcpSocket { .. }) => Fold::Grew(bytes.to_vec()),
+            _ => return,
+        };
+        match fold {
+            Fold::TlsFailed(error) => fail(self, error),
+            Fold::PlainEof => {
+                // The plain path's end-of-connection: completion or truncation is the
+                // framing's call (the TLS path decides inside the pump, where the
+                // close_notify distinction lives).
+                let ended = match self.resources.get_mut(&body_id) {
+                    Some(Resource::HttpBody { framing, .. }) => framing.on_eof(),
+                    _ => return,
+                };
+                match ended {
+                    Ok(()) => {
+                        if let Some(Resource::HttpBody { socket, .. }) =
+                            self.resources.get_mut(&body_id)
+                            && let Some(socket_id) = socket.take()
+                        {
+                            self.close_resource(socket_id);
+                        }
+                        self.stream_events
+                            .push((body_id, body_type, StreamEvent::End, vec![]));
+                    }
+                    Err(e) => fail(self, EffectError::Other(e)),
+                }
+            }
+            Fold::Grew(grown) => {
+                if let Some(Resource::HttpBody { buffered, .. }) = self.resources.get_mut(&body_id)
+                {
+                    buffered.extend(grown);
+                }
+                if self.http_body_pump(body_id).is_err() {
+                    fail(
+                        self,
+                        EffectError::IO("could not re-arm the body read".to_string()),
+                    );
+                }
+            }
+        }
+    }
 }

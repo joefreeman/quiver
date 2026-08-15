@@ -9,7 +9,7 @@ use quiver_compiler::Compiler;
 use quiver_compiler::ModuleResolver;
 use quiver_compiler::compiler::ModuleCache;
 use quiver_compiler::recorder::Recorder;
-use quiver_core::builtins::{BuiltinRegistry, core_modules};
+use quiver_core::builtins::BuiltinRegistry;
 use quiver_core::format::format_type_by_id;
 use quiver_core::program::Program;
 use quiver_core::types::{Type, TypeLookup};
@@ -32,19 +32,10 @@ pub struct Analysis {
 /// type-checks builtin calls without a real I/O backend.
 fn builtins() -> &'static BuiltinRegistry<NoEffect> {
     static REGISTRY: OnceLock<BuiltinRegistry<NoEffect>> = OnceLock::new();
-    // The LSP edits code destined for arbitrary hosts, so it registers the permissive
-    // union: the always-set plus every io signature group. When the manifest grows a
-    // platform/capability declaration, this scopes per project instead.
-    REGISTRY.get_or_init(|| {
-        let mut registry = BuiltinRegistry::with_modules(&core_modules());
-        for module in quiver_core::builtins::io_modules()
-            .into_iter()
-            .chain(quiver_core::builtins::tls_modules())
-        {
-            module(&mut registry);
-        }
-        registry
-    })
+    // The full signature contract, no implementations — the LSP type-checks but never
+    // executes, and signatures are universal.
+    REGISTRY
+        .get_or_init(|| BuiltinRegistry::with_modules(&quiver_core::builtins::universal_modules()))
 }
 
 /// Parse and typecheck `text`, producing diagnostics, a semantic index, and symbols. Imports

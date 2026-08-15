@@ -11,13 +11,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 type ReplResult = Result<Option<WireValue>, ReplError>;
 
 thread_local! {
-    /// The artifact store for every non-scoped test session on this thread:
-    /// content-addressed and disk-backed, so a module compiled by one test links
-    /// everywhere else — across tests, binaries, and runs (keys carry the debug flag, so
-    /// both compile modes share one store). Warming is organic: the first test to import a
-    /// module compiles and saves it. Scoped (no-io) tests never carry a store: their
-    /// capability model depends on io-referencing std modules failing to compile, which
-    /// pre-built artifacts would defeat.
+    /// The artifact store for every test session on this thread: content-addressed and
+    /// disk-backed, so a module compiled by one test links everywhere else — across tests,
+    /// binaries, and runs (keys carry the debug flag, so both compile modes share one
+    /// store). Warming is organic: the first test to import a module compiles and saves
+    /// it. Capability shapes don't split the store: every registry carries the same
+    /// universal signatures, so compilation is identical whatever a host attaches.
     ///
     /// Per-thread because an artifact holds a compile-time `Value`, whose payload is `Rc`.
     /// Sharing is through the cache *directory*, which is what made it shareable across
@@ -109,10 +108,11 @@ pub mod tls_server;
 
 // The standard library is a built-in package (embedded in quiver-compiler), so tests start
 // with no in-memory modules — only those a test adds via `with_modules`.
-/// Which IO signature groups the host registers — a host's capability set, mirroring the real
-/// ones. `Full` is the native CLI's; `SystemOnly` is the browser's (clocks and entropy, which
-/// need no effect backend, but no filesystem or sockets); `None` is a host with no IO vocabulary
-/// at all. Referencing a builtin outside the set is a compile error.
+/// Which IO implementations the host attaches — a host's capability set, mirroring the
+/// real ones. `Full` is the native CLI's; `SystemOnly`/`Web` are the browser's (clocks and
+/// entropy, which need no effect backend, but no filesystem or sockets); `None` attaches
+/// nothing. Signatures are universal either way: a call outside the attached set errors at
+/// runtime, never at compile time.
 #[allow(dead_code)]
 #[derive(Default, Clone, Copy, PartialEq)]
 pub enum Capabilities {
@@ -130,7 +130,6 @@ pub struct TestBuilder {
     modules: HashMap<Vec<String>, String>,
     with_io: bool,
     mock_io: Option<MockIo>,
-    host_tags: Option<Vec<String>>,
     files: Option<HashMap<String, String>>,
     capabilities: Capabilities,
     debug: bool,
@@ -158,8 +157,8 @@ impl TestBuilder {
         self
     }
 
-    /// Real io builtins over a *faked OS*: the client, the transport, the codecs and the
-    /// effect plumbing all run for real, and only the syscalls are canned. This is how the
+    /// Real io builtins over a *faked OS*: the client, the codecs and the effect
+    /// plumbing all run for real, and only the syscalls are canned. This is how the
     /// cases a live socket cannot reach reliably get tested — awkward read boundaries, a peer
     /// that never answers, a refused connect, an aborting operation.
     pub fn with_mock_io(mut self, behaviour: MockIo) -> Self {
@@ -168,9 +167,8 @@ impl TestBuilder {
         self
     }
 
-    /// An in-memory package addressed by *file path* rather than module name — the shape the
-    /// web host uses. Needed for host variants, since a module name cannot express the
-    /// `foo.web.qv` spelling (the `.web` would be read as part of the name).
+    /// An in-memory package addressed by *file path* rather than module name — the shape
+    /// the web host uses.
     pub fn with_files(mut self, files: &[(&str, &str)]) -> Self {
         self.files = Some(
             files
@@ -181,26 +179,17 @@ impl TestBuilder {
         self
     }
 
-    /// Claim a different host's tags, so `foo.<tag>.qv` variants resolve as they would there.
-    pub fn with_host_tags(mut self, tags: &[&str]) -> Self {
-        self.host_tags = Some(tags.iter().map(|t| t.to_string()).collect());
-        self
-    }
-
-    /// A capability-scoped host with no io signatures at all — io-referencing code fails at
-    /// compile time.
+    /// A host with no io implementations attached at all — io-referencing code compiles
+    /// (signatures are universal) and errors only when a call is actually reached.
     pub fn scoped_no_io(mut self) -> Self {
         self.capabilities = Capabilities::None;
         self
     }
 
-    /// The browser's capability set — system builtins plus `fetch`, no sockets or filesystem
-    /// — with the web host's module tags, so `foo.web.qv` variants resolve. Signatures only
-    /// for `fetch`: this type-checks browser code from a native build, which is the whole
-    /// point (nothing else compiles the web variants).
+    /// The browser's capability shape — the system builtins attached, no sockets or
+    /// filesystem.
     pub fn scoped_web(mut self) -> Self {
         self.capabilities = Capabilities::Web;
-        self.host_tags = Some(vec!["web".to_string()]);
         self
     }
 
@@ -268,38 +257,20 @@ impl TestBuilder {
         // Initialize virtual time for testing
         let virtual_time_ms = Arc::new(AtomicU64::new(0));
 
-        // Build builtin registry: the always-set plus the io signature union — the
-        // harness compiles std modules that reference io builtins even without io;
-        // `with_io` only attaches the native implementations.
+        // Every registry carries the universal signature contract — compilation is
+        // host-independent — and the capability shape decides only which implementations
+        // attach, i.e. what this test host can actually run.
         let mut builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
-            &quiver_core::builtins::core_modules(),
+            &quiver_core::builtins::universal_modules(),
         );
         match self.capabilities {
-            Capabilities::Full => {
-                for module in quiver_core::builtins::io_modules()
-                    .into_iter()
-                    .chain(quiver_core::builtins::tls_modules())
-                {
-                    module(&mut builtins);
-                }
-            }
-            Capabilities::SystemOnly => {
-                for module in quiver_core::builtins::system_modules() {
-                    module(&mut builtins);
-                }
-                // The point of the group: implementations alone make it runnable.
+            // Full attaches via `with_io` below; None attaches nothing at all.
+            Capabilities::Full | Capabilities::None => {}
+            // The system builtins are synchronous host reads, so implementations alone
+            // make them runnable — no effect backend. This is a browser's shape.
+            Capabilities::SystemOnly | Capabilities::Web => {
                 quiver_io::attach_system_builtins(&mut builtins);
             }
-            Capabilities::Web => {
-                for module in quiver_core::builtins::system_modules()
-                    .into_iter()
-                    .chain(quiver_core::builtins::fetch_modules())
-                {
-                    module(&mut builtins);
-                }
-                quiver_io::attach_system_builtins(&mut builtins);
-            }
-            Capabilities::None => {}
         }
 
         // Add I/O builtins if I/O is enabled
@@ -308,6 +279,7 @@ impl TestBuilder {
             quiver_io::attach_file_builtins(&mut builtins);
             quiver_io::attach_system_builtins(&mut builtins);
             quiver_io::attach_tls_builtins(&mut builtins);
+            quiver_io::attach_http_builtins(&mut builtins);
         }
 
         // Create workers with virtual time function. The harness drives the environment itself
@@ -369,17 +341,12 @@ impl TestBuilder {
             }
             None => PackageResolver::memory(self.modules),
         };
-        let resolver = Box::new(match self.host_tags {
-            Some(tags) => resolver.with_host_tags(tags),
-            None => resolver,
-        });
+        let resolver = Box::new(resolver);
         let mut repl =
             Repl::new(&mut environment, resolver, builtins).expect("Failed to create REPL");
-        // The shared store is keyed on a fingerprint that doesn't cover the registry, so only the
-        // full-capability shape (what every other test builds) may use it.
-        if self.capabilities == Capabilities::Full {
-            repl.set_artifact_store(ARTIFACTS.with(Rc::clone));
-        }
+        // Every capability shape compiles against the same universal signatures, so all
+        // of them may share the artifact store — implementations don't reach compilation.
+        repl.set_artifact_store(ARTIFACTS.with(Rc::clone));
         if self.debug || self.compile_fuel.is_some() || self.compile_cancel.is_some() {
             let mut options = quiver_compiler::compiler::CompileOptions {
                 debug: self.debug,

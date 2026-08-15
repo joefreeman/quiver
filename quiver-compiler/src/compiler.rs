@@ -308,11 +308,9 @@ impl std::fmt::Display for Error {
                 "'{written}' reaches above the outermost function: each '$' names one enclosing function"
             ),
             Error::Noted { error, note } => write!(f, "{error} ({note})"),
-            Error::BuiltinUndefined(name) => write!(
-                f,
-                "builtin `__{name}__` is not available on this host (its capability \
-                 group is not registered)"
-            ),
+            Error::BuiltinUndefined(name) => {
+                write!(f, "unknown builtin `__{name}__`")
+            }
             Error::FunctionUndefined(index) => write!(f, "Undefined function: {index}"),
             Error::TypeUnresolved(name) => write!(f, "Unresolved type: {name}"),
             Error::TypeAliasMissing(name) => write!(f, "Unknown type alias: {name}"),

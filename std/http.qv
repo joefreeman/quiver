@@ -22,14 +22,6 @@
 
 'response = Response[status: 'int, headers: 'pairs, body: 'bin]
 
-// How a client reaches the network. The URL says where to connect and the request says what
-// to send — a transport needs both, since the request line carries only the target.
-//
-// This lives here, in the shared vocabulary, rather than in `%http/client`: every transport
-// implementation must name the type too, and a transport importing the client (which imports
-// the transport) would be a cycle.
-'transport = [request: #[(url): '%url, (request): '] -> ('response | [])]
-
 'parsed = Incomplete | Bad[status: 'int, reason: '%str] | [', 'bin]
 
 // ASCII-lowercased bytes (for case-insensitive names).

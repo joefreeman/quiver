@@ -161,17 +161,20 @@ fn test_non_stream_resource_is_rejected() {
 }
 
 #[test]
-fn test_scoped_host_rejects_io_builtins_at_compile_time() {
-    // A capability-scoped registry: referencing an io builtin — directly or via a std
-    // module that uses one — is a pointed compile error, not a runtime trap.
+fn test_scoped_host_rejects_io_builtins_at_call_time() {
+    // Signatures are universal, so io-referencing code compiles on any host — naming a
+    // builtin, or merely holding a reference to one, costs nothing. The capability check
+    // is at the call: a host that never attached the implementation errors there.
     quiver()
         .scoped_no_io()
         .evaluate(r#"f = &__tcp_connect__; Ok"#)
-        .expect_error_containing("not available on this host");
+        .expect("Ok");
     quiver()
         .scoped_no_io()
         .evaluate(r#"%tcp.connect [0x7f000001, 80]"#)
-        .expect_error_containing("not available on this host");
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "builtin __tcp_connect__ is not available on this host".to_string(),
+        ));
 }
 
 #[test]
@@ -210,14 +213,18 @@ fn test_system_only_host_runs_clocks_and_entropy() {
 
 #[test]
 fn test_system_only_host_still_rejects_file_and_network() {
-    // The groups are separable: granting clocks and entropy grants nothing else, so a browser
-    // program naming a socket or a file fails to compile rather than failing to run.
+    // The groups are separable: granting clocks and entropy grants nothing else, so a
+    // socket or file call on this host still errors — at the call, naming the builtin.
     quiver()
         .scoped_system_only()
         .evaluate(r#"%tcp.connect [0x7f000001, 80]"#)
-        .expect_error_containing("not available on this host");
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "builtin __tcp_connect__ is not available on this host".to_string(),
+        ));
     quiver()
         .scoped_system_only()
-        .evaluate(r#"f = &__file_open__; Ok"#)
-        .expect_error_containing("not available on this host");
+        .evaluate(r#"%fs.stat "/tmp""#)
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "builtin __filesystem_stat__ is not available on this host".to_string(),
+        ));
 }

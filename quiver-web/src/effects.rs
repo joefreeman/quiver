@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// registry to rebuild tuples with. `%http` owns the header grammar on the Quiver side.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WebEffect {
-    Fetch {
+    HttpRequest {
         method: Vec<u8>,
         url: Vec<u8>,
         headers: Vec<u8>,
@@ -24,10 +24,10 @@ pub enum WebEffect {
 
 impl Effect for WebEffect {
     fn resource_id(&self) -> Option<ResourceId> {
-        // Fetch creates the body stream rather than operating on one, so it needs no
+        // The request creates the body stream rather than operating on one, so it needs no
         // ownership check. Reads of that stream go through `arm_stream`, not an effect.
         match self {
-            WebEffect::Fetch { .. } => None,
+            WebEffect::HttpRequest { .. } => None,
         }
     }
 }

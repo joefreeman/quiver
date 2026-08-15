@@ -95,6 +95,15 @@ pub enum NativeEffect {
         cert: Vec<u8>,
         key: Vec<u8>,
     },
+
+    /// A whole HTTP exchange as one effect — the native backing of `__http_request__`,
+    /// driven by the backend over its own socket (see `native_backend`'s HTTP section).
+    HttpRequest {
+        method: Vec<u8>,
+        url: Vec<u8>,
+        headers: Vec<u8>,
+        body: Vec<u8>,
+    },
 }
 
 impl Effect for NativeEffect {
@@ -106,7 +115,8 @@ impl Effect for NativeEffect {
             | NativeEffect::ReadDirOpen { .. }
             | NativeEffect::DnsResolve { .. }
             | NativeEffect::TcpConnect { .. }
-            | NativeEffect::TcpListen { .. } => None,
+            | NativeEffect::TcpListen { .. }
+            | NativeEffect::HttpRequest { .. } => None,
 
             // Resource-using effects
             NativeEffect::FileRead { resource_id, .. }

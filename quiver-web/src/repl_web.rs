@@ -179,9 +179,7 @@ pub(crate) fn create_session_resolver(
     files: HashMap<String, String>,
 ) -> std::result::Result<Box<PackageResolver>, String> {
     PackageResolver::memory_files(files)
-        // The browser's tag: `%http/transport` resolves to `transport.web.qv` (over `fetch`)
-        // rather than `transport.native.qv` (over sockets, which do not exist here).
-        .map(|resolver| Box::new(resolver.with_host_tags(vec!["web".to_string()])))
+        .map(Box::new)
         .map_err(|e| e.to_string())
 }
 

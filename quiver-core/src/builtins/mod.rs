@@ -454,9 +454,15 @@ pub struct RuntimeDeclarations {
 }
 
 /// A registered builtin: its implementation, purity class, and type signature.
+///
+/// The implementation is optional because a signature is universal while an
+/// implementation is a host's: every registry carries the full signature contract (which
+/// is what makes compilation host-independent), and an executing host attaches
+/// implementations for the capabilities it actually provides. Calling a builtin whose
+/// implementation was never attached is a runtime error naming the builtin.
 #[derive(Clone)]
 pub struct BuiltinEntry<E: Effect> {
-    pub implementation: BuiltinFn<E>,
+    pub implementation: Option<BuiltinFn<E>>,
     pub purity: Purity,
     pub parameter: TypeSpec,
     pub result: TypeSpec,
@@ -505,7 +511,29 @@ impl<E: Effect> BuiltinRegistry<E> {
         self.functions.insert(
             name,
             BuiltinEntry {
-                implementation: impl_fn,
+                implementation: Some(impl_fn),
+                purity,
+                parameter: param,
+                result,
+                type_parameters: vec![],
+            },
+        );
+    }
+
+    /// Register a builtin's signature alone — the universal contract, with no
+    /// implementation. An executing host that provides the capability attaches one via
+    /// [`Self::attach_implementation`]; on any other host a call errors at runtime.
+    pub fn register_signature(
+        &mut self,
+        name: String,
+        purity: Purity,
+        param: TypeSpec,
+        result: TypeSpec,
+    ) {
+        self.functions.insert(
+            name,
+            BuiltinEntry {
+                implementation: None,
                 purity,
                 parameter: param,
                 result,
@@ -534,7 +562,7 @@ impl<E: Effect> BuiltinRegistry<E> {
         self.functions.insert(
             name,
             BuiltinEntry {
-                implementation: impl_fn,
+                implementation: Some(impl_fn),
                 purity,
                 parameter: param,
                 result,
@@ -553,11 +581,11 @@ impl<E: Effect> BuiltinRegistry<E> {
     /// Attach (replace) the implementation of an already-registered builtin, keeping its
     /// signature. This is how an executing host backs a builtin whose *signature* is part of the
     /// universal contract but whose *implementation* it provides — e.g. the IO builtins, whose
-    /// signatures are registered everywhere (via [`core_modules`]) but whose runtime differs per
-    /// host (native io-uring, a web backend, or none in a type-checker).
+    /// signatures are registered everywhere (via [`universal_modules`]) but whose runtime differs
+    /// per host (native io-uring, a web backend, or none in a type-checker).
     pub fn attach_implementation(&mut self, name: &str, impl_fn: BuiltinFn<E>) {
         match self.functions.get_mut(name) {
-            Some(entry) => entry.implementation = impl_fn,
+            Some(entry) => entry.implementation = Some(impl_fn),
             None => debug_assert!(
                 false,
                 "attaching an implementation for unregistered builtin `{name}`; its signature \
@@ -618,11 +646,12 @@ impl<E: Effect> BuiltinRegistry<E> {
         registry
     }
 
-    /// Get the implementation function for a builtin by function name
+    /// The implementation attached for a builtin — `None` both for an unknown name and
+    /// for a signature this host never backed; either way a call errors at runtime.
     pub fn get_implementation(&self, function: &str) -> Option<BuiltinFn<E>> {
         self.functions
             .get(function)
-            .map(|entry| entry.implementation)
+            .and_then(|entry| entry.implementation)
     }
 
     /// Get the purity class for a builtin by function name
@@ -999,11 +1028,12 @@ pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 /// with their universal implementations, plus refs, control, and process management —
 /// the language runtime, independent of any host capability.
 ///
-/// The IO builtins are deliberately NOT here: a registry is a host's *capability
-/// set*, and hosts compose in the [`io_modules`] groups they can actually execute
-/// (attaching implementations via [`BuiltinRegistry::attach_implementation`]).
-/// Referencing a builtin absent from the registry is a compile error, so "the
-/// program compiles" means "this host can run it".
+/// The IO builtins are not here because they have no universal implementations, only
+/// universal *signatures* — see [`universal_modules`], which every compiling registry
+/// includes so that compilation is host-independent. Which of those signatures a host
+/// actually backs is decided by what it attaches
+/// ([`BuiltinRegistry::attach_implementation`]); calling one it never attached is a
+/// runtime error, not a compile error.
 pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
     vec![
         register_binary_builtins,
@@ -1017,8 +1047,8 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
 }
 
 /// The IO builtin signature groups (file, network + stream declarations, system
-/// clocks/entropy) — the capability vocabulary an executing host opts into, or a
-/// type-checking host (the LSP) registers in full as the permissive union.
+/// clocks/entropy) — capability vocabulary an executing host backs by attaching
+/// implementations.
 pub fn io_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
     vec![io::register_io_signatures, io::register_system_signatures]
 }
@@ -1036,10 +1066,23 @@ pub fn tls_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
     vec![io::register_tls_signatures]
 }
 
-/// The `fetch` builtin — a browser's whole io capability, since it cannot open a socket.
-/// Deliberately *not* part of [`io_modules`]: a host with sockets builds HTTP over them in
-/// Quiver, and registering both would let a program compile against `fetch` on a host where
-/// it means something else.
-pub fn fetch_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
-    vec![io::register_fetch_signatures]
+/// The `http_request` builtin: a whole HTTP exchange as one mediated effect. A browser
+/// backs it with its `fetch` API (and can back nothing lower-level); a native host backs
+/// it over its own sockets. Its own group so a restricted host can grant mediated HTTP
+/// without granting raw sockets.
+pub fn http_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
+    vec![io::register_http_signatures]
+}
+
+/// Every builtin module — the full signature contract, independent of any host. This is
+/// what a *compiling* registry registers, whatever host it runs on: signatures are
+/// universal, so a program (and its content-keyed module artifacts) compiles identically
+/// everywhere, and which builtins a program can actually *call* is decided by the
+/// executing host's attached implementations, at runtime.
+pub fn universal_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
+    let mut modules = core_modules();
+    modules.extend(io_modules());
+    modules.extend(tls_modules());
+    modules.extend(http_modules());
+    modules
 }
