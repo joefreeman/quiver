@@ -1820,5 +1820,7 @@ fn test_process_type_clause_stops_at_a_newline() {
 fn test_process_type_arrow_form_is_gone() {
     // The pre-clause spelling `@'m -> 'r` no longer parses: sending a message does
     // not yield the result — awaiting does, and that grant is spelled `!'r`.
-    quiver().evaluate("'bad = @'int -> 'int").expect_parse_failure();
+    quiver()
+        .evaluate("'bad = @'int -> 'int")
+        .expect_parse_failure();
 }

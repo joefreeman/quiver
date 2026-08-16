@@ -16,7 +16,9 @@ fn register_lookup_send_await() {
 
 #[test]
 fn lookup_of_unbound_key_is_nil() {
-    quiver().evaluate("%registry.lookup<@'int> Missing").expect("[]");
+    quiver()
+        .evaluate("%registry.lookup<@'int> Missing")
+        .expect("[]");
 }
 
 #[test]
@@ -111,7 +113,9 @@ fn cascade_teardown_frees_the_name() {
 #[test]
 fn all_names_of_a_process_free_together() {
     quiver()
-        .evaluate("p = @#{ !'int }; %registry.register [First, &p]; %registry.register [Second, &p]")
+        .evaluate(
+            "p = @#{ !'int }; %registry.register [First, &p]; %registry.register [Second, &p]",
+        )
         .expect("Ok")
         .then_evaluate(
             "%proc.kill &p; !p ~> =[]; \

@@ -1,10 +1,11 @@
 mod common;
 use common::*;
 
-// The runtime JSON codec: `%json.parse` (`Str['bin] -> '%json | []`) and `%json.stringify`
-// (`'%json -> Str['bin]`). These share the `%parse` combinators with the `%json{…}` dialect
-// but build `'%json` values directly rather than `%meta` code (see std/json.qv); the dialect
-// itself is covered in dialects.rs.
+// The runtime JSON codec — `%json.parse` (`Str['bin] -> '%json | []`) and `%json.stringify`
+// (`'%json -> Str['bin]`) — and the document-model query/update API (`get`, `set`, `update`,
+// `delete`, `merge`, and the `%dict`/`%list` bridges), all over `'%json`. The codec shares
+// the `%parse` combinators with the `%json{…}` dialect but builds `'%json` values directly
+// rather than `%meta` code (see std/json.qv); the dialect itself is covered in dialects.rs.
 //
 // A literal `{` in a Quiver string opens an interpolation hole, so inline JSON objects escape
 // it as `\{`; runtime input from files/sockets needs no such escaping.
@@ -201,4 +202,220 @@ fn test_round_trip_complex_document() {
             r#"doc = "\{\"user\":\{\"name\":\"Ada \\\"L\\\"\",\"age\":36,\"active\":true,\"roles\":[\"admin\",\"dev\"],\"manager\":null},\"scores\":[10,-5,0],\"empty_obj\":\{},\"empty_arr\":[],\"path\":\"a\\\\b\\nc\"}"; doc ~> %json.parse ~> =('%json)v; v ~> %json.stringify ~> =&doc"#,
         )
         .expect("Ok");
+}
+
+#[test]
+fn test_get_object_key_and_array_index() {
+    quiver()
+        .evaluate(r#"%json{ { "a": 1, "b": [10, 20] } } ~> %json.get [~, "a"]"#)
+        .expect("1");
+    // An index applied to the array a key answered — one polymorphic `get`, chained.
+    quiver()
+        .evaluate(r#"%json{ { "b": [10, 20] } } ~> %json.get [~, "b"] ~> %json.get [~, 1]"#)
+        .expect("20");
+}
+
+#[test]
+fn test_get_misses_are_nil() {
+    // Absent key; key applied to an array; index applied to an object; index out of range;
+    // negative index.
+    quiver()
+        .evaluate(r#"%json{ { "a": 1 } } ~> %json.get [~, "z"]"#)
+        .expect("[]");
+    quiver()
+        .evaluate(r#"%json{ [1, 2] } ~> %json.get [~, "a"]"#)
+        .expect("[]");
+    quiver()
+        .evaluate(r#"%json{ { "a": 1 } } ~> %json.get [~, 0]"#)
+        .expect("[]");
+    quiver()
+        .evaluate(r#"%json{ [1, 2] } ~> %json.get [~, 5]"#)
+        .expect("[]");
+    quiver()
+        .evaluate(r#"%json{ [1, 2] } ~> %json.get [~, -1]"#)
+        .expect("[]");
+}
+
+#[test]
+fn test_get_accepts_nil_so_lookups_chain() {
+    // The first miss answers nil; the later `get` accepts it and answers nil again, so a
+    // deep lookup is one pipeline with no narrowing between steps.
+    quiver()
+        .evaluate(r#"%json{ { "a": 1 } } ~> %json.get [~, "z"] ~> %json.get [~, "x"]"#)
+        .expect("[]");
+}
+
+#[test]
+fn test_get_path() {
+    quiver()
+        .evaluate(r#"%json{ { "users": [{ "name": "ada" }] } } ~> %json.get [~, %list{ "users", 0, "name" }]"#)
+        .expect(r#""ada""#);
+    // The empty path names the value itself.
+    quiver()
+        .evaluate(r#"doc = %json{ { "a": 1 } }; %json.get [doc, %list{}] ~> =&doc"#)
+        .expect("Ok");
+    // A path over a missing intermediate is nil.
+    quiver()
+        .evaluate(r#"%json{ { "a": 1 } } ~> %json.get [~, %list{ "z", "x" }]"#)
+        .expect("[]");
+}
+
+#[test]
+fn test_get_duplicate_keys_last_wins() {
+    // Only `parse` can introduce duplicates; `get` answers the last binding, matching what
+    // mainstream parsers keep.
+    quiver()
+        .evaluate(r#""\{\"a\": 1, \"a\": 2}" ~> %json.parse ~> %json.get [~, "a"]"#)
+        .expect("2");
+}
+
+#[test]
+fn test_set_object_key() {
+    // Present: replaced in place, order kept. Absent: appended at the end.
+    quiver()
+        .evaluate(r#"%json{ { "a": 1, "b": 2 } } ~> %json.set [~, "a", 9] ~> =('%json)v; v ~> %json.stringify"#)
+        .expect(r#""{\"a\":9,\"b\":2}""#);
+    quiver()
+        .evaluate(
+            r#"%json{ { "a": 1 } } ~> %json.set [~, "c", 3] ~> =('%json)v; v ~> %json.stringify"#,
+        )
+        .expect(r#""{\"a\":1,\"c\":3}""#);
+    // Duplicates collapse: the first occurrence is rewritten, the rest are dropped.
+    quiver()
+        .evaluate(r#""\{\"a\": 1, \"b\": 2, \"a\": 3}" ~> %json.parse ~> %json.set [~, "a", 9] ~> =('%json)v; v ~> %json.stringify"#)
+        .expect(r#""{\"a\":9,\"b\":2}""#);
+}
+
+#[test]
+fn test_set_array_index_and_path() {
+    quiver()
+        .evaluate(
+            r#"%json{ [1, 2, 3] } ~> %json.set [~, 1, 9] ~> =('%json)v; v ~> %json.stringify"#,
+        )
+        .expect(r#""[1,9,3]""#);
+    quiver()
+        .evaluate(r#"%json{ { "tags": [1, 2] } } ~> %json.set [~, %list{ "tags", 0 }, 9] ~> =('%json)v; v ~> %json.stringify"#)
+        .expect(r#""{\"tags\":[9,2]}""#);
+    // The empty path replaces the whole value.
+    quiver()
+        .evaluate(r#"%json{ { "a": 1 } } ~> %json.set [~, %list{}, 5]"#)
+        .expect("5");
+}
+
+#[test]
+fn test_set_misses_are_nil() {
+    // Out-of-range index; a path through a missing container (no vivification); a nil
+    // replacement value propagates instead of being embedded.
+    quiver()
+        .evaluate(r#"%json{ [1, 2] } ~> %json.set [~, 5, 9]"#)
+        .expect("[]");
+    quiver()
+        .evaluate(r#"%json{ { "a": 1 } } ~> %json.set [~, %list{ "z", "x" }, 9]"#)
+        .expect("[]");
+    quiver()
+        .evaluate(r#"%json{ { "a": 1 } } ~> %json.set [~, "a", %json.get [%json{ {} }, "z"]]"#)
+        .expect("[]");
+}
+
+#[test]
+fn test_update() {
+    quiver()
+        .evaluate(r#"%json{ { "n": 2 } } ~> %json.update [~, "n", #{ =('int)i; %num.mul [i, 10] }] ~> %json.get [~, "n"]"#)
+        .expect("20");
+    // A path key: the leaf is transformed and every level rebuilt around it.
+    quiver()
+        .evaluate(r#"%json{ { "a": { "n": [5, 7] } } } ~> %json.update [~, %list{ "a", "n", 1 }, #{ =('int)i; %num.mul [i, 10] }] ~> =('%json)v; v ~> %json.stringify"#)
+        .expect(r#""{\"a\":{\"n\":[5,70]}}""#);
+    // An absent target is nil — for a single key and through a path — and so is `f`
+    // answering nil.
+    quiver()
+        .evaluate(r#"%json{ { "n": 2 } } ~> %json.update [~, "z", #{ ~ }]"#)
+        .expect("[]");
+    quiver()
+        .evaluate(r#"%json{ { "n": 2 } } ~> %json.update [~, %list{ "z", "x" }, #{ ~ }]"#)
+        .expect("[]");
+    quiver()
+        .evaluate(r#"%json{ { "n": 2 } } ~> %json.update [~, "n", #{ [] }]"#)
+        .expect("[]");
+}
+
+#[test]
+fn test_delete() {
+    quiver()
+        .evaluate(r#"%json{ { "a": 1, "b": 2 } } ~> %json.delete [~, "a"] ~> =('%json)v; v ~> %json.stringify"#)
+        .expect(r#""{\"b\":2}""#);
+    quiver()
+        .evaluate(
+            r#"%json{ [1, 2, 3] } ~> %json.delete [~, 1] ~> =('%json)v; v ~> %json.stringify"#,
+        )
+        .expect(r#""[1,3]""#);
+    quiver()
+        .evaluate(r#"%json{ { "a": [1, 2] } } ~> %json.delete [~, %list{ "a", 0 }] ~> =('%json)v; v ~> %json.stringify"#)
+        .expect(r#""{\"a\":[2]}""#);
+    // Every duplicate occurrence is removed.
+    quiver()
+        .evaluate(r#""\{\"a\": 1, \"b\": 2, \"a\": 3}" ~> %json.parse ~> %json.delete [~, "a"] ~> =('%json)v; v ~> %json.stringify"#)
+        .expect(r#""{\"b\":2}""#);
+}
+
+#[test]
+fn test_delete_is_idempotent_but_kind_strict() {
+    // Absent key or index, or a missing intermediate: unchanged. Wrong kind: nil.
+    quiver()
+        .evaluate(r#"doc = %json{ { "a": 1 } }; %json.delete [doc, "z"] ~> =&doc"#)
+        .expect("Ok");
+    quiver()
+        .evaluate(r#"doc = %json{ [1] }; %json.delete [doc, 5] ~> =&doc"#)
+        .expect("Ok");
+    quiver()
+        .evaluate(r#"doc = %json{ { "a": 1 } }; %json.delete [doc, %list{ "z", "x" }] ~> =&doc"#)
+        .expect("Ok");
+    quiver()
+        .evaluate(r#"%json{ [1] } ~> %json.delete [~, "a"]"#)
+        .expect("[]");
+    // Deleting the whole value (the empty path) leaves nothing.
+    quiver()
+        .evaluate(r#"%json{ { "a": 1 } } ~> %json.delete [~, %list{}]"#)
+        .expect("[]");
+}
+
+#[test]
+fn test_merge() {
+    // First object's order with the second's values winning per key, then the second's
+    // remaining pairs.
+    quiver()
+        .evaluate(r#"[%json{ { "a": 1, "b": 2 } }, %json{ { "b": 20, "c": 30 } }] ~> %json.merge ~> =('%json)v; v ~> %json.stringify"#)
+        .expect(r#""{\"a\":1,\"b\":20,\"c\":30}""#);
+    // Anything but two objects is nil.
+    quiver()
+        .evaluate(r#"[%json{ [1] }, %json{ {} }] ~> %json.merge"#)
+        .expect("[]");
+}
+
+#[test]
+fn test_dict_and_list_bridges() {
+    quiver()
+        .evaluate(r#"%json{ { "a": 1 } } ~> %json.to_dict ~> =('%dict<'%str, '%json>)d; %dict.get [d, "a"]"#)
+        .expect("1");
+    // Later duplicates win, matching `get`.
+    quiver()
+        .evaluate(r#""\{\"a\": 1, \"a\": 2}" ~> %json.parse ~> %json.to_dict ~> =('%dict<'%str, '%json>)d; %dict.get [d, "a"]"#)
+        .expect("2");
+    quiver()
+        .evaluate(r#"%json{ [1] } ~> %json.to_dict"#)
+        .expect("[]");
+    // Constructors: an Object from a pair list or a %dict, an Array from a list.
+    quiver()
+        .evaluate(r#"%json.object %list{ ["x", 1] } ~> %json.stringify"#)
+        .expect(r#""{\"x\":1}""#);
+    quiver()
+        .evaluate(r#"%json.object %dict{ "y" => 2 } ~> %json.get [~, "y"]"#)
+        .expect("2");
+    quiver()
+        .evaluate(r#"%json.array %list{ 1, 2 } ~> %json.stringify"#)
+        .expect(r#""[1,2]""#);
+    // Round trip: Object -> %dict -> Object preserves the entries (not the order).
+    quiver()
+        .evaluate(r#"%json{ { "m": { "x": 7 } } } ~> %json.to_dict ~> =('%dict<'%str, '%json>)d; %json.object d ~> %json.get [~, %list{ "m", "x" }]"#)
+        .expect("7");
 }
