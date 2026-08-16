@@ -44,7 +44,7 @@ fn test_parse_request_body_and_leftover() {
         .evaluate(
             r#""POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET /" ~> .0 ~> %http.parse_request ~ ~> =[r, rest]; [r.body, rest]"#,
         )
-        .expect(r#"[0x68656c6c6f, 0x474554202f]"#);
+        .expect(r#"[<68656c6c6f>, <474554202f>]"#);
 }
 
 #[test]
@@ -124,7 +124,7 @@ fn test_serialize_response() {
         .expect(r#""HTTP/1.1 404 Not Found\r\ncontent-length: 4\r\n\r\ngone""#);
     quiver()
         .evaluate(
-            r#"Response[status: 200, headers: Cons[["content-length", "0"], Nil], body: 0x] ~> %http.serialize_response ~ ~> Str[~]"#,
+            r#"Response[status: 200, headers: Cons[["content-length", "0"], Nil], body: <>] ~> %http.serialize_response ~ ~> Str[~]"#,
         )
         .expect(r#""HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n""#);
 }
@@ -165,7 +165,7 @@ fn test_served_connection_end_to_end() {
             };
             @{ [port: 4181, handler: handler] ~> %http/server.serve ~ } [];
             { ![50] | Ok };
-            [0x7f000001, 4181] ~> __tcp_connect__ ~ ~> =(\TcpSocket)sock;
+            [<7f000001>, 4181] ~> __tcp_connect__ ~ ~> =(\TcpSocket)sock;
             [sock, "GET /n/one HTTP/1.1\r\n\r\nGET /n/two HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __tcp_socket_write__ ~;
             [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin)r1;
             [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin)r2;
@@ -194,7 +194,7 @@ fn test_crashed_handler_answers_500_and_connection_survives() {
             };
             @{ [port: 4182, handler: handler] ~> %http/server.serve ~ } [];
             { ![50] | Ok };
-            [0x7f000001, 4182] ~> __tcp_connect__ ~ ~> =(\TcpSocket)sock;
+            [<7f000001>, 4182] ~> __tcp_connect__ ~ ~> =(\TcpSocket)sock;
             [sock, "GET /boom HTTP/1.1\r\n\r\nGET /ok HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __tcp_socket_write__ ~;
             [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin)r1;
             [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin)r2;
@@ -244,8 +244,8 @@ fn test_session_round_trip() {
     quiver()
         .evaluate(
             r#"
-            key = 0x000102030405060708090a0b0c0d0e0f;
-            resp = Response[status: 200, headers: Nil, body: 0x];
+            key = <000102030405060708090a0b0c0d0e0f>;
+            resp = Response[status: 200, headers: Nil, body: <>];
             r2 = [resp, key, Cons[["count", "7"], Cons[["name", "Ada L"], Nil]]] ~> %http/session.put ~;
             [r2.headers, "set-cookie"] ~> %http.header ~ ~> =Str[scb];
             [scb, 59, 0] ~> %bin.index ~ ~> =('int)semi;
@@ -263,7 +263,7 @@ fn test_session_rejects_tampering() {
     quiver()
         .evaluate(
             r#"
-            key = 0x000102030405060708090a0b0c0d0e0f;
+            key = <000102030405060708090a0b0c0d0e0f>;
             req = "GET / HTTP/1.1\r\nCookie: session=ff.00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[rq, _];
             r = [rq, key] ~> %http/session.get ~;
             { | r ~> =('%http.pairs)p => Forged | Rejected }
@@ -273,9 +273,9 @@ fn test_session_rejects_tampering() {
     quiver()
         .evaluate(
             r#"
-            key = 0x000102030405060708090a0b0c0d0e0f;
-            other = 0xff0102030405060708090a0b0c0d0e0f;
-            resp = Response[status: 200, headers: Nil, body: 0x];
+            key = <000102030405060708090a0b0c0d0e0f>;
+            other = <ff0102030405060708090a0b0c0d0e0f>;
+            resp = Response[status: 200, headers: Nil, body: <>];
             r2 = [resp, key, Cons[["a", "1"], Nil]] ~> %http/session.put ~;
             [r2.headers, "set-cookie"] ~> %http.header ~ ~> =Str[scb];
             [scb, 59, 0] ~> %bin.index ~ ~> =('int)semi;
@@ -292,7 +292,7 @@ fn test_session_rejects_tampering() {
 fn test_session_clear() {
     quiver()
         .evaluate(
-            r#"Response[status: 200, headers: Nil, body: 0x] ~> %http/session.clear ~ ~> =Response(headers: hs); [hs, "set-cookie"] ~> %http.header ~"#,
+            r#"Response[status: 200, headers: Nil, body: <>] ~> %http/session.clear ~ ~> =Response(headers: hs); [hs, "set-cookie"] ~> %http.header ~"#,
         )
         .expect(r#""session=; Path=/; Max-Age=0""#);
 }

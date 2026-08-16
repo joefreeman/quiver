@@ -44,7 +44,7 @@ lower_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 
 lower = #'%str {
   :doc "The string with ASCII letters lowercased."
-  =Str[b]; lower_loop [b, 0, %bin.length b, 0x] ~> Str[~]
+  =Str[b]; lower_loop [b, 0, %bin.length b, <>] ~> Str[~]
 }
 
 // The first value whose name matches case-insensitively, or nil.
@@ -119,7 +119,7 @@ pct_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (plus?): 'int, (acc): 'bin]
   }
 }
 
-pct_decode = #['bin, 'int] { pct_loop [$0, 0, %bin.length $0, $1, 0x] }
+pct_decode = #['bin, 'int] { pct_loop [$0, 0, %bin.length $0, $1, <>] }
 
 // --- request-target decomposition -------------------------------------------------------
 
@@ -142,7 +142,7 @@ segs_loop = #[(data): 'bin, (start): 'int, (pos): 'int, (len): 'int, (acc): 'seg
 path_segments = #'bin {
   =raw
   data = {
-    | %bin.length raw ~> =0 => 0x
+    | %bin.length raw ~> =0 => <>
     | %bin.get_byte [raw, 0] ~> =47 => %bin.slice [raw, 1, %bin.length raw]
     | raw
   }
@@ -571,8 +571,8 @@ parse_response_with = #[(data): 'bin, (eof): (Ok | []), (max_head): 'int, (max_b
                     [Response[status: status, headers: hs, body: $body], $rest]
                   }
                   {
-                    | bodyless? status => done [0x, %bin.slice [$data, bstart, len]]
-                    | header [hs, "transfer-encoding"] ~> =Str[te]; lower Str[te] ~> ="chunked" => chunk_step [$data, bstart, len, 0x] ~> {
+                    | bodyless? status => done [<>, %bin.slice [$data, bstart, len]]
+                    | header [hs, "transfer-encoding"] ~> =Str[te]; lower Str[te] ~> ="chunked" => chunk_step [$data, bstart, len, <>] ~> {
                       | =Incomplete => Incomplete
                       | =Bad[reason: r] => Bad[reason: r]
                       | =[body, e] => {
@@ -610,7 +610,7 @@ parse_response_with = #[(data): 'bin, (eof): (Ok | []), (max_head): 'int, (max_b
                           __integer_subtract__ [len, bstart],
                           $max_body,
                         ] ~> =1 => Bad[reason: "response body too large"]
-                      | done [%bin.slice [$data, bstart, len], 0x]
+                      | done [%bin.slice [$data, bstart, len], <>]
                     }
                     | Incomplete
                   }
@@ -700,7 +700,7 @@ serialize_request = #' {
   %bin.concat ["{head}\r\n" ~> .0, b]
 }
 
-request = #[(method): 'method, (target): '%str, headers: 'pairs = Nil, body: 'bin = 0x] {
+request = #[(method): 'method, (target): '%str, headers: 'pairs = Nil, body: 'bin = <>] {
   :doc "Builds an HTTP/1.1 request, deriving `path` and `query` from the target the way the server's parser would — so a client-built request and a parsed one are the same value."
   // Positional access rather than `=[path, query]`: `split_target` answers a union of two
   // tuple shapes, and a destructure of that is not seen as total, which would make this
@@ -752,14 +752,14 @@ pct_enc_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
   }
 }
 
-pct_encode = #'bin { pct_enc_loop [$, 0, %bin.length $, 0x] }
+pct_encode = #'bin { pct_enc_loop [$, 0, %bin.length $, <>] }
 
 form_encode = #'pairs {
   :doc "Ordered [name, value] pairs as an application/x-www-form-urlencoded body — the inverse of form_decode."
   %list.iter ~ ~> %iter.map [
     ~,
     #{ =[Str[n], Str[v]]; pct_encode n ~> %bin.append [~, 61, 1] ~> %bin.concat [~, pct_encode v] },
-  ] ~> %iter.intersperse [~, 0x26] ~> %iter.fold [~, 0x, %bin.concat]
+  ] ~> %iter.intersperse [~, <26>] ~> %iter.fold [~, <>, %bin.concat]
 }
 
 // One `k=v` cookie segment (edges trimmed, value verbatim) prepended to the accumulator;

@@ -29,7 +29,7 @@ fn test_generic_type_with_different_instantiations() {
         .evaluate(
             r#"
             'list<'t> = Nil | Cons['t, ^];
-            Cons[0xaa, Cons[0xbb, Nil]];
+            Cons[<aa>, Cons[<bb>, Nil]];
             "#,
         )
         .expect_type("Cons['bin, Cons['bin, Nil]]");
@@ -47,7 +47,7 @@ fn test_generic_function_single_type_param() {
         .expect_type("'int");
 
     quiver()
-        .evaluate("f = #<'t>'t { =x => x }; 0x00 ~> f ~")
+        .evaluate("f = #<'t>'t { =x => x }; <00> ~> f ~")
         .expect_type("'bin");
 }
 
@@ -57,17 +57,17 @@ fn test_generic_function_multiple_type_params() {
         .evaluate(
             r#"
             pair = #<'a, 'b>['a, 'b] { =[x, y] => [y, x] };
-            [1, 0x00] ~> pair ~
+            [1, <00>] ~> pair ~
             "#,
         )
-        .expect("[0x00, 1]");
+        .expect("[<00>, 1]");
 }
 
 #[test]
 fn test_generic_function_with_same_type_param_widening() {
     // Inline functions are not auto-called; bind first, then call
     quiver()
-        .evaluate("f = #<'t>['t, 't] { =[a, _] => a }; [1, 0x00] ~> f ~")
+        .evaluate("f = #<'t>['t, 't] { =[a, _] => a }; [1, <00>] ~> f ~")
         .expect_type("'bin | 'int");
 }
 
@@ -253,11 +253,11 @@ fn test_generic_type_with_multiple_fields() {
         .evaluate(
             r#"
             'triple<'a, 'b, 'c> = Triple['a, 'b, 'c];
-            t = Triple[1, "a", 0x00];
+            t = Triple[1, "a", <00>];
             [t.0, t.1, t.2]
             "#,
         )
-        .expect("[1, \"a\", 0x00]");
+        .expect("[1, \"a\", <00>]");
 }
 
 #[test]
@@ -326,8 +326,8 @@ fn test_explicit_type_application_pins_and_checks() {
 fn test_explicit_type_application_prefix_partial() {
     // A prefix of the declared parameters may be pinned; the rest stay inferred.
     quiver()
-        .evaluate(r#"pair = #<'t, 'u>['t, 'u] { $ }; pair<'int> [1, 0x0a]"#)
-        .expect("[1, 0x0a]");
+        .evaluate(r#"pair = #<'t, 'u>['t, 'u] { $ }; pair<'int> [1, <0a>]"#)
+        .expect("[1, <0a>]");
 }
 
 #[test]

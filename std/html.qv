@@ -546,7 +546,7 @@ instrument_attrs = #[(items): 'pattrs, (ist): 'ist, (elem): 'int] {
       ist2 = v ~> {
         | =Lit[Str[lv]] => $ist[
           ...,
-          cur: %bin.concat [%bin.append [$ist.cur, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> esc_attr [lv, 0, %bin.length lv, ~] ~> %bin.append [
+          cur: %bin.concat [%bin.append [$ist.cur, 32, 1], n] ~> %bin.concat [~, <3d22>] ~> esc_attr [lv, 0, %bin.length lv, ~] ~> %bin.append [
             ~,
             34,
             1,
@@ -569,7 +569,7 @@ instrument_attrs = #[(items): 'pattrs, (ist): 'ist, (elem): 'int] {
           ]
           $ist[
             ...,
-            cur: 0x,
+            cur: <>,
             runs: Cons[$ist.cur, $ist.runs],
             holes: Cons[entry, $ist.holes],
             ci: __integer_add__ [$ist.ci, 1],
@@ -629,7 +629,7 @@ instrument_list = #[(self): #^ -> 'ist, (items): 'pnodes, (ist): 'ist] {
               ist3 = $self [$self, kids, ist2]
               ist3[
                 ...,
-                cur: %bin.concat [ist3.cur, 0x3c2f] ~> %bin.concat [~, t] ~> %bin.append [~, 62, 1],
+                cur: %bin.concat [ist3.cur, <3c2f>] ~> %bin.concat [~, t] ~> %bin.append [~, 62, 1],
               ]
             }
           }
@@ -716,7 +716,7 @@ parse = #[(content): '%str, (term): '%meta.cb] {
 expand = #'pnodes {
   :doc "Emits a parse tree as the expression a dialect returns: the node-tree construction, with the template provenance (instrumented statics and hole values) attached. Emitted calls name %html explicitly, so the expression stays valid returned from another module's dialect."
   roots = $
-  ist = instrument_list [instrument_list, roots, [cur: 0x, runs: Nil, holes: Nil, ci: 0, ei: 0]]
+  ist = instrument_list [instrument_list, roots, [cur: <>, runs: Nil, holes: Nil, ci: 0, ei: 0]]
   Call[
     module: "html",
     member: "with_template",
@@ -753,14 +753,14 @@ render_attrs = #<'d>[(items): 'attrs<'d>, (acc): 'bin] {
       acc2 = v ~> {
         | =[] => $acc
         | =Ok => %bin.concat [%bin.append [$acc, 32, 1], n]
-        | =Str[vb] => %bin.concat [%bin.append [$acc, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> esc_attr [vb, 0, %bin.length vb, ~] ~> %bin.append [
+        | =Str[vb] => %bin.concat [%bin.append [$acc, 32, 1], n] ~> %bin.concat [~, <3d22>] ~> esc_attr [vb, 0, %bin.length vb, ~] ~> %bin.append [
           ~,
           34,
           1,
         ]
         | =Data[payload] => {
           %data.encode payload ~> =Str[eb]
-          %bin.concat [%bin.append [$acc, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> esc_attr [eb, 0, %bin.length eb, ~] ~> %bin.append [
+          %bin.concat [%bin.append [$acc, 32, 1], n] ~> %bin.concat [~, <3d22>] ~> esc_attr [eb, 0, %bin.length eb, ~] ~> %bin.append [
             ~,
             34,
             1,
@@ -789,7 +789,7 @@ render_list = #<'e>[(self): #^ -> 'bin, (items): 'nodes<'e>, (acc): 'bin] {
               | {
                 inner = $self [$self, kids, %bin.append [opened, 62, 1]]
 
-                %bin.concat [inner, 0x3c2f] ~> %bin.concat [~, t] ~> %bin.append [~, 62, 1]
+                %bin.concat [inner, <3c2f>] ~> %bin.concat [~, t] ~> %bin.append [~, 62, 1]
               }
             }
           }
@@ -805,7 +805,7 @@ render_list = #<'e>[(self): #^ -> 'bin, (items): 'nodes<'e>, (acc): 'bin] {
 
 render = #<'e>'<'e> {
   :doc "Renders a node tree to its HTML string: Text nodes and attribute values are escaped, Raw nodes are emitted verbatim, nil-valued attributes are omitted, Ok-valued attributes render bare, and event values render as their %data notation."
-  render_list [render_list, Cons[$, Nil], 0x] ~> Str[~]
+  render_list [render_list, Cons[$, Nil], <>] ~> Str[~]
 }
 
 page = #<'e>'<'e> {
@@ -860,12 +860,12 @@ with_template = #<'d>[(tree): 'node<'d>, (statics): 'statics, (holes): 'holes<'d
 
 escape_text = #'%str {
   :doc "Escapes a string for HTML text content: `&`, `<`, `>`."
-  =Str[b]; esc_text [b, 0, %bin.length b, 0x] ~> Str[~]
+  =Str[b]; esc_text [b, 0, %bin.length b, <>] ~> Str[~]
 }
 
 escape_attr = #'%str {
   :doc "Escapes a string for a double-quoted attribute value: `&` and the quote."
-  =Str[b]; esc_attr [b, 0, %bin.length b, 0x] ~> Str[~]
+  =Str[b]; esc_attr [b, 0, %bin.length b, <>] ~> Str[~]
 }
 
 {

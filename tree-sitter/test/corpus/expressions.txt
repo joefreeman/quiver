@@ -89,7 +89,7 @@ string with escaped brace
 binary and integer
 ==================
 
-[0x0a1b, -17]
+[<0a1b>, -17]
 
 ---
 
@@ -101,6 +101,87 @@ binary and integer
           (binary))
         (chain
           (integer))))))
+
+==================
+empty binary
+==================
+
+<>
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (binary))))
+
+==================
+grouped binary
+==================
+
+<6a09e667 bb67ae85>
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (binary))))
+
+==================
+binary written across lines
+==================
+
+k = <
+  428a2f98 71374491
+  b5c0fbcf e9b5dba5
+>
+
+---
+
+(source_file
+  (sequence
+    (chain
+      binding: (identifier)
+      (binary))))
+
+==================
+glued angle brackets are type arguments, spaced ones a binary
+==================
+
+f<'int> <0a>
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (application
+        function: (access
+          source: (identifier)
+          (type_arguments
+            (type_identifier
+              name: (type_name))))
+        argument: (binary)))))
+
+==================
+a type argument named in hex digits is not a binary
+==================
+
+f<ABC> 1
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (application
+        function: (access
+          source: (identifier)
+          (type_arguments
+            (tuple_type
+              name: (tuple_name))))
+        argument: (integer)))))
 
 ==================
 spread

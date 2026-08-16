@@ -34,12 +34,12 @@ fn test_tcp_client_connect_and_write() {
     thread::sleep(Duration::from_millis(50));
 
     // Connect from Quiver and send data
-    // 0x7f000001 is 127.0.0.1 as raw bytes
+    // <7f000001> is 127.0.0.1 as raw bytes
     quiver()
         .with_io()
         .evaluate(&format!(
             r#"
-            [0x7f000001, {}] ~> __tcp_connect__ ~ ~> =(\TcpSocket)socket;
+            [<7f000001>, {}] ~> __tcp_connect__ ~ ~> =(\TcpSocket)socket;
             [socket, "Hello from Quiver!" ~> .0] ~> __tcp_socket_write__ ~;
             [socket, 4096] ~> __tcp_socket_read__ ~ ~> =('bin)response;
             socket ~> __tcp_socket_close__ ~;
@@ -135,19 +135,19 @@ fn test_tcp_multiple_connections() {
     thread::sleep(Duration::from_millis(50));
 
     // Make multiple connections from Quiver
-    // 0x7f000001 is 127.0.0.1 as raw bytes
+    // <7f000001> is 127.0.0.1 as raw bytes
     quiver()
         .with_io()
         .evaluate(&format!(
             r#"
             // First connection
-            [0x7f000001, {}] ~> __tcp_connect__ ~ ~> =(\TcpSocket)socket1;
+            [<7f000001>, {}] ~> __tcp_connect__ ~ ~> =(\TcpSocket)socket1;
             [socket1, "First" ~> .0] ~> __tcp_socket_write__ ~;
             [socket1, 4096] ~> __tcp_socket_read__ ~ ~> =('bin)response1;
             socket1 ~> __tcp_socket_close__ ~;
 
             // Second connection
-            [0x7f000001, {}] ~> __tcp_connect__ ~ ~> =(\TcpSocket)socket2;
+            [<7f000001>, {}] ~> __tcp_connect__ ~ ~> =(\TcpSocket)socket2;
             [socket2, "Second" ~> .0] ~> __tcp_socket_write__ ~;
             [socket2, 4096] ~> __tcp_socket_read__ ~ ~> =('bin)response2;
             socket2 ~> __tcp_socket_close__ ~;
@@ -218,20 +218,20 @@ fn test_binary_data_over_socket() {
     thread::sleep(Duration::from_millis(50));
 
     // Send binary data
-    // 0x7f000001 is 127.0.0.1 as raw bytes
+    // <7f000001> is 127.0.0.1 as raw bytes
     quiver()
         .with_io()
         .evaluate(&format!(
             r#"
-            [0x7f000001, {}] ~> __tcp_connect__ ~ ~> =(\TcpSocket)socket;
-            [socket, 0xdeadbeef] ~> __tcp_socket_write__ ~;
+            [<7f000001>, {}] ~> __tcp_connect__ ~ ~> =(\TcpSocket)socket;
+            [socket, <deadbeef>] ~> __tcp_socket_write__ ~;
             [socket, 4096] ~> __tcp_socket_read__ ~ ~> =('bin)response;
             socket ~> __tcp_socket_close__ ~;
             response
         "#,
             port
         ))
-        .expect("0xdeadbeef");
+        .expect("<deadbeef>");
 
     running.store(false, Ordering::Relaxed);
     thread::sleep(Duration::from_millis(50));
@@ -255,12 +255,12 @@ fn test_write_to_closed_socket() {
     thread::sleep(Duration::from_millis(50));
 
     // Connect, close, then try to write - should fail with runtime error
-    // 0x7f000001 is 127.0.0.1 as raw bytes
+    // <7f000001> is 127.0.0.1 as raw bytes
     quiver()
         .with_io()
         .evaluate(&format!(
             r#"
-        [0x7f000001, {}] ~> __tcp_connect__ ~ ~> =(\TcpSocket)socket;
+        [<7f000001>, {}] ~> __tcp_connect__ ~ ~> =(\TcpSocket)socket;
         socket ~> __tcp_socket_close__ ~;
         [socket, "test" ~> .0] ~> __tcp_socket_write__ ~
     "#,

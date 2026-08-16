@@ -979,7 +979,7 @@ fn test_int_allowed_as_variable() {
 
 #[test]
 fn test_bin_allowed_as_variable() {
-    quiver().evaluate("0x0a ~> =bin; bin").expect("0x0a");
+    quiver().evaluate("<0a> ~> =bin; bin").expect("<0a>");
 }
 
 #[test]
@@ -990,8 +990,8 @@ fn test_int_allowed_in_destructuring() {
 #[test]
 fn test_bin_allowed_in_destructuring() {
     quiver()
-        .evaluate("[0x0a, 0x0b] ~> =[bin, y]; bin")
-        .expect("0x0a");
+        .evaluate("[<0a>, <0b>] ~> =[bin, y]; bin")
+        .expect("<0a>");
 }
 
 #[test]
@@ -1030,7 +1030,7 @@ fn test_pin_with_type_alias_primitive() {
         .evaluate(
             r#"
             'number_or_bytes = 'int | 'bin;
-            0x0a ~> ='number_or_bytes
+            <0a> ~> ='number_or_bytes
             "#,
         )
         .expect("Ok");
@@ -1063,7 +1063,7 @@ fn test_pin_with_type_alias_mismatch() {
         .evaluate(
             r#"
             'number = 'int;
-            0x0a ~> ='number
+            <0a> ~> ='number
             "#,
         )
         .expect("[]");
@@ -1115,7 +1115,7 @@ fn test_pin_with_inline_type_primitive() {
     quiver()
         .evaluate(
             r#"
-            0x0a ~> =('int | 'bin)
+            <0a> ~> =('int | 'bin)
             "#,
         )
         .expect("Ok");
@@ -1184,7 +1184,7 @@ fn test_generic_type_explicit_instantiation_mismatch() {
         .evaluate(
             r#"
             'list<'t> = Nil | Cons['t, ^];
-            Cons[0xaa, Nil] ~> ='list<'int>
+            Cons[<aa>, Nil] ~> ='list<'int>
             "#,
         )
         .expect("[]");
@@ -1234,7 +1234,7 @@ fn test_generic_type_short_syntax_mismatch() {
         .evaluate(
             r#"
             'list<'t> = Nil | Cons['t, ^];
-            Cons[0xaa, Nil] ~> ='list<'int>
+            Cons[<aa>, Nil] ~> ='list<'int>
             "#,
         )
         .expect("[]");
@@ -1249,7 +1249,7 @@ fn test_named_partial_type_without_parens() {
 
     // Type mismatch should fail
     quiver()
-        .evaluate("A[x: 0xff, y: 2] ~> =A(x: 'int)")
+        .evaluate("A[x: <ff>, y: 2] ~> =A(x: 'int)")
         .expect("[]");
 
     // Missing field should fail
@@ -1266,7 +1266,7 @@ fn test_unnamed_partial_type_without_parens() {
     quiver().evaluate("[x: 1, y: 2] ~> =(x: 'int)").expect("Ok");
 
     // Type mismatch should fail
-    quiver().evaluate("A[x: 0xff] ~> =(x: 'int)").expect("[]");
+    quiver().evaluate("A[x: <ff>] ~> =(x: 'int)").expect("[]");
 }
 
 #[test]
@@ -1604,13 +1604,13 @@ fn test_type_alias_shadows_outer() {
             'p = 'int
             outer = #'p { $ }
             main = #{
-              inner = { 'p = 'bin; f = #'p { $ }; f 0x0a }
+              inner = { 'p = 'bin; f = #'p { $ }; f <0a> }
               [inner, 3 ~> outer ~]
             }
             main []
             "#,
         )
-        .expect("[0x0a, 3]");
+        .expect("[<0a>, 3]");
 }
 
 #[test]

@@ -322,8 +322,9 @@ pub fn generate_pattern_code(
                             let idx = program.register_constant(Constant::Integer(val.clone()));
                             codegen.add_instruction(Instruction::constant(idx));
                         }
-                        ast::Literal::Binary(bytes) => {
-                            let idx = program.register_constant(Constant::Binary(bytes.clone()));
+                        ast::Literal::Binary(binary) => {
+                            let idx = program
+                                .register_constant(Constant::Binary(binary.bytes().to_vec()));
                             codegen.add_instruction(Instruction::constant(idx));
                         }
                     }
@@ -420,7 +421,9 @@ fn analyze_match_pattern(
                 name: Some("Str".to_string()),
                 fields: vec![ast::MatchField {
                     name: None,
-                    pattern: ast::Match::Literal(ast::Literal::Binary(bytes.clone())),
+                    pattern: ast::Match::Literal(ast::Literal::Binary(
+                        ast::BinaryLiteral::ungrouped(bytes.clone()),
+                    )),
                 }],
             };
             analyze_match_tuple_pattern(

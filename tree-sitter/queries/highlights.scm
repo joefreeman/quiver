@@ -113,9 +113,6 @@
   "..."
 ] @operator
 
-(equality) @operator
-(not) @operator
-
 ; The process operators (`@` spawn / process, `!` select) get a distinct, attention-
 ; drawing highlight so concurrency stands out from ordinary flow operators.
 [

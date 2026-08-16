@@ -82,7 +82,7 @@ fn test_extract_hash_bits() {
             [hash, 31] ~> %int.and ~
             "#,
         )
-        .expect("24"); // Lower 5 bits: 0x78 & 0x1f = 24
+        .expect("24"); // Lower 5 bits: <78> & <1f> = 24
 
     quiver()
         .evaluate(
@@ -94,7 +94,7 @@ fn test_extract_hash_bits() {
             [shifted, 31] ~> %int.and ~
             "#,
         )
-        .expect("19"); // (0x12345678 >> 5) & 0x1f = 19
+        .expect("19"); // (<12345678> >> 5) & <1f> = 19
 }
 
 #[test]

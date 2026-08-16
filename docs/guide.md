@@ -73,12 +73,28 @@ There are three kinds of primitive value and one composite.
 ```quiver
 42                       //=> 42
 -17                      //=> -17
-0x0a1b                   //=> 0x0a1b
-[1, 0x0a, [2, 3]]        //=> [1, 0x0a, [2, 3]]
+<0a1b>                   //=> <0a1b>
+<6a09e667 bb67ae85>      //=> <6a09e667bb67ae85>
+[1, <0a>, [2, 3]]        //=> [1, <0a>, [2, 3]]
 ```
 
-Integers are arbitrary precision. Binaries are written as an even number of hex digits, so
-`0x` alone is the empty binary. Everything else is a **tuple**.
+Integers are arbitrary precision. Binaries are an even number of hex digits between angle
+brackets, so `<>` is the empty binary. Spaces may divide the digits into groups, each a
+whole number of bytes, and a newline starts a new row — so a table of constants can be laid
+out as one:
+
+```quiver
+sha256_k = <
+  428a2f98 71374491 b5c0fbcf e9b5dba5
+  d807aa98 12835b01 243185be 550c7dc3
+>
+sha256_k //=> ('bin)
+```
+
+Both are for the reader: the value is the same run of bytes however it is divided, and the
+formatter leaves the groups and rows where you put them rather than reflowing them. On one
+line the brackets stay tight against the digits (`< 0a>` is an error); across lines they sit
+on their own. Everything else is a **tuple**.
 
 ### Tuples
 
@@ -91,7 +107,7 @@ field labels are ordinary identifiers.
 [x: 1, y: 2]                  //=> [x: 1, y: 2]
 Point[x: 1, y: 2]             //=> Point[x: 1, y: 2]
 Blue                          //=> Blue
-A[b: B[c: 0x01]]              //=> A[b: B[c: 0x01]]
+A[b: B[c: <01>]]              //=> A[b: B[c: <01>]]
 ```
 
 Two tuples are worth naming now, because the language uses them as answers:
@@ -109,7 +125,7 @@ value with no special support in the language.
 
 ```quiver
 "hello"                       //=> "hello"
-"hello" ~> =Str[b]; b         //=> 0x68656c6c6f
+"hello" ~> =Str[b]; b         //=> <68656c6c6f>
 ```
 
 The escapes `\n`, `\r`, `\t`, `\\`, `\"` and `\{` are recognised. A `{ … }` hole
@@ -498,7 +514,7 @@ against an existing *value*, prefix it with `&`.
 
 ```quiver
 42 ~> ='int                   //=> Ok
-0x01 ~> ='int                 //=> []
+<01> ~> ='int                 //=> []
 
 y = 2
 2 ~> =&y                      //=> Ok
@@ -783,7 +799,7 @@ Spreading a union distributes over its members:
 'writable = (write: (#'bin -> Ok))
 'rw = 'readable & 'writable
 
-echo = #'rw { $read 0x01 }
+echo = #'rw { $read <01> }
 echo [read: #'bin { Ok }, write: #'bin { Ok }]   //=> Ok
 ```
 

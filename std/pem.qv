@@ -39,7 +39,7 @@ line_step = #['state, '%str] {
   state ~> {
     | =Bad => Bad
     | =State[blocks: bs, cur: Nil] => {
-      | begin_label line ~> =('%str)label => State[blocks: bs, cur: Cur[label: label, body: 0x]]
+      | begin_label line ~> =('%str)label => State[blocks: bs, cur: Cur[label: label, body: <>]]
       // Anything outside a block — headers, comments, blank lines — is ignored, matching
       // how PEM readers have always treated surrounding text.
       | State[blocks: bs, cur: Nil]
@@ -78,7 +78,7 @@ parse = #'%str {
     parse $ ~> =('%list<'block>)bs
     certs = %list.filter [bs, #{ $label ~> ="CERTIFICATE"; $ }]
     certs ~> =Cons[_, _]
-    %list.fold [certs, 0x, #{ %bin.concat [$0, $1.der] }]
+    %list.fold [certs, <>, #{ %bin.concat [$0, $1.der] }]
   },
 
   key: #'%str {

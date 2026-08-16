@@ -205,7 +205,7 @@ fn test_many0_zero_width_match_has_no_phantom_element() {
             ["12", p] ~> %parse.run ~
             "#,
         )
-        .expect("Cons[0x3132, Nil]");
+        .expect("Cons[<3132>, Nil]");
 }
 
 #[test]
@@ -221,7 +221,7 @@ fn test_chainl_nullable_operator_terminates() {
             ["57", c] ~> %parse.run ~
             "#,
         )
-        .expect("0x3537");
+        .expect("<3537>");
 }
 
 #[test]
@@ -245,7 +245,7 @@ fn test_ident_accepts_host_identifier_grammar() {
 fn test_quoted_backspace_and_formfeed_escapes() {
     quiver()
         .evaluate(r#"["\"a\\b\\f\"", &%parse.quoted] ~> %parse.run ~ ~> =Str[b]; b"#)
-        .expect("0x61080c");
+        .expect("<61080c>");
 }
 
 #[test]

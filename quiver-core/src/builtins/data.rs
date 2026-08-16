@@ -1,7 +1,7 @@
 //! Quiver data notation (`%data`): the canonical textual form of Quiver **values**.
 //!
 //! The notation is the language's own literal syntax restricted to data — integers,
-//! binaries (`0x…`), and tuples (with names and field labels), plus the `"…"` string
+//! binaries (`<…>`), and tuples (with names and field labels), plus the `"…"` string
 //! sugar for `Str` tuples. Encoding is a plain value walk (tuple names come from the
 //! runtime type tables, so names — never ids — cross the program boundary). Decoding is
 //! **type-directed**: the expected type (the builtin's explicit type argument) drives
@@ -68,7 +68,7 @@ pub(crate) fn encode_value<E: Effect>(
 
             // `Str` sugar: quotable text encodes as a string literal. Bytes that no
             // string literal can carry (invalid UTF-8, unescapable control characters)
-            // fall through to the ordinary tuple form, `Str[0x…]`.
+            // fall through to the ordinary tuple form, `Str[<…>]`.
             if info.name.as_deref() == Some("Str")
                 && let [Value::Binary(binary)] = &payload[..]
             {
@@ -112,10 +112,11 @@ pub(crate) fn encode_value<E: Effect>(
 
 fn push_hex(bytes: &[u8], out: &mut String) {
     use std::fmt::Write;
-    out.push_str("0x");
+    out.push('<');
     for b in bytes {
         let _ = write!(out, "{b:02x}");
     }
+    out.push('>');
 }
 
 /// Quote as a `"…"` literal if every character is representable: valid UTF-8 whose
@@ -198,13 +199,21 @@ pub fn builtin_data_decode<E: Effect>(
 }
 
 /// A type-directed recursive-descent parser over the notation. Unions are ordered
-/// choice with per-member backtracking (reset to the saved position); the two places a
-/// successfully-parsed member could otherwise be a strict prefix of a sibling are
-/// closed by lookahead instead of full backtracking — an integer is never `0x…` (that
-/// is lexically a binary), and a bare named-empty tuple is never followed by a glued
-/// `[` (that is the named-fields form). Recursive types resolve through the same
-/// union-boundary stack the compatibility checker uses: union ids push on descent, and
-/// `Cycle(n)` reads `n` boundaries up.
+/// choice with per-member backtracking (reset to the saved position); the one place a
+/// successfully-parsed member could otherwise be a strict prefix of a sibling is closed
+/// by lookahead instead of full backtracking — a bare named-empty tuple is never
+/// followed by a glued `[` (that is the named-fields form). Recursive types resolve
+/// through the same union-boundary stack the compatibility checker uses: union ids push
+/// on descent, and `Cycle(n)` reads `n` boundaries up.
+/// The whitespace between two things inside a binary literal. Between groups any gap will
+/// do; against a bracket only a line break will, which is what keeps `< 0a>` malformed while
+/// letting a literal be written as a table across lines.
+enum Gap {
+    None,
+    Inline,
+    Line,
+}
+
 struct Decoder<'a, 'b, 'c, E: Effect> {
     ctx: &'a mut BuiltinContext<'b, E>,
     bytes: &'c [u8],
@@ -380,12 +389,6 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
             self.pos = start;
             return None;
         }
-        // `0x…` is lexically a binary, never an integer — the lookahead that keeps
-        // ordered choice honest in `'int | 'bin` unions.
-        if &self.bytes[digits_start..self.pos] == b"0" && self.peek() == Some(b'x') {
-            self.pos = start;
-            return None;
-        }
         let text = std::str::from_utf8(&self.bytes[start..self.pos]).ok()?;
         match text.parse::<i64>() {
             Ok(n) => Some(Value::int(n)),
@@ -394,30 +397,72 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
         }
     }
 
+    /// Consume the whitespace between two things inside a binary literal.
+    fn eat_binary_gap(&mut self) -> Gap {
+        let start = self.pos;
+        let mut gap = Gap::None;
+        while let Some(byte) = self.peek() {
+            match byte {
+                // A line break anywhere in the run decides the whole gap, so the
+                // indentation that follows one does not downgrade it back to inline.
+                b' ' | b'\t' if matches!(gap, Gap::None) => gap = Gap::Inline,
+                b' ' | b'\t' => {}
+                b'\n' | b'\r' => gap = Gap::Line,
+                _ => break,
+            }
+            self.pos += 1;
+        }
+        debug_assert!(self.pos > start || matches!(gap, Gap::None));
+        gap
+    }
+
     fn parse_binary(&mut self) -> Result<Option<Value>, Error> {
         self.skip_ws();
         let start = self.pos;
-        if !(self.eat(b'0') && self.eat(b'x')) {
+        if !self.eat(b'<') {
             self.pos = start;
             return Ok(None);
         }
-        let hex_start = self.pos;
-        while self.peek().is_some_and(|b| b.is_ascii_hexdigit()) {
-            self.pos += 1;
-        }
-        let hex = &self.bytes[hex_start..self.pos];
-        if !hex.len().is_multiple_of(2) {
+        // Whole-byte groups separated by whitespace, exactly as a source literal is written:
+        // on one line the brackets stay tight against the digits, and only a line break in
+        // the gap lets them sit apart. `encode` emits neither grouping nor rows, but the
+        // notation is the literal syntax, so text that a person wrote reads back.
+        let mut bytes = Vec::new();
+        // The gap after `<` pads a bracket rather than separating anything.
+        let mut gap = self.eat_binary_gap();
+        if matches!(gap, Gap::Inline) {
             self.pos = start;
             return Ok(None);
         }
-        let bytes: Vec<u8> = hex
-            .chunks(2)
-            .map(|pair| {
+        loop {
+            let group_start = self.pos;
+            while self.peek().is_some_and(|b| b.is_ascii_hexdigit()) {
+                self.pos += 1;
+            }
+            if self.pos == group_start {
+                // No group follows, so the gap we just crossed pads the closing bracket.
+                if matches!(gap, Gap::Inline) {
+                    self.pos = start;
+                    return Ok(None);
+                }
+                break;
+            }
+            let group = &self.bytes[group_start..self.pos];
+            if !group.len().is_multiple_of(2) {
+                self.pos = start;
+                return Ok(None);
+            }
+            bytes.extend(group.chunks(2).map(|pair| {
                 let hi = (pair[0] as char).to_digit(16).unwrap() as u8;
                 let lo = (pair[1] as char).to_digit(16).unwrap() as u8;
                 (hi << 4) | lo
-            })
-            .collect();
+            }));
+            gap = self.eat_binary_gap();
+        }
+        if !self.eat(b'>') {
+            self.pos = start;
+            return Ok(None);
+        }
         let binary = self.ctx.executor.allocate_binary(bytes)?;
         Ok(Some(Value::Binary(binary)))
     }

@@ -11,7 +11,7 @@ use common::*;
 fn compaction_releases_orphaned_binary_local() {
     quiver()
         // x holds a heap binary built by a builtin (not a cache-pinned constant).
-        .evaluate("x = __binary_concat__ ~> [0xaa, 0xbb]")
+        .evaluate("x = __binary_concat__ ~> [<aa>, <bb>]")
         // Rebind x: the old binary local is now orphaned; the worker drops (and must release) it
         // when delivering this line's result.
         .then_evaluate("x = 5")

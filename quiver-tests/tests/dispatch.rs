@@ -145,7 +145,7 @@ fn test_dispatch_across_repl_entries() {
     // them, `f A` widened to the whole union and the `%num.add` below became a type error that
     // the identical program in a file compiles fine.
     quiver()
-        .evaluate("f = #(A | B) { | =A => 1 | =B => 0x01 }; Ok")
+        .evaluate("f = #(A | B) { | =A => 1 | =B => <01> }; Ok")
         .then_evaluate("f A ~> %num.add [~, 1]")
         .expect("2");
 }

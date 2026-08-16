@@ -65,7 +65,7 @@ lines_step = #[', 'int, 'bin, 'int] {
         | =0 => {
           // EOF: emit the final unterminated line if there is one, otherwise stop.
           | %bin.length leftover ~> =0 => []
-          | [Str[leftover], [f, offset, 0x, 0]]
+          | [Str[leftover], [f, offset, <>, 0]]
         }
         | =n => n ~> %num.add [offset, ~] ~> ^ [f, ~, %bin.concat [leftover, chunk], 0]
       }
@@ -101,12 +101,12 @@ lines_step = #[', 'int, 'bin, 'int] {
 
   read_all: #' {
     :doc "Reads the entire file from the start, returning all its bytes."
-    read_all [~, 0, 0x]
+    read_all [~, 0, <>]
   },
 
   lines: #' {
     :doc "Iterates over the lines of the file, without their trailing newlines."
-    %iter.unfold [[~, 0, 0x, 0], lines_step]
+    %iter.unfold [[~, 0, <>, 0], lines_step]
   },
 
   write: #[(file): ', (offset): 'int, (data): 'bin] {

@@ -229,7 +229,7 @@ qstr_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 quoted = #' {
   :doc "A double-quoted string with `\\\" \\\\ \\/ \\b \\f \\n \\t \\r` escapes, as a Str."
   | peek $ ~> =34 => {
-    qstr_loop [$data, __integer_add__ [$pos, 1], $len, 0x] ~> =(bytes, end)
+    qstr_loop [$data, __integer_add__ [$pos, 1], $len, <>] ~> =(bytes, end)
     [Str[bytes], $[..., pos: end]]
   }
   | fail_in [$, "a string"]

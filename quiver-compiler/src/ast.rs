@@ -265,7 +265,83 @@ impl Term {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     Integer(num_bigint::BigInt),
-    Binary(Vec<u8>),
+    Binary(BinaryLiteral),
+}
+
+/// A binary literal's bytes together with the layout written around them, which the formatter
+/// re-emits: `<0a1b 2c>` is one row of two groups, and a literal spread over lines is one row
+/// per line. Layout is presentation only — it is invisible to the compiler, which reads
+/// [`bytes`](BinaryLiteral::bytes) — and the fields are private so it cannot drift from the
+/// bytes it describes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BinaryLiteral {
+    bytes: Vec<u8>,
+    /// The byte length of each whitespace-separated group, by row. Flattened, it sums to
+    /// `bytes.len()`; a single entry is a literal written on one line.
+    layout: Vec<Vec<usize>>,
+}
+
+impl BinaryLiteral {
+    /// From the rows of groups as written. Empty groups and rows are dropped, so separator
+    /// runs and blank lines collapse rather than rendering back out.
+    pub fn new(rows: Vec<Vec<Vec<u8>>>) -> Self {
+        let rows: Vec<Vec<Vec<u8>>> = rows
+            .into_iter()
+            .map(|row| row.into_iter().filter(|group| !group.is_empty()).collect())
+            .filter(|row: &Vec<Vec<u8>>| !row.is_empty())
+            .collect();
+        Self {
+            layout: rows
+                .iter()
+                .map(|row| row.iter().map(Vec::len).collect())
+                .collect(),
+            bytes: rows.concat().concat(),
+        }
+    }
+
+    /// One undivided run on one line, for literals built by the compiler rather than
+    /// written by hand.
+    pub fn ungrouped(bytes: Vec<u8>) -> Self {
+        let layout = if bytes.is_empty() {
+            Vec::new()
+        } else {
+            vec![vec![bytes.len()]]
+        };
+        Self { bytes, layout }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// How many lines the literal was written across. Zero for `<>`.
+    pub fn row_count(&self) -> usize {
+        self.layout.len()
+    }
+
+    /// The bytes of each group, row by row, in written order.
+    pub fn rows(&self) -> Vec<Vec<&[u8]>> {
+        let mut start = 0;
+        let mut rows = Vec::with_capacity(self.layout.len());
+        for row in &self.layout {
+            let mut groups = Vec::with_capacity(row.len());
+            for &len in row {
+                groups.push(&self.bytes[start..start + len]);
+                start += len;
+            }
+            rows.push(groups);
+        }
+        rows
+    }
+
+    /// The bytes of each group, in written order, ignoring where the rows divide.
+    pub fn groups(&self) -> impl Iterator<Item = &[u8]> {
+        self.layout.iter().flatten().scan(0, |start, &len| {
+            let group = &self.bytes[*start..*start + len];
+            *start += len;
+            Some(group)
+        })
+    }
 }
 
 /// One piece of a string literal ([`Term::String`]).

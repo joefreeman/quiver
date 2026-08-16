@@ -36,7 +36,7 @@ handshake_response = #'%str {
 apply_mask = #[(payload): 'bin, (key): 'bin] {
   n = %bin.length $payload
   {
-    | n ~> =0 => 0x
+    | n ~> =0 => <>
     | {
       reps = __integer_divide__ [__integer_add__ [n, 3], 4]
       %bin.xor [$payload, __binary_repeat__ [$key, reps] ~> %bin.slice [~, 0, n]]
@@ -47,7 +47,7 @@ apply_mask = #[(payload): 'bin, (key): 'bin] {
 // The first two header bytes for a frame: FIN plus opcode, then the 7-bit length
 // code (with the mask bit when `mask_bit` is 128) and any extended length bytes.
 frame_head = #[(opcode): 'int, (n): 'int, (mask_bit): 'int] {
-  b0 = __binary_append__ [0x, __integer_add__ [128, $opcode], 1]
+  b0 = __binary_append__ [<>, __integer_add__ [128, $opcode], 1]
   {
     | __integer_compare__ [$n, 126] ~> =-1 => __binary_append__ [
       b0,
@@ -149,7 +149,7 @@ close_info = #'bin {
 
 // A Close payload from a code and reason.
 close_payload = #[(code): 'int, (reason): '%str] {
-  __binary_append__ [0x, $code, 2] ~> %bin.concat [~, $reason.0]
+  __binary_append__ [<>, $code, 2] ~> %bin.concat [~, $reason.0]
 }
 
 conn = #[(sock): \TcpSocket, (buf): 'bin] {
@@ -165,7 +165,7 @@ wrap_message = #['int, 'bin] { $0 ~> =1 => Text[Str[$1]] | Binary[$1] }
 fail = #[(conn): ', (code): 'int, (reason): '%str] {
   __tcp_socket_write__ [$conn.sock, close_payload [$code, $reason] ~> encode_frame [8, ~]]
   __tcp_socket_close__ $conn.sock
-  [Close($code, $reason), $conn[..., buf: 0x, part: Nil]]
+  [Close($code, $reason), $conn[..., buf: <>, part: Nil]]
 }
 
 recv = #' {
@@ -181,7 +181,7 @@ recv = #' {
           // The peer vanished without a Close: abnormal closure (1006 is never on
           // the wire — it names the absence of a close handshake).
           __tcp_socket_close__ $sock
-          [Close[code: 1006, reason: ""], $[..., buf: 0x, part: Nil]]
+          [Close[code: 1006, reason: ""], $[..., buf: <>, part: Nil]]
         }
         | {
           $
@@ -189,7 +189,7 @@ recv = #' {
         }
       }
     }
-    | =Bad[r] => fail [$ ~> Conn[..., buf: 0x, part: Nil], 1002, r]
+    | =Bad[r] => fail [$ ~> Conn[..., buf: <>, part: Nil], 1002, r]
     | =[Frame[fin: fin, opcode: op, payload: p], rest] => {
       | op ~> =9 => { __tcp_socket_write__ [$sock, encode_frame [10, p]]; ^ $[..., buf: rest] }
       | op ~> =10 => ^ $[..., buf: rest]
@@ -206,16 +206,16 @@ recv = #' {
             | __integer_compare__ [
                 %bin.length joined,
                 max_payload,
-              ] ~> =1 => $[..., buf: 0x, part: Nil] ~> fail [~, 1009, "message too big"]
+              ] ~> =1 => $[..., buf: <>, part: Nil] ~> fail [~, 1009, "message too big"]
             | fin ~> =0 => ^ $[..., buf: rest, part: Part[opcode: o, data: joined]]
             | [wrap_message [o, joined], $[..., buf: rest, part: Nil]]
           }
         }
-        | $[..., buf: 0x, part: Nil] ~> fail [~, 1002, "unexpected continuation"]
+        | $[..., buf: <>, part: Nil] ~> fail [~, 1002, "unexpected continuation"]
       }
       | $part ~> {
         | =Part[opcode: _, data: _] => fail [
-          $[..., buf: 0x, part: Nil],
+          $[..., buf: <>, part: Nil],
           1002,
           "interleaved data frame",
         ]
@@ -234,7 +234,7 @@ drain = #[', 'messages] {
   parse_frame buf ~> {
     | =Incomplete => [%list.reverse acc, Conn(sock, buf, part)]
     | =Bad[r] => {
-      fail [Conn[sock: sock, buf: 0x, part: Nil], 1002, r] ~> =[close, c2]
+      fail [Conn[sock: sock, buf: <>, part: Nil], 1002, r] ~> =[close, c2]
       [%list.reverse Cons[close, acc], c2]
     }
     | =[Frame[fin: fin, opcode: op, payload: p], rest] => {
@@ -254,7 +254,7 @@ drain = #[', 'messages] {
           joined = %bin.concat [d, p]
           {
             | __integer_compare__ [%bin.length joined, max_payload] ~> =1 => {
-                fail [Conn[sock: sock, buf: 0x, part: Nil], 1009, "message too big"] ~> =[close, c2]
+                fail [Conn[sock: sock, buf: <>, part: Nil], 1009, "message too big"] ~> =[close, c2]
                 [%list.reverse Cons[close, acc], c2]
               }
             | fin ~> =0 => ^ [
@@ -266,7 +266,7 @@ drain = #[', 'messages] {
         }
         | {
           fail [
-            Conn[sock: sock, buf: 0x, part: Nil],
+            Conn[sock: sock, buf: <>, part: Nil],
             1002,
             "unexpected continuation",
           ] ~> =[close, c2]
@@ -276,7 +276,7 @@ drain = #[', 'messages] {
       | part ~> {
         | =Part[opcode: _, data: _] => {
           fail [
-            Conn[sock: sock, buf: 0x, part: Nil],
+            Conn[sock: sock, buf: <>, part: Nil],
             1002,
             "interleaved data frame",
           ] ~> =[close, c2]

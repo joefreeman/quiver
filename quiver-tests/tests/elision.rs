@@ -35,7 +35,7 @@ fn test_forwarder_calls_by_every_form() {
         .expect("42");
     quiver()
         .with_modules(forwarders())
-        .evaluate("[0x6162, 1] ~> %m.byte ~")
+        .evaluate("[<6162>, 1] ~> %m.byte ~")
         .expect("98");
     quiver()
         .with_modules(forwarders())

@@ -648,9 +648,9 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
 fn format_binary(bytes: &[u8]) -> String {
     if bytes.len() <= 8 {
         let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-        format!("0x{}", hex)
+        format!("<{}>", hex)
     } else {
         let hex: String = bytes[..8].iter().map(|b| format!("{:02x}", b)).collect();
-        format!("0x{}… ({} bytes)", hex, bytes.len())
+        format!("<{}…> ({} bytes)", hex, bytes.len())
     }
 }

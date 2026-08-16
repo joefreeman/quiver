@@ -122,12 +122,12 @@ fn test_pin_mixed_repeated_and_single() {
 #[test]
 fn test_pin_int_type() {
     quiver().evaluate("42 ~> ='int").expect("Ok");
-    quiver().evaluate("0xff ~> ='int").expect("[]");
+    quiver().evaluate("<ff> ~> ='int").expect("[]");
 }
 
 #[test]
 fn test_pin_bin_type() {
-    quiver().evaluate("0xabcd ~> ='bin").expect("Ok");
+    quiver().evaluate("<abcd> ~> ='bin").expect("Ok");
     quiver().evaluate("42 ~> ='bin").expect("[]");
 }
 
@@ -278,7 +278,7 @@ fn test_type_narrowing_in_blocks() {
 
     // Test type narrowing for bin
     quiver()
-        .evaluate("value = 0xabcd; value ~> { ='bin => \"is_bin\" | \"is_int\" }")
+        .evaluate("value = <abcd>; value ~> { ='bin => \"is_bin\" | \"is_int\" }")
         .expect("\"is_bin\"");
 
     // Test type narrowing failure falls through
@@ -332,7 +332,7 @@ fn test_narrowing_nested_field() {
 fn test_narrowing_with_wildcard() {
     // Wildcards match anything - only outer structure matters
     quiver()
-        .evaluate("f = #(A['int, 'bin] | B['int, 'bin]) { =A[_, _] => $ }; A[1, 0xff] ~> f ~")
+        .evaluate("f = #(A['int, 'bin] | B['int, 'bin]) { =A[_, _] => $ }; A[1, <ff>] ~> f ~")
         .expect_type("A['int, 'bin]");
 }
 
@@ -548,15 +548,15 @@ fn test_narrowing_in_block_branches() {
 #[test]
 fn test_narrowing_with_fallback_branch() {
     quiver()
-        .evaluate("f = #('int | 'bin) { ='bin | 0xff }; f")
+        .evaluate("f = #('int | 'bin) { ='bin | <ff> }; f")
         .expect_type("#('bin | 'int) -> ('bin | Ok)");
 
     quiver()
-        .evaluate("f = #('int | 'bin) { ='bin | 0xff }; 0x0a ~> f ~")
+        .evaluate("f = #('int | 'bin) { ='bin | <ff> }; <0a> ~> f ~")
         .expect("Ok");
     quiver()
-        .evaluate("f = #('int | 'bin) { ='bin | 0xff }; 42 ~> f ~")
-        .expect("0xff");
+        .evaluate("f = #('int | 'bin) { ='bin | <ff> }; 42 ~> f ~")
+        .expect("<ff>");
 }
 
 #[test]
@@ -614,7 +614,7 @@ fn test_as_pattern_binds_and_asserts_type() {
         .evaluate("42 ~> =('int)x; [x, 1] ~> __integer_add__ ~")
         .expect("43");
     // A type mismatch fails the match (yields nil), like any failed match.
-    quiver().evaluate("0x0a ~> =('int)x").expect("[]");
+    quiver().evaluate("<0a> ~> =('int)x").expect("[]");
 }
 
 #[test]
@@ -642,7 +642,7 @@ fn test_as_pattern_narrows_union_in_field() {
     // The other variant fails the field-type assertion.
     quiver()
         .evaluate(
-            "f = #(A[a: 'int] | A[a: 'bin]) { =A[a: ('int)x] => x | NoMatch }; A[a: 0x0a] ~> f ~",
+            "f = #(A[a: 'int] | A[a: 'bin]) { =A[a: ('int)x] => x | NoMatch }; A[a: <0a>] ~> f ~",
         )
         .expect("NoMatch");
     // The partial-pattern spelling works identically.
@@ -662,8 +662,8 @@ fn test_as_pattern_captures_whole_value() {
 #[test]
 fn test_as_pattern_with_union_type() {
     quiver()
-        .evaluate("0x0a ~> =('int | 'bin)x; x")
-        .expect("0x0a");
+        .evaluate("<0a> ~> =('int | 'bin)x; x")
+        .expect("<0a>");
     quiver().evaluate("42 ~> =('int | 'bin)x; x").expect("42");
 }
 

@@ -84,7 +84,7 @@ hex_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 
 hex = #'int {
   :doc "A random token: n cryptographically secure bytes as 2n lowercase hex characters."
-  b = __random_bytes__ $; hex_loop [b, 0, %bin.length b, 0x] ~> Str[~]
+  b = __random_bytes__ $; hex_loop [b, 0, %bin.length b, <>] ~> Str[~]
 }
 
 [

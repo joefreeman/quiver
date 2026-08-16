@@ -180,7 +180,7 @@ number = #'%parse {
         | [bytes: fbb, st: st3a]
       }
     }
-    | [bytes: 0x, st: st2]
+    | [bytes: <>, st: st2]
   }
   frac ~> =[bytes: fb, st: st3]
 
@@ -266,13 +266,13 @@ esc_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
   | {
     b = %bin.get_byte [$data, $pos]
     acc2 = b ~> {
-      | =34 => %bin.concat [$acc, 0x5c22]
-      | =92 => %bin.concat [$acc, 0x5c5c]
-      | =8 => %bin.concat [$acc, 0x5c62]
-      | =12 => %bin.concat [$acc, 0x5c66]
-      | =10 => %bin.concat [$acc, 0x5c6e]
-      | =13 => %bin.concat [$acc, 0x5c72]
-      | =9 => %bin.concat [$acc, 0x5c74]
+      | =34 => %bin.concat [$acc, <5c22>]
+      | =92 => %bin.concat [$acc, <5c5c>]
+      | =8 => %bin.concat [$acc, <5c62>]
+      | =12 => %bin.concat [$acc, <5c66>]
+      | =10 => %bin.concat [$acc, <5c6e>]
+      | =13 => %bin.concat [$acc, <5c72>]
+      | =9 => %bin.concat [$acc, <5c74>]
       | %bin.append [$acc, b, 1]
     }
     ^ [$data, %num.add [$pos, 1], $len, acc2]
@@ -282,8 +282,8 @@ esc_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 // A JSON string literal: the bytes escaped and wrapped in double quotes.
 escape_str = #'%str {
   =Str[bytes]
-  inner = esc_loop [bytes, 0, %bin.length bytes, 0x]
-  %bin.concat [0x22, inner] ~> %bin.concat [~, 0x22] ~> Str[~]
+  inner = esc_loop [bytes, 0, %bin.length bytes, <>]
+  %bin.concat [<22>, inner] ~> %bin.concat [~, <22>] ~> Str[~]
 }
 
 // Concatenate a list's elements — each rendered to a string by `render` — separated by
@@ -298,7 +298,7 @@ repeat_byte = #[(acc): 'bin, (b): 'int, (n): 'int] {
   | ^ [%bin.append [$acc, $b, 1], $b, __integer_subtract__ [$n, 1]]
 }
 
-// Drop trailing `0x30` (`'0'`) bytes from a binary.
+// Drop trailing `<30>` (`'0'`) bytes from a binary.
 strip_zeros = #'bin {
   =b
   len = %bin.length b
@@ -317,7 +317,7 @@ frac_bytes = #[(fracpart): 'int, (width): 'int] {
   ds = %str.from_int $fracpart ~> .0
   pad = __integer_subtract__ [$width, %bin.length ds]
 
-  [repeat_byte [0x, 48, pad], ds] ~> %bin.concat ~ ~> strip_zeros ~
+  [repeat_byte [<>, 48, pad], ds] ~> %bin.concat ~ ~> strip_zeros ~
 }
 
 // Format a canonical rational `n/d` (`d > 0`, gcd 1) as a JSON decimal: the exact finite
@@ -348,10 +348,10 @@ format_rational = #[(n): 'int, (d): 'int] {
       ib = %str.from_int intpart ~> .0
       full = {
         | fracpart ~> =0 => ib
-        | %bin.concat [ib, %bin.concat [0x2e, frac_bytes [fracpart, 12]]]
+        | %bin.concat [ib, %bin.concat [<2e>, frac_bytes [fracpart, 12]]]
       }
       {
-        | neg? => %bin.concat [0x2d, full] ~> Str[~]
+        | neg? => %bin.concat [<2d>, full] ~> Str[~]
         | full ~> Str[~]
       }
     }

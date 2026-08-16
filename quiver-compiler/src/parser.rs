@@ -151,7 +151,7 @@ impl ErrorKind {
                 "An assertion runs to the end of its line, like a comment; move code after it to the next line"
             }
             ErrorKind::HexMalformed(_) => {
-                "Binary literals must contain only hexadecimal digits: 0-9, a-f, A-F"
+                "Binary literals are an even number of hexadecimal digits between angle brackets: <0a1b>"
             }
             ErrorKind::StringEscapeInvalid(_) => {
                 "Valid escape sequences are: \\n \\r \\t \\\\ \\\""
@@ -535,7 +535,7 @@ fn integer_literal(input: Span) -> IResult<Span, Literal> {
     map(
         pair(
             opt(char('-')),
-            // Decimal only. Hexadecimal byte sequences are binary literals (`0x...`).
+            // Decimal only. Hexadecimal byte sequences are binary literals (`<...>`).
             map_res(digit1, |s: Span| {
                 s.fragment().parse::<BigInt>().map_err(|_| {
                     Error::new(
@@ -549,23 +549,70 @@ fn integer_literal(input: Span) -> IResult<Span, Literal> {
     )(input)
 }
 
-fn binary_literal(input: Span) -> IResult<Span, Literal> {
-    // Hexadecimal bytes: `0x` followed by an even number of hex digits. `0x` alone is
-    // the empty binary.
-    let (remaining, content) =
-        preceded(tag("0x"), take_while(|c: char| c.is_ascii_hexdigit()))(input)?;
-
-    // Decode the hex string - this fails on an odd number of digits.
-    match hex::decode(content.fragment()) {
-        Ok(bytes) => Ok((remaining, Literal::Binary(bytes))),
-        Err(_) => Err(nom::Err::Failure(nom::error::Error::new(
-            content,
-            nom::error::ErrorKind::HexDigit,
-        ))),
-    }
+/// One line of a binary literal: hex-digit groups separated by horizontal whitespace.
+fn binary_row(input: Span) -> IResult<Span, Vec<Span>> {
+    separated_list1(hspace1, take_while1(|c: char| c.is_ascii_hexdigit()))(input)
 }
 
-/// Build the `Str[0x…]` tuple term that a string literal desugars to.
+/// The break between two lines of a binary literal, absorbing the trailing whitespace of the
+/// line it ends and the indentation of the one it starts. Blank lines collapse into it — an
+/// empty row carries no bytes and no meaning.
+fn binary_row_break(input: Span) -> IResult<Span, ()> {
+    nom_value(
+        (),
+        tuple((
+            space0,
+            line_ending,
+            many0(pair(space0, line_ending)),
+            space0,
+        )),
+    )(input)
+}
+
+fn binary_literal(input: Span) -> IResult<Span, Literal> {
+    // Hexadecimal bytes between angle brackets: `<0a1b>`, with `<>` the empty binary.
+    //
+    // Horizontal whitespace *separates* groups of digits (`<6a09e667 bb67ae85>`) — on a
+    // single line it does not pad the brackets, so `< 0a>` is malformed rather than quietly
+    // accepted. A newline instead starts a new row, which is how a table of constants is
+    // written; there the brackets do sit apart from the digits, on their own lines. Each
+    // group must be a whole number of bytes, so a miscounted run is caught at the group that
+    // is wrong rather than only when the total comes out odd.
+    //
+    // The formatter re-emits both the grouping and the rows, so what it produces is exactly
+    // what this accepts — it never reflows a table the author laid out to match a spec.
+    //
+    // A `<` only ever opens a binary here — the type-argument lists that share the bracket
+    // are glued to a name and parsed as part of an access — and anything else fails the
+    // closing `>`, so a `<` belonging to something else falls through to the other term
+    // parsers untouched.
+    let (input, _) = char('<')(input)?;
+    let (input, _) = opt(binary_row_break)(input)?;
+    let (input, rows) = separated_list0(binary_row_break, binary_row)(input)?;
+    let (input, _) = opt(binary_row_break)(input)?;
+    let (remaining, _) = char('>')(input)?;
+
+    // Each group decodes on its own - this fails on a group with an odd number of digits.
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|group| {
+                    hex::decode(group.fragment()).map_err(|_| {
+                        nom::Err::Failure(nom::error::Error::new(
+                            group,
+                            nom::error::ErrorKind::HexDigit,
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok((remaining, Literal::Binary(BinaryLiteral::new(rows))))
+}
+
+/// Build the `Str[<…>]` tuple term that a string literal desugars to.
 /// Parse a single-line string body: the characters between `"` quotes, with escapes processed.
 /// The scan for the closing `"` is escape-aware (a backslash skips the next character), so an
 /// escaped quote `\"` does not terminate the string.
@@ -1107,7 +1154,6 @@ fn process_multiline_segments(raw: &str) -> Option<Vec<StrSegment>> {
 }
 
 fn literal(input: Span) -> IResult<Span, Literal> {
-    // Binary first: `0x...` would otherwise be read as the integer `0`.
     alt((binary_literal, integer_literal))(input)
 }
 
@@ -3371,7 +3417,7 @@ mod tests {
     fn test_span_malformed_hex() {
         // Note: Currently malformed hex produces UnexpectedEndOfInput errors
         // because nom converts our custom errors. This could be improved in future.
-        let source = "#{ 0x999999999999999999999 }";
+        let source = "#{ <999999999999999999999> }";
         let result = parse(source);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -3379,6 +3425,63 @@ mod tests {
         assert!(err.span.is_some());
         let span = err.span.unwrap();
         assert_eq!(span.line, 1);
+    }
+
+    #[test]
+    fn test_binary_group_must_be_whole_bytes() {
+        // Grouping is checked per group, not just on the total: `<0a1 b2c>` has six digits
+        // but neither group is a whole number of bytes, and the error names the first.
+        let err = parse("#{ <0a1 b2c> }").expect_err("an odd group must not parse");
+        assert!(
+            matches!(&err.kind, ErrorKind::HexMalformed(group) if group == "0a1"),
+            "expected the offending group to be named, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn test_binary_grouping_does_not_change_the_value() {
+        assert_eq!(
+            binary_bytes("<6a09e667 bb67ae85>"),
+            binary_bytes("<6a09e667bb67ae85>")
+        );
+        assert_eq!(
+            binary_bytes("<\n  6a09e667\n  bb67ae85\n>"),
+            binary_bytes("<6a09e667bb67ae85>")
+        );
+    }
+
+    #[test]
+    fn test_binary_rows_are_recorded_as_written() {
+        let row_count = |source| match parse(source)
+            .expect("source must parse")
+            .chains()
+            .flat_map(|chain| &chain.terms)
+            .find_map(|term| match term {
+                Term::Literal(Literal::Binary(binary)) => Some(binary.row_count()),
+                _ => None,
+            }) {
+            Some(rows) => rows,
+            None => panic!("program must contain a binary literal"),
+        };
+        assert_eq!(row_count("<0a1b 2c3d>"), 1);
+        assert_eq!(row_count("<\n  0a1b\n  2c3d\n>"), 2);
+        // A blank line carries no bytes, so it is not a row.
+        assert_eq!(row_count("<\n  0a1b\n\n  2c3d\n>"), 2);
+        assert_eq!(row_count("<>"), 0);
+    }
+
+    /// The bytes of the binary literal a single-step program evaluates to.
+    fn binary_bytes(source: &str) -> Vec<u8> {
+        parse(source)
+            .expect("source must parse")
+            .chains()
+            .flat_map(|chain| &chain.terms)
+            .find_map(|term| match term {
+                Term::Literal(Literal::Binary(binary)) => Some(binary.bytes().to_vec()),
+                _ => None,
+            })
+            .expect("program must contain a binary literal")
     }
 
     #[test]

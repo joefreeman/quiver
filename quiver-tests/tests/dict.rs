@@ -9,15 +9,15 @@ const FROM: &str = r#"
     Nil]]]]]]]]]]]] ~> %dict.from ~
 "#;
 
-// Two distinct binary keys whose *encoded notation* ("0x…" text) has the same 32-bit
-// FNV-1a hash (216258148), found by search. FNV-1a is injective over short inputs, so a
+// Two distinct binary keys whose *encoded notation* ("<…>" text) has the same 32-bit
+// FNV-1a hash (1102851308), found by search. FNV-1a is injective over short inputs, so a
 // colliding pair is needed to exercise the `Collision`-node / bucket code paths that
 // ordinary keys never reach. `DA` builds a dict holding both (which forms a single
 // `Collision` node).
-const KA: &str = "0x86f15d4023";
-const KB: &str = "0xe6619cfcd4";
+const KA: &str = "<86f15dabd8>";
+const KB: &str = "<86f166b4b6>";
 const DA: &str =
-    "%dict.new [] ~> [~, 0x86f15d4023, 1] ~> %dict.put ~ ~> [~, 0xe6619cfcd4, 2] ~> %dict.put ~";
+    "%dict.new [] ~> [~, <86f15dabd8>, 1] ~> %dict.put ~ ~> [~, <86f166b4b6>, 2] ~> %dict.put ~";
 
 #[test]
 fn test_collision_forms_collision_node() {
@@ -26,7 +26,7 @@ fn test_collision_forms_collision_node() {
     // otherwise silently stop testing collisions).
     quiver()
         .evaluate(DA)
-        .expect("Collision[216258148, Cons[[0x86f15d4023, 1], Cons[[0xe6619cfcd4, 2], Nil]]]");
+        .expect("Collision[1102851308, Cons[[<86f15dabd8>, 1], Cons[[<86f166b4b6>, 2], Nil]]]");
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn test_remove_collapses_collision_to_leaf() {
     // removing one of two colliding keys collapses the Collision bucket back to a Leaf
     quiver()
         .evaluate(&format!("{DA} ~> [~, {KA}] ~> %dict.remove ~"))
-        .expect(r#"Leaf[216258148, 0xe6619cfcd4, 2]"#);
+        .expect(r#"Leaf[1102851308, <86f166b4b6>, 2]"#);
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn test_overwrite_keeps_count() {
 #[test]
 fn test_binary_keys() {
     quiver()
-        .evaluate("%dict.new [] ~> [~, 0x01, 7] ~> %dict.put ~ ~> [~, 0x01] ~> %dict.get ~")
+        .evaluate("%dict.new [] ~> [~, <01>, 7] ~> %dict.put ~ ~> [~, <01>] ~> %dict.get ~")
         .expect("7");
 }
 
@@ -379,12 +379,12 @@ fn test_repl_continuation_across_lines() {
 
 #[test]
 fn test_string_and_binary_keys_distinct() {
-    // The string "A" (Str[0x41]) and the raw binary 0x41 are distinct keys.
+    // The string "A" (Str[<41>]) and the raw binary <41> are distinct keys.
     quiver()
-        .evaluate(r#"%dict.new [] ~> [~, "A", 1] ~> %dict.put ~ ~> [~, 0x41, 2] ~> %dict.put ~ ~> [~, "A"] ~> %dict.get ~"#)
+        .evaluate(r#"%dict.new [] ~> [~, "A", 1] ~> %dict.put ~ ~> [~, <41>, 2] ~> %dict.put ~ ~> [~, "A"] ~> %dict.get ~"#)
         .expect("1");
     quiver()
-        .evaluate(r#"%dict.new [] ~> [~, "A", 1] ~> %dict.put ~ ~> [~, 0x41, 2] ~> %dict.put ~ ~> [~, 0x41] ~> %dict.get ~"#)
+        .evaluate(r#"%dict.new [] ~> [~, "A", 1] ~> %dict.put ~ ~> [~, <41>, 2] ~> %dict.put ~ ~> [~, <41>] ~> %dict.get ~"#)
         .expect("2");
 }
 
@@ -513,16 +513,16 @@ fn test_tuple_keys() {
 #[test]
 fn test_nested_tuple_keys() {
     quiver()
-        .evaluate(r#"k = A[B[1, "x"], 0x0a]; %dict.new [] ~> [~, k, 5] ~> %dict.put ~ ~> [~, A[B[1, "x"], 0x0a]] ~> %dict.get ~"#)
+        .evaluate(r#"k = A[B[1, "x"], <0a>]; %dict.new [] ~> [~, k, 5] ~> %dict.put ~ ~> [~, A[B[1, "x"], <0a>]] ~> %dict.get ~"#)
         .expect("5");
 }
 
 #[test]
 fn test_mixed_key_types_distinct() {
-    // The int 1, the string "1", and the binary 0x31 encode distinctly, so they are
+    // The int 1, the string "1", and the binary <31> encode distinctly, so they are
     // distinct keys in one dict (the key type widens to their union).
     quiver()
-        .evaluate(r#"%dict.new [] ~> [~, 1, 10] ~> %dict.put ~ ~> [~, "1", 20] ~> %dict.put ~ ~> [~, 0x31, 30] ~> %dict.put ~ ~> %dict.count ~"#)
+        .evaluate(r#"%dict.new [] ~> [~, 1, 10] ~> %dict.put ~ ~> [~, "1", 20] ~> %dict.put ~ ~> [~, <31>, 30] ~> %dict.put ~ ~> %dict.count ~"#)
         .expect("3");
     quiver()
         .evaluate(r#"%dict.new [] ~> [~, 1, 10] ~> %dict.put ~ ~> [~, "1", 20] ~> %dict.put ~ ~> [~, 1] ~> %dict.get ~"#)

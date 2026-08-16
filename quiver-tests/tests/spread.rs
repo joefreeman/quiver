@@ -155,8 +155,8 @@ fn test_identifier_spread_unnamed_tuple() {
 #[test]
 fn test_identifier_spread_multiple_fields() {
     quiver()
-        .evaluate("p = Point[x: 10, y: 20]; p[..., z: 30, color: 0xff]")
-        .expect("Point[x: 10, y: 20, z: 30, color: 0xff]");
+        .evaluate("p = Point[x: 10, y: 20]; p[..., z: 30, color: <ff>]")
+        .expect("Point[x: 10, y: 20, z: 30, color: <ff>]");
 }
 
 #[test]
@@ -183,8 +183,8 @@ fn test_ripple_spread_unnamed_tuple() {
 #[test]
 fn test_ripple_spread_multiple_fields() {
     quiver()
-        .evaluate("Point[x: 10, y: 20] ~> ~[..., z: 30, color: 0xff]")
-        .expect("Point[x: 10, y: 20, z: 30, color: 0xff]");
+        .evaluate("Point[x: 10, y: 20] ~> ~[..., z: 30, color: <ff>]")
+        .expect("Point[x: 10, y: 20, z: 30, color: <ff>]");
 }
 
 #[test]

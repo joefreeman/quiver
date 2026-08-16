@@ -696,14 +696,6 @@
         },
         {
           "type": "SYMBOL",
-          "name": "equality"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "not"
-        },
-        {
-          "type": "SYMBOL",
           "name": "tuple"
         },
         {
@@ -1675,14 +1667,6 @@
           }
         ]
       }
-    },
-    "equality": {
-      "type": "STRING",
-      "value": "=="
-    },
-    "not": {
-      "type": "STRING",
-      "value": "<>"
     },
     "tail_call": {
       "type": "PREC_RIGHT",
@@ -5721,8 +5705,15 @@
       "value": "-?\\d+"
     },
     "binary": {
-      "type": "PATTERN",
-      "value": "0x[0-9a-fA-F]*"
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": -1,
+        "content": {
+          "type": "PATTERN",
+          "value": "<[0-9a-fA-F \\t\\r\\n]*>"
+        }
+      }
     },
     "string": {
       "type": "SEQ",

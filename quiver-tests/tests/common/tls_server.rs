@@ -152,10 +152,12 @@ pub fn escape(text: &str) -> String {
 
 fn hex_literal(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    bytes.iter().fold("0x".to_string(), |mut out, b| {
+    let mut out = bytes.iter().fold("<".to_string(), |mut out, b| {
         write!(out, "{b:02x}").unwrap();
         out
-    })
+    });
+    out.push('>');
+    out
 }
 
 fn serve(

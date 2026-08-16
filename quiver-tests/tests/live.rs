@@ -283,7 +283,7 @@ fn test_pointer_events_carry_element_relative_positions() {
                  view: #Str['bin] { %html/live{ <p on:mousemove[throttle: 40]={Move}>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
                ]
-               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: <>]
                s = %html/live.sim [req, comp]
                %html/live.sim_text [s, "[\"0\", \"Ev[Move]\", [\"mousemove\", 12, 34, 0, [false, false, false, false]]]"] ~> =[s2, ps]
                [ps, %html/live.sim_html s2]"#,
@@ -536,7 +536,7 @@ const COUNTER: &str = r#"
       view: #'int { %str.from_int $ ~> %html{ <p>Count: {~}</p> } },
       decode: %data.decode<Ev['ev]>,
     ]
-    req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+    req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: <>]
 "#;
 
 #[test]
@@ -643,7 +643,7 @@ fn test_submit_fields_reach_update_as_event_metadata() {
                  view: #Str['bin] { %html{ <p>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
                ]
-               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: <>]
                s = %html/live.sim [req, comp]
                %html/live.sim_text [s, "[\"0\", \"Ev[Submit]\", [\"submit\", [[\"v\", \"hello\"]]]]"] ~> =[_, ps]
                ps"#,
@@ -665,7 +665,7 @@ fn test_event_metadata_is_invisible_to_the_data_plane() {
                  view: #Str['bin] { %html{ <p>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
                ]
-               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: <>]
                s = %html/live.sim [req, comp]
                %html/live.sim_text [s, "[\"0\", \"Ev[Inc]\", [\"click\", 1, 2, 0, [false, false, false, false]]]"] ~> =[_, ps]
                ps"#,
@@ -689,7 +689,7 @@ fn test_change_metadata_carries_checked_state() {
                  view: #Str['bin] { %html{ <p>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
                ]
-               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: <>]
                s = %html/live.sim [req, comp]
                %html/live.sim_text [s, "[\"0\", \"Ev[Toggle]\", [\"change\", \"yes\", true]]"] ~> =[s2, _]
                %html/live.sim_text [s2, "[\"0\", \"Ev[Toggle]\", [\"change\", \"yes\", false]]"] ~> =[_, ps]
@@ -714,7 +714,7 @@ fn test_input_and_change_share_one_shape() {
                  view: #Str['bin] { %html{ <p>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
                ]
-               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: <>]
                s = %html/live.sim [req, comp]
                %html/live.sim_text [s, "[\"0\", \"Ev[Edit]\", [\"input\", \"typed\", false]]"] ~> =[s2, _]
                %html/live.sim_text [s2, "[\"0\", \"Ev[Edit]\", [\"change\", \"committed\", false]]"] ~> =[_, ps]
@@ -740,7 +740,7 @@ fn test_keydown_metadata_carries_key_and_modifiers() {
                  view: #Str['bin] { %html{ <p>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
                ]
-               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: <>]
                s = %html/live.sim [req, comp]
                %html/live.sim_text [s, "[\"0\", \"Ev[Commit]\", [\"keydown\", \"Enter\", [false, true, false, false]]]"] ~> =[_, ps]
                ps"#,
@@ -765,7 +765,7 @@ fn test_click_metadata_carries_coordinates_and_modifiers() {
                  view: #Str['bin] { %html{ <p>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
                ]
-               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: <>]
                s = %html/live.sim [req, comp]
                %html/live.sim_text [s, "[\"0\", \"Ev[Mark]\", [\"click\", 30, 40, 0, [false, false, true, false]]]"] ~> =[_, ps]
                ps"#,
@@ -821,7 +821,7 @@ fn test_sim_changed_rerenders_after_store_step() {
                  ]
                }
                st = 0 ~> @'int { !'int ~> { =n => ^ n } } ~
-               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: 0x]
+               req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: <>]
                s = %html/live.sim [req, mkcomp st]
                7 ~> st ~
                w = ![#'%proc.changed, 2000] ~> { ='%proc.changed => Woke | TimedOut }

@@ -456,9 +456,9 @@ fn instantiated_members_never_share_a_cse_slot() {
     // must keep its own type argument.
     quiver()
         .evaluate(
-            r#"a = %data.decode<'int> "42"; b = %data.decode<'bin> "0x0a"; c = %data.decode<'int> "7"; [a, b, c]"#,
+            r#"a = %data.decode<'int> "42"; b = %data.decode<'bin> "<0a>"; c = %data.decode<'int> "7"; [a, b, c]"#,
         )
-        .expect("[42, 0x0a, 7]");
+        .expect("[42, <0a>, 7]");
 }
 
 #[test]

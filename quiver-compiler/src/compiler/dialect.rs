@@ -232,7 +232,9 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
             Value::Binary(binary) => {
                 let bytes = (self.read_binary)(binary)
                     .ok_or_else(|| self.error("returned an unreadable binary"))?;
-                return Ok(term_chain(ast::Term::Literal(ast::Literal::Binary(bytes))));
+                return Ok(term_chain(ast::Term::Literal(ast::Literal::Binary(
+                    ast::BinaryLiteral::ungrouped(bytes),
+                ))));
             }
             _ => {}
         }

@@ -25,7 +25,7 @@ fn test_field_narrowing_propagates_to_parent() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #'int { =0 => A[a: 1, b: 2] | B[a: 0x00, c: 3] };
+            make_ab = #'int { =0 => A[a: 1, b: 2] | B[a: <00>, c: 3] };
             y = 0 ~> make_ab ~;
             y.a ~> ='int; y.b
             "#,
@@ -189,7 +189,7 @@ fn test_basic_complement_narrowing() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #'int { =0 => A[a: 1, b: 2] | B[a: 0x00, c: 3] };
+            make_ab = #'int { =0 => A[a: 1, b: 2] | B[a: <00>, c: 3] };
             y = 0 ~> make_ab ~;
             { y.a ~> ='int => y.b | y.c }
             "#,
@@ -200,7 +200,7 @@ fn test_basic_complement_narrowing() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #'int { =0 => A[a: 1, b: 2] | B[a: 0x00, c: 3] };
+            make_ab = #'int { =0 => A[a: 1, b: 2] | B[a: <00>, c: 3] };
             y = 1 ~> make_ab ~;
             { y.a ~> ='int => y.b | y.c }
             "#,
@@ -366,7 +366,7 @@ fn test_complement_union_with_common_field() {
     quiver()
         .evaluate(
             r#"
-            make_ab = #'int { =0 => A[val: 1, a: 10] | B[val: 0x00, b: 20] };
+            make_ab = #'int { =0 => A[val: 1, a: 10] | B[val: <00>, b: 20] };
             x = 0 ~> make_ab ~;
             { x.val ~> ='int => x.a | x.b }
             "#,
@@ -1305,7 +1305,7 @@ fn test_field_scrutinee_nested_tuple_pattern() {
             r#"
             'opt = Nil | Cons[['bin, 'int], Done]
             bg = #[(entries): 'opt] { $entries ~> { | =Nil => [] | =Cons[[k, v], t] => v } }
-            bg [Cons[[0x61, 7], Done]]
+            bg [Cons[[<61>, 7], Done]]
             "#,
         )
         .expect("7");
@@ -1333,7 +1333,7 @@ fn test_field_scrutinee_two_step_destructure() {
             r#"
             'opt = Nil | Cons[['bin, 'int], Done]
             bg = #[(entries): 'opt] { $entries ~> { | =Nil => [] | =Cons[x, t]; x ~> =[k, v] => v } }
-            bg [Cons[[0x61, 7], Done]]
+            bg [Cons[[<61>, 7], Done]]
             "#,
         )
         .expect("7");

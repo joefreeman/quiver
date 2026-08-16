@@ -1593,10 +1593,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.codegen.add_instruction(Instruction::constant(index));
                 Ok(self.program.register_type(Type::Integer))
             }
-            ast::Literal::Binary(bytes) => {
+            ast::Literal::Binary(binary) => {
                 let index = self
                     .program
-                    .register_constant(Constant::Binary(bytes.clone()));
+                    .register_constant(Constant::Binary(binary.bytes().to_vec()));
                 self.codegen.add_instruction(Instruction::constant(index));
                 Ok(self.program.register_type(Type::Binary))
             }

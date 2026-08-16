@@ -55,7 +55,7 @@ exchange = #[(url): '%url, (request): '%http] {
 
   // Bound with a bare binder rather than a narrowing one: a failed read must still reach the
   // close below, and the annotated nil is what this answers.
-  response = read_loop [sock, 0x]
+  response = read_loop [sock, <>]
   // Discard the close's own result — a close failure must not lose a response we already
   // have, and teardown is the backstop either way.
   { %tcp.close sock; Ok | Ok }

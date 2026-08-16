@@ -1010,7 +1010,7 @@ fn a_lines_imports_are_its_own_reads_only() {
     let (bundled, _) = evaluate_observing_payload(
         &mut environment,
         &mut repl,
-        "%bin.get_byte [bin: 0x616263, index: 1]",
+        "%bin.get_byte [bin: <616263>, index: 1]",
     );
     assert!(bundled, "the line that reads %bin names it");
 

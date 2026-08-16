@@ -295,8 +295,6 @@ module.exports = grammar({
       $.select,
       $.state,
       $.tail_call,
-      $.equality,
-      $.not,
       $.tuple,
       $.function,
       $.block,
@@ -431,9 +429,6 @@ module.exports = grammar({
     // ------------------------------------------------------------------- operations
 
     builtin: $ => prec.right(seq(token(/__[a-z][a-zA-Z0-9_]*__/), optional($.type_arguments))),
-
-    equality: _ => '==',
-    not: _ => '<>',
 
     // Tail calls: `^` (self), `^name`, `^name.field`, `^.field`, and `^~` (tail-call the
     // flowing value). A tail call is an applicable head (see `_applicable`), so it may take a
@@ -820,7 +815,17 @@ module.exports = grammar({
     tuple_name: _ => /[A-Z][a-zA-Z0-9_]*/,
 
     integer: _ => /-?\d+/,
-    binary: _ => /0x[0-9a-fA-F]*/,
+    // Hex digits between angle brackets, with whitespace separating groups and a newline
+    // starting a new row (`<6a09e667 bb67ae85>`, or a table across lines). Like the integer
+    // rule this is laxer than the real parser, which additionally requires every group to be
+    // a whole number of bytes and forbids padding the brackets on a single line.
+    //
+    // The negative lexical precedence loses to the glued `<` of a `type_arguments` list
+    // wherever both are valid, which is what keeps a type argument whose name happens to
+    // be hex digits (`f<ABC>`) from lexing as a binary. It costs nothing in term position,
+    // where the immediate `<` is not a candidate at all, and a *spaced* `f <0a1b>` still
+    // reaches this rule because an immediate token cannot follow skipped whitespace.
+    binary: _ => token(prec(-1, /<[0-9a-fA-F \t\r\n]*>/)),
 
     // A single-line string. Content stops at `{`: an unescaped brace opens an
     // interpolation hole, parsed exactly like a block body (`string_segments` in

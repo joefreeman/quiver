@@ -1,5 +1,5 @@
 // Quiver data notation: the language's literal syntax restricted to data — integers,
-// binaries (`0x…`), and tuples (with names and field labels), plus the `"…"` string
+// binaries (`<…>`), and tuples (with names and field labels), plus the `"…"` string
 // sugar for `Str` values. Strings never interpolate here (data, not code), and encoded
 // text reads back as literal code unchanged (`{` is escaped).
 //

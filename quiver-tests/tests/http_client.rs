@@ -193,7 +193,7 @@ fn test_an_untrusted_anchor_set_is_refused() {
             r#""example.com" ~> %dns.resolve ~ ~> %iter.nth [~, 0]
                ~> { | =IPv4[b] => b | =IPv6[b] => b } ~> =('bin)ip
                %tcp.connect [ip, 443] ~> =(\TcpSocket)s
-               %tls.attach [socket: s, hostname: "example.com", roots: 0xdeadbeef]
+               %tls.attach [socket: s, hostname: "example.com", roots: <deadbeef>]
                ~> :('%io)error ~> =IoError(message: m); m"#,
         )
         .expect(r#""tls: no usable trust anchors in the supplied roots""#);

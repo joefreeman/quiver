@@ -1098,7 +1098,10 @@ fn registry_rendezvous_across_sessions() {
         ),
         "42"
     );
-    assert_eq!(b.evaluate_value("%registry.lookup<@'int> Shared ~> =[]"), "Ok");
+    assert_eq!(
+        b.evaluate_value("%registry.lookup<@'int> Shared ~> =[]"),
+        "Ok"
+    );
 }
 
 #[test]
@@ -1124,8 +1127,7 @@ fn registry_names_free_when_session_teardown_kills_the_service() {
     // Teardown is asynchronous: poll until the cascade's expiry frees the name.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let value =
-            b.evaluate_value("%registry.lookup<@'int> Owned ~> { =[] => Missing | Found }");
+        let value = b.evaluate_value("%registry.lookup<@'int> Owned ~> { =[] => Missing | Found }");
         if value == "Missing" {
             break;
         }

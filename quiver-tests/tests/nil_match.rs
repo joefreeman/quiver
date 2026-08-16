@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 // Matching against the nil pattern `=[]` is the test for nil: it evaluates to Ok when the value is
-// nil and [] otherwise. (This replaces the former `<>` operator.)
+// nil and [] otherwise.
 
 #[test]
 fn test_nil_match_nil() {

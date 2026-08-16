@@ -44,8 +44,17 @@ bsig1 = #'int {
 }
 
 // The SHA-256 round constants (64 words) and initial state (8 words).
-k256 = 0x428a2f9871374491b5c0fbcfe9b5dba53956c25b59f111f1923f82a4ab1c5ed5d807aa9812835b01243185be550c7dc372be5d7480deb1fe9bdc06a7c19bf174e49b69c1efbe47860fc19dc6240ca1cc2de92c6f4a7484aa5cb0a9dc76f988da983e5152a831c66db00327c8bf597fc7c6e00bf3d5a7914706ca63511429296727b70a852e1b21384d2c6dfc53380d13650a7354766a0abb81c2c92e92722c85a2bfe8a1a81a664bc24b8b70c76c51a3d192e819d6990624f40e3585106aa07019a4c1161e376c082748774c34b0bcb5391c0cb34ed8aa4a5b9cca4f682e6ff3748f82ee78a5636f84c878148cc7020890befffaa4506cebbef9a3f7c67178f2
-h256 = 0x6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19
+k256 = <
+  428a2f98 71374491 b5c0fbcf e9b5dba5 3956c25b 59f111f1 923f82a4 ab1c5ed5
+  d807aa98 12835b01 243185be 550c7dc3 72be5d74 80deb1fe 9bdc06a7 c19bf174
+  e49b69c1 efbe4786 0fc19dc6 240ca1cc 2de92c6f 4a7484aa 5cb0a9dc 76f988da
+  983e5152 a831c66d b00327c8 bf597fc7 c6e00bf3 d5a79147 06ca6351 14292967
+  27b70a85 2e1b2138 4d2c6dfc 53380d13 650a7354 766a0abb 81c2c92e 92722c85
+  a2bfe8a1 a81a664b c24b8b70 c76c51a3 d192e819 d6990624 f40e3585 106aa070
+  19a4c116 1e376c08 2748774c 34b0bcb5 391c0cb3 4ed8aa4a 5b9cca4f 682e6ff3
+  748f82ee 78a5636f 84c87814 8cc70208 90befffa a4506ceb bef9a3f7 c67178f2
+>
+h256 = <6a09e667 bb67ae85 3c6ef372 a54ff53a 510e527f 9b05688c 1f83d9ab 5be0cd19>
 
 // Extend a block's 16 words to the full 64-word schedule.
 extend = #[(w): 'bin, (t): 'int] {
@@ -119,7 +128,7 @@ blocks = #[(data): 'bin, (off): 'int, (st): 'state] {
   }
 }
 
-// The message padded to a whole number of blocks: 0x80, zeros, 8-byte bit length.
+// The message padded to a whole number of blocks: <80>, zeros, 8-byte bit length.
 pad = #'bin {
   =msg
   len = __binary_length__ msg
@@ -140,7 +149,7 @@ pad = #'bin {
 digest = #'state {
   =[a, b, c, d, e, f, g, h]
 
-  __binary_append__ [0x, a, 4] ~> __binary_append__ [~, b, 4] ~> __binary_append__ [~, c, 4] ~> __binary_append__ [~, d, 4] ~> __binary_append__ [~, e, 4] ~> __binary_append__ [~, f, 4] ~> __binary_append__ [~, g, 4] ~> __binary_append__ [
+  __binary_append__ [<>, a, 4] ~> __binary_append__ [~, b, 4] ~> __binary_append__ [~, c, 4] ~> __binary_append__ [~, d, 4] ~> __binary_append__ [~, e, 4] ~> __binary_append__ [~, f, 4] ~> __binary_append__ [~, g, 4] ~> __binary_append__ [
     ~,
     h,
     4,
@@ -167,7 +176,7 @@ sha256 = #'bin {
 // rotate-right (32 - n).
 
 // The SHA-1 initial state (5 words).
-h1 = 0x67452301efcdab8998badcfe10325476c3d2e1f0
+h1 = <67452301 efcdab89 98badcfe 10325476 c3d2e1f0>
 
 // Extend a block's 16 words to the full 80-word SHA-1 schedule:
 // w[t] = rotl1(w[t-3] ^ w[t-8] ^ w[t-14] ^ w[t-16]).
@@ -249,15 +258,15 @@ sha1 = #'bin {
   init = [w_at [h1, 0], w_at [h1, 1], w_at [h1, 2], w_at [h1, 3], w_at [h1, 4]]
   blocks1 [pad $, 0, init] ~> =[a, b, c, d, e]
 
-  __binary_append__ [0x, a, 4] ~> __binary_append__ [~, b, 4] ~> __binary_append__ [~, c, 4] ~> __binary_append__ [~, d, 4] ~> __binary_append__ [
+  __binary_append__ [<>, a, 4] ~> __binary_append__ [~, b, 4] ~> __binary_append__ [~, c, 4] ~> __binary_append__ [~, d, 4] ~> __binary_append__ [
     ~,
     e,
     4,
   ]
 }
 
-ipad = 0x36363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636
-opad = 0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c
+ipad = <36363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636>
+opad = <5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c>
 
 hmac_sha256 = #[(key): 'bin, (msg): 'bin] {
   :doc "The HMAC-SHA256 of the message under the key, as a 32-byte binary."

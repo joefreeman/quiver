@@ -41,8 +41,8 @@ parse = #[(segments): '%list<'%str>, (init): '] {
     #{
       $1 ~> {
         | %str.empty? ~ => $0
-        | =Str[0x2e] => $0
-        | =Str[0x2e2e] => $0 ~> {
+        | =Str[<2e>] => $0
+        | =Str[<2e2e>] => $0 ~> {
           | =Path[_, parent] => parent
           | =Relative[n] => %num.add [n, 1] ~> Relative[~]
           | =Root => Root

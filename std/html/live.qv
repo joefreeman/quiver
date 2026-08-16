@@ -345,7 +345,7 @@ render_of = #[(self): #^ -> 'bin, (f): 'frame, (acc): 'bin] {
       | =Ok => %bin.concat [%bin.append [$acc, 32, 1], n]
       | =Str[vb] => {
         ev = %html.escape_attr Str[vb] ~> .0
-        %bin.concat [%bin.append [$acc, 32, 1], n] ~> %bin.concat [~, 0x3d22] ~> %bin.concat [~, ev] ~> %bin.append [
+        %bin.concat [%bin.append [$acc, 32, 1], n] ~> %bin.concat [~, <3d22>] ~> %bin.concat [~, ev] ~> %bin.append [
           ~,
           34,
           1,
@@ -402,7 +402,7 @@ render_of = #[(self): #^ -> 'bin, (f): 'frame, (acc): 'bin] {
 
 render = #'frame {
   :doc "Renders a frame to instrumented HTML — statics interleaved with slot values, child-hole markers and data-q anchors included — for the initial region render and SetHtml patch payloads."
-  render_of [render_of, $, 0x] ~> Str[~]
+  render_of [render_of, $, <>] ~> Str[~]
 }
 
 // An inserted row's payload: the row rendered inside its own markers.
@@ -1469,7 +1469,7 @@ alife = #[(req): '%http, (mode): 'amode, (buffer): 'strs, (token): ('%str | []),
       | =Attach[conn] => {
         flush_frames [%list.reverse $buffer, conn]
         tell_views [$routes, Wake]
-        %http/websocket.on_data [conn, 0x] ~> =[msgs, c2]
+        %http/websocket.on_data [conn, <>] ~> =[msgs, c2]
         route_events [$req, msgs, $routes] ~> {
           | =Go => ^ [$req, Attached[c2], Nil, $token, reg, $routes]
           | Ok

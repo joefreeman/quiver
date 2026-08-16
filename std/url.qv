@@ -74,7 +74,7 @@ split_authority = #[(data): 'bin, (start): 'int, (end): 'int] {
       %bin.index [$data, 93, $start] ~> =('int)rb
       __integer_compare__ [__integer_add__ [rb, 1], $end] ~> =-1 => __integer_add__ [rb, 1]
     | [$data, $start] ~> %bin.get_byte ~ ~> =91 => $end
-    | scan_to [$data, $start, $end, 0x3a]
+    | scan_to [$data, $start, $end, <3a>]
   }
   host = %bin.slice [$data, $start, ci] ~> Str[~]
   {
@@ -98,24 +98,24 @@ parse = #'%str {
   __integer_compare__ [__integer_add__ [ci, 2], len] ~> =-1
   %bin.get_byte [u, __integer_add__ [ci, 1]] ~> =47
   %bin.get_byte [u, __integer_add__ [ci, 2]] ~> =47
-  scheme = lower_loop [u, 0, ci, 0x] ~> Str[~]
+  scheme = lower_loop [u, 0, ci, <>] ~> Str[~]
 
   // authority, up to the first `/`, `?` or `#`
   astart = __integer_add__ [ci, 3]
-  aend = scan_to [u, astart, len, 0x2f3f23]
+  aend = scan_to [u, astart, len, <2f3f23>]
   __integer_compare__ [astart, aend] ~> =-1
   split_authority [u, astart, aend] ~> =[host, p]
   port = { p ~> =0 => default_port scheme | p }
 
   // path, up to the first `?` or `#`
-  pend = scan_to [u, aend, len, 0x3f23]
+  pend = scan_to [u, aend, len, <3f23>]
   path = {
     | __integer_compare__ [aend, pend] ~> =0 => "/"
     | %bin.slice [u, aend, pend] ~> Str[~]
   }
 
   // query (after `?`, up to `#`) and fragment (after `#`)
-  qend = scan_to [u, pend, len, 0x23]
+  qend = scan_to [u, pend, len, <23>]
   query = {
     | __integer_compare__ [pend, len] ~> =-1; [u, pend] ~> %bin.get_byte ~ ~> =63 => %bin.slice [u, __integer_add__ [pend, 1], qend] ~> Str[
       ~,
@@ -184,11 +184,11 @@ directory = #'%str {
       // An absolute reference stands alone.
       | parse $ref
       // `//host/path` — inherit only the scheme.
-      | starts_with? [r, 0x2f2f] => parse "{$base.scheme}:{$ref}"
+      | starts_with? [r, <2f2f>] => parse "{$base.scheme}:{$ref}"
       // `/path` — inherit the authority.
-      | starts_with? [r, 0x2f] => parse "{$base.scheme}://{authority $base}{$ref}"
+      | starts_with? [r, <2f>] => parse "{$base.scheme}://{authority $base}{$ref}"
       // `#fragment` (and the empty reference) — the base, re-fragmented.
-      | starts_with? [r, 0x23] => $base[..., fragment: %bin.slice [r, 1, %bin.length r] ~> Str[~]]
+      | starts_with? [r, <23>] => $base[..., fragment: %bin.slice [r, 1, %bin.length r] ~> Str[~]]
       | %bin.length r ~> =0 => $base
       // Anything else is relative to the base path's directory.
       | {

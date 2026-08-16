@@ -124,10 +124,6 @@
             "named": true
           },
           {
-            "type": "equality",
-            "named": true
-          },
-          {
             "type": "function",
             "named": true
           },
@@ -137,10 +133,6 @@
           },
           {
             "type": "multiline_string",
-            "named": true
-          },
-          {
-            "type": "not",
             "named": true
           },
           {
@@ -576,10 +568,6 @@
           "named": true
         },
         {
-          "type": "equality",
-          "named": true
-        },
-        {
           "type": "function",
           "named": true
         },
@@ -589,10 +577,6 @@
         },
         {
           "type": "multiline_string",
-          "named": true
-        },
-        {
-          "type": "not",
           "named": true
         },
         {
@@ -3172,10 +3156,6 @@
     "named": true
   },
   {
-    "type": "equality",
-    "named": true
-  },
-  {
     "type": "escape_sequence",
     "named": true
   },
@@ -3189,10 +3169,6 @@
   },
   {
     "type": "integer",
-    "named": true
-  },
-  {
-    "type": "not",
     "named": true
   },
   {

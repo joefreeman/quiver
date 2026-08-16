@@ -41,7 +41,7 @@ to_hex_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 
 to_hex = #'bin {
   :doc "The binary as lowercase hex text, two characters per byte."
-  to_hex_loop [$, 0, __binary_length__ $, 0x] ~> Str[~]
+  to_hex_loop [$, 0, __binary_length__ $, <>] ~> Str[~]
 }
 
 from_hex_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
@@ -66,7 +66,7 @@ from_hex = #Str['bin] {
 
   __integer_compare__ [__integer_modulo__ [__binary_length__ data, 2], 0] ~> =0
 
-  from_hex_loop [data, 0, __binary_length__ data, 0x]
+  from_hex_loop [data, 0, __binary_length__ data, <>]
 }
 
 // A 6-bit value as a base64 character code (RFC 4648 standard alphabet).
@@ -108,7 +108,7 @@ to_base64_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
         ~,
         __integer_modulo__ [b0, 4] ~> __integer_multiply__ [~, 16] ~> b64_digit ~,
         1,
-      ] ~> __binary_concat__ [~, 0x3d3d]
+      ] ~> __binary_concat__ [~, <3d3d>]
     }
     | rem ~> =2 => {
       b0 = __binary_get__ [$data, $pos, 0, 8]
@@ -126,7 +126,7 @@ to_base64_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
         ~,
         __integer_modulo__ [b1, 16] ~> __integer_multiply__ [~, 4] ~> b64_digit ~,
         1,
-      ] ~> __binary_concat__ [~, 0x3d]
+      ] ~> __binary_concat__ [~, <3d>]
     }
     | {
       b0 = __binary_get__ [$data, $pos, 0, 8]
@@ -157,7 +157,7 @@ to_base64_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 
 to_base64 = #'bin {
   :doc "The binary as base64 text (RFC 4648 standard alphabet, padded)."
-  to_base64_loop [$, 0, __binary_length__ $, 0x] ~> Str[~]
+  to_base64_loop [$, 0, __binary_length__ $, <>] ~> Str[~]
 }
 
 // Decode one 4-character quantum at pos; the last may carry one or two `=` pads.
@@ -230,10 +230,10 @@ from_base64 = #Str['bin] {
   =Str[data]
   len = __binary_length__ data
   {
-    | len ~> =0 => 0x
+    | len ~> =0 => <>
     | {
       __integer_compare__ [__integer_modulo__ [len, 4], 0] ~> =0
-      from_base64_loop [data, 0, len, 0x]
+      from_base64_loop [data, 0, len, <>]
     }
   }
 }

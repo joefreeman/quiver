@@ -448,7 +448,7 @@ fn test_ragged_buffer_is_a_runtime_error() {
         .evaluate(
             r#"
             vec = %vec
-            Vec[dtype: I32, scale: 1, data: 0x0102] ~> vec.sum ~
+            Vec[dtype: I32, scale: 1, data: <0102>] ~> vec.sum ~
             "#,
         )
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(

@@ -80,7 +80,7 @@ chars = #'bin {
 from_chars = #'%iter<'int> {
   %iter.fold [
     ~,
-    0x,
+    <>,
     #['bin, 'int] {
       =[acc, char_int]
       byte_count = char_int ~> {
@@ -113,7 +113,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
   | {
     d = __integer_modulo__ [$n, 10]
     q = __integer_divide__ [$n, 10]
-    digit = %bin.append [0x, %num.add [d, 48], 1]
+    digit = %bin.append [<>, %num.add [d, 48], 1]
     ^ [q, %bin.concat [digit, $acc]]
   }
 }
@@ -142,8 +142,8 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
     :doc "The decimal representation of an integer."
     {
       | $ ~> =0 => "0"
-      | %num.lt? [$, 0] => %num.sub [0, $] ~> int_bytes [~, 0x] ~> %bin.concat [0x2d, ~] ~> Str[~]
-      | int_bytes [$, 0x] ~> Str[~]
+      | %num.lt? [$, 0] => %num.sub [0, $] ~> int_bytes [~, <>] ~> %bin.concat [<2d>, ~] ~> Str[~]
+      | int_bytes [$, <>] ~> Str[~]
     }
   },
 
@@ -273,7 +273,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
   join: #[(strs): '%iter<'>, (sep): '] {
     :doc "Joins an iterator of strings with a separator between each."
     Str[sep] = $sep
-    $strs ~> %iter.map [~, #' { .0 }] ~> %iter.intersperse [~, sep] ~> %iter.fold [~, 0x, %bin.concat] ~> Str[
+    $strs ~> %iter.map [~, #' { .0 }] ~> %iter.intersperse [~, sep] ~> %iter.fold [~, <>, %bin.concat] ~> Str[
       ~,
     ]
   },

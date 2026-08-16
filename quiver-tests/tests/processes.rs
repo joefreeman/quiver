@@ -34,7 +34,7 @@ fn test_process_type_checking_send() {
         .evaluate(
             r#"
             p = @#{ !#'int } [];
-            0x00 ~> p ~
+            <00> ~> p ~
         "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
@@ -162,7 +162,7 @@ fn spawn_with_init_argument_is_argument_first() {
 #[test]
 fn test_spawn_with_argument_type_mismatch() {
     quiver()
-        .evaluate("0x00 ~> @#'int { $ } ~")
+        .evaluate("<00> ~> @#'int { $ } ~")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "'int".to_string(),
             found: "'bin".to_string(),
@@ -707,7 +707,7 @@ fn test_select_receive_pattern_priority() {
             f = #{
                 . ~> =self_pid;
                 42 ~> self_pid ~;
-                0x00 ~> self_pid ~;
+                <00> ~> self_pid ~;
                 ![#'int, #'bin]
             };
             @f [] ~> !
@@ -1011,7 +1011,7 @@ fn test_send_to_self() {
 #[test]
 fn test_send_to_self_with_receive_type_check() {
     quiver()
-        .evaluate("#{ me = .; 0x00 ~> me ~; !#'int }")
+        .evaluate("#{ me = .; <00> ~> me ~; !#'int }")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "'int".to_string(),
             found: "'bin".to_string(),
@@ -1131,7 +1131,7 @@ fn test_sugar_receive_function_with_union_type() {
         .evaluate(
             r#"
             p = @#{ ![#('int | 'bin) { =42 => Ok }] } [];
-            0x00 ~> p ~; 42 ~> p ~;
+            <00> ~> p ~; 42 ~> p ~;
             !p
             "#,
         )

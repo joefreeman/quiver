@@ -16,7 +16,7 @@ fn test_listener_and_socket_as_select_sources() {
             r#"
             %tcp.listen [4293, 8] ~> =(\TcpListener)l
             c = @{
-              %tcp.connect [0x7f000001, 4293] ~> =(\TcpSocket)s
+              %tcp.connect [<7f000001>, 4293] ~> =(\TcpSocket)s
               %tcp.write [s, "ping" ~> .0]
               !'int
             } []
@@ -52,7 +52,7 @@ fn test_socket_select_races_timeout() {
         .evaluate(
             r#"
             %tcp.listen [4294, 8] ~> =(\TcpListener)l
-            c = @{ %tcp.connect [0x7f000001, 4294] ~> =(\TcpSocket)s; !'int } []
+            c = @{ %tcp.connect [<7f000001>, 4294] ~> =(\TcpSocket)s; !'int } []
             ![l] ~> =Accepted[listener: _, sock: conn]
             ![conn, 50] ~> {
               | =Data[sock: _, data: _] => GotData
@@ -74,7 +74,7 @@ fn test_socket_select_races_mailbox() {
             r#"
             %tcp.listen [4295, 8] ~> =(\TcpListener)l
             c = @{
-              %tcp.connect [0x7f000001, 4295] ~> =(\TcpSocket)s
+              %tcp.connect [<7f000001>, 4295] ~> =(\TcpSocket)s
               !'int ~> =1
               %tcp.write [s, "later" ~> .0]
               Ok
@@ -107,7 +107,7 @@ fn test_socket_closed_event() {
             r#"
             %tcp.listen [4296, 8] ~> =(\TcpListener)l
             c = @{
-              %tcp.connect [0x7f000001, 4296] ~> =(\TcpSocket)s
+              %tcp.connect [<7f000001>, 4296] ~> =(\TcpSocket)s
               %tcp.close s
               Done
             } []
@@ -133,7 +133,7 @@ fn test_plain_read_consumes_stashed_event() {
             r#"
             %tcp.listen [4297, 8] ~> =(\TcpListener)l
             c = @{
-              %tcp.connect [0x7f000001, 4297] ~> =(\TcpSocket)s
+              %tcp.connect [<7f000001>, 4297] ~> =(\TcpSocket)s
               !'int ~> =1
               %tcp.write [s, "stash me" ~> .0]
               !'int
@@ -173,7 +173,7 @@ fn test_scoped_host_rejects_io_builtins_at_call_time() {
         .expect("Ok");
     quiver()
         .scoped_no_io()
-        .evaluate(r#"%tcp.connect [0x7f000001, 80]"#)
+        .evaluate(r#"%tcp.connect [<7f000001>, 80]"#)
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
             "builtin __tcp_connect__ is not available on this host".to_string(),
         ));
@@ -219,7 +219,7 @@ fn test_system_only_host_still_rejects_file_and_network() {
     // socket or file call on this host still errors — at the call, naming the builtin.
     quiver()
         .scoped_system_only()
-        .evaluate(r#"%tcp.connect [0x7f000001, 80]"#)
+        .evaluate(r#"%tcp.connect [<7f000001>, 80]"#)
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
             "builtin __tcp_connect__ is not available on this host".to_string(),
         ));

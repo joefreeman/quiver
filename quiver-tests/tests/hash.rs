@@ -22,10 +22,10 @@ fn test_sha256_nist_vectors() {
 
 #[test]
 fn test_hmac_sha256_rfc4231_vectors() {
-    // RFC 4231 test case 1: key = 20 × 0x0b, data = "Hi There".
+    // RFC 4231 test case 1: key = 20 × <0b>, data = "Hi There".
     quiver()
         .evaluate(
-            r#"[0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b, "Hi There" ~> .0] ~> %hash.hmac_sha256 ~ ~> %bin.to_hex ~"#,
+            r#"[<0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b>, "Hi There" ~> .0] ~> %hash.hmac_sha256 ~ ~> %bin.to_hex ~"#,
         )
         .expect(r#""b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7""#);
     // Test case 2: short key ("Jefe").
@@ -33,14 +33,14 @@ fn test_hmac_sha256_rfc4231_vectors() {
         .evaluate(r#"["Jefe" ~> .0, "what do ya want for nothing?" ~> .0] ~> %hash.hmac_sha256 ~ ~> %bin.to_hex ~"#)
         .expect(r#""5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843""#);
     // A key longer than the block size is hashed first (RFC 4231 case 6, truncated key
-    // form: 131 × 0xaa, data "Test Using Larger Than Block-Size Key - Hash Key First").
+    // form: 131 × <aa>, data "Test Using Larger Than Block-Size Key - Hash Key First").
     quiver()
         .evaluate(
             r#"rep = #['bin, 'int, 'int] {
                  =[acc, b, n]
                  { | n ~> =0 => acc | [[acc, b, 1] ~> %bin.append ~, b, [n, 1] ~> __integer_subtract__ ~] ~> ^ ~ }
                };
-               key = [0x, 170, 131] ~> rep ~;
+               key = [<>, 170, 131] ~> rep ~;
                [key, "Test Using Larger Than Block-Size Key - Hash Key First" ~> .0] ~> %hash.hmac_sha256 ~ ~> %bin.to_hex ~"#,
         )
         .expect(r#""60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54""#);
@@ -49,11 +49,11 @@ fn test_hmac_sha256_rfc4231_vectors() {
 #[test]
 fn test_bin_hex_codecs() {
     quiver()
-        .evaluate(r#"0xdeadbeef ~> %bin.to_hex ~"#)
+        .evaluate(r#"<deadbeef> ~> %bin.to_hex ~"#)
         .expect(r#""deadbeef""#);
     quiver()
         .evaluate(r#""DeadBEEF" ~> %bin.from_hex ~"#)
-        .expect("0xdeadbeef");
+        .expect("<deadbeef>");
     quiver()
         .evaluate(r#""abc" ~> %bin.from_hex ~"#)
         .expect("[]"); // odd length

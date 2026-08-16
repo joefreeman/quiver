@@ -42,8 +42,8 @@ fn test_function_with_tuple_parameter() {
 #[test]
 fn test_function_with_enumerated_type_parameter() {
     quiver()
-        .evaluate("f = #('int | 'bin) { =x => x }; 0x0a1b2c ~> f ~")
-        .expect("0x0a1b2c");
+        .evaluate("f = #('int | 'bin) { =x => x }; <0a1b2c> ~> f ~")
+        .expect("<0a1b2c>");
 }
 
 #[test]
@@ -184,7 +184,7 @@ fn test_function_parameter_contravariance() {
     quiver().evaluate(
         r#"
         f = #(#[] -> 'bin) { ~ };
-        g = #(Ok | []) { 0x00 };
+        g = #(Ok | []) { <00> };
         g ~> f ~
         "#,
     );
@@ -206,8 +206,8 @@ fn test_identity_function_int() {
 #[test]
 fn test_identity_function_bin() {
     quiver()
-        .evaluate("f = #'bin; 0x0a1b2c ~> f ~")
-        .expect("0x0a1b2c");
+        .evaluate("f = #'bin; <0a1b2c> ~> f ~")
+        .expect("<0a1b2c>");
 }
 
 #[test]

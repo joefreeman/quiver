@@ -101,7 +101,7 @@ conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
                 resp.headers,
                 ["content-length", %bin.length resp.body ~> %str.from_int ~],
               ],
-              body: 0x,
+              body: <>,
             ]
             | resp
           }
@@ -129,7 +129,7 @@ conn = #[\TcpSocket, 'handler, ('tls | [])] {
     | t ~> =[cert: c, key: k] => %tls.accept [socket: sock, cert: c, key: k]
     | Ok
   }
-  conn_loop [sock, h, 0x]
+  conn_loop [sock, h, <>]
 }
 
 // A failed accept ends the loop rather than spinning on a broken listener; the nil carries
@@ -183,7 +183,7 @@ json = #'%json {
 
 redirect = #'%str {
   :doc "A 303 See Other redirect to the location — the POST-then-redirect-to-GET idiom."
-  Response[status: 303, headers: %list{ ["location", $] }, body: 0x]
+  Response[status: 303, headers: %list{ ["location", $] }, body: <>]
 }
 
 not_found = #{

@@ -118,7 +118,7 @@ fn test_pem_roots_reach_a_tls_server() {
         .evaluate(&server.program(
             r#"
             %pem.certificates "__CA_PEM__" ~> =('bin)roots
-            %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
+            %tcp.connect [<7f000001>, __PORT__] ~> =(\TcpSocket)s
             %tls.attach [socket: s, hostname: "localhost", roots: roots]
             %tcp.write [s, "ping" ~> .0]
             %tcp.read [s, 4] ~> Str[~]

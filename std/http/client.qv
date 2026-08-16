@@ -72,7 +72,7 @@ exchange = #[(url): '%url, (method): '%http.method, (headers): '%http.pairs, (bo
     }
   } ~> =('%http.pairs)hs
 
-  drain [body, 0x] ~> =('bin)content
+  drain [body, <>] ~> =('bin)content
   Response[status: status, headers: hs, body: content]
 }
 
@@ -102,7 +102,7 @@ follow_loop = #[(url): '%url, (method): '%http.method, (headers): '%http.pairs, 
       // A method-changing redirect drops the body with the method: a GET with a payload is
       // meaningless, and forwarding it would resend a POST's data to a new target.
       method = { kind ~> =ToGet => GET | $method }
-      body = { kind ~> =ToGet => 0x | $body }
+      body = { kind ~> =ToGet => <> | $body }
       ^ [next, method, $headers, body, $timeout, __integer_subtract__ [$left, 1]]
     }
     | resp
@@ -110,7 +110,7 @@ follow_loop = #[(url): '%url, (method): '%http.method, (headers): '%http.pairs, 
 }
 
 [
-  request: #[(url): '%str, method: '%http.method = GET, headers: '%http.pairs = Nil, body: 'bin = 0x, timeout: 'int = 30000, redirects: 'int = 5] {
+  request: #[(url): '%str, method: '%http.method = GET, headers: '%http.pairs = Nil, body: 'bin = <>, timeout: 'int = 30000, redirects: 'int = 5] {
     :doc "Performs a request, following redirects. Nil on failure, carrying :error (exchange), :timeout (deadline) or :crash (the exchange died)."
     %url.parse $url ~> =('%url)u
     follow_loop [u, $method, $headers, $body, $timeout, $redirects]
@@ -118,12 +118,12 @@ follow_loop = #[(url): '%url, (method): '%http.method, (headers): '%http.pairs, 
 
   get: #'%str {
     :doc "A GET for the URL, with default headers and timeout."
-    %url.parse $ ~> =('%url)u; follow_loop [u, GET, Nil, 0x, 30000, 5]
+    %url.parse $ ~> =('%url)u; follow_loop [u, GET, Nil, <>, 30000, 5]
   },
 
   head: #'%str {
     :doc "A HEAD for the URL, with default headers and timeout."
-    %url.parse $ ~> =('%url)u; follow_loop [u, HEAD, Nil, 0x, 30000, 5]
+    %url.parse $ ~> =('%url)u; follow_loop [u, HEAD, Nil, <>, 30000, 5]
   },
 
   post: #[(url): '%str, (body): 'bin, headers: '%http.pairs = Nil] {

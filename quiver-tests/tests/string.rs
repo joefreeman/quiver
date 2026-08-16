@@ -93,11 +93,11 @@ fn test_interpolation_requires_str_hole() {
 fn test_bytes() {
     quiver()
         .evaluate(r#""hello" ~> %str.bytes ~"#)
-        .expect("0x68656c6c6f");
-    quiver().evaluate(r#""" ~> %str.bytes ~"#).expect("0x");
+        .expect("<68656c6c6f>");
+    quiver().evaluate(r#""" ~> %str.bytes ~"#).expect("<>");
     quiver()
         .evaluate(r#""🚀" ~> %str.bytes ~"#)
-        .expect("0xf09f9a80");
+        .expect("<f09f9a80>");
 }
 
 #[test]

@@ -506,6 +506,8 @@ fn is_breakable_container(term: &Term) -> bool {
 fn term_doc(trivia: &Trivia, term: &Term) -> Doc {
     match term {
         Term::Tuple(tuple) => tuple_doc(trivia, tuple),
+        // A binary written across lines keeps its rows; a single-line one is atomic text.
+        Term::Literal(Literal::Binary(binary)) if binary.row_count() > 1 => binary_doc(binary),
         Term::String(style, segments) => string_term_doc(trivia, *style, segments),
         Term::Block(block) => block_doc(trivia, block),
         Term::Function(function) => function_doc(trivia, function),
@@ -1355,11 +1357,40 @@ fn collapse_blanks(text: &str) -> String {
     out
 }
 
+/// Render a literal to one line. A binary written across rows collapses onto that line, so
+/// this is only the whole story where a term can't break — patterns and select sources.
+/// [`binary_doc`] renders the rows where they can be kept.
 fn render_literal(literal: &Literal) -> String {
     match literal {
         Literal::Integer(value) => value.to_string(),
-        Literal::Binary(bytes) => format!("0x{}", hex::encode(bytes)),
+        // The author's grouping is presentation the formatter keeps, like a string's
+        // delimiter style: separator runs and whitespace against a bracket normalise to one
+        // space, but where the groups divide is left alone (`<550e8400 e29b 41d4>` means
+        // something the formatter has no business regrouping).
+        Literal::Binary(binary) => {
+            let groups: Vec<String> = binary.groups().map(hex::encode).collect();
+            format!("<{}>", groups.join(" "))
+        }
     }
+}
+
+/// Render a binary literal written across lines: one row per line, indented inside the
+/// brackets, with the closing `>` back at the enclosing indentation — the same shape as a
+/// `"""` string, and, as there, the line breaks are the author's rather than the width
+/// engine's. A table of round constants laid out to match its spec stays laid out that way.
+fn binary_doc(binary: &BinaryLiteral) -> Doc {
+    let mut parts = vec![pretty::text("<")];
+    for row in binary.rows() {
+        parts.push(pretty::hardline());
+        parts.push(pretty::text(
+            row.iter().map(hex::encode).collect::<Vec<_>>().join(" "),
+        ));
+    }
+    pretty::concat(vec![
+        pretty::nest(2, pretty::concat(parts)),
+        pretty::hardline(),
+        pretty::text(">"),
+    ])
 }
 
 fn render_access(access: &Access) -> String {
@@ -2120,7 +2151,7 @@ mod tests {
             r#""tab\tend""#,
             r#""back\\slash""#,
             r#""cr\rlf""#,
-            // An embedded quote now round-trips as `\"` rather than falling back to `Str[0x…]`.
+            // An embedded quote now round-trips as `\"` rather than falling back to `Str[<…>]`.
             r#""say \"hi\"""#,
         ] {
             assert_idempotent(source, source);
@@ -2159,7 +2190,7 @@ mod tests {
 
     #[test]
     fn string_pattern_renders_as_string() {
-        // A string pattern reconstructs as `"…"`, not the desugared `Str[0x…]`.
+        // A string pattern reconstructs as `"…"`, not the desugared `Str[<…>]`.
         assert_formats(
             "f = #{ role ~> =\"admin\" }",
             "f = #{ role ~> =\"admin\" }\n",
@@ -2168,8 +2199,46 @@ mod tests {
 
     #[test]
     fn literal_str_tuple_is_not_canonicalised() {
-        // A hand-written `Str[0x…]` tuple stays a tuple — only string *literals* render as `"…"`.
-        assert_formats("x = Str[0x68]", "x = Str[0x68]\n");
+        // A hand-written `Str[<…>]` tuple stays a tuple — only string *literals* render as `"…"`.
+        assert_formats("x = Str[<68>]", "x = Str[<68>]\n");
+    }
+
+    #[test]
+    fn binary_rows_are_kept_and_indentation_normalises() {
+        // The rows are the author's — a table laid out to match a spec is not reflowed —
+        // while the indentation is the formatter's, and follows the enclosing context.
+        assert_formats(
+            "k = <\n0a1b 2c3d\n4e5f 6071\n>",
+            "k = <\n  0a1b 2c3d\n  4e5f 6071\n>\n",
+        );
+        assert_formats(
+            "f = #{ <\n0a1b\n2c3d\n> }",
+            "f = #{\n  <\n    0a1b\n    2c3d\n  >\n}\n",
+        );
+        // Blank lines carry no bytes, so they collapse rather than becoming empty rows.
+        assert_formats("k = <\n0a1b\n\n\n2c3d\n>", "k = <\n  0a1b\n  2c3d\n>\n");
+    }
+
+    #[test]
+    fn binary_pattern_collapses_onto_one_line() {
+        // A pattern renders on one line, so a binary written across rows flattens there —
+        // exactly as a `"""` string in pattern position renders as a single-line `"…"`.
+        assert_formats(
+            "f = #{ $ ~> =<\n0a1b\n2c3d\n> }",
+            "f = #{ $ ~> =<0a1b 2c3d> }\n",
+        );
+    }
+
+    #[test]
+    fn binary_grouping_is_kept_but_separators_normalise() {
+        // Where the groups divide is the author's, so it survives; how wide the gap is is not.
+        assert_formats("k = <6a09e667   bb67ae85>", "k = <6a09e667 bb67ae85>\n");
+        // Regrouping would destroy meaning (this is a UUID's 4-2-2-2-6 division), so it is
+        // left exactly as written even though the bytes are one run.
+        assert_formats(
+            "id = <550e8400 e29b 41d4 a716 446655440000>",
+            "id = <550e8400 e29b 41d4 a716 446655440000>\n",
+        );
     }
 
     #[test]
@@ -2306,6 +2375,11 @@ mod tests {
             "f",
             ".",
             "__integer_add__",
+            // --- binary literals: the author's digit grouping is preserved as written ---
+            "<0a1b>",
+            "<>",
+            "<6a09e667 bb67ae85>",
+            "<550e8400 e29b 41d4 a716 446655440000>",
             "42 ~> pid ~",
             "@3",
             // --- ripple / spread values ---
@@ -2338,7 +2412,8 @@ mod tests {
             "=Circle[radius: r]",
             "=\"hello\"",
             "=42",
-            "=0x0a1b",
+            "=<0a1b>",
+            "=<0a1b 2c3d>",
             "Point[x, y] = p",
             "x = 5",
             "(a, b) = p",

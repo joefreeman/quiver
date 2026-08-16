@@ -732,6 +732,6 @@ fn test_defaults_rejects_duplicate_field() {
 #[test]
 fn test_defaults_rejects_mistyped_value() {
     quiver()
-        .evaluate("f = #[a: 'int, b: 'int] { :defaults [b: 0x00]; $a }; f:defaults")
+        .evaluate("f = #[a: 'int, b: 'int] { :defaults [b: <00>]; $a }; f:defaults")
         .expect_error_containing("default for 'b' compatible with 'int");
 }

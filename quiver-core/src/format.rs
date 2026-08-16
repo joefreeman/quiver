@@ -268,11 +268,11 @@ const BINARY_DISPLAY_BYTES: usize = 8;
 
 fn format_binary(bytes: &[u8]) -> String {
     if bytes.len() <= BINARY_DISPLAY_BYTES {
-        format!("0x{}", hex::encode(bytes))
+        format!("<{}>", hex::encode(bytes))
     } else {
         // Show a prefix and the total length for long binaries.
         format!(
-            "0x{}… ({} bytes)",
+            "<{}…> ({} bytes)",
             hex::encode(&bytes[..BINARY_DISPLAY_BYTES]),
             bytes.len()
         )

@@ -82,7 +82,7 @@ buildValues = #[(vec): 'opt, (f): 'mapper, (values): '%list<'%num>] {
 // Broadcasts `factor` across the lanes via a tiled single-lane buffer, then a lane-wise
 // multiply — checked, so overflow yields nil. `[data, width, factor] -> 'bin | []`.
 rescale = #[(data): 'bin, (width): 'int, (factor): 'int] {
-  0x ~> __vector_push__ [~, $width, $factor] ~> =('bin)unit
+  <> ~> __vector_push__ [~, $width, $factor] ~> =('bin)unit
 
   __binary_length__ $data ~> =bytes
   __integer_divide__ [bytes, $width] ~> =lanes
@@ -129,7 +129,7 @@ align = #['vec, 'vec] {
   // An empty vector with the given dtype and (canonicalised) scale.
   new: #[(dtype): 'dtype, (scale): ('%num | [])] {
     :doc "Creates an empty vector with the given dtype and scale; a nil scale propagates."
-    $scale ~> =('%num)scale; Vec[dtype: $dtype, scale: norm scale, data: 0x]
+    $scale ~> =('%num)scale; Vec[dtype: $dtype, scale: norm scale, data: <>]
   },
 
   // Build from a dtype, scale, and a list of *stored* integer lanes. Each lane's logical
@@ -138,7 +138,7 @@ align = #['vec, 'vec] {
     :doc "A vector built from stored integer lanes; nil when a lane overflows the dtype, or on a nil operand."
     $scale ~> =('%num)scale
     $lanes ~> =('%list<'int>)xs
-    of [Vec[dtype: $dtype, scale: norm scale, data: 0x], xs]
+    of [Vec[dtype: $dtype, scale: norm scale, data: <>], xs]
   },
 
   // Build from a dtype, scale, and a list of *values*: each lane is `value / scale`, which
@@ -149,7 +149,7 @@ align = #['vec, 'vec] {
     $values ~> =('%list<'%num>)values
     norm scale ~> =s
     m = #'%num { %num.div [~, s] ~> =Rational[n, 1]; n }
-    buildValues [Vec[dtype: $dtype, scale: s, data: 0x], m, values]
+    buildValues [Vec[dtype: $dtype, scale: s, data: <>], m, values]
   },
 
   // Like `of_exact`, but each lane is `value / scale` rounded to the nearest integer (halves
@@ -160,7 +160,7 @@ align = #['vec, 'vec] {
     $values ~> =('%list<'%num>)values
     norm scale ~> =s
     m = #'%num { %num.div [~, s] ~> %num.round ~ }
-    buildValues [Vec[dtype: $dtype, scale: s, data: 0x], m, values]
+    buildValues [Vec[dtype: $dtype, scale: s, data: <>], m, values]
   },
 
   // Build from a list of values alone, inferring the finest scale (`1/lcm` of all
@@ -172,7 +172,7 @@ align = #['vec, 'vec] {
     lcm_denoms [1, values] ~> =('int)cap
     norm Rational[1, cap] ~> =s
     m = #'%num { %num.mul [~, cap] ~> %num.numer ~ }
-    buildValues [Vec[dtype: $dtype, scale: s, data: 0x], m, values]
+    buildValues [Vec[dtype: $dtype, scale: s, data: <>], m, values]
   },
 
   // Append one stored lane.
@@ -313,7 +313,7 @@ align = #['vec, 'vec] {
     $count ~> =('int)count
     norm scale ~> =s
 
-    Vec[dtype: $dtype, scale: s, data: 0x] ~> push [~, value] ~> =('vec)unit
+    Vec[dtype: $dtype, scale: s, data: <>] ~> push [~, value] ~> =('vec)unit
 
     __binary_repeat__ [unit.data, count] ~> =tiled
     Vec[dtype: $dtype, scale: s, data: tiled]

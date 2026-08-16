@@ -14,8 +14,8 @@ fn test_encode_primitives_and_tuples() {
         .evaluate(r#"%data.encode 123456789012345678901234567890"#)
         .expect(r#""123456789012345678901234567890""#);
     quiver()
-        .evaluate(r#"%data.encode 0x0a1b"#)
-        .expect(r#""0x0a1b""#);
+        .evaluate(r#"%data.encode <0a1b>"#)
+        .expect(r#""<0a1b>""#);
     quiver().evaluate(r#"%data.encode []"#).expect(r#""[]""#);
     quiver().evaluate(r#"%data.encode Ok"#).expect(r#""Ok""#);
     quiver()
@@ -32,8 +32,8 @@ fn test_encode_strings() {
         .expect(r#""\"a\\\"b\\\\c\\{d\\ne\"""#);
     // Bytes no string literal can carry fall back to the ordinary tuple form.
     quiver()
-        .evaluate(r#"%data.encode Str[0xff00]"#)
-        .expect(r#""Str[0xff00]""#);
+        .evaluate(r#"%data.encode Str[<ff00>]"#)
+        .expect(r#""Str[<ff00>]""#);
 }
 
 #[test]
@@ -75,14 +75,14 @@ fn test_decode_primitives() {
         .evaluate(r#"%data.decode<'int> "123456789012345678901234567890""#)
         .expect("123456789012345678901234567890");
     quiver()
-        .evaluate(r#"%data.decode<'bin> "0x0a1b""#)
-        .expect("0x0a1b");
+        .evaluate(r#"%data.decode<'bin> "<0a1b>""#)
+        .expect("<0a1b>");
     quiver()
         .evaluate(r#"%data.decode<Str['bin]> "\"hi\"""#)
         .expect(r#""hi""#);
     // The tuple form of a Str decodes too — the sugar is a synonym, not a format.
     quiver()
-        .evaluate(r#"%data.decode<Str['bin]> "Str[0x6869]""#)
+        .evaluate(r#"%data.decode<Str['bin]> "Str[<6869>]""#)
         .expect(r#""hi""#);
 }
 
@@ -102,12 +102,40 @@ fn test_decode_tuples_labels_and_layout() {
 }
 
 #[test]
-fn test_decode_unions_and_recursion() {
-    // Ordered choice with the two prefix-lookahead rules: `0x…` is never an integer,
-    // and a bare named-empty tuple is never followed by a glued `[`.
+fn test_decode_accepts_grouped_binaries() {
+    // The notation is the literal syntax, so a hand-written binary may be grouped — under
+    // the same rules: whole-byte groups, separated but not padded. `encode` never emits
+    // grouping, so this only ever matters for text a person wrote.
     quiver()
-        .evaluate(r#"%data.decode<('int | 'bin)> "0x0a""#)
-        .expect("0x0a");
+        .evaluate(r#"%data.decode<'bin> "<6a09e667 bb67ae85>""#)
+        .expect("<6a09e667bb67ae85>");
+    quiver()
+        .evaluate(r#"%data.decode<'bin> "<0a1 b2c>""#)
+        .expect("[]");
+    quiver()
+        .evaluate(r#"%data.decode<'bin> "< 0a1b>""#)
+        .expect("[]");
+    quiver()
+        .evaluate(r#"%data.decode<'bin> "<0a1b >""#)
+        .expect("[]");
+    quiver().evaluate(r#"%data.decode<'bin> "<>""#).expect("<>");
+    // A line break both separates groups and lets the brackets sit apart from the digits,
+    // so a table written across lines reads back like the source literal it mirrors.
+    quiver()
+        .evaluate(r#"%data.decode<'bin> "<\n  0a1b 2c3d\n  4e5f 6071\n>""#)
+        .expect("<0a1b2c3d4e5f6071>");
+    quiver()
+        .evaluate(r#"%data.decode<'bin> "<\n>""#)
+        .expect("<>");
+}
+
+#[test]
+fn test_decode_unions_and_recursion() {
+    // Ordered choice with its prefix-lookahead rule: a bare named-empty tuple is never
+    // followed by a glued `[`.
+    quiver()
+        .evaluate(r#"%data.decode<('int | 'bin)> "<0a>""#)
+        .expect("<0a>");
     quiver()
         .evaluate(r#"'u = Ok | Ok['int]; %data.decode<'u> "Ok[5]""#)
         .expect("Ok[5]");
@@ -145,7 +173,7 @@ fn test_decode_failures_answer_nil() {
         .evaluate(r#"%data.decode<P['int]> "P[1, 2]""#)
         .expect("[]");
     quiver()
-        .evaluate(r#"%data.decode<'bin> "0x0a1""#)
+        .evaluate(r#"%data.decode<'bin> "<0a1>""#)
         .expect("[]");
     quiver()
         .evaluate(r#"%data.decode<'int> "4 2""#)
