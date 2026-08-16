@@ -15,7 +15,7 @@
 // `get` returns the stored value or nil (`[]`), so a dict cannot usefully store nil as a
 // value.
 //
-// Non-tail tree operations (`put`, `remove`) recurse with the self-passing idiom `f [&f, ...]`,
+// Non-tail tree operations (`put`, `remove`) recurse with the self-passing idiom `f [f, ...]`,
 // since `^` is tail-only and a binding isn't in scope in its own body. A `Node`'s children
 // are `'list<^>` — the list alias instantiated with the dict's own recursion reference.
 

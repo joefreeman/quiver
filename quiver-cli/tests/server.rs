@@ -248,7 +248,7 @@ fn concurrent_sessions_evaluate_and_run_independently() {
                 let mut session = Session::open(server);
                 session.evaluate_value(&format!("x = {n}; x"));
                 for step in 0..10u64 {
-                    let value = session.evaluate_value("x = [x, 1] ~> __integer_add__; x");
+                    let value = session.evaluate_value("x = [x, 1] ~> __integer_add__ ~; x");
                     assert_eq!(value, (n + step + 1).to_string(), "session {n}");
                 }
                 // A run beside the session: its own root, one resume, delete.
@@ -258,7 +258,7 @@ fn concurrent_sessions_evaluate_and_run_independently() {
                     .resume(
                         pid,
                         ResumePayload {
-                            unit: program(&format!("#{{ [{n}, 1] ~> __integer_add__ }}")),
+                            unit: program(&format!("#{{ [{n}, 1] ~> __integer_add__ ~ }}")),
                             modules: Vec::new(),
                         },
                         None,
@@ -389,7 +389,7 @@ fn abandoned_processes_stay_visible_and_collectable() {
 
     // The server stays fully usable beside it...
     let mut session = Session::open(&server);
-    assert_eq!(session.evaluate_value("[40, 2] ~> __integer_add__"), "42");
+    assert_eq!(session.evaluate_value("[40, 2] ~> __integer_add__ ~"), "42");
 
     // ...the orphan is visible...
     let listing = client.inspect("/processes").expect("inspect failed");
@@ -422,7 +422,9 @@ fn code_sweeps_fire_under_concurrent_load() {
                     // previous one — churn that crosses the sweep threshold
                     // constantly while other sessions do the same.
                     let offset = n * 1000 + round;
-                    session.evaluate(&format!("f = #'int {{ [$, {offset}] ~> __integer_add__ }}"));
+                    session.evaluate(&format!(
+                        "f = #'int {{ [$, {offset}] ~> __integer_add__ ~ }}"
+                    ));
                     let value = session.evaluate_value("f 1");
                     assert_eq!(value, (offset + 1).to_string(), "session {n} round {round}");
                     session.evaluate("f = 0");
@@ -514,7 +516,7 @@ fn connect_or_spawn_starts_a_server_when_absent() {
     let client = quiver_cli::client::connect_or_spawn(&spawned.socket, &exe())
         .expect("connect_or_spawn failed");
     assert_eq!(
-        quick_value(&client, "#{ [40, 2] ~> __integer_add__ }"),
+        quick_value(&client, "#{ [40, 2] ~> __integer_add__ ~ }"),
         "42"
     );
     client.shutdown().expect("shutdown failed");
@@ -592,7 +594,7 @@ fn takeover_replaces_an_incompatible_server() {
     let client =
         quiver_cli::client::connect_or_spawn(&spawned.socket, &exe()).expect("takeover failed");
     assert_eq!(
-        quick_value(&client, "#{ [40, 2] ~> __integer_add__ }"),
+        quick_value(&client, "#{ [40, 2] ~> __integer_add__ ~ }"),
         "42"
     );
     client.shutdown().expect("shutdown failed");
@@ -1069,8 +1071,8 @@ fn registry_rendezvous_across_sessions() {
     let mut a = Session::open(&server);
     assert_eq!(
         a.evaluate_value(
-            "svc = @#{ !'int ~> %num.mul [~, 2] }; %proc.detach &svc; \
-             %registry.register [Shared, &svc]"
+            "svc = @#{ !'int ~> %num.mul [~, 2] } []; %proc.detach svc; \
+             %registry.register [Shared, svc]"
         ),
         "Ok"
     );
@@ -1085,7 +1087,7 @@ fn registry_rendezvous_across_sessions() {
     );
     // The name is taken environment-wide: B's own registration answers nil.
     assert_eq!(
-        b.evaluate_value("p = @#{ !'int }; %registry.register [Shared, &p] ~> =[]"),
+        b.evaluate_value("p = @#{ !'int } []; %registry.register [Shared, p] ~> =[]"),
         "Ok"
     );
 
@@ -1093,9 +1095,7 @@ fn registry_rendezvous_across_sessions() {
     // service's termination frees the name for every session, deterministically
     // before B's await answers.
     assert_eq!(
-        b.evaluate_value(
-            "%registry.lookup<(@'int -> 'int)> Shared ~> =((@'int -> 'int))q; 21 ~> q; !q"
-        ),
+        b.evaluate_value("%registry.lookup<@'int !'int> Shared ~> =(@'int !'int)q; q 21; !q"),
         "42"
     );
     assert_eq!(
@@ -1113,7 +1113,7 @@ fn registry_names_free_when_session_teardown_kills_the_service() {
     // down its subtree, and the cascade's death must free the name for everyone.
     let mut a = Session::open(&server);
     assert_eq!(
-        a.evaluate_value("svc = @#{ !'int }; %registry.register [Owned, &svc]"),
+        a.evaluate_value("svc = @#{ !'int } []; %registry.register [Owned, svc]"),
         "Ok"
     );
     let mut b = Session::open(&server);
@@ -1140,7 +1140,7 @@ fn registry_names_free_when_session_teardown_kills_the_service() {
 
     // The freed name is immediately reusable, from any session.
     assert_eq!(
-        b.evaluate_value("mine = @#{ !'int }; %registry.register [Owned, &mine]"),
+        b.evaluate_value("mine = @#{ !'int } []; %registry.register [Owned, mine]"),
         "Ok"
     );
 }

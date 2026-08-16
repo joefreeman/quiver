@@ -129,7 +129,7 @@ pub fn doc_at_definition(program: &Sequence, definition: SourceSpan) -> Option<S
 pub fn member_doc(program: &Sequence, member: &str) -> Option<String> {
     let chain = program.steps.iter().rev().find_map(Step::as_chain)?;
     // The module record itself, or the record flowing into an identity-plus-attach
-    // annotation block (`[…] { :dialect &f }`) — the block leaves the value unchanged.
+    // annotation block (`[…] { :dialect f }`) — the block leaves the value unchanged.
     let tuple = match chain.terms.as_slice() {
         [Term::Tuple(tuple)] => tuple,
         [Term::Tuple(tuple), Term::Block(block)] if block.branches.is_empty() => tuple,
@@ -147,7 +147,7 @@ pub fn member_doc(program: &Sequence, member: &str) -> Option<String> {
         })
 }
 
-/// The `:doc` of the top-level binding a `member: &local` field refers to — annotations
+/// The `:doc` of the top-level binding a `member: local` field refers to — annotations
 /// ride the referenced closure into the module tuple, so the binding's doc is the
 /// member's doc.
 fn doc_behind_reference(program: &Sequence, chain: &Chain) -> Option<String> {
@@ -320,7 +320,7 @@ mod reference_doc_tests {
     #[test]
     fn member_doc_chases_a_local_reference() {
         let source = "\
-floor = #'int {\n  :doc \"Rounds down.\"\n  $\n}\n\n[\n  floor: &floor,\n]\n";
+floor = #'int {\n  :doc \"Rounds down.\"\n  $\n}\n\n[\n  floor: floor,\n]\n";
         let ast = quiver_compiler::parse(source).expect("parse");
         assert_eq!(member_doc(&ast, "floor").as_deref(), Some("Rounds down."));
     }

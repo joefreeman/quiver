@@ -17,7 +17,7 @@ fn test_ref_uniqueness() {
 
 #[test]
 fn test_ref_via_reference_binding() {
-    // Binding the function with `&%ref` mints a fresh ref on each call
+    // Binding the function and calling it twice mints a fresh ref each time
     quiver()
         .evaluate("ref = %ref; a = ref []; b = ref []; a ~> =&b")
         .expect("[]");

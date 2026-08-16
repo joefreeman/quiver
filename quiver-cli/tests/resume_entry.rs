@@ -73,7 +73,7 @@ fn a_program_is_a_one_line_session() {
     environment
         .resume_process_unit(
             pid,
-            &compile("#{ [40, 2] ~> __integer_add__ }"),
+            &compile("#{ [40, 2] ~> __integer_add__ ~ }"),
             &quiver_cli::build_builtin_registry(),
         )
         .expect("resume failed");
@@ -91,8 +91,8 @@ fn the_process_survives_for_another_resume() {
     let pid = environment.start_process().expect("start failed");
     for expected in ["42", "9"] {
         let source = match expected {
-            "42" => "#{ [40, 2] ~> __integer_add__ }",
-            _ => "#{ [4, 5] ~> __integer_add__ }",
+            "42" => "#{ [40, 2] ~> __integer_add__ ~ }",
+            _ => "#{ [4, 5] ~> __integer_add__ ~ }",
         };
         environment
             .resume_process_unit(pid, &compile(source), &quiver_cli::build_builtin_registry())
@@ -113,7 +113,7 @@ fn top_level_work_runs_on_resume() {
     environment
         .resume_process_unit(
             pid,
-            &compile("x = 40\n#{ [x, 2] ~> __integer_add__ }"),
+            &compile("x = 40\n#{ [x, 2] ~> __integer_add__ ~ }"),
             &quiver_cli::build_builtin_registry(),
         )
         .expect("resume failed");

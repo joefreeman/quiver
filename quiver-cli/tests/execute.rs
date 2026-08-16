@@ -28,9 +28,9 @@ fn top_level_process_work_runs_at_boot() {
     // with it, and the root's own mailbox services top-level sends and receives.
     // (A receive no sender can ever satisfy blocks forever — exactly as it would
     // inside the entry function.)
-    expect_output("p = @#{ !'int }; #{ 5 }", "5");
-    expect_output("42 ~> .; !'int; #{ 5 }", "5");
-    expect_output("p = @#{ 42 }; r = !p; #{ r }", "42");
+    expect_output("p = @#{ !'int } []; #{ 5 }", "5");
+    expect_output("me = .; 42 ~> me ~; !'int; #{ 5 }", "5");
+    expect_output("p = @#{ 42 } []; r = !p; #{ r }", "42");
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn compile_falls_back_without_an_entry_for_top_level_process_work() {
         .args([
             "compile",
             "-e",
-            "f = @{ !'int ~> { | =0 => \"done\" | [] ~> ^ } }",
+            "f = @{ !'int ~> { | =0 => \"done\" | [] ~> ^ ~ } } []",
         ])
         .output()
         .unwrap();
@@ -53,7 +53,7 @@ fn compile_falls_back_without_an_entry_for_top_level_process_work() {
 fn entry_function_spawns_are_unaffected() {
     // Process work inside the entry function runs in the real runtime environment.
     let out = quiv()
-        .args(["run", "-e", "#{ p = @#{ 42 }; ![p, 1000] }"])
+        .args(["run", "-e", "#{ p = @#{ 42 } []; ![p, 1000] }"])
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -64,7 +64,7 @@ fn entry_function_spawns_are_unaffected() {
 fn top_level_host_reads_run_at_boot() {
     // Host reads at the top level happen per program run, at boot — nothing is baked
     // into the emitted bytecode, so determinism of compilation is preserved.
-    expect_output("t = %time.now; #{ t ~> { ='int => 1 | 2 } }", "1");
+    expect_output("t = %time.now []; #{ t ~> { ='int => 1 | 2 } }", "1");
     expect_output("r = %random.bytes 8; #{ %bin.length r }", "8");
 }
 
@@ -72,13 +72,13 @@ fn top_level_host_reads_run_at_boot() {
 fn top_level_ref_minting_runs_at_boot() {
     // Identity-freedom constrains *modules* (shared across importers); the program's
     // top level runs at boot, so a top-level ref is minted fresh each run.
-    expect_output("a = %ref; #{ [a, 1] ~> =[&a, x]; x }", "1");
+    expect_output("a = %ref []; #{ [a, 1] ~> =[&a, x]; x }", "1");
 
     let out = quiv()
         .args([
             "run",
             "-e",
-            "mk = &%ref; #{ a = mk; b = mk; a ~> =&b => 1 | 2 }",
+            "mk = %ref; #{ a = mk []; b = mk []; a ~> =&b => 1 | 2 }",
         ])
         .output()
         .unwrap();

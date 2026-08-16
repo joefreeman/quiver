@@ -54,7 +54,7 @@ fn test_ident_and_quoted() {
         .evaluate("[\"hello_1\", %parse.ident] ~> %parse.run ~")
         .expect("\"hello_1\"");
     quiver()
-        .evaluate(r#"["\"hi\"", &%parse.quoted] ~> %parse.run ~"#)
+        .evaluate(r#"["\"hi\"", %parse.quoted] ~> %parse.run ~"#)
         .expect("\"hi\"");
 }
 
@@ -115,7 +115,7 @@ fn test_alt_keeps_furthest_failure() {
             r#"
             'e = Expected[offset: 'int, message: Str['bin]]
             p = [%parse.int, %parse.quoted] ~> %parse.alt2 ~
-            r = ["\"ab", &p] ~> %parse.run ~
+            r = ["\"ab", p] ~> %parse.run ~
             { | r:('e)error ~> =Expected(offset: 3) => Pass | Fail }
             "#,
         )
@@ -244,7 +244,7 @@ fn test_ident_accepts_host_identifier_grammar() {
 #[test]
 fn test_quoted_backspace_and_formfeed_escapes() {
     quiver()
-        .evaluate(r#"["\"a\\b\\f\"", &%parse.quoted] ~> %parse.run ~ ~> =Str[b]; b"#)
+        .evaluate(r#"["\"a\\b\\f\"", %parse.quoted] ~> %parse.run ~ ~> =Str[b]; b"#)
         .expect("<61080c>");
 }
 

@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn valid_program_has_no_diagnostics() {
         // A program that both parses and typechecks: integer add.
-        assert!(diagnostics("[1, 2] ~> __integer_add__").is_empty());
+        assert!(diagnostics("[1, 2] ~> __integer_add__ ~").is_empty());
     }
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
         // step reading it — a block whose chain is just an implicit continuation, which is
         // what a dialect expands to — failed to match. See `quiv`'s entry compilation.
         assert!(diagnostics("c = { =v }\nc").is_empty());
-        assert!(diagnostics("xs = %list{ 1, 2 }\nxs ~> %list.count").is_empty());
+        assert!(diagnostics("xs = %list{ 1, 2 }\nxs ~> %list.count ~").is_empty());
     }
 
     #[test]
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn type_error_is_reported_with_a_range() {
         // `__integer_add__` expects integers; a reference to an undefined variable fails to compile.
-        let diags = diagnostics("nope ~> __integer_add__");
+        let diags = diagnostics("nope ~> __integer_add__ ~");
         assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
     }
 
@@ -207,13 +207,13 @@ mod tests {
     #[test]
     fn std_imports_resolve_via_the_bundled_loader() {
         // Exercises the bundled std module loader (`%num` → std/num.qv).
-        let diags = diagnostics("[1, 2] ~> %num.add");
+        let diags = diagnostics("[1, 2] ~> %num.add ~");
         assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
     }
 
     #[test]
     fn records_type_and_definition_for_a_reference() {
-        let text = "double = #'int { ~ }\n5 ~> double";
+        let text = "double = #'int { ~ }\n5 ~> double ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),
@@ -237,7 +237,7 @@ mod tests {
     fn semantics_survive_a_type_error_elsewhere_in_the_file() {
         // `double` typechecks; the second line fails (undefined builtin). Hover and
         // go-to-definition must still work on the first line.
-        let text = "double = #'int { ~ }\n5 ~> double ~> __nope__";
+        let text = "double = #'int { ~ }\n5 ~> double ~ ~> __nope__";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert_eq!(analysis.diagnostics.len(), 1, "expected the type error");
         let semantics = analysis
@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn hover_on_a_builtin_shows_its_signature_and_label() {
         use quiver_compiler::recorder::SymbolKind;
-        let text = "[1, 2] ~> __integer_add__";
+        let text = "[1, 2] ~> __integer_add__ ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),
@@ -395,7 +395,7 @@ mod tests {
     fn tail_call_hovers_and_navigates_to_the_function() {
         // `^fact` is an access whose source is the tail target; hovering it shows the function's
         // type and go-to-definition jumps to its binding.
-        let text = "fact = #'int { ~ };\nrun = #'int { ~ ~> ^fact }";
+        let text = "fact = #'int { ~ };\nrun = #'int { ~ ~> ^fact ~ }";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),
@@ -438,8 +438,8 @@ mod tests {
     #[test]
     fn hover_on_a_builtin_reference_is_recorded() {
         use quiver_compiler::recorder::SymbolKind;
-        // `&__integer_add__` references the builtin without applying it.
-        let text = "&__integer_add__";
+        // Naming the builtin without applying it records it as a reference.
+        let text = "__integer_add__";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let offset = text.find("__integer_add__").unwrap();
@@ -482,10 +482,10 @@ mod tests {
     }
 
     #[test]
-    fn ampersand_reference_to_a_variable_supports_hover_and_goto() {
-        // `&double` references the function without calling it; hovering it should show a
-        // type and go-to-definition should land on the `double` binding.
-        let text = "double = #'int { ~ }\n&double";
+    fn reference_to_a_variable_supports_hover_and_goto() {
+        // Naming the function without calling it; hovering it should show a type and
+        // go-to-definition should land on the `double` binding.
+        let text = "double = #'int { ~ }\ndouble";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let program = analysis.program.expect("program");
@@ -497,17 +497,25 @@ mod tests {
     }
 
     #[test]
-    fn ampersand_reference_to_a_module_member_is_recorded() {
+    fn reference_to_a_module_member_is_recorded() {
         use quiver_compiler::recorder::SymbolKind;
-        let text = "&%num.add";
+        let text = "%num.add";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
-        let offset = text.find("%num.add").unwrap();
-        let info = semantics.at_offset(offset).expect("import ref recorded");
-        assert_eq!(info.kind, SymbolKind::Import);
-        assert_eq!(info.label.as_deref(), Some("%num.add"));
+        // The path records its components separately, as any access does: the module
+        // base, then the member.
+        let base = semantics
+            .at_offset(text.find("%num").unwrap())
+            .expect("import base recorded");
+        assert_eq!(base.kind, SymbolKind::Import);
+        assert_eq!(base.label.as_deref(), Some("%num"));
+        let member = semantics
+            .at_offset(text.find(".add").unwrap() + 1)
+            .expect("import member recorded");
+        assert_eq!(member.kind, SymbolKind::Import);
+        assert_eq!(member.label.as_deref(), Some("add"));
         // The standard library has no openable origin, so there is nothing to jump to.
-        assert_eq!(info.definition_module, None);
+        assert_eq!(member.definition_module, None);
     }
 
     #[test]
@@ -524,10 +532,10 @@ mod tests {
         )
         .unwrap();
         let util = src.join("util.qv");
-        std::fs::write(&util, "[ double: #'int { [~, 2] ~> %num.mul } ]").unwrap();
+        std::fs::write(&util, "[ double: #'int { [~, 2] ~> %num.mul ~ } ]").unwrap();
 
         // Analyse a document in the project that imports the project module.
-        let text = "&%util.double";
+        let text = "%util.double";
         let resolver = PackageResolver::for_entry_file(&src.join("main.qv"));
         let analysis = analyze(text, &LineIndex::new(text), &resolver);
         let semantics = analysis.semantics.expect("semantics");
@@ -689,12 +697,12 @@ mod tests {
         let util = src.join("util.qv");
         std::fs::write(
             &util,
-            "[ double: #'int { [~, 2] ~> %num.mul }, triple: #'int { [~, 3] ~> %num.mul } ]",
+            "[ double: #'int { [~, 2] ~> %num.mul ~ }, triple: #'int { [~, 3] ~> %num.mul ~ } ]",
         )
         .unwrap();
 
         // Two references to `%util.double` and one to `%util.triple`.
-        let text = "#{ [ 1 ~> %util.double, 2 ~> %util.double, 3 ~> %util.triple ] }";
+        let text = "#{ [ 1 ~> %util.double ~, 2 ~> %util.double ~, 3 ~> %util.triple ~ ] }";
         let resolver = PackageResolver::for_entry_file(&src.join("main.qv"));
         let analysis = analyze(text, &LineIndex::new(text), &resolver);
         let semantics = analysis.semantics.expect("semantics");
@@ -734,10 +742,10 @@ mod tests {
         )
         .unwrap();
         let util = src.join("util.qv");
-        std::fs::write(&util, "[ double: #'int { [~, 2] ~> %num.mul } ]").unwrap();
+        std::fs::write(&util, "[ double: #'int { [~, 2] ~> %num.mul ~ } ]").unwrap();
 
         // `double` is destructured (no `%util.double` access) and then used twice.
-        let text = "(double) = %util;\n#{ [ 1 ~> double, 2 ~> double ] }";
+        let text = "(double) = %util;\n#{ [ 1 ~> double ~, 2 ~> double ~ ] }";
         let resolver = PackageResolver::for_entry_file(&src.join("main.qv"));
         let analysis = analyze(text, &LineIndex::new(text), &resolver);
         let semantics = analysis.semantics.expect("semantics");
@@ -783,7 +791,7 @@ mod tests {
     #[test]
     fn hover_on_operators_shows_their_inferred_types() {
         use quiver_compiler::recorder::SymbolKind;
-        let text = "f = #'int { ~ };\nt = [a: 1, b: 2];\n5 ~> [~, 1];\np = @{ 42 };\n!p";
+        let text = "f = #'int { ~ };\nt = [a: 1, b: 2];\n5 ~> [~, 1];\np = @{ 42 } [];\n!p";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let program = analysis.program.unwrap();
@@ -814,7 +822,7 @@ mod tests {
     fn hover_on_a_call_argument_tuple_shows_its_type() {
         use quiver_compiler::recorder::SymbolKind;
         // The `[` of a call's argument tuple hovers as that tuple's type.
-        let text = "[3, 4] ~> __integer_add__";
+        let text = "[3, 4] ~> __integer_add__ ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),
@@ -836,7 +844,7 @@ mod tests {
     #[test]
     fn operator_hover_covers_only_the_token_not_the_interior() {
         use quiver_compiler::recorder::SymbolKind;
-        let text = "f = #'int { [~, 1] ~> __integer_add__ };\nt = [a: 1, b: 2]";
+        let text = "f = #'int { [~, 1] ~> __integer_add__ ~ };\nt = [a: 1, b: 2]";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),
@@ -868,8 +876,8 @@ mod tests {
 
     #[test]
     fn hover_on_a_called_function_shows_its_type_not_the_result() {
-        // `5 f` calls `f`; hover on `f` must show its function type, not the call's `'int`.
-        let text = "f = #'int { ~ }\n5 ~> f";
+        // `f ~` calls `f`; hover on `f` must show its function type, not the call's `'int`.
+        let text = "f = #'int { ~ }\n5 ~> f ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let program = analysis.program.unwrap();
@@ -887,7 +895,7 @@ mod tests {
     fn builtin_span_excludes_the_argument() {
         // Hovering inside the argument must not resolve to the builtin: the builtin's
         // recorded span covers only `__integer_add__`, not `[1, 2]`.
-        let text = "[1, 2] ~> __integer_add__";
+        let text = "[1, 2] ~> __integer_add__ ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let arg_offset = text.find('1').unwrap();
@@ -900,7 +908,7 @@ mod tests {
     #[test]
     fn hover_on_a_module_member_shows_its_signature_and_label() {
         use quiver_compiler::recorder::SymbolKind;
-        let text = "[1, 2] ~> %num.add";
+        let text = "[1, 2] ~> %num.add ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
             analysis.diagnostics.is_empty(),
@@ -924,7 +932,7 @@ mod tests {
     #[test]
     fn import_span_excludes_the_argument() {
         // Hovering inside the call argument must not resolve to the import member.
-        let text = "[1, 2] ~> %num.add";
+        let text = "[1, 2] ~> %num.add ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let arg_offset = text.rfind('1').unwrap();
