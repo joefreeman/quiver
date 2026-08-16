@@ -211,3 +211,46 @@ omittable field labels
         name: (identifier)
         (type_identifier
           name: (type_name))))))
+
+==================
+type intersection
+==================
+
+'rw = 'readable & 'writable
+
+---
+
+(source_file
+  (sequence
+    (type_alias
+      name: (type_name)
+      definition: (intersection_type
+        (type_identifier
+          name: (type_name))
+        (type_identifier
+          name: (type_name))))))
+
+==================
+intersection binds tighter than union
+==================
+
+'m = (a: 'int) & (b: 'int) | Nil
+
+---
+
+(source_file
+  (sequence
+    (type_alias
+      name: (type_name)
+      definition: (union_type
+        (intersection_type
+          (partial_type
+            name: (identifier)
+            (type_identifier
+              name: (type_name)))
+          (partial_type
+            name: (identifier)
+            (type_identifier
+              name: (type_name))))
+        (tuple_type
+          name: (tuple_name))))))

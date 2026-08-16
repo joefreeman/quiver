@@ -4,7 +4,7 @@
 // server and middleware is ordinary function composition.
 //
 //   handler = #'%http { ... routes ... }
-//   [port: 4000, handler: &handler] %http/server.serve
+//   %http/server.serve [port: 4000, handler: handler]
 //
 // One process per connection, and one per request: the handler runs in its own
 // process and is awaited, so a handler that *crashes* answers the same plain 500 as
@@ -58,19 +58,19 @@ conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
       __tcp_socket_read__ [$sock, 8192] ~> =('bin)chunk
       {
         | %bin.length chunk ~> =0 => __tcp_socket_close__ $sock
-        | ^ [$sock, &$handler, %bin.concat [$buf, chunk]]
+        | ^ [$sock, $handler, %bin.concat [$buf, chunk]]
       }
     }
     | =Bad[status: s, reason: r] => {
-      out = plain [s, r] ~> %http.serialize_response
+      out = plain [s, r] ~> %http.serialize_response ~
       __tcp_socket_write__ [$sock, out]
       __tcp_socket_close__ $sock
     }
     | =[req, rest] => {
       // Run the handler in its own process: a crash surfaces here as a stamped nil,
       // degrading to the 500 below exactly like a plain failed handler.
-      hp = req ~> @$handler
-      r = !hp
+      hp = req ~> @$handler ~
+      r = ![hp]
       {
         | r ~> =Upgrade[handler: wh] => {
           // "Switch this connection": answer the WebSocket handshake and hand the
@@ -79,11 +79,11 @@ conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
           // bytes already read past the request seed the connection's buffer.
           | %http.header [req.headers, "sec-websocket-key"] ~> =Str[k] => {
               __tcp_socket_write__ [$sock, %http/websocket.handshake_response Str[k]]
-              %http/websocket.conn [$sock, rest] ~> wh
+              %http/websocket.conn [$sock, rest] ~> wh ~
             }
           | {
             out =
-              plain [400, "Bad Request"] ~> %http.serialize_response
+              plain [400, "Bad Request"] ~> %http.serialize_response ~
 
             __tcp_socket_write__ [$sock, out]
             __tcp_socket_close__ $sock
@@ -99,7 +99,7 @@ conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
               ...,
               headers: %list.prepend [
                 resp.headers,
-                ["content-length", %bin.length resp.body ~> %str.from_int],
+                ["content-length", %bin.length resp.body ~> %str.from_int ~],
               ],
               body: 0x,
             ]
@@ -107,7 +107,7 @@ conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
           }
           __tcp_socket_write__ [$sock, %http.serialize_response resp2]
           {
-            | keep_alive? req => ^ [$sock, &$handler, rest]
+            | keep_alive? req => ^ [$sock, $handler, rest]
             | __tcp_socket_close__ $sock
           }
         }
@@ -129,15 +129,15 @@ conn = #[\TcpSocket, 'handler, ('tls | [])] {
     | t ~> =[cert: c, key: k] => %tls.accept [socket: sock, cert: c, key: k]
     | Ok
   }
-  conn_loop [sock, &h, 0x]
+  conn_loop [sock, h, 0x]
 }
 
 // A failed accept ends the loop rather than spinning on a broken listener; the nil carries
 // its `:error` out to `serve`'s caller.
 accept_loop = #[(listener): \TcpListener, (handler): 'handler, (tls): ('tls | [])] {
   __tcp_listener_accept__ $listener ~> =(\TcpSocket)sock
-  [sock, &$handler, $tls] ~> @conn
-  ^ [$listener, &$handler, $tls]
+  [sock, $handler, $tls] ~> @conn ~
+  ^ [$listener, $handler, $tls]
 }
 
 serve = #[port: 'int, handler: 'handler, tls: ('tls | []) = []] {
@@ -147,7 +147,7 @@ serve = #[port: 'int, handler: 'handler, tls: ('tls | []) = []] {
   p
   ~> __tcp_listen__ [~, 128] ~> =(\TcpListener)listener
 
-  accept_loop [listener, &h, t]
+  accept_loop [listener, h, t]
 }
 
 html = #<'e>'%html<'e> {

@@ -19,8 +19,8 @@ area = #'shape {
 // A program's last step is the function `quiv run` executes.
 #{
   %list{ Square[side: 3], Rect[width: 2, height: 4] }
-  ~> %list.map [~, &area]
-  ~> %list.fold [~, init: 0, f: &%num.add]
+  ~> %list.map [~, area]
+  ~> %list.fold [~, init: 0, f: %num.add]
   //=> 17
 }
 ```
@@ -49,7 +49,7 @@ elaboration of one of these rows.
 | `#` | function literal | `#'int { $ }` |
 | `$` | the function's parameter | `#'int { $ }` |
 | `$$` | the *enclosing* function's parameter | `#'int { #'int { $$ } }` |
-| `&` | reference a value; don't call it | `&double` |
+| `&` | pin: match against an existing value | `5 ~> =&x` |
 | `=` | bind, or match | `x = 5` / `5 ~> =x` |
 | `\|` | separates branches, and union members | `{ =A => 1 \| 2 }` |
 | `=>` | condition, then consequence | `{ =0 => "zero" \| "other" }` |
@@ -161,16 +161,17 @@ the input to the next, and `~` always names the value flowing in.
 5 ~> %num.add [~, 1] ~> %num.mul [~, 10]   //=> 60
 ```
 
-What a term does with the value it receives depends on what the term is. A callable is
-called with it, and `~` puts it wherever you want it — including inside a tuple being
-built, whose fields each receive a copy.
+`~>` does not call: it names the value flowing on, and `~` puts that value wherever you
+want it — including inside a tuple being built, whose fields each receive a copy. Calling
+is written one way and one way only, by [juxtaposition](#applying), so piping into a
+function is `f ~`: the function, and the flowing value as its argument.
 
 ```quiver
 double = #'int { %num.mul [~, 2] }
 
-5 ~> double                   //=> 10
+5 ~> double ~                 //=> 10   the flowing value as the argument
 5 ~> [~, 1]                   //=> [5, 1]
-5 ~> [double, 1]              //=> [10, 1]
+5 ~> [double ~, ~]            //=> [10, 5]   each field gets a copy
 ```
 
 Every term must use the value flowing into it. One that ignores it drops everything the
@@ -180,12 +181,7 @@ a new step. Only the head is exempt: that is where a chain chooses what it start
 ```quiver ignore
 5 ~> 99                       // error: DiscardedChainValue — the 99 ignores the 5
 5 ~> [1, 2]                   // error: so do both fields
-```
-
-`&` is the opt-out for calling: it references a callable instead.
-
-```quiver
-5 ~> [&double, ~] ~> =[f, n]; f n   //=> 10
+5 ~> double                   // error: naming a function is not calling it
 ```
 
 The `~>` is mandatory: whitespace alone does not join terms. To spread one chain over
@@ -210,10 +206,10 @@ Two rules govern a sequence, and together they are most of Quiver's control flow
 
 ```quiver
 f = #'int { 5; ~ }
-9 ~> f                        //=> 9     `~` is f's input, not the 5
+9 ~> f ~                        //=> 9     `~` is f's input, not the 5
 
 g = #'int { a = %num.add [~, 20]; %num.add [a, 100] }
-3 ~> g                        //=> 123   carried across the boundary by name
+3 ~> g ~                        //=> 123   carried across the boundary by name
 ```
 
 So a step's result gates the boundary, and — if it is the last step — is the sequence's
@@ -268,16 +264,15 @@ x = 1; y = 2
 Point(x, y)                   //=> Point[x: 1, y: 2]
 ```
 
-An entry is a *name*, not an expression, so nothing flows into it and a callable entry is
-referenced rather than called — which is what a record of functions wants. Entries may be
-access paths, labelled by the final segment; `(…)` takes puns and nothing else.
+An entry is a *name*, not an expression, so nothing flows into it. Entries may be access
+paths, labelled by the final segment; `(…)` takes puns and nothing else.
 
 ```quiver
 p = [x: 1, y: 2]
 (p.x, p.y)                    //=> [x: 1, y: 2]
 
-5 ~> [f: double]                  //=> [f: 10]   a field is an expression: called
-(double) ~> .double ~> ~ 4        //=> 8         a pun is a name: referenced
+double = #'int { %num.mul [~, 2] }
+(double) ~> .double ~> ~ 4    //=> 8
 ```
 
 ### Field access
@@ -301,18 +296,17 @@ inferred. `$` is the parameter.
 double = #'int { %num.mul [$, 2] }
 sum = #['int, 'int] { %num.add [$.0, $.1] }
 
-5 ~> double                   //=> 10
+5 ~> double ~                   //=> 10
 sum [3, 4]                    //=> 7
 ```
 
 `$x` and `$0` are sugar for `$.x` and `$.0`. `#'int` with no body is the identity
-function on `'int`. `#[] { … }`, or just `#{ … }`, takes nil — such a function ignores
-any value flowing into it and is called automatically:
+function on `'int`. `#[] { … }`, or just `#{ … }`, takes nil — so calling one is `f []`,
+its argument written like any other:
 
 ```quiver
 answer = #{ 42 }
-answer                        //=> 42
-5 ~> answer                   //=> 42   the 5 is ignored
+answer []                     //=> 42
 ```
 
 A result type can be stated and is then checked: `#'int -> 'bin { … }`.
@@ -335,33 +329,34 @@ outermost function is a compile error.
 
 ### Applying
 
-There are two spellings, and they mean the same thing.
+A call is a **juxtaposition**: a callable, a space, one argument. That is the only thing
+that calls — naming a function anywhere else, in a chain or a field, is just the function.
 
 ```quiver
-[3, 4] ~> %num.add            //=> 7    pipe the whole value in
 %num.add [3, 4]               //=> 7    write the argument after the callee
+[3, 4] ~> %num.add ~          //=> 7    ... or pipe it in as `~`
 ```
 
-The second is **juxtaposition**: a callable, a space, one argument. The flowing value
-flows into that argument, which is what lets the two combine:
+The flowing value flows into the argument, which is what lets the two combine:
 
 ```quiver
 5 ~> %num.add [~, 100]        //=> 105
 ```
 
-Exactly one argument is taken — `f x y` is an error; pipe instead (`g x ~> f`). Because
-arguments and tuple fields receive the flowing value, a callable written in one is
-*called*; prefix `&` to pass it along instead.
+Exactly one argument is taken — `f x y` is an error; pipe instead (`g x ~> f ~`). A
+function named in an argument or a tuple field is passed along, not called, which is what
+handing a function to a combinator wants:
 
 ```quiver
+double = #'int { %num.mul [~, 2] }
 xs = Cons[1, Cons[2, Nil]]
-xs ~> %list.map [~, &double]  //=> Cons[2, Cons[4, Nil]]
+xs ~> %list.map [~, double]   //=> Cons[2, Cons[4, Nil]]
 ```
 
 To apply a function that is itself the flowing value, use `~` as the head:
 
 ```quiver
-&%num.add ~> ~ [1, 2]         //=> 3
+%num.add ~> ~ [1, 2]          //=> 3
 %num ~> ~.add [1, 2]          //=> 3
 ```
 
@@ -397,7 +392,7 @@ a successor it was handed rather than one it names.
 
 ```quiver
 double = #'int { %num.mul [$, 2] }
-apply = #'int { &double ~> ^~ $ }
+apply = #'int { double ~> ^~ $ }
 apply 5                       //=> 10
 ```
 
@@ -583,8 +578,8 @@ first_hit = #'int {
   | { =0 => [] | ~ }        // fails on 0
   | -1                         // ... and then this
 }
-7 ~> first_hit                //=> 7
-0 ~> first_hit                //=> -1
+7 ~> first_hit ~                //=> 7
+0 ~> first_hit ~                //=> -1
 ```
 
 ### Condition and consequence
@@ -598,9 +593,9 @@ sign = #'int {
   | %num.gt? [~, 0] => "positive"
   | "negative"
 }
-0 ~> sign                     //=> "zero"
-5 ~> sign                     //=> "positive"
--5 ~> sign                    //=> "negative"
+0 ~> sign ~                     //=> "zero"
+5 ~> sign ~                     //=> "positive"
+-5 ~> sign ~                    //=> "negative"
 ```
 
 A condition is a *sequence*, so a step separator adds a guard. The match is one step, the
@@ -612,8 +607,8 @@ size = #(Square[side: 'int]) {
   | =Square[side: s]; %num.gt? [s, 10] => "large"
   | "small"
 }
-Square[side: 20] ~> size      //=> "large"
-Square[side: 2] ~> size       //=> "small"
+Square[side: 20] ~> size ~      //=> "large"
+Square[side: 2] ~> size ~       //=> "small"
 ```
 
 Joining those with `~>` instead would not be a guard, and is rejected: a fallible match
@@ -624,8 +619,8 @@ not_square? = #(Square[side: 'int] | Circle[radius: 'int]) {
   | =Square() => []
   | Ok
 }
-Circle[radius: 1] ~> not_square?   //=> Ok
-Square[side: 1] ~> not_square?     //=> []
+Circle[radius: 1] ~> not_square? ~   //=> Ok
+Square[side: 1] ~> not_square? ~     //=> []
 ```
 
 ### Scope
@@ -730,7 +725,7 @@ So in a nested type, `^` reaches the whole thing and `^1` the union it is writte
 ```quiver
 'json = Null | 'int | Array[(Nil | Cons[^, ^1])]
 render = #'json { Ok }
-Array[Cons[1, Cons[Null, Nil]]] ~> render   //=> Ok
+Array[Cons[1, Cons[Null, Nil]]] ~> render ~   //=> Ok
 ```
 
 Here `^` is `'json` — so a list element may be any JSON value — and `^1` is the list's own
@@ -756,7 +751,7 @@ a compile error.
 
 ```quiver
 id<'int> 42                   //=> 42
-f = &id<'int>; f 7            //=> 7
+f = id<'int>; f 7            //=> 7
 ```
 
 A prefix may be given and the rest left inferred. A builtin can be *type-consuming* —
@@ -916,13 +911,15 @@ answers a pid.
 
 ```quiver
 worker = #'int { %num.mul [$, 2] }
-a = @worker 21                // the init argument, written explicitly
-b = 21 ~> @worker             // or taken from the flowing value
+a = @worker 21                // the init argument, after the function
+b = 21 ~> @worker ~           // or piped in, as `~`
 [!a, !b]                      //=> [42, 42]
 ```
 
-`@'int { … }` is shorthand for spawning a function literal, and `@~` spawns a function
-that is itself the flowing value.
+The init is written like a call's argument, and for the same reason: a nilary root
+function is entered with nil, and that nil is spelled out — `@f []`. `@'int { … }` is
+shorthand for spawning a function literal, and `@~` spawns a function that is itself the
+flowing value (`f ~> @~ []`).
 
 ### Sending, receiving, awaiting
 
@@ -930,18 +927,19 @@ Send by applying a value to the pid. Receive with `!`, whose parameter type name
 message type. Await a process's result with `!` on the pid.
 
 ```quiver
-p = @#{ 42 }
+p = @#{ 42 } []
 !p                            //=> 42
 ```
 
 ```quiver
-adder = #{ !#['int, 'int] ~> %num.add }
-q = @adder
-[3, 4] ~> q; !q               //=> 7
+adder = #{ !#['int, 'int] ~> %num.add ~ }
+q = @adder []
+[3, 4] ~> q ~; !q               //=> 7
 ```
 
-A receive shapes the process's message type, and sending is checked against it. `.` is the
-current process — `42 ~> .` sends to self, `&.` is a reference to it.
+A receive shapes the process's message type, and sending is checked against it. Sending is
+a call like any other, so `p x` sends `x` to `p`, and `x ~> p ~` is the piped spelling. `.`
+names the current process, so `me = .` then `x ~> me ~` sends to self.
 
 Awaiting is never lethal, so its result is fallible: `'r | []` for a process returning
 `'r`. A crashed process answers nil carrying a `:crash` annotation rather than propagating
@@ -965,7 +963,7 @@ it, and never waits.
 ```quiver
 'status = Loading | Done['int]
 step = #'status { =Loading => 7 ~> ^ Done[~] | =Done[x] => x }
-p = Loading ~> @step
+p = Loading ~> @step ~
 ?p ~> ='status                //=> Ok   Loading, then Done[7]
 ```
 
@@ -984,12 +982,12 @@ glues to a bare `@` and takes a space after anything else:
 ```quiver
 'status = Loading | Done['int]
 step = #'status { =Loading => 7 ~> ^ Done[~] | =Done[x] => x }
-p = Loading ~> @step
+p = Loading ~> @step ~
 
 watch = #(@?'status) { ?$ }         // sample-only
 await = #(@!'int) { !$ }            // awaitable
-watch &p ~> ='status                //=> Ok
-await &p                            //=> 7
+watch p ~> ='status                //=> Ok
+await p                            //=> 7
 ```
 
 No parentheses are needed where the type ends at a natural boundary — a tuple field
@@ -1017,9 +1015,9 @@ not, its owned children are torn down with it, cascading down the subtree. Teard
 travels upward: a child's death is only ever observed by its parent.
 
 ```quiver ignore
-%proc.detach &p    // relinquish ownership; p outlives this process
-%proc.kill &p      // terminate p and its subtree
-%proc.link &p      // fate-sharing: either dying abnormally kills the other
+%proc.detach p    // relinquish ownership; p outlives this process
+%proc.kill p      // terminate p and its subtree
+%proc.link p      // fate-sharing: either dying abnormally kills the other
 ```
 
 ### The registry
@@ -1037,12 +1035,12 @@ usual variance rules, so what a name grants is exactly what the lookup spells. A
 unbound key or a failed check answers nil, like any failed match.
 
 ```quiver
-p = @#{ !'int ~> %num.mul [~, 2] }
-%registry.register [Doubler, &p]           //=> Ok
-%registry.register [Doubler, &p]           //=> []   the name is taken
+p = @#{ !'int ~> %num.mul [~, 2] } []
+%registry.register [Doubler, p]           //=> Ok
+%registry.register [Doubler, p]           //=> []   the name is taken
 %registry.lookup<@'bin> Doubler            //=> []   wrong message type
 %registry.lookup<@'int> Doubler ~> =(@'int)q
-21 ~> q
+21 ~> q ~
 !p                                         //=> 42
 %registry.lookup<@'int> Doubler            //=> []   freed when the process ended
 ```
@@ -1055,12 +1053,12 @@ semantics included. `%registry.unregister` removes a binding early.
 ### Select
 
 `!` generalises to a **select** over several sources, racing them. The general form is
-`![sources]` — an ordinary value tuple, so a function source needs `&`.
+`![sources]` — an ordinary value tuple, and a name in one is the value it names.
 
 ```quiver ignore
-![p1, p2, 5000]    // whichever of two processes finishes first, or a 5s timeout
-![sock, &control]  // socket bytes, or a mailbox message
-&p1 ~> ![~, 1000]  // in a chain, via `~`
+![p1, p2, 5000]   // whichever of two processes finishes first, or a 5s timeout
+![sock, control]  // socket bytes, or a mailbox message
+p1 ~> ![~, 1000]  // in a chain, via `~`
 ```
 
 Sources are processes (await), functions by reference (receive), integers (a timeout in
@@ -1072,7 +1070,7 @@ The shorthands each select on one source:
 
 | form | means |
 | --- | --- |
-| `!p`, `!f`, `!%mod.recv` | `![&p]` — await, or receive |
+| `!p`, `!f`, `!%mod.recv` | `![p]` — await, or receive |
 | `!'int`, `!Done`, `!(…)` | `![#'int]` — receive a message of that type |
 | `!#['int, 'int]` | an unnamed tuple type needs the `#` |
 | `![]` | a no-op, returning nil |
@@ -1098,13 +1096,12 @@ selects, host-state reads and ref minting are all rejected inside one.
 fresh unique value of type `'ref`.
 
 ```quiver
-tag = %ref
+tag = %ref []
 [tag, 42] ~> =[&tag, x]; x    //=> 42
 ```
 
 ```quiver
-ref = &%ref                   // bind the function to call it repeatedly
-a = ref; b = ref
+a = %ref []; b = %ref []
 a ~> =&b                      //=> []   distinct refs are not equal
 ```
 
@@ -1158,7 +1155,7 @@ yielding `Data[stream, bytes] | Closed[stream]` whatever produced it.
 ```quiver ignore
 ![sock]                    // the next event: a plain blocking read
 ![sock, 5000]              // ... with a timeout
-![listener, &control]      // an accept loop that can also be told to stop
+![listener, control]      // an accept loop that can also be told to stop
 ```
 
 Reading a stream is fallible like any other I/O operation: a *failed* read — a reset, a
@@ -1184,7 +1181,7 @@ the braces denote — a function literal's closure, or a chain block's result.
 div = #['int, 'int] {
   :doc "Integer division. Fails with :error on a zero divisor."
   | =[_, 0] => [] ~> { :error DivisionByZero }
-  | %int.div
+  | %int.div ~
 }
 
 div [7, 2]                    //=> 3
@@ -1234,7 +1231,7 @@ running it.
 
 ```quiver
 double = #'int { %num.mul [$, 2] }
-5 ~> double //=> 10
+5 ~> double ~ //=> 10
 x = double 3 //=> Ok   a binding step's value is its verdict
 x                      //=> 6
 ```
@@ -1288,8 +1285,8 @@ notations get first-class syntax without the language growing it.
 ```quiver
 %list{ 1, 2, 3 }                                    //=> Cons[1, Cons[2, Cons[3, Nil]]]
 %dict{ "a" => 1, "b" => 2 } ~> %dict.get [~, "a"]   //=> 1
-%json{ {"a": [1, 2]} } ~> %json.stringify          //=> "{\"a\":[1,2]}"
-%html{ <p class="greeting">hi</p> } ~> %html.render //=> "<p class=\"greeting\">hi</p>"
+%json{ {"a": [1, 2]} } ~> %json.stringify ~          //=> "{\"a\":[1,2]}"
+%html{ <p class="greeting">hi</p> } ~> %html.render ~ //=> "<p class=\"greeting\">hi</p>"
 ```
 
 The content is arbitrary — it is the dialect's grammar, not Quiver's — but holes are
@@ -1298,7 +1295,7 @@ flowing value as input.
 
 ```quiver
 name = "world"
-%html{ <p>hello {name}</p> } ~> %html.render   //=> "<p>hello world</p>"
+%html{ <p>hello {name}</p> } ~> %html.render ~   //=> "<p>hello world</p>"
 ```
 
 The standard library ships `%list{ … }`, `%dict{ … }`, `%json{ … }`, `%html{ … }` and
@@ -1314,7 +1311,7 @@ reachable directly.
 
 ```quiver
 __integer_add__ [3, 4]              //=> 7
-[add: &__integer_add__] ~> .add ~> ~ [3, 4]   //=> 7
+[add: __integer_add__] ~> .add ~> ~ [3, 4]   //=> 7
 ```
 
 `__panic__` aborts the process with a message.

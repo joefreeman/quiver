@@ -99,9 +99,9 @@ pct_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (plus?): 'int, (acc): 'bin]
 
           __integer_compare__ [__integer_add__ [$pos, 2], $len] ~> =-1
 
-          [$data, __integer_add__ [$pos, 1]] ~> hex_val %bin.get_byte ~> =('int)h1
+          [$data, __integer_add__ [$pos, 1]] ~> %bin.get_byte ~ ~> hex_val ~ ~> =('int)h1
 
-          [$data, __integer_add__ [$pos, 2]] ~> hex_val %bin.get_byte ~> =('int)h2 => {
+          [$data, __integer_add__ [$pos, 2]] ~> %bin.get_byte ~ ~> hex_val ~ ~> =('int)h2 => {
           decoded = __integer_add__ [__integer_multiply__ [h1, 16], h2]
 
           ^ [$data, __integer_add__ [$pos, 3], $len, $plus?, %bin.append [$acc, decoded, 1]]
@@ -179,7 +179,7 @@ part_pair = #'bin {
 qp_loop = #[(data): 'bin, (start): 'int, (pos): 'int, (len): 'int, (acc): 'pairs] {
   next = {
     | __integer_compare__ [$start, $pos] ~> =-1 => Cons[
-      [$data, $start, $pos] ~> part_pair %bin.slice,
+      [$data, $start, $pos] ~> %bin.slice ~ ~> part_pair ~,
       $acc,
     ]
     | $acc
@@ -240,7 +240,7 @@ ows? = #'int { $ ~> =(32 | 9); $ }
 trim_start = #[(data): 'bin, (pos): 'int, (end): 'int] {
   {
     | __integer_compare__ [$pos, $end] ~> =(0 | 1) => $pos
-    | [$data, $pos] ~> ows? %bin.get_byte => ^ [$data, __integer_add__ [$pos, 1], $end]
+    | [$data, $pos] ~> %bin.get_byte ~ ~> ows? ~ => ^ [$data, __integer_add__ [$pos, 1], $end]
     | $pos
   }
 }
@@ -251,7 +251,7 @@ trim_end = #[(data): 'bin, (pos): 'int, (end): 'int] {
     | [
         $data,
         __integer_subtract__ [$end, 1],
-      ] ~> ows? %bin.get_byte => ^ [$data, $pos, __integer_subtract__ [$end, 1]]
+      ] ~> %bin.get_byte ~ ~> ows? ~ => ^ [$data, $pos, __integer_subtract__ [$end, 1]]
     | $end
   }
 }
@@ -278,7 +278,7 @@ parse_headers = #[(data): 'bin, (pos): 'int, (end): 'int, (acc): 'pairs] {
             $data,
             $pos,
             le,
-          ] ~> parse_header_line %bin.slice ~> =[n, v] => ^ [
+          ] ~> %bin.slice ~ ~> parse_header_line ~ ~> =[n, v] => ^ [
             $data,
             __integer_add__ [le, 2],
             $end,
@@ -327,7 +327,7 @@ split_target = #'%str {
   qi = %bin.index [t, 63, 0]
   {
     | qi ~> =('int)q => [
-      [t, 0, q] ~> path_segments %bin.slice,
+      [t, 0, q] ~> %bin.slice ~ ~> path_segments ~,
       qp_loop [
         %bin.slice [t, __integer_add__ [q, 1], %bin.length t],
         0,
@@ -364,7 +364,11 @@ parse_request_with = #[(data): 'bin, (max_head): 'int, (max_body): 'int] {
       | {
         rle = line_end [$data, 0, h]
         {
-          | [$data, 0, rle] ~> parse_request_line %bin.slice ~> =(method: m, target, version) => {
+          | [
+              $data,
+              0,
+              rle,
+            ] ~> %bin.slice ~ ~> parse_request_line ~ ~> =(method: m, target, version) => {
               hstart = {
                 | __integer_compare__ [rle, h] ~> =-1 => __integer_add__ [rle, 2]
                 | h
@@ -457,8 +461,7 @@ hex_value = #'int {
 parse_hex = #[(data): 'bin, (pos): 'int, (end): 'int, (acc): 'int] {
   {
     | __integer_compare__ [$pos, $end] ~> =(0 | 1) => $acc
-    | %bin.get_byte [$data, $pos] ~> hex_value
-      ~> =('int)v => ^ [
+    | %bin.get_byte [$data, $pos] ~> hex_value ~ ~> =('int)v => ^ [
         $data,
         __integer_add__ [$pos, 1],
         $end,
@@ -492,7 +495,7 @@ chunk_step = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
       }
       {
         | __integer_compare__ [$pos, size_end] ~> =(0 | 1) => Bad[reason: "empty chunk size"]
-        | %bin.get_byte [$data, $pos] ~> hex_value ~> =[] => Bad[reason: "malformed chunk size"]
+        | %bin.get_byte [$data, $pos] ~> hex_value ~ ~> =[] => Bad[reason: "malformed chunk size"]
         | {
           n = parse_hex [$data, $pos, size_end, 0]
           dstart = __integer_add__ [le, 2]
@@ -533,8 +536,7 @@ parse_status_line = #'bin {
   b = %bin.index [line, 32, __integer_add__ [a, 1]]
   code_end = { b ~> =('int)i => i | len }
 
-  %bin.slice [line, __integer_add__ [a, 1], code_end] ~> Str[~] ~> %str.parse_int
-  ~> =('int)status
+  %bin.slice [line, __integer_add__ [a, 1], code_end] ~> Str[~] ~> %str.parse_int ~ ~> =('int)status
 
   __integer_compare__ [status, 100] ~> =(0 | 1)
   __integer_compare__ [status, 599] ~> =(-1 | 0)
@@ -556,7 +558,7 @@ parse_response_with = #[(data): 'bin, (eof): (Ok | []), (max_head): 'int, (max_b
       | {
         sle = line_end [$data, 0, h]
         {
-          | [$data, 0, sle] ~> parse_status_line %bin.slice ~> =('int)status => {
+          | [$data, 0, sle] ~> %bin.slice ~ ~> parse_status_line ~ ~> =('int)status => {
               hstart = {
                 | __integer_compare__ [sle, h] ~> =-1 => __integer_add__ [sle, 2]
                 | h
@@ -662,7 +664,10 @@ serialize_response = #'response {
   status_line = "HTTP/1.1 {%str.from_int s} {reason s}\r\n"
   hs2 = {
     | header [hs, "content-length"] ~> =Str[_] => hs
-    | %list.prepend [hs, ["content-length", %bin.length b ~> %str.from_int]]
+    | %list.prepend [
+      hs,
+      ["content-length", %bin.length b ~> %str.from_int ~],
+    ]
   }
   head = serialize_headers [hs2, status_line]
   %bin.concat ["{head}\r\n" ~> .0, b]
@@ -686,7 +691,10 @@ serialize_request = #' {
   hs2 = {
     | header [hs, "content-length"] ~> =Str[_] => hs
     | %bin.length b ~> =0 => hs
-    | %list.prepend [hs, ["content-length", %bin.length b ~> %str.from_int]]
+    | %list.prepend [
+      hs,
+      ["content-length", %bin.length b ~> %str.from_int ~],
+    ]
   }
   head = serialize_headers [hs2, request_line]
   %bin.concat ["{head}\r\n" ~> .0, b]
@@ -733,9 +741,9 @@ pct_enc_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
       acc2 = {
         | enc_plain? b => %bin.append [$acc, b, 1]
         | b ~> =32 => %bin.append [$acc, 43, 1]
-        | %bin.append [$acc, 37, 1] ~> %bin.append [~, __integer_divide__ [b, 16] ~> hex_upper, 1] ~> %bin.append [
+        | %bin.append [$acc, 37, 1] ~> %bin.append [~, __integer_divide__ [b, 16] ~> hex_upper ~, 1] ~> %bin.append [
           ~,
-          __integer_modulo__ [b, 16] ~> hex_upper,
+          __integer_modulo__ [b, 16] ~> hex_upper ~,
           1,
         ]
       }
@@ -748,11 +756,10 @@ pct_encode = #'bin { pct_enc_loop [$, 0, %bin.length $, 0x] }
 
 form_encode = #'pairs {
   :doc "Ordered [name, value] pairs as an application/x-www-form-urlencoded body — the inverse of form_decode."
-  %list.iter
-  ~> %iter.map [
+  %list.iter ~ ~> %iter.map [
     ~,
     #{ =[Str[n], Str[v]]; pct_encode n ~> %bin.append [~, 61, 1] ~> %bin.concat [~, pct_encode v] },
-  ] ~> %iter.intersperse [~, 0x26] ~> %iter.fold [~, 0x, &%bin.concat]
+  ] ~> %iter.intersperse [~, 0x26] ~> %iter.fold [~, 0x, %bin.concat]
 }
 
 // One `k=v` cookie segment (edges trimmed, value verbatim) prepended to the accumulator;
@@ -795,7 +802,7 @@ cookies = #' {
         | $0
       }
     },
-  ] ~> %list.reverse
+  ] ~> %list.reverse ~
 }
 
 'attrs = '%list<'%str>

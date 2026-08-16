@@ -1,45 +1,55 @@
-// Tests for the "flow the piped value into tuple fields / arguments" semantics
-// and the requirement to use `&` to pass a callable by value.
+// Tests for the "flow the piped value into tuple fields / arguments" semantics: each field
+// chain receives a copy of the piped value, and reads it by naming `~`. A field names a
+// value and never calls it, so a callable field is the function itself.
 mod common;
 use common::*;
 
-const INC: &str = "inc = #'int { [~, 1] ~> __integer_add__ };";
+const INC: &str = "inc = #'int { [~, 1] ~> __integer_add__ ~ };";
 
 #[test]
-fn callable_field_is_called_with_flow() {
-    // A bare callable variable in a tuple field is called with the piped value.
+fn callable_field_is_the_function_not_a_call() {
+    // A field names a value; calling is written. So a bare callable field is the function,
+    // and applying it to the piped value is spelled out.
+    quiver()
+        .evaluate(&format!("{INC} 5 ~> [inc ~, 100]"))
+        .expect("[6, 100]");
+    // Naming it instead stores it — and then no field reads the flow, so the tuple would
+    // drop it.
     quiver()
         .evaluate(&format!("{INC} 5 ~> [inc, 100]"))
-        .expect("[6, 100]");
+        .expect_compile_error(quiver_compiler::compiler::Error::DiscardedChainValue);
 }
 
 #[test]
 fn each_field_independently_receives_flow() {
     quiver()
-        .evaluate(&format!("{INC} 5 ~> [inc, inc]"))
+        .evaluate(&format!("{INC} 5 ~> [inc ~, inc ~]"))
         .expect("[6, 6]");
 }
 
 #[test]
-fn nil_arg_callable_field_called_with_nil_param() {
-    // Standalone record: the implicit nil parameter flows in, so a nil-arg callable
-    // field is called. `&` is required to store the function instead.
-    quiver().evaluate("g = #{ 42 }; [g]").expect("[42]");
+fn nil_arg_callable_field_is_stored_not_called() {
+    // A record of functions is the ordinary case: the field is the function, and `&` adds
+    // nothing to it.
+    quiver()
+        .evaluate("g = #{ 42 }; [g] ~> .0 ~> ~ []")
+        .expect("42");
+    quiver().evaluate("g = #{ 42 }; [g []]").expect("[42]");
 }
 
 #[test]
 fn amp_builtin_reference_in_record() {
     // `&__builtin__` stores a builtin as a value (e.g. a module export tuple).
     quiver()
-        .evaluate("r = [a: &__integer_add__]; [3, 4] ~> r.a")
+        .evaluate("r = [a: __integer_add__]; [3, 4] ~> r.a ~")
         .expect("7");
 }
 
 #[test]
 fn amp_passes_callable_by_value() {
-    // `&inc` stores the function (not called with 5); it can be called later.
+    // `&inc` stores the function, as the bare name now does; it can be called later.
     quiver()
-        .evaluate(&format!("{INC} t = 5 ~> [&inc, ~]; 10 ~> t.0"))
+        .evaluate(&format!("{INC} t = 5 ~> [inc, ~]; 10 ~> t.0 ~"))
         .expect("11");
 }
 
@@ -62,11 +72,11 @@ fn ripple_beside_constructor_sibling() {
 }
 
 #[test]
-fn higher_order_argument_needs_amp() {
-    // Passing a function as an argument requires `&`; it is then applied inside.
+fn higher_order_argument_is_a_plain_name() {
+    // A function passed as an argument is named, and applied inside.
     quiver()
         .evaluate(&format!(
-            "{INC} twice = #[#'int -> 'int, 'int] {{ $.1 ~> $.0 ~> $.0 }}; [&inc, 5] ~> twice"
+            "{INC} twice = #[#'int -> 'int, 'int] {{ $.1 ~> $.0 ~ ~> $.0 ~ }}; [inc, 5] ~> twice ~"
         ))
         .expect("7");
 }
@@ -75,7 +85,7 @@ fn higher_order_argument_needs_amp() {
 fn nil_arg_callable_passed_then_called() {
     // A nil-arg function passed by `&`, then explicitly called.
     quiver()
-        .evaluate("g = #{ 42 }; t = [&g]; [] ~> t.0")
+        .evaluate("g = #{ 42 }; t = [g]; [] ~> t.0 ~")
         .expect("42");
 }
 
@@ -85,7 +95,7 @@ fn tuple_field_provenance_preserved() {
     quiver()
         .evaluate(
             "make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
-             x = 0 ~> make_ab;
+             x = 0 ~> make_ab ~;
              t = x ~> [~, 1];
              t.0 ~> =A[a: 'int]; x.a",
         )

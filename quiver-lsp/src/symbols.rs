@@ -151,7 +151,7 @@ pub fn member_doc(program: &Sequence, member: &str) -> Option<String> {
 /// ride the referenced closure into the module tuple, so the binding's doc is the
 /// member's doc.
 fn doc_behind_reference(program: &Sequence, chain: &Chain) -> Option<String> {
-    let [Term::Reference(access)] = chain.terms.as_slice() else {
+    let [Term::Access(access)] = chain.terms.as_slice() else {
         return None;
     };
     let Some(AccessSource::Identifier(name)) = &access.source else {

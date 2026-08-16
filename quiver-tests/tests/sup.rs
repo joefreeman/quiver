@@ -7,7 +7,7 @@ use common::quiver;
 // then waits: 0 makes it crash, any other int completes it normally.
 //
 // The shared shape:
-//   worker:  @{ &. ~> me; !'int ~> { =0 => panic | ... } }
+//   worker:  @{ &. ~> me ~; !'int ~> { =0 => panic | ... } } []
 //   start:   spawns the worker, wires its watcher (%sup.watch), answers the pid
 
 #[test]
@@ -16,22 +16,22 @@ fn test_supervisor_restarts_crashed_child() {
         .with_io()
         .evaluate(
             r#"
-            me = &.
+            me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @{
-                &. ~> me
-                !'int ~> { =0 => "boom" ~> __panic__ | [] ~> ^ }
-              }
-              %sup.watch [id, &w, &sup]
-              &w
+                . ~> me ~
+                !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ }
+              } []
+              %sup.watch [id, w, sup]
+              w
             }
-            spec = [id: "w", restart: Permanent, start: &mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start
+            spec = [id: "w", restart: Permanent, start: mk]
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             p1 = !#(@'int)
-            0 ~> p1
+            0 ~> p1 ~
             p2 = !#(@'int)
-            [&p2] ~> { =[&p1] => "same pid" | "restarted" }
+            [p2] ~> { =[&p1] => "same pid" | "restarted" }
             "#,
         )
         .expect("\"restarted\"");
@@ -45,21 +45,21 @@ fn test_restart_intensity_limit_escalates() {
         .with_io()
         .evaluate(
             r#"
-            me = &.
+            me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @{
-                &. ~> me
-                !'int ~> { =0 => "boom" ~> __panic__ | [] ~> ^ }
-              }
-              %sup.watch [id, &w, &sup]
-              &w
+                . ~> me ~
+                !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ }
+              } []
+              %sup.watch [id, w, sup]
+              w
             }
-            spec = [id: "w", restart: Permanent, start: &mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 2, window: 5000] ~> %sup.start
-            p1 = !#(@'int); 0 ~> p1
-            p2 = !#(@'int); 0 ~> p2
-            p3 = !#(@'int); 0 ~> p3
+            spec = [id: "w", restart: Permanent, start: mk]
+            sup = [children: Cons[spec, Nil], max_restarts: 2, window: 5000] ~> %sup.start ~
+            p1 = !#(@'int); 0 ~> p1 ~
+            p2 = !#(@'int); 0 ~> p2 ~
+            p3 = !#(@'int); 0 ~> p3 ~
             r = !sup
             r:(Panic(message: Str['bin]))crash ~> =(message: msg)
             msg
@@ -74,20 +74,20 @@ fn test_temporary_child_is_not_restarted() {
         .with_io()
         .evaluate(
             r#"
-            me = &.
+            me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @{
-                &. ~> me
-                !'int ~> { =0 => "boom" ~> __panic__ | Ok }
-              }
-              %sup.watch [id, &w, &sup]
-              &w
+                . ~> me ~
+                !'int ~> { =0 => "boom" ~> __panic__ ~ | Ok }
+              } []
+              %sup.watch [id, w, sup]
+              w
             }
-            spec = [id: "w", restart: Temporary, start: &mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start
+            spec = [id: "w", restart: Temporary, start: mk]
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             p1 = !#(@'int)
-            0 ~> p1
+            0 ~> p1 ~
             { | ![#(@'int), 200] ~> =(@'int)p2 => "restarted" | "no restart" }
             "#,
         )
@@ -100,22 +100,22 @@ fn test_transient_child_restarts_on_crash() {
         .with_io()
         .evaluate(
             r#"
-            me = &.
+            me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @{
-                &. ~> me
-                !'int ~> { =0 => "boom" ~> __panic__ | Ok }
-              }
-              %sup.watch [id, &w, &sup]
-              &w
+                . ~> me ~
+                !'int ~> { =0 => "boom" ~> __panic__ ~ | Ok }
+              } []
+              %sup.watch [id, w, sup]
+              w
             }
-            spec = [id: "w", restart: Transient, start: &mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start
+            spec = [id: "w", restart: Transient, start: mk]
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             p1 = !#(@'int)
-            0 ~> p1
+            0 ~> p1 ~
             p2 = !#(@'int)
-            [&p2] ~> { =[&p1] => "same pid" | "restarted" }
+            [p2] ~> { =[&p1] => "same pid" | "restarted" }
             "#,
         )
         .expect("\"restarted\"");
@@ -127,20 +127,20 @@ fn test_transient_child_not_restarted_after_normal_completion() {
         .with_io()
         .evaluate(
             r#"
-            me = &.
+            me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @{
-                &. ~> me
-                !'int ~> { =0 => "boom" ~> __panic__ | Ok }
-              }
-              %sup.watch [id, &w, &sup]
-              &w
+                . ~> me ~
+                !'int ~> { =0 => "boom" ~> __panic__ ~ | Ok }
+              } []
+              %sup.watch [id, w, sup]
+              w
             }
-            spec = [id: "w", restart: Transient, start: &mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start
+            spec = [id: "w", restart: Transient, start: mk]
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             p1 = !#(@'int)
-            1 ~> p1
+            1 ~> p1 ~
             { | ![#(@'int), 200] ~> =(@'int)p2 => "restarted" | "no restart" }
             "#,
         )
@@ -155,22 +155,22 @@ fn test_killing_the_supervisor_tears_down_its_children() {
         .with_io()
         .evaluate(
             r#"
-            me = &.
+            me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @{
-                &. ~> me
-                !'int ~> { =0 => "boom" ~> __panic__ | [] ~> ^ }
-              }
-              %sup.watch [id, &w, &sup]
-              &w
+                . ~> me ~
+                !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ }
+              } []
+              %sup.watch [id, w, sup]
+              w
             }
-            spec = [id: "w", restart: Permanent, start: &mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start
+            spec = [id: "w", restart: Permanent, start: mk]
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             // The declared message type spells the await grant (`-> []`): a declared
             // type grants only what it spells, and this test awaits the child.
             p1 = !#(@'int ![])
-            %proc.kill &sup
+            %proc.kill sup
             r = !p1
             r:(Killed)crash
             "#,
@@ -186,23 +186,23 @@ fn test_add_supervises_child_dynamically() {
         .with_io()
         .evaluate(
             r#"
-            me = &.
+            me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @{
-                &. ~> me
-                !'int ~> { =0 => "boom" ~> __panic__ | [] ~> ^ }
-              }
-              %sup.watch [id, &w, &sup]
-              &w
+                . ~> me ~
+                !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ }
+              } []
+              %sup.watch [id, w, sup]
+              w
             }
-            sup = [children: Nil, max_restarts: 3, window: 5000] ~> %sup.start
-            v = %sup.add [&sup, [id: "w", restart: Permanent, start: &mk]]
+            sup = [children: Nil, max_restarts: 3, window: 5000] ~> %sup.start ~
+            v = %sup.add [sup, [id: "w", restart: Permanent, start: mk]]
             started? = v ~> { =Started[_] => Ok | [] }
             p1 = !#(@'int)
-            0 ~> p1
+            0 ~> p1 ~
             p2 = !#(@'int)
-            [started?, [&p2] ~> { =[&p1] => "same pid" | "restarted" }]
+            [started?, [p2] ~> { =[&p1] => "same pid" | "restarted" }]
             "#,
         )
         .expect(r#"[Ok, "restarted"]"#);
@@ -214,17 +214,17 @@ fn test_add_duplicate_id_rejected() {
         .with_io()
         .evaluate(
             r#"
-            me = &.
+            me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @{ &. ~> me; !'int ~> { =0 => "boom" ~> __panic__ | [] ~> ^ } }
-              %sup.watch [id, &w, &sup]
-              &w
+              w = @{ . ~> me ~; !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ } } []
+              %sup.watch [id, w, sup]
+              w
             }
-            spec = [id: "w", restart: Permanent, start: &mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start
+            spec = [id: "w", restart: Permanent, start: mk]
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             !#(@'int)
-            %sup.add [&sup, spec]
+            %sup.add [sup, spec]
             "#,
         )
         .expect("Duplicate");
@@ -241,25 +241,25 @@ fn test_drop_forgets_and_id_is_reusable() {
         .with_io()
         .evaluate(
             r#"
-            me = &.
+            me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @{ &. ~> me; !'int ~> { =0 => "boom" ~> __panic__ | [] ~> ^ } }
-              %sup.watch [id, &w, &sup]
-              &w
+              w = @{ . ~> me ~; !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ } } []
+              %sup.watch [id, w, sup]
+              w
             }
-            spec = [id: "w", restart: Permanent, start: &mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start
+            spec = [id: "w", restart: Permanent, start: mk]
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             p1 = !#(@'int)
-            %sup.drop [&sup, "w"]
-            v = %sup.add [&sup, spec]
+            %sup.drop [sup, "w"]
+            v = %sup.add [sup, spec]
             p2 = !#(@'int)
             // The dead first incarnation must not spawn a third announcement: give
             // any spurious restart a moment, then crash p2 and expect exactly one.
             spurious = ![#(@'int), 100] ~> { =(@'int) => Spurious | Quiet }
-            0 ~> p2
+            0 ~> p2 ~
             p3 = !#(@'int)
-            [v ~> { =Started[_] => Ok | [] }, spurious, [&p3] ~> { =[&p2] => "same" | "fresh" }]
+            [v ~> { =Started[_] => Ok | [] }, spurious, [p3] ~> { =[&p2] => "same" | "fresh" }]
             "#,
         )
         .expect(r#"[Ok, Quiet, "fresh"]"#);

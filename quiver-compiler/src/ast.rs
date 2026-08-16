@@ -188,17 +188,21 @@ pub enum Term {
     /// A braced expression `{ … }`: a new scope whose branches each start from the flowing value.
     Block(Block),
     Function(Function),
+    /// A name: a variable, `$`, an import member, a builtin, a field of the flowing value, or
+    /// `~` itself. Always the value it names — calling is written, and only [`Term::Apply`]
+    /// does it — so a value flowing into a bare access is dropped.
     Access(Access),
     /// A juxtaposition application `f x` / `f [args]`: the access head applied to a single
     /// argument written after it, separated by horizontal space. The head covers everything an
     /// `Access` can name — a variable, `$`, import member, builtin, tail call (`^f [args]`,
-    /// `^ [args]`), or a ripple (`~ [args]`, `~.f [args]`, `^~ arg`). The flowing value flows
-    /// into the argument (so `f [~, 1]` works); for ripple heads it is consumed by the head
-    /// instead, and the argument is evaluated without it.
+    /// `^ [args]`), or a ripple (`~ [args]`, `~.f [args]`, `^~ arg`). This is the only thing
+    /// that calls. The flowing value flows into the argument (so `f [~, 1]` and the piped
+    /// spelling `f ~` work); for ripple heads it is consumed by the head instead, and the
+    /// argument is evaluated without it.
     Apply(Access, Box<Term>),
-    /// Spawn a process from a function (`@f`, `@~`, `@{ … }`). The init argument is the
-    /// juxtaposed argument (`@f x`, `@~ x`) when present, otherwise the chained value
-    /// (`x ~> @f`), or nil.
+    /// Spawn a process from a function (`@f x`, `@~ x`, `@{ … } x`). The init is written like
+    /// a call's argument, nil included (`@f []`) — the flowing value reaches it only through
+    /// `~` (`x ~> @f ~`). `@~` spawns the flowing value itself, so its init is the argument.
     Spawn(Box<Term>, Option<Box<Term>>, Spanned),
     Self_,
     /// Select operation. None means bare `!` (postfix form using chained value).
@@ -211,9 +215,6 @@ pub enum Term {
     /// member holding a pid); the `Spanned` is the `?`, for hover.
     State(Access, Spanned),
     Process(usize),
-    /// Reference operator (`&`): references a value without calling it — a variable, import
-    /// member, builtin, or self (`&x`, `&m.f`, `&__integer_add__`, `&.`).
-    Reference(Access),
     /// A dialect invocation `%mod{ … }` (glued `{`): the raw brace content is handed at
     /// compile time to the function the module's `:dialect` annotation carries, and the
     /// expression tree it returns is spliced in place of this term. The flowing value is
@@ -310,7 +311,7 @@ pub struct Tuple {
     /// the labeled reference it abbreviates (`a` → `a: &a`), so the rest of the compiler sees an
     /// ordinary tuple; the flag records the spelling so the formatter can render it back — like
     /// [`Chain::binding`] and [`Term::String`]'s style. A punned tuple's fields are therefore
-    /// always labeled, always [`FieldValue::Chain`], and always a lone [`Term::Reference`].
+    /// always labeled, always [`FieldValue::Chain`], and always a lone [`Term::Access`].
     pub punned: bool,
 }
 
@@ -378,9 +379,9 @@ pub enum AccessSource {
     /// Tail call (`^`, `^f`, `^f.field`): `None` recurses into the current function, `Some(name)`
     /// tail-calls `name`. Compiled with the tail-call instruction (TCO), not a normal call.
     TailCall(Option<String>),
-    /// Ripple tail call (`^~`): tail-calls the flowing value, which must be a nilary function (it
-    /// is called with nil). The flowing-value analogue of `^`/`^f` — tail recursion, not
-    /// application; to tail-call with an argument, bind the function and use `arg ~> ^name`.
+    /// Ripple tail call (`^~ x`): tail-calls the flowing value, which is the callee rather than
+    /// the argument — the flowing-value analogue of `^`/`^f`. Its argument is written like any
+    /// other, nil included (`^~ []`).
     TailCallRipple,
 }
 
@@ -474,7 +475,7 @@ pub enum Match {
     /// if the value equals the referenced value. The target is an access path rooted at a
     /// variable or the enclosing function's parameter (with the parameter's usual glued first
     /// accessor, as in `$x`); annotation accessors are not part of a pin target.
-    Reference(PinTarget),
+    Pin(PinTarget),
     Type(Type),
     /// An alternation of patterns (`(p | q | …)`): matches if any alternative matches. Every
     /// alternative must bind the same set of variables (so the body sees them regardless of which

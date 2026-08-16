@@ -108,7 +108,7 @@ fact = #'int { ^f [~, 1] }
 tail-call ripple application
 ==================
 
-g = #{ 10 }; f = #'int { &g ~> ^~ 5 }
+g = #{ 10 }; f = #'int { g ~> ^~ 5 }
 
 ---
 
@@ -131,9 +131,8 @@ g = #{ 10 }; f = #'int { &g ~> ^~ 5 }
           (branch
             (sequence
               (chain
-                (reference
-                  (access
-                    source: (identifier)))
+                (access
+                  source: (identifier))
                 (application
                   function: (tail_call
                     (ripple))

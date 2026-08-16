@@ -129,8 +129,28 @@ pub struct Hole {
 /// A resolved `Call` target: the access term to append, and its `module/path.member`
 /// spelling, which distinguishes holes over one span in [`Hole::key`].
 struct Callee {
-    term: ast::Term,
+    access: ast::Access,
     key: String,
+}
+
+impl Callee {
+    /// `f ~`: the member applied to the chain's flowing value. A `Call` puts its argument
+    /// chain first, so the call is written as a juxtaposition onto `~` — the piped
+    /// spelling of `f arg`, and the only thing that calls.
+    fn applied(self) -> ast::Term {
+        let span = self.access.span;
+        ast::Term::Apply(
+            self.access,
+            Box::new(ast::Term::Access(ast::Access {
+                source: Some(ast::AccessSource::Ripple),
+                accessors: vec![],
+                accessor_spans: vec![],
+                type_arguments: vec![],
+                base_span: span,
+                span,
+            })),
+        )
+    }
 }
 
 /// Wrap an expansion chain as a single term: a block binding the flowing value to
@@ -247,7 +267,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                     return self.unquote(offset, length, Some(callee));
                 }
                 let mut chain = self.value_to_chain(arg)?;
-                chain.terms.push(callee.term);
+                chain.terms.push(callee.applied());
                 Ok(chain)
             }
             "Tuple" => {
@@ -276,9 +296,8 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
     /// chain, evaluated in the caller's scope with the dialect term's flowing value as
     /// its input. Semantics is bind-once: every hole evaluates exactly once, in content
     /// order, before the expansion's own structure. Provably pure single-term holes —
-    /// a literal, a text-only string, a `&`-reference, or a bare `~` — splice in place
-    /// instead; anything else (including a bare identifier, whose callability is
-    /// type-dependent) becomes a `~dialect-hole-N` binding, deduplicated by span.
+    /// see [`splices_in_place`] — splice there instead; anything else becomes a
+    /// `~dialect-hole-N` binding, deduplicated by span.
     ///
     /// `callee` is the member of a `Call` whose argument this span is: it is appended to
     /// the span's own chain, so the span sits in argument position (typed by the callee's
@@ -310,12 +329,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
         self.remap_chain_spans(&mut chain, offset);
 
         let (ripple, pure) = match &chain.terms[..] {
-            [term] if chain.binding.is_none() => (
-                term.is_bare_ripple(),
-                matches!(term, ast::Term::Literal(_) | ast::Term::Reference(_))
-                    || matches!(term, ast::Term::String(_, segments)
-                        if segments.iter().all(|s| matches!(s, ast::StrSegment::Text(_)))),
-            ),
+            [term] if chain.binding.is_none() => (term.is_bare_ripple(), splices_in_place(term)),
             _ => (false, false),
         };
         if ripple || pure {
@@ -325,7 +339,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 chain
             };
             if let Some(callee) = callee {
-                spliced.terms.push(callee.term);
+                spliced.terms.push(callee.applied());
             }
             return Ok(spliced);
         }
@@ -346,7 +360,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 // bindings it makes stay local to it. A `Call`'s member is applied inside
                 // the block, leaving the span in argument position.
                 if let Some(callee) = callee {
-                    chain.terms.push(callee.term);
+                    chain.terms.push(callee.applied());
                 }
                 let terms = vec![
                     self.reference(RIPPLE_BINDING.to_string()),
@@ -479,14 +493,14 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
         };
         let key = format!("{}.{member}", path.join("/"));
         Ok(Callee {
-            term: ast::Term::Access(ast::Access {
+            access: ast::Access {
                 source: Some(ast::AccessSource::Import(path)),
                 accessors: vec![ast::AccessPath::Field(member)],
                 accessor_spans: vec![ast::Spanned::default()],
                 type_arguments: vec![],
                 base_span: self.dialect.span,
                 span: self.dialect.span,
-            }),
+            },
             key,
         })
     }
@@ -522,7 +536,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
     }
 
     fn reference(&self, name: String) -> ast::Term {
-        ast::Term::Reference(ast::Access {
+        ast::Term::Access(ast::Access {
             source: Some(ast::AccessSource::Identifier(name)),
             accessors: vec![],
             accessor_spans: vec![],
@@ -770,7 +784,7 @@ fn walk_term_spans(term: &mut ast::Term, f: &mut impl FnMut(&mut ast::Spanned)) 
                 walk_block_spans(body, f);
             }
         }
-        ast::Term::Access(access) | ast::Term::Reference(access) => walk_access_spans(access, f),
+        ast::Term::Access(access) => walk_access_spans(access, f),
         ast::Term::State(access, span) => {
             f(span);
             walk_access_spans(access, f);
@@ -830,7 +844,7 @@ fn walk_access_spans(access: &mut ast::Access, f: &mut impl FnMut(&mut ast::Span
 fn walk_match_spans(pattern: &mut ast::Match, f: &mut impl FnMut(&mut ast::Spanned)) {
     match pattern {
         ast::Match::Identifier(_, span) | ast::Match::As(_, _, span) => f(span),
-        ast::Match::Reference(target) => {
+        ast::Match::Pin(target) => {
             for span in &mut target.accessor_spans {
                 f(span);
             }
@@ -860,5 +874,24 @@ fn walk_match_spans(pattern: &mut ast::Match, f: &mut impl FnMut(&mut ast::Spann
                 walk_match_spans(alternative, f);
             }
         }
+    }
+}
+
+/// Whether a single-term hole can be spliced where it is written rather than bound to a
+/// `~dialect-hole-N` first: evaluating it must have no effect and no result of its own, so
+/// that "once, in content order" is satisfied trivially. A literal and a text-only string
+/// are values; a name is only ever a load, since every call is written (a tail call is the
+/// one access that is a call).
+fn splices_in_place(term: &ast::Term) -> bool {
+    match term {
+        ast::Term::Literal(_) => true,
+        ast::Term::Access(access) => !matches!(
+            access.source,
+            Some(ast::AccessSource::TailCall(_) | ast::AccessSource::TailCallRipple)
+        ),
+        ast::Term::String(_, segments) => segments
+            .iter()
+            .all(|segment| matches!(segment, ast::StrSegment::Text(_))),
+        _ => false,
     }
 }

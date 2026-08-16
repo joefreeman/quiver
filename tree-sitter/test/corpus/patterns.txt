@@ -268,3 +268,19 @@ statement-level ascribed binding
           source: (identifier))
         argument: (access
           source: (identifier))))))
+
+==================
+named star pattern
+==================
+
+Point* = p
+
+---
+
+(source_file
+  (sequence
+    (chain
+      binding: (star
+        name: (tuple_name))
+      (access
+        source: (identifier)))))

@@ -14,7 +14,7 @@
     :doc "Encodes a data value (integers, binaries, tuples — no refs, pids, functions, or resources, which are runtime errors) as Quiver data notation. `decode` reads it back."
     __data_encode__ $ ~> Str[~]
   },
-  decode: &__data_decode__ ~> {
+  decode: __data_decode__ ~> {
     :doc "Decodes Quiver data notation as the explicitly-given expected type — `%data.decode<'event> text` answers `'event | []`, nil for anything malformed, mismatched, or trailing. The expected type must be concrete at the naming site."
   },
 ]

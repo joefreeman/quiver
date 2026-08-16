@@ -12,7 +12,7 @@
 // (`fail_in`), so the deepest failure on the whole path is the one that surfaces. On a
 // tie the fresher, more local message wins.
 //
-// Parsers are values: combinators take them by reference (`&p`) and return new parser
+// Parsers are values: combinators take them by name (`p`) and return new parser
 // closures. `alt2`/`alt3`/`alt4` keep the failure that got furthest through the input.
 //
 // A recursive grammar ties its knot with `rec`: the builder receives the grammar's own
@@ -20,7 +20,7 @@
 //
 //   value = #['%parse.p<'json>, '%parse] {
 //     =[value_p, st]
-//     st (... combinators over &value_p ...)
+//     st (... combinators over value_p ...)
 //   } rec
 
 'perr = Expected[offset: 'int, message: Str['bin]]
@@ -92,7 +92,7 @@ byte = #[(b): 'int, (what): Str['bin]] {
 // numeric value.
 satisfy = #[(pred): 'pred<'int>, (what): Str['bin]] {
   :doc "A parser for one byte satisfying the predicate, yielding the predicate's value for it."
-  pred = &$pred
+  pred = $pred
   what = $what
   #' {
     | peek $ ~> =('int)b; pred b ~> =('int)v => [v, advance [$, 1]]
@@ -104,17 +104,17 @@ satisfy = #[(pred): 'pred<'int>, (what): Str['bin]] {
 ws = #' {
   :doc "Zero or more whitespace bytes (space, tab, newline, carriage return); always succeeds."
   {
-    | peek $ ~> =(32 | 9 | 10 | 13) => advance [$, 1] ~> ^
+    | peek $ ~> =(32 | 9 | 10 | 13) => advance [$, 1] ~> ^ ~
     | [Ok, $]
   }
 }
 
 tw_end = #<'t>[(data): 'bin, (pos): 'int, (len): 'int, (pred): 'pred<'t>] {
-  | __integer_compare__ [$pos, $len] ~> =-1; %bin.get_byte [$data, $pos] ~> $pred => ^ [
+  | __integer_compare__ [$pos, $len] ~> =-1; %bin.get_byte [$data, $pos] ~> $pred ~ => ^ [
     $data,
     __integer_add__ [$pos, 1],
     $len,
-    &$pred,
+    $pred,
   ]
   | $pos
 }
@@ -123,7 +123,7 @@ tw_end = #<'t>[(data): 'bin, (pos): 'int, (len): 'int, (pred): 'pred<'t>] {
 take_while = #<'t>'pred<'t> {
   :doc "A parser for the longest (possibly empty) run of bytes satisfying the predicate, as a slice."
   =pred
-  #' { end = tw_end [$data, $pos, $len, &pred]; [%bin.slice [$data, $pos, end], $[..., pos: end]] }
+  #' { end = tw_end [$data, $pos, $len, pred]; [%bin.slice [$data, $pos, end], $[..., pos: end]] }
 }
 
 digit_val = #'int {
@@ -182,7 +182,7 @@ opt_byte_end = #[(data): 'bin, (pos): 'int, (len): 'int, (b): 'int] {
 ident = #' {
   :doc "An identifier (lowercase start; letters, digits, underscores; optional `?` then `!` suffixes), as a Str."
   | peek $ ~> =('int)b; __integer_compare__ [b, 97] ~> =(0 | 1); __integer_compare__ [b, 122] ~> =(-1 | 0) => {
-    end = tw_end [$data, __integer_add__ [$pos, 1], $len, &ident_char?] ~> opt_byte_end [$data, ~, $len, 63] ~> opt_byte_end [
+    end = tw_end [$data, __integer_add__ [$pos, 1], $len, ident_char?] ~> opt_byte_end [$data, ~, $len, 63] ~> opt_byte_end [
       $data,
       ~,
       $len,
@@ -282,7 +282,7 @@ right = #<'t, 'u>['p<'t>, 'p<'u>] {
 // `p` between `open` and `close`, keeping `p`'s value.
 between = #<'o, 't, 'c>['p<'o>, 'p<'t>, 'p<'c>] {
   :doc "The middle parser between the other two, keeping its value."
-  =[open, p, close]; inner = right [&open, &p]; left [&inner, &close]
+  =[open, p, close]; inner = right [open, p]; left [inner, close]
 }
 
 // The first alternative to succeed; on failure, the error that got furthest.
@@ -310,12 +310,12 @@ alt2 = #<'t>['p<'t>, 'p<'t>] {
 
 alt3 = #<'t>['p<'t>, 'p<'t>, 'p<'t>] {
   :doc "The first of three alternatives to succeed; on failure, the error that got furthest."
-  =[p, q, r]; pq = alt2 [&p, &q]; alt2 [&pq, &r]
+  =[p, q, r]; pq = alt2 [p, q]; alt2 [pq, r]
 }
 
 alt4 = #<'t>['p<'t>, 'p<'t>, 'p<'t>, 'p<'t>] {
   :doc "The first of four alternatives to succeed; on failure, the error that got furthest."
-  =[p, q, r, s]; pq = alt2 [&p, &q]; rs = alt2 [&r, &s]; alt2 [&pq, &rs]
+  =[p, q, r, s]; pq = alt2 [p, q]; rs = alt2 [r, s]; alt2 [pq, rs]
 }
 
 many_run = #<'t>[(p): 'p<'t>, (st): ', (acc): 'items<'t>] {
@@ -324,7 +324,7 @@ many_run = #<'t>[(p): 'p<'t>, (st): ', (acc): 'items<'t>] {
     | r ~> =[v, st2] => {
       // Stop when the parser succeeds without consuming, or repetition would never end.
       // The zero-width value is discarded: it matched nothing.
-      | __integer_compare__ [st2.pos, $st.pos] ~> =1 => ^ [&$p, st2, Cons[v, $acc]]
+      | __integer_compare__ [st2.pos, $st.pos] ~> =1 => ^ [$p, st2, Cons[v, $acc]]
       | [rev [$acc, Nil], st2]
     }
     | [rev [$acc, Nil], $st[..., err: further [r:('perr)error, $st.err]]]
@@ -334,7 +334,7 @@ many_run = #<'t>[(p): 'p<'t>, (st): ', (acc): 'items<'t>] {
 // Zero or more of `p`, as a list of values.
 many0 = #<'t>'p<'t> {
   :doc "Zero or more of a parser, as a list of its values."
-  =p; #' { many_run [&p, $, Nil] }
+  =p; #' { many_run [p, $, Nil] }
 }
 
 sep_run = #<'t, 's>[(p): 'p<'t>, (sep): 'p<'s>, (st): ', (acc): 'items<'t>] {
@@ -346,7 +346,7 @@ sep_run = #<'t, 's>[(p): 'p<'t>, (sep): 'p<'s>, (st): ', (acc): 'items<'t>] {
         // Recurse only on progress: a separator and element that both matched empty
         // would repeat forever. The zero-width element is discarded: it matched nothing.
         | r2 ~> =[v, st2] => {
-          | __integer_compare__ [st2.pos, $st.pos] ~> =1 => ^ [&$p, &$sep, st2, Cons[v, $acc]]
+          | __integer_compare__ [st2.pos, $st.pos] ~> =1 => ^ [$p, $sep, st2, Cons[v, $acc]]
           | [rev [$acc, Nil], st2]
         }
         // Backtracking over the separator: stash the element's failure — it's the
@@ -367,7 +367,7 @@ sep_by = #<'t, 's>['p<'t>, 'p<'s>] {
   #' {
     r = p $
     {
-      | r ~> =[v, st1] => sep_run [&p, &sep, st1, Cons[v, Nil]]
+      | r ~> =[v, st1] => sep_run [p, sep, st1, Cons[v, Nil]]
       | [Nil, $[..., err: further [r:('perr)error, $err]]]
     }
   }
@@ -390,7 +390,7 @@ opt = #<'t>'p<'t> {
 // a list of `p`'s values. `sep_by` leaves a trailing separator unconsumed; this consumes it.
 sep_end_by = #<'t, 's>['p<'t>, 'p<'s>] {
   :doc "Zero or more of a parser separated by another, tolerating an optional trailing separator, as a list of values."
-  =[p, sep]; body = sep_by [&p, &sep]; left [&body, opt &sep]
+  =[p, sep]; body = sep_by [p, sep]; left [body, opt sep]
 }
 
 // Replace `p`'s failure with `message` at the position where `p` started.
@@ -398,7 +398,7 @@ label = #<'t>[(p): 'p<'t>, (message): Str['bin]] {
   :doc "Replaces the parser's failure with a message at the position where it started."
   // The returned parser closes over the fields (an inner `$` is its own parameter), so
   // bind them locally — the parser by reference.
-  p = &$p
+  p = $p
   message = $message
   #' {
     r = p $
@@ -417,7 +417,7 @@ chain_run = #<'t>[(p): 'p<'t>, (op): 'p<#['t, 't] -> 't>, (st): ', (lhs): 't] {
       {
         // Recurse only on progress: an operator and operand that both matched empty
         // would repeat forever.
-        | __integer_compare__ [st2.pos, $st.pos] ~> =1 => ^ [&$p, &$op, st2, f [$lhs, rhs]]
+        | __integer_compare__ [st2.pos, $st.pos] ~> =1 => ^ [$p, $op, st2, f [$lhs, rhs]]
         | [$lhs, $st]
       }
     }
@@ -429,21 +429,21 @@ chain_run = #<'t>[(p): 'p<'t>, (op): 'p<#['t, 't] -> 't>, (st): ', (lhs): 't] {
 // combining function for each pair — the classic precedence-level combinator.
 chainl = #<'t>['p<'t>, 'p<#['t, 't] -> 't>] {
   :doc "One or more of a parser separated by an operator parser yielding combining functions, folded left-associatively."
-  =[p, op]; #' { p $ ~> =[v, st]; chain_run [&p, &op, st, v] }
+  =[p, op]; #' { p $ ~> =[v, st]; chain_run [p, op, st, v] }
 }
 
 rec_run = #<'t>[#^ -> (['t, '] | []), 'builder<'t>, '] {
-  =[self, builder, st]; me = #' { self [&self, &builder, $] }; builder [&me, st]
+  =[self, builder, st]; me = #' { self [self, builder, $] }; builder [me, st]
 }
 
 // Tie a recursive grammar's knot: `rec` turns a builder into the parser it describes.
 rec = #<'t>'builder<'t> {
   :doc "Ties a recursive grammar's knot: turns a builder (which receives the grammar's own parser and the state) into the parser it describes."
-  =builder; #' { rec_run [&rec_run, &builder, $] }
+  =builder; #' { rec_run [rec_run, builder, $] }
 }
 
 // Apply a parser to a whole string: the value, or nil with a positioned `:error` — the
-// dialect contract, so a `:dialect` function can be `#Str['bin] { [~, &grammar] %parse.run }`.
+// dialect contract, so a `:dialect` function can be `#Str['bin] { %parse.run [~, grammar] }`.
 run = #<'t>[(s): Str['bin], (p): 'p<'t>] {
   :doc "Applies a parser to a whole string: the value, or nil with a positioned `:error` payload — the dialect failure contract."
   $s ~> =Str[data]

@@ -12,13 +12,13 @@ fn forwarders() -> HashMap<Vec<String>, String> {
     HashMap::from([(
         vec!["m".to_string()],
         r#"[
-  add1: #[(n): 'int] { [$n, 1] ~> __integer_add__ },
+  add1: #[(n): 'int] { [$n, 1] ~> __integer_add__ ~ },
   byte: #[(bin): 'bin, (index): 'int] { __binary_get__ [$bin, $index, 0, 8] },
   pair_sum: #['int, 'int] { __integer_add__ $ },
-  wrapped: #[(n): 'int] { [$n, 1] ~> __integer_add__ ~> W[~] },
+  wrapped: #[(n): 'int] { [$n, 1] ~> __integer_add__ ~ ~> W[~] },
   checked: #[(n): 'int] {
-    :pre #{ [$n, 0] ~> __integer_compare__ ~> =1 }
-    [$n, 1] ~> __integer_add__
+    :pre #{ [$n, 0] ~> __integer_compare__ ~ ~> =1 }
+    [$n, 1] ~> __integer_add__ ~
   },
 ]"#
         .to_string(),
@@ -35,7 +35,7 @@ fn test_forwarder_calls_by_every_form() {
         .expect("42");
     quiver()
         .with_modules(forwarders())
-        .evaluate("[0x6162, 1] ~> %m.byte")
+        .evaluate("[0x6162, 1] ~> %m.byte ~")
         .expect("98");
     quiver()
         .with_modules(forwarders())
@@ -61,11 +61,11 @@ fn test_forwarder_reference_is_a_real_function() {
     // `&` opts out of application, so the member must still exist as a callable value.
     quiver()
         .with_modules(forwarders())
-        .evaluate("f = &%m.add1; f [41]")
+        .evaluate("f = %m.add1; f [41]")
         .expect("42");
     quiver()
         .with_modules(forwarders())
-        .evaluate("[a: &%m.add1] ~> .a ~> ~ [n: 41]")
+        .evaluate("[a: %m.add1] ~> .a ~> ~ [n: 41]")
         .expect("42");
 }
 
@@ -92,6 +92,6 @@ fn test_forwarder_argument_evaluation_still_happens() {
     // Argument field expressions run exactly once, in order, elided or not.
     quiver()
         .with_modules(forwarders())
-        .evaluate("x = 40; %m.add1 [[x, 1] ~> __integer_add__]")
+        .evaluate("x = 40; %m.add1 [[x, 1] ~> __integer_add__ ~]")
         .expect("42");
 }

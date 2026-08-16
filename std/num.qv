@@ -136,7 +136,7 @@ radical = #[(b1): 'rational, (n1): 'int, (b2): 'rational, (n2): 'int] {
 // `√1` folds into the rational part, a zero `b` yields a plain rational/integer, and
 // integral coefficients are lowered.
 build = #[(a): 'rational, (b): 'rational, (n): 'int] {
-  | __integer_compare__ [$n, 1] ~> =0 => radd [$a, $b] ~> lower
+  | __integer_compare__ [$n, 1] ~> =0 => radd [$a, $b] ~> lower ~
   | rsign $b ~> =0 => lower $a
   | Surd[lower $a, lower $b, $n]
 }
@@ -250,7 +250,7 @@ to_int = #'opt {
     d = __integer_multiply__ [qa, qb]
 
     s =
-      __integer_multiply__ [__integer_multiply__ [q, q], n] ~> __integer_sqrt__
+      __integer_multiply__ [__integer_multiply__ [q, q], n] ~> __integer_sqrt__ ~
 
     nlo = {
       | __integer_compare__ [q, 0] ~> =1 => __integer_add__ [p, s]
@@ -271,13 +271,13 @@ sign = #'opt {
 min = #['opt, 'opt] {
   :doc "The smaller of two numbers; nil when either operand is nil."
   | =([[], _] | [_, []]) => []
-  | compare ~> =1 => $1
+  | compare ~ ~> =1 => $1
   | $0
 }
 max = #['opt, 'opt] {
   :doc "The larger of two numbers; nil when either operand is nil."
   | =([[], _] | [_, []]) => []
-  | compare ~> =-1 => $1
+  | compare ~ ~> =-1 => $1
   | $0
 }
 
@@ -327,7 +327,7 @@ ceil = #'opt {
 round = #'opt {
   :doc "Rounds to the nearest integer, halves away from zero; nil for a nil operand."
   | =[] => []
-  | floor ~> =('int)f => {
+  | floor ~ ~> =('int)f => {
     mid = f ~> __integer_multiply__ [~, 2] ~> __integer_add__ [~, 1] ~> Rational[~, 2]
     {
       | compare [$, mid] ~> =1 => __integer_add__ [f, 1]
@@ -357,21 +357,21 @@ d_div = #['dexpr, 'dexpr] { %meta.call2 ["div", $0, $1] }
 
 // Operator parsers: leading whitespace, the symbol, yielding the combining function.
 d_add_op = {
-  plus = %parse.map [%parse.byte [43, "'+'"], #{ &d_add }]
+  plus = %parse.map [%parse.byte [43, "'+'"], #{ d_add }]
 
-  minus = %parse.map [%parse.byte [45, "'-'"], #{ &d_sub }]
+  minus = %parse.map [%parse.byte [45, "'-'"], #{ d_sub }]
 
-  ops = %parse.alt2 [&plus, &minus]
-  %parse.right [&%parse.ws, &ops]
+  ops = %parse.alt2 [plus, minus]
+  %parse.right [%parse.ws, ops]
 }
 
 d_mul_op = {
-  times = %parse.map [%parse.byte [42, "'*'"], #{ &d_mul }]
+  times = %parse.map [%parse.byte [42, "'*'"], #{ d_mul }]
 
-  divide = %parse.map [%parse.byte [47, "'/'"], #{ &d_div }]
+  divide = %parse.map [%parse.byte [47, "'/'"], #{ d_div }]
 
-  ops = %parse.alt2 [&times, &divide]
-  %parse.right [&%parse.ws, &ops]
+  ops = %parse.alt2 [times, divide]
+  %parse.right [%parse.ws, ops]
 }
 
 // One host term as an operand: the host prefix-parser answers the exclusive end offset
@@ -392,7 +392,7 @@ d_term = #'%meta.cb {
 
 // The two precedence levels over a factor parser.
 d_expr_of = #'%parse.p<'dexpr> {
-  =factor; term = %parse.chainl [&factor, &d_mul_op]; %parse.chainl [&term, &d_add_op]
+  =factor; term = %parse.chainl [factor, d_mul_op]; %parse.chainl [term, d_add_op]
 }
 
 // The factor grammar, self-passed (together with the host-term operand parser) to tie
@@ -401,34 +401,34 @@ d_expr_of = #'%parse.p<'dexpr> {
 d_factor_step = #[(self): #^ -> (['dexpr, '%parse] | []), (term): '%parse.p<'dexpr>, (st): '%parse] {
   // The nested factor literal closes over `self` and `term` (an inner `$` would be its
   // own parameter), so bind the fields locally — by reference, as callables.
-  self = &$self
-  term = &$term
-  factor = #'%parse { self [&self, &term, $] }
-  expr = d_expr_of &factor
+  self = $self
+  term = $term
+  factor = #'%parse { self [self, term, $] }
+  expr = d_expr_of factor
 
-  n1 = %parse.right [%parse.byte [45, "'-'"], &factor]
+  n1 = %parse.right [%parse.byte [45, "'-'"], factor]
 
-  neg = %parse.map [&n1, #{ Call[member: "neg", arg: $] }]
+  neg = %parse.map [n1, #{ Call[member: "neg", arg: $] }]
 
-  close = %parse.right [&%parse.ws, %parse.byte [41, "')'"]]
+  close = %parse.right [%parse.ws, %parse.byte [41, "')'"]]
 
-  p1 = %parse.right [%parse.byte [40, "'('"], &expr]
+  p1 = %parse.right [%parse.byte [40, "'('"], expr]
 
-  paren = %parse.left [&p1, &close]
+  paren = %parse.left [p1, close]
 
-  core = %parse.alt4 [&paren, &%parse.int, &neg, &term]
+  core = %parse.alt4 [paren, %parse.int, neg, term]
 
-  core_ws = %parse.right [&%parse.ws, &core]
+  core_ws = %parse.right [%parse.ws, core]
   core_ws $st
 }
 
 num_dialect = #(content: Str['bin], term: '%meta.cb) {
   $ ~> =(content, term: cb)
-  host_term = d_term &cb
-  factor = #'%parse { d_factor_step [&d_factor_step, &host_term, $] }
-  expr = d_expr_of &factor
-  full = %parse.left [&expr, &%parse.ws]
-  %parse.run [content, &full]
+  host_term = d_term cb
+  factor = #'%parse { d_factor_step [d_factor_step, host_term, $] }
+  expr = d_expr_of factor
+  full = %parse.left [expr, %parse.ws]
+  %parse.run [content, full]
 }
 
 [
@@ -515,7 +515,7 @@ num_dialect = #(content: Str['bin], term: '%meta.cb) {
   // Negation preserves kind: integer stays integer, rational stays rational, surd stays surd.
   neg: #'opt {
     :doc "Negates a number, preserving its kind; nil for a nil operand."
-    | =Surd[a, b, n] => build [to_rational a ~> rneg, to_rational b ~> rneg, n]
+    | =Surd[a, b, n] => build [to_rational a ~> rneg ~, to_rational b ~> rneg ~, n]
     | =Rational[m, d] => reduce Rational[__integer_multiply__ [m, -1], d]
     | ='int => __integer_multiply__ [$, -1]
   },
@@ -524,7 +524,13 @@ num_dialect = #(content: Str['bin], term: '%meta.cb) {
   abs: #'opt {
     :doc "The absolute value of a number, preserving its kind; nil for a nil operand."
     // The result is never negative (nil passes through).
-    :post #{ $ ~> =(out: o); o ~> { =[] => Ok | sign ~> { =-1 => [] | Ok } } }
+    :post #{
+      $ ~> =(out: o)
+      o ~> {
+        | =[] => Ok
+        | sign ~ ~> { =-1 => [] | Ok }
+      }
+    }
     | =Surd[a, b, n] => {
       ar = to_rational a
       br = to_rational b
@@ -539,35 +545,35 @@ num_dialect = #(content: Str['bin], term: '%meta.cb) {
 
   // Truncate toward zero / round toward ∓∞ / round to nearest, each to a bare integer. See the
   // top-level bindings of the same names.
-  to_int: &to_int,
-  floor: &floor,
-  ceil: &ceil,
-  round: &round,
+  to_int: to_int,
+  floor: floor,
+  ceil: ceil,
+  round: round,
 
   // Sign (-1/0/1), and the smaller/larger/clamped of numbers.
-  sign: &sign,
-  min: &min,
-  max: &max,
-  clamp: &clamp,
+  sign: sign,
+  min: min,
+  max: max,
+  clamp: clamp,
 
   eq?: #['opt, 'opt] {
     :doc "Whether two numbers are equal."
-    compare ~> =0; Ok
+    compare ~ ~> =0; Ok
   },
   lt?: #['opt, 'opt] {
     :doc "Whether the first number is less than the second."
-    compare ~> =-1; Ok
+    compare ~ ~> =-1; Ok
   },
   le?: #['opt, 'opt] {
     :doc "Whether the first number is at most the second."
-    compare ~> { =-1 | =0 }; Ok
+    compare ~ ~> { =-1 | =0 }; Ok
   },
   gt?: #['opt, 'opt] {
     :doc "Whether the first number is greater than the second."
-    compare ~> =1; Ok
+    compare ~ ~> =1; Ok
   },
   ge?: #['opt, 'opt] {
     :doc "Whether the first number is at least the second."
-    compare ~> { =0 | =1 }; Ok
+    compare ~ ~> { =0 | =1 }; Ok
   },
-] ~> { :dialect &num_dialect }
+] ~> { :dialect num_dialect }

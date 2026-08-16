@@ -176,8 +176,7 @@ fn term_assertions(term: &Term) -> usize {
         | Term::Access(_)
         | Term::Self_
         | Term::State(..)
-        | Term::Process(_)
-        | Term::Reference(_) => 0,
+        | Term::Process(_) => 0,
     }
 }
 

@@ -31,13 +31,13 @@ fn test_function_with_type_pattern() {
               | Rectangle[w: 'int, h: 'int];
 
             area = #'shape {
-              | =Circle[r: r] => [r, r] ~> __integer_multiply__
-              | =Rectangle[w: w, h: h] => [w, h] ~> __integer_multiply__
+              | =Circle[r: r] => [r, r] ~> __integer_multiply__ ~
+              | =Rectangle[w: w, h: h] => [w, h] ~> __integer_multiply__ ~
             };
 
-            a1 = Circle[r: 5] ~> area;
-            a2 = Rectangle[w: 4, h: 3] ~> area;
-            [a1, a2] ~> __integer_add__
+            a1 = Circle[r: 5] ~> area ~;
+            a2 = Rectangle[w: 4, h: 3] ~> area ~;
+            [a1, a2] ~> __integer_add__ ~
             "#,
         )
         .expect("37")
@@ -57,7 +57,7 @@ fn test_exhaustive_union_matching() {
               | =A['int] => 10
               | =B['int] => 20
             };
-            A[5] ~> f
+            A[5] ~> f ~
             "#,
         )
         .expect("10")
@@ -74,7 +74,7 @@ fn test_non_exhaustive_union_matching() {
               | =A['int] => 10
               | =B['int] => 20
             };
-            C[99] ~> f
+            C[99] ~> f ~
             "#,
         )
         .expect("[]")
@@ -91,7 +91,7 @@ fn test_value_guard_with_full_coverage() {
               | =A[10] => 100
               | =A['int] => 999
             };
-            A[10] ~> f
+            A[10] ~> f ~
             "#,
         )
         .expect("100")
@@ -105,7 +105,7 @@ fn test_recursive_list_type() {
             r#"
             'list = Nil | Cons['int, ^];
             xs = Cons[1, Cons[2, Cons[3, Nil]]];
-            [xs.1.0, xs.1.1.0] ~> __integer_add__
+            [xs.1.0, xs.1.1.0] ~> __integer_add__ ~
             "#,
         )
         .expect("5")
@@ -122,7 +122,7 @@ fn test_cycle_ref_with_pattern_matching() {
               | =Cons[h, _] => h
               | =Nil => 0
             };
-            Cons[1, Cons[2, Cons[3, Nil]]] ~> get_head
+            Cons[1, Cons[2, Cons[3, Nil]]] ~> get_head ~
             "#,
         )
         .expect("1")
@@ -136,7 +136,7 @@ fn test_cycle_ref_nested_depth() {
             r#"
             'json = True | False | Array[(Nil | Cons[^0, ^1])];
             f = #'json { =Array[Cons[a, Cons[b, Nil]]] => [a, b] };
-            Array[Cons[False, Cons[True, Nil]]] ~> f
+            Array[Cons[False, Cons[True, Nil]]] ~> f ~
             "#,
         )
         .expect("[False, True]");
@@ -153,17 +153,17 @@ fn test_cycle_ref_across_members_of_differing_depth() {
                 f = #'json { Ok };\n";
     quiver()
         .evaluate(&format!(
-            "{json}Object[Cons[[\"a\", Array[Cons[1, Nil]]], Nil]] ~> f"
+            "{json}Object[Cons[[\"a\", Array[Cons[1, Nil]]], Nil]] ~> f ~"
         ))
         .expect("Ok");
     quiver()
         .evaluate(&format!(
-            "{json}Array[Cons[Object[Cons[[\"a\", 1], Nil]], Nil]] ~> f"
+            "{json}Array[Cons[Object[Cons[[\"a\", 1], Nil]], Nil]] ~> f ~"
         ))
         .expect("Ok");
     quiver()
         .evaluate(&format!(
-            "{json}Object[Cons[[\"a\", Array[Cons[1, Cons[2, Nil]]]], Nil]] ~> f"
+            "{json}Object[Cons[[\"a\", Array[Cons[1, Cons[2, Nil]]]], Nil]] ~> f ~"
         ))
         .expect("Ok");
 }
@@ -234,7 +234,7 @@ fn test_nested_union_pattern_matching_in_function() {
               | 999
             };
 
-            Cons[10, Cons[20, Cons[30, Nil]]] ~> get_second
+            Cons[10, Cons[20, Cons[30, Nil]]] ~> get_second ~
             "#,
         )
         .expect("20");
@@ -249,7 +249,7 @@ fn test_nested_union_pattern_matching_in_function() {
               | [0, 0]
             };
 
-            Cons[10, Cons[20, Cons[30, Nil]]] ~> get_first_two
+            Cons[10, Cons[20, Cons[30, Nil]]] ~> get_first_two ~
             "#,
         )
         .expect("[10, 20]");
@@ -264,7 +264,7 @@ fn test_nested_union_pattern_matching_in_function() {
               | 999
             };
 
-            Cons[10, Cons[20, Cons[30, Cons[40, Nil]]]] ~> get_third
+            Cons[10, Cons[20, Cons[30, Cons[40, Nil]]]] ~> get_third ~
             "#,
         )
         .expect("30");
@@ -290,9 +290,9 @@ fn test_multiple_runtime_type_checks_with_nested_patterns() {
             t2 = Node[Leaf[15], Leaf[25]];
             t3 = Leaf[3];
 
-            r1 = t1 ~> extract_left_leaf;
-            r2 = t2 ~> extract_left_leaf;
-            r3 = t3 ~> extract_left_leaf;
+            r1 = t1 ~> extract_left_leaf ~;
+            r2 = t2 ~> extract_left_leaf ~;
+            r3 = t3 ~> extract_left_leaf ~;
 
             [r1, r2, r3]
             "#,
@@ -310,7 +310,7 @@ fn test_recursive_type_as_function_parameter() {
               | =Cons[h, _] => h
               | =Nil => 0
             };
-            Cons[1, Cons[2, Cons[3, Nil]]] ~> get_head
+            Cons[1, Cons[2, Cons[3, Nil]]] ~> get_head ~
             "#,
         )
         .expect("1");
@@ -352,7 +352,7 @@ fn test_recursive_type_with_cycle() {
             r#"
             'list = Nil | Cons['int, ^];
             prepend = #'list { =x => Cons[10, x] };
-            Cons[20, Cons[30, Nil]] ~> prepend ~> .0
+            Cons[20, Cons[30, Nil]] ~> prepend ~ ~> .0
             "#,
         )
         .expect("10");
@@ -375,17 +375,17 @@ fn test_recursive_type_pattern_matching_bug() {
             // (which has no fields) when matching the pattern [Full[rest], n]
             match_recursive = #['t, 'int] {
               | =[Empty, n] => n
-              | =[Full[rest], n] => [n, 100] ~> __integer_add__
+              | =[Full[rest], n] => [n, 100] ~> __integer_add__ ~
             };
 
             // Test with Empty - should return n
-            r1 = [Empty, 42] ~> match_recursive;
+            r1 = [Empty, 42] ~> match_recursive ~;
 
             // Test with Full[Empty] - should return n + 100
-            r2 = [Full[Empty], 42] ~> match_recursive;
+            r2 = [Full[Empty], 42] ~> match_recursive ~;
 
             // Test with Full[Full[Empty]] - should return n + 100
-            r3 = [Full[Full[Empty]], 42] ~> match_recursive;
+            r3 = [Full[Full[Empty]], 42] ~> match_recursive ~;
 
             [r1, r2, r3]
             "#,
@@ -400,12 +400,12 @@ fn test_recursive_type_pattern_matching_bug() {
 
             // Function that matches on first element of tuple
             match_first = #['tree, 'int] {
-              | =[Leaf[x], n] => [x, n] ~> __integer_add__
+              | =[Leaf[x], n] => [x, n] ~> __integer_add__ ~
               | =[Node[l, r], n] => n
             };
 
-            t1 = [Leaf[42], 10] ~> match_first;
-            t2 = [Node[Leaf[1], Leaf[2]], 20] ~> match_first;
+            t1 = [Leaf[42], 10] ~> match_first ~;
+            t2 = [Node[Leaf[1], Leaf[2]], 20] ~> match_first ~;
 
             [t1, t2]
             "#,
@@ -421,13 +421,13 @@ fn test_recursive_type_pattern_matching_bug() {
             // Pattern matching that would trigger the bug
             process_list = #['list, 'int] {
               | =[Nil, x] => x
-              | =[Cons[head, tail], x] => [head, x] ~> __integer_add__
+              | =[Cons[head, tail], x] => [head, x] ~> __integer_add__ ~
             };
 
             // These should all work without FieldAccessInvalid errors
-            r1 = [Nil, 10] ~> process_list;
-            r2 = [Cons[5, Nil], 10] ~> process_list;
-            r3 = [Cons[5, Cons[3, Nil]], 10] ~> process_list;
+            r1 = [Nil, 10] ~> process_list ~;
+            r2 = [Cons[5, Nil], 10] ~> process_list ~;
+            r3 = [Cons[5, Cons[3, Nil]], 10] ~> process_list ~;
 
             [r1, r2, r3]
             "#,
@@ -445,7 +445,7 @@ fn test_union_pattern() {
               | =[Empty, _] => 100
               | =[Full[rest], n] => 200
             };
-            [Empty, 1] ~> f
+            [Empty, 1] ~> f ~
             "#,
         )
         .expect("100");
@@ -458,7 +458,7 @@ fn test_union_pattern() {
               | =[Empty, _] => 100
               | =[Full[rest], n] => 200
             };
-            [Full[Empty], 1] ~> f
+            [Full[Empty], 1] ~> f ~
             "#,
         )
         .expect("200");
@@ -472,9 +472,9 @@ fn test_recursive_union_pattern() {
             't = Empty | Full[^];
             f = #['t, 'int] {
               | =[Empty, _] => 100
-              | =[Full[rest], n] => [rest, 0] ~> ^
+              | =[Full[rest], n] => [rest, 0] ~> ^ ~
             };
-            [Full[Empty], 1] ~> f
+            [Full[Empty], 1] ~> f ~
             "#,
         )
         .expect("100");
@@ -486,10 +486,10 @@ fn test_unnamed_partial_type() {
         .evaluate(
             r#"
             f = #(x: 'int, y: 'int) { =(x, y) => [x, y] };
-            a = [x: 1, y: 2] ~> f;
-            b = [x: 3, y: 4, z: 5] ~> f;
-            c = Point[x: 6, y: 7] ~> f;
-            d = Point[x: 8, y: 9, z: 10] ~> f;
+            a = [x: 1, y: 2] ~> f ~;
+            b = [x: 3, y: 4, z: 5] ~> f ~;
+            c = Point[x: 6, y: 7] ~> f ~;
+            d = Point[x: 8, y: 9, z: 10] ~> f ~;
             [a, b, c, d]
             "#,
         )
@@ -500,7 +500,7 @@ fn test_unnamed_partial_type() {
         .evaluate(
             r#"
             f = #(x: 'int, y: 'int) { =(x, y) => [x, y] };
-            [x: 1, z: 3] ~> f
+            [x: 1, z: 3] ~> f ~
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
@@ -512,19 +512,19 @@ fn test_unnamed_partial_type() {
 #[test]
 fn test_named_partial_type() {
     quiver()
-        .evaluate("f = #Point(x: 'int) { .x }; Point[x: 1] ~> f")
+        .evaluate("f = #Point(x: 'int) { .x }; Point[x: 1] ~> f ~")
         .expect("1")
         .expect_variable("f", "#Point(x: 'int) -> 'int");
 
     quiver()
-        .evaluate("f = #Point(x: 'int) { .x }; [x: 1] ~> f")
+        .evaluate("f = #Point(x: 'int) { .x }; [x: 1] ~> f ~")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "function parameter compatible with Point(x: 'int)".to_string(),
             found: "[x: 'int]".to_string(),
         });
 
     quiver()
-        .evaluate("f = #Point(x: 'int) { .x }; Other[x: 1] ~> f")
+        .evaluate("f = #Point(x: 'int) { .x }; Other[x: 1] ~> f ~")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "function parameter compatible with Point(x: 'int)".to_string(),
             found: "Other[x: 'int]".to_string(),
@@ -537,10 +537,10 @@ fn test_empty_partial_type() {
         .evaluate(
             r#"
             f = #() { $ };
-            a = [1, 2, 3] ~> f;
-            b = [x: 4, y: 5] ~> f;
-            c = Point[x: 6, y: 7] ~> f;
-            d = Point ~> f;
+            a = [1, 2, 3] ~> f ~;
+            b = [x: 4, y: 5] ~> f ~;
+            c = Point[x: 6, y: 7] ~> f ~;
+            d = Point ~> f ~;
             [a, b, c, d]
             "#,
         )
@@ -555,7 +555,7 @@ fn test_nested_partial_type() {
             r#"
             'container = (value: (x: 'int, y: 'int));
             f = #'container { =c => [c.value.x, c.value.y] };
-            [value: [x: 1, y: 2, z: 3], extra: 42] ~> f
+            [value: [x: 1, y: 2, z: 3], extra: 42] ~> f ~
             "#,
         )
         .expect("[1, 2]")
@@ -568,8 +568,8 @@ fn test_union_partial_type() {
         .evaluate(
             r#"
             f = #(A(x: 'int) | B(x: 'int)) { .x };
-            a = A[x: 10, y: 20] ~> f;
-            b = B[x: 42, z: 99] ~> f;
+            a = A[x: 10, y: 20] ~> f ~;
+            b = B[x: 42, z: 99] ~> f ~;
             [a, b]
             "#,
         )
@@ -579,7 +579,7 @@ fn test_union_partial_type() {
         .evaluate(
             r#"
             f = #(A(x: 'int) | B(x: 'int)) { .x };
-            C[x: 10] ~> f
+            C[x: 10] ~> f ~
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
@@ -591,7 +591,7 @@ fn test_union_partial_type() {
         .evaluate(
             r#"
             f = #(A(x: 'int) | B(x: 'int)) { .x };
-            B[y: 10] ~> f
+            B[y: 10] ~> f ~
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
@@ -1293,9 +1293,9 @@ fn test_generic_type_parameters_do_not_collide_across_definitions() {
     quiver()
         .evaluate(
             r#"
-            apply = #<'t, 'u>['t, #'t -> 'u] { =[v, f]; v ~> f }
+            apply = #<'t, 'u>['t, #'t -> 'u] { =[v, f]; v ~> f ~ }
             pick = #<'t, 'u>['t, 'u] { =[a, b]; apply [[a, b], #{ $0 }] }
-            [1, "x"] ~> pick
+            [1, "x"] ~> pick ~
             "#,
         )
         .expect("1");
@@ -1310,10 +1310,10 @@ fn test_enclosing_generic_variable_in_callee_argument() {
             r#"
             f = #<'t>[#^ -> ('t | []), 't] {
               =[self, n]
-              me = #'int { [&self, $] ~> self }
+              me = #'int { [self, $] ~> self ~ }
               n
             }
-            [&f, 3] ~> f
+            [f, 3] ~> f ~
             "#,
         )
         .expect("3");
@@ -1344,11 +1344,11 @@ fn test_union_folds_members_differing_only_by_annotation_row() {
     quiver()
         .evaluate(
             r#"
-            comma = [44, "','"] ~> %parse.byte
-            elems = [&%parse.int, &comma] ~> %parse.sep_by
-            a1 = [[91, "'['"] ~> %parse.byte, &elems] ~> %parse.right
-            a3 = [&a1, [93, "']'"] ~> %parse.byte] ~> %parse.left
-            %parse.map [&a3, #{ $ }]
+            comma = [44, "','"] ~> %parse.byte ~
+            elems = [%parse.int, comma] ~> %parse.sep_by ~
+            a1 = [[91, "'['"] ~> %parse.byte ~, elems] ~> %parse.right ~
+            a3 = [a1, [93, "']'"] ~> %parse.byte ~] ~> %parse.left ~
+            %parse.map [a3, #{ $ }]
             "#,
         )
         .expect_type(
@@ -1366,7 +1366,7 @@ fn test_type_alias_then_same_named_binding() {
             'room = Str['bin]
             room = #'int { $ }
             f = #'room { Ok }
-            ["hi" ~> f, 7 ~> room]
+            ["hi" ~> f ~, 7 ~> room ~]
             "#,
         )
         .expect("[Ok, 7]");
@@ -1382,7 +1382,7 @@ fn test_binding_then_same_named_type_alias() {
             room = 42
             'room = Str['bin]
             f = #'room { Ok }
-            ["hi" ~> f, room]
+            ["hi" ~> f ~, room]
             "#,
         )
         .expect("[Ok, 42]");
@@ -1399,9 +1399,9 @@ fn test_same_named_alias_and_binding_in_function_body() {
             main = #{
               room = #'int { $ }
               g = #'room { Ok }
-              ["hi" ~> g, 7 ~> room]
+              ["hi" ~> g ~, 7 ~> room ~]
             }
-            main
+            main []
             "#,
         )
         .expect("[Ok, 7]");
@@ -1418,14 +1418,14 @@ fn test_module_alias_and_binding_share_name() {
         'frame = Frame['int]
         frame = #'int { Frame[$] }
         unwrap = #'frame { =Frame[n] => n }
-        [frame: &frame, unwrap: &unwrap]
+        [frame: frame, unwrap: unwrap]
         "#
         .to_string(),
     );
 
     quiver()
         .with_modules(modules)
-        .evaluate("5 ~> %frames.frame ~> %frames.unwrap")
+        .evaluate("5 ~> %frames.frame ~ ~> %frames.unwrap ~")
         .expect("5");
 }
 
@@ -1437,7 +1437,7 @@ fn test_alias_and_binding_share_name_across_repl_lines() {
         .evaluate("'room = Str['bin]")
         .then_evaluate("room = 42")
         .then_evaluate("f = #'room { Ok }")
-        .then_evaluate(r#"["hi" ~> f, room]"#)
+        .then_evaluate(r#"["hi" ~> f ~, room]"#)
         .expect("[Ok, 42]");
 }
 
@@ -1453,7 +1453,7 @@ fn test_recursive_argument_to_module_alias() {
             r#"
             'tree = Leaf['int] | Node['%list<^>]
             f = #'tree { =Node[kids] => %list.count kids }
-            Node[Cons[Leaf[1], Cons[Leaf[2], Nil]]] ~> f
+            Node[Cons[Leaf[1], Cons[Leaf[2], Nil]]] ~> f ~
             "#,
         )
         .expect("2");
@@ -1467,7 +1467,7 @@ fn test_recursive_argument_to_local_alias() {
             'mylist<'t> = Nil | Cons['t, ^]
             'tree = Leaf['int] | Node['mylist<^>]
             f = #'tree { =Node[kids] => %list.count kids }
-            Node[Cons[Leaf[1], Cons[Leaf[2], Nil]]] ~> f
+            Node[Cons[Leaf[1], Cons[Leaf[2], Nil]]] ~> f ~
             "#,
         )
         .expect("2");
@@ -1483,9 +1483,9 @@ fn test_recursive_argument_deep_fold() {
             'tree = Leaf['int] | Node['%list<^>]
             sum = #[#^ -> 'int, 'tree, 'int] {
               | =[_, Leaf[n], acc] => __integer_add__ [n, acc]
-              | =[self, Node[kids], acc] => %list.fold [kids, acc, #{ self [&self, $1, $0] }]
+              | =[self, Node[kids], acc] => %list.fold [kids, acc, #{ self [self, $1, $0] }]
             }
-            sum [&sum, Node[Cons[Leaf[1], Cons[Node[Cons[Leaf[2], Cons[Leaf[3], Nil]]], Nil]]], 0]
+            sum [sum, Node[Cons[Leaf[1], Cons[Node[Cons[Leaf[2], Cons[Leaf[3], Nil]]], Nil]]], 0]
             "#,
         )
         .expect("6");
@@ -1531,7 +1531,7 @@ fn test_nested_union_member_cycle_flattening() {
             r#"
             'x = A | (B[^] | C)
             f = #'x { | =B[inner] => inner | =A => A | =C => C }
-            f B[A] ~> %data.encode
+            f B[A] ~> %data.encode ~
             "#,
         )
         .expect("\"A\"");
@@ -1551,7 +1551,7 @@ fn test_type_alias_in_function_body() {
               g = #'p { $x }
               g [x: 5]
             }
-            main
+            main []
             "#,
         )
         .expect("5");
@@ -1569,7 +1569,7 @@ fn test_type_alias_in_block() {
                 g [x: 7]
               }
             }
-            main
+            main []
             "#,
         )
         .expect("7");
@@ -1586,7 +1586,7 @@ fn test_type_alias_scoped_to_its_block() {
               g = #'p { $x }
               g [x: 5]
             }
-            main
+            main []
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeAliasMissing(
@@ -1605,9 +1605,9 @@ fn test_type_alias_shadows_outer() {
             outer = #'p { $ }
             main = #{
               inner = { 'p = 'bin; f = #'p { $ }; f 0x0a }
-              [inner, 3 ~> outer]
+              [inner, 3 ~> outer ~]
             }
-            main
+            main []
             "#,
         )
         .expect("[0x0a, 3]");
@@ -1623,7 +1623,7 @@ fn test_type_alias_is_branch_local() {
             main = #{
               { | [] => { 'p = 'int; 1 } | g = #'p { $ }; g 2 }
             }
-            main
+            main []
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeAliasMissing(
@@ -1661,7 +1661,7 @@ fn test_type_alias_step_is_transparent_to_the_flow() {
               'p = 'int
               __integer_add__ [7, 2]
             }
-            main
+            main []
             "#,
         )
         .expect("9");
@@ -1675,7 +1675,7 @@ fn test_type_alias_step_is_transparent_to_the_flow() {
               'p = 'int
               7
             }
-            main
+            main []
             "#,
         )
         .expect("[]");
@@ -1691,7 +1691,7 @@ fn test_type_alias_step_does_not_stop_nil_short_circuit() {
               'p = 'int
               7
             }
-            main
+            main []
             "#,
         )
         .expect("[]");
@@ -1705,7 +1705,7 @@ fn test_alias_only_block_is_nil() {
         .evaluate(
             r#"
             main = #{ [{ 'p = 'int }, 5] }
-            main
+            main []
             "#,
         )
         .expect("[[], 5]");
@@ -1722,7 +1722,7 @@ fn test_type_alias_forward_reference_in_block_fails() {
               'p = 'int
               g 2
             }
-            main
+            main []
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeAliasMissing(
@@ -1743,14 +1743,14 @@ fn test_nested_type_alias_is_module_private() {
           Secret[$] ~> =('private)s
           s
         }
-        [make: &make]
+        [make: make]
         "#
         .to_string(),
     );
 
     quiver()
         .with_modules(modules)
-        .evaluate("f = #'%helper.private { Ok }; 1 ~> %helper.make ~> f")
+        .evaluate("f = #'%helper.private { Ok }; 1 ~> %helper.make ~ ~> f ~")
         .expect_error_containing("private");
 }
 
@@ -1762,10 +1762,10 @@ fn test_nested_type_alias_may_name_a_module_type() {
             r#"
             main = #{
               'ints = '%list<'int>
-              %list.new ~> %list.prepend [~, 4] ~> =('ints)xs
+              %list.new [] ~> %list.prepend [~, 4] ~> =('ints)xs
               xs
             }
-            main
+            main []
             "#,
         )
         .expect("Cons[4, Nil]");
@@ -1812,7 +1812,7 @@ fn test_process_type_clause_stops_at_a_newline() {
     // A clause sigil needs horizontal whitespace, so the `!'int` on its own line is a
     // receive step, not an await clause reaching across the step boundary.
     quiver()
-        .evaluate("f = #{\n  'p = @'int\n  !'int\n}\nq = @f\n7 ~> q\n!q")
+        .evaluate("f = #{\n  'p = @'int\n  !'int\n}\nq = @f []\n7 ~> q ~\n!q")
         .expect("7");
 }
 

@@ -4,7 +4,7 @@ use common::*;
 #[test]
 fn test_operation_chaining() {
     quiver()
-        .evaluate("[1, 2] ~> __integer_add__ ~> [~, 2] ~> __integer_multiply__")
+        .evaluate("[1, 2] ~> __integer_add__ ~ ~> [~, 2] ~> __integer_multiply__ ~")
         .expect("6");
 }
 
@@ -53,7 +53,7 @@ fn test_chain_term_must_use_the_flowing_value() {
         "1 ~> [2, 3 ~> ~]", // no field reads the 1
         "5 ~> 99",
         "5 ~> \"abc\"",
-        "5 ~> &__integer_add__",
+        "5 ~> __integer_add__",
         "5 ~> #'int { $ }",
         "5 ~> __integer_add__ [1, 2]", // the argument ignores it, so the call does
     ];
@@ -63,7 +63,7 @@ fn test_chain_term_must_use_the_flowing_value() {
             .expect_compile_error(quiver_compiler::compiler::Error::DiscardedChainValue);
     }
     // Only the head is exempt: that is where a chain chooses what it starts from.
-    quiver().evaluate("f = #'int { 99 }; 5 ~> f").expect("99");
+    quiver().evaluate("f = #'int { 99 }; 5 ~> f ~").expect("99");
     quiver().evaluate("[2, 3 ~> ~]").expect("[2, 3]");
     // A block takes the value and may ignore it, which is how a step runs for its effect
     // and continues whatever its result — `;` would gate on the nil instead.
@@ -75,9 +75,13 @@ fn test_sequence_step_starts_from_the_block_value() {
     // Every step starts from the block value — the enclosing block's parameter, or the value
     // piped into it — not from the previous step's result. So `~` in the second step is the
     // argument `9`, and the first step's `5` is discarded.
-    quiver().evaluate("f = #'int { 5; ~ }; 9 ~> f").expect("9");
+    quiver()
+        .evaluate("f = #'int { 5; ~ }; 9 ~> f ~")
+        .expect("9");
     // Which makes `~` at the start of a step mean what `$` means in a function body.
-    quiver().evaluate("f = #'int { 5; $ }; 9 ~> f").expect("9");
+    quiver()
+        .evaluate("f = #'int { 5; $ }; 9 ~> f ~")
+        .expect("9");
 }
 
 #[test]
@@ -86,13 +90,13 @@ fn test_each_step_restarts_from_the_block_value() {
     // the sequence's result and the earlier steps are dead.
     quiver()
         .evaluate(
-            "f = #'int { 1; [~, 10] ~> __integer_add__; [~, 100] ~> __integer_add__ }; 0 ~> f",
+            "f = #'int { 1; [~, 10] ~> __integer_add__ ~; [~, 100] ~> __integer_add__ ~ }; 0 ~> f ~",
         )
         .expect("100");
     // To carry a value across a step boundary, name it.
     quiver()
         .evaluate(
-            "f = #'int { a = [~, 10] ~> __integer_add__; [a, 100] ~> __integer_add__ }; 0 ~> f",
+            "f = #'int { a = [~, 10] ~> __integer_add__ ~; [a, 100] ~> __integer_add__ ~ }; 0 ~> f ~",
         )
         .expect("110");
 }
@@ -100,7 +104,9 @@ fn test_each_step_restarts_from_the_block_value() {
 #[test]
 fn test_dollar_is_always_the_parameter_across_steps() {
     // `$` always refers to the function parameter, regardless of threading; `~` would be `5`.
-    quiver().evaluate("f = #'int { 5; $ }; 9 ~> f").expect("9");
+    quiver()
+        .evaluate("f = #'int { 5; $ }; 9 ~> f ~")
+        .expect("9");
 }
 
 #[test]
@@ -114,7 +120,7 @@ fn test_sequence_short_circuits_on_nil() {
 fn test_sequence_binding_persists_across_steps() {
     // Bindings persist across steps; naming a binding ignores the threaded value.
     quiver()
-        .evaluate("f = #'int { x = 5; [x, $] }; 9 ~> f")
+        .evaluate("f = #'int { x = 5; [x, $] }; 9 ~> f ~")
         .expect("[5, 9]");
 }
 
@@ -131,7 +137,7 @@ fn test_newline_is_a_sequence_separator() {
     // A newline is a sequence separator, synonymous with semicolon — including that each step
     // restarts from the block value.
     quiver()
-        .evaluate("f = #'int {\n  1\n  [~, 10] ~> __integer_add__\n  [~, 100] ~> __integer_add__\n}\n0 ~> f")
+        .evaluate("f = #'int {\n  1\n  [~, 10] ~> __integer_add__ ~\n  [~, 100] ~> __integer_add__ ~\n}\n0 ~> f ~")
         .expect("100");
 }
 
@@ -140,14 +146,14 @@ fn test_newline_separated_top_level_threads() {
     // Top-level items separated by newlines form one threaded sequence; the final value is the
     // result. Bindings persist across the newlines.
     quiver()
-        .evaluate("x = 5\ny = 10\n[x, y] ~> __integer_add__")
+        .evaluate("x = 5\ny = 10\n[x, y] ~> __integer_add__ ~")
         .expect("15");
 }
 
 #[test]
 fn test_tilde_arrow_is_the_chain_separator() {
     // `a ~> b` chains terms: the value flows left to right.
-    quiver().evaluate("[3, 4] ~> __integer_add__").expect("7");
+    quiver().evaluate("[3, 4] ~> __integer_add__ ~").expect("7");
 }
 
 #[test]
@@ -156,7 +162,7 @@ fn test_leading_tilde_arrow_continues_a_chain_across_lines() {
     // so the value flows straight through. Threads 0 -> 10 -> 110.
     quiver()
         .evaluate(
-            "f = #'int {\n  $\n  ~> [~, 10] ~> __integer_add__\n  ~> [~, 100] ~> __integer_add__\n}\n0 ~> f",
+            "f = #'int {\n  $\n  ~> [~, 10] ~> __integer_add__ ~\n  ~> [~, 100] ~> __integer_add__ ~\n}\n0 ~> f ~",
         )
         .expect("110");
 }

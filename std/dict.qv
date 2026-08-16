@@ -24,7 +24,7 @@
 '<'k, 'v> = Empty | Leaf['int, 'k, 'v] | Collision['int, 'list<['k, 'v]>] | Node['int, 'list<^>]
 
 // --- key hashing -------------------------------------------------------------
-hash = #<'k>'k { __data_encode__ ~> __binary_hash32__ }
+hash = #<'k>'k { __data_encode__ ~ ~> __binary_hash32__ ~ }
 
 // 5-bit hash fragment at `shift` bits, and the compact child index for a slot bit.
 fragment = #[(hash): 'int, (shift): 'int] {
@@ -32,7 +32,7 @@ fragment = #[(hash): 'int, (shift): 'int] {
 }
 
 slot_index = #[(bitmap): 'int, (bit): 'int] {
-  %num.sub [$bit, 1] ~> %int.and [$bitmap, ~] ~> %int.popcount
+  %num.sub [$bit, 1] ~> %int.and [$bitmap, ~] ~> %int.popcount ~
 }
 
 // --- generic list helpers (tail-recursive, à la %list) -----------------------
@@ -53,7 +53,7 @@ length = #<'t>[(list): 'list<'t>, (n): 'int] {
 map = #<'t, 'u>[(list): 'list<'t>, (f): #'t -> 'u, (acc): 'list<'u>] {
   $list ~> {
     | =Nil => revcat [$acc, Nil]
-    | =Cons[h, t] => Cons[$f h, $acc] ~> ^ [t, &$f, ~]
+    | =Cons[h, t] => Cons[$f h, $acc] ~> ^ [t, $f, ~]
   }
 }
 
@@ -160,7 +160,7 @@ split_pair = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (h1): 'int, (k1): 'k, (v1): 'v, 
       f2 = fragment [$h2, $shift]
       {
         | f1 ~> =&f2 => {
-          children = %num.add [$shift, 5] ~> $self [&$self, $h1, $k1, $v1, $h2, $k2, $v2, ~] ~> Cons[
+          children = %num.add [$shift, 5] ~> $self [$self, $h1, $k1, $v1, $h2, $k2, $v2, ~] ~> Cons[
             ~,
             Nil,
           ]
@@ -193,7 +193,7 @@ split_node = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (cnode): '<'k, 'v>, (chash): 'in
     | fc ~> =&fh => Node[
       %int.shift [1, fc],
       Cons[
-        $self [&$self, $cnode, $chash, $hash, $key, $value, %num.add [$shift, 5]],
+        $self [$self, $cnode, $chash, $hash, $key, $value, %num.add [$shift, 5]],
         Nil,
       ],
     ]
@@ -211,11 +211,11 @@ put = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (node): '<'k, 'v>, (key): 'k, (value): 
     | =Empty => Leaf[$hash, $key, $value]
     | =Leaf[lhash, lkey, lvalue] => {
       | $key ~> =&lkey => Leaf[$hash, $key, $value]
-      | split_pair [&split_pair, lhash, lkey, lvalue, $hash, $key, $value, $shift]
+      | split_pair [split_pair, lhash, lkey, lvalue, $hash, $key, $value, $shift]
     }
     | =Collision[chash, entries] => {
       | $hash ~> =&chash => Collision[chash, bucket_put [entries, $key, $value, Nil]]
-      | split_node [&split_node, $node, chash, $hash, $key, $value, $shift]
+      | split_node [split_node, $node, chash, $hash, $key, $value, $shift]
     }
     | =Node[bitmap, children] => {
       bit = fragment [$hash, $shift] ~> %int.shift [1, ~]
@@ -227,7 +227,7 @@ put = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (node): '<'k, 'v>, (key): 'k, (value): 
         ]
         | child = child_at [children, idx]
 
-          new_child = $self [&$self, child, $key, $value, $hash, %num.add [$shift, 5]]
+          new_child = $self [$self, child, $key, $value, $hash, %num.add [$shift, 5]]
 
           Node[bitmap, update_at [children, idx, new_child, Nil]]
       }
@@ -277,7 +277,7 @@ remove = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (node): '<'k, 'v>, (key): 'k, (hash)
         | %int.and [bitmap, bit] ~> =0 => Node[bitmap, children]
         | idx = slot_index [bitmap, bit]
           child = child_at [children, idx]
-          $self [&$self, child, $key, $hash, %num.add [$shift, 5]] ~> {
+          $self [$self, child, $key, $hash, %num.add [$shift, 5]] ~> {
             | =Empty => remove_slot [bitmap, bit, children, idx]
             | =new => collapse_node [bitmap, update_at [children, idx, new, Nil]]
           }
@@ -302,7 +302,7 @@ entries = #<'k, 'v>[(worklist): 'list<'<'k, 'v>>, (acc): 'list<['k, 'v]>] {
 from = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (d): '<'k, 'v>, (pairs): 'list<['k, 'v]>] {
   $pairs ~> {
     | =Nil => $d
-    | =Cons[[k, val], t] => put [&put, $d, k, val, hash k, 0] ~> $self [&$self, ~, t]
+    | =Cons[[k, val], t] => put [put, $d, k, val, hash k, 0] ~> $self [$self, ~, t]
   }
 }
 
@@ -319,7 +319,7 @@ from_iter = #<'k, 'v>'%iter<['k, 'v]> {
   %iter.fold [
     ~,
     Empty,
-    #<'k, 'v>['<'k, 'v>, ['k, 'v]] { put [&put, $0, $1.0, $1.1, hash $1.0, 0] },
+    #<'k, 'v>['<'k, 'v>, ['k, 'v]] { put [put, $0, $1.0, $1.1, hash $1.0, 0] },
   ]
 }
 
@@ -328,13 +328,13 @@ from_iter = #<'k, 'v>'%iter<['k, 'v]> {
 // `key => value` entries: key and value are each an ordinary host expression (one
 // chain), located by the host's `chain` prefix-parser and spliced as an `Unquote` —
 // evaluated in the caller's scope with the dialect term's flowing value as input, so
-// variables, `~`, `&f`, tuples, and full call chains all work. Chain parsing stops
+// variables, `~`, function names, tuples, and full call chains all work. Chain parsing stops
 // before `,` and `=>`, so the dialect keeps both. Expands to a `from` call over the
 // entry list. Built from `%parse` combinators and the `%meta` constructors.
 
-d_arrow = %parse.right [&%parse.ws, %parse.literal ["=>", "'=>'"]]
+d_arrow = %parse.right [%parse.ws, %parse.literal ["=>", "'=>'"]]
 
-d_comma = %parse.right [&%parse.ws, %parse.byte [44, "','"]]
+d_comma = %parse.right [%parse.ws, %parse.byte [44, "','"]]
 
 // One expression (a key or a value): skip whitespace, then hand the host prefix-parser
 // the exact start of the expression and splice the span it reports.
@@ -354,19 +354,19 @@ d_expr = #'%meta.cb {
 
 dict_dialect = #(content: '%str, chain: '%meta.cb) {
   $ ~> =(content, chain: cb)
-  expr = d_expr &cb
-  expr_ws = %parse.right [&%parse.ws, &expr]
-  k = %parse.left [&expr_ws, &d_arrow]
+  expr = d_expr cb
+  expr_ws = %parse.right [%parse.ws, expr]
+  k = %parse.left [expr_ws, d_arrow]
 
-  entry = %parse.map [%parse.then [&k, &expr_ws], #{ %meta.pair2 [$0, $1] }]
+  entry = %parse.map [%parse.then [k, expr_ws], #{ %meta.pair2 [$0, $1] }]
 
-  entries = %parse.sep_by [&entry, &d_comma]
-  e2 = %parse.left [&entries, %parse.opt &d_comma]
-  e3 = %parse.left [&e2, &%parse.ws]
+  entries = %parse.sep_by [entry, d_comma]
+  e2 = %parse.left [entries, %parse.opt d_comma]
+  e3 = %parse.left [e2, %parse.ws]
 
-  full = %parse.map [&e3, #{ Call[member: "from", arg: %meta.list_expr $] }]
+  full = %parse.map [e3, #{ Call[member: "from", arg: %meta.list_expr $] }]
 
-  %parse.run [content, &full]
+  %parse.run [content, full]
 }
 
 [
@@ -382,12 +382,12 @@ dict_dialect = #(content: '%str, chain: '%meta.cb) {
 
   put: #<'k, 'v>[(dict): '<'k, 'v>, (key): 'k, (value): 'v] {
     :doc "A dict with the key mapped to the value, replacing any existing mapping. Keys are data values (integers, binaries, tuples); a non-data key is a runtime error."
-    put [&put, $dict, $key, $value, hash $key, 0]
+    put [put, $dict, $key, $value, hash $key, 0]
   },
 
   remove: #<'k, 'v>[(dict): '<'k, 'v>, (key): 'k] {
     :doc "A dict with the key removed, or the dict unchanged when the key is absent."
-    remove [&remove, $dict, $key, hash $key, 0]
+    remove [remove, $dict, $key, hash $key, 0]
   },
 
   has?: #<'k, 'v>[(dict): '<'k, 'v>, (key): 'k] {
@@ -416,51 +416,51 @@ dict_dialect = #(content: '%str, chain: '%meta.cb) {
 
   iter: #<'k, 'v>'<'k, 'v> {
     :doc "An iterator over the dict's [key, value] entries, in unspecified order."
-    to_iter
+    to_iter ~
   },
 
   collect: #<'k, 'v>'%iter<['k, 'v]> {
     :doc "Builds a dict from an iterator of [key, value] pairs; later pairs win on duplicate keys."
-    from_iter
+    from_iter ~
   },
 
   map: #<'k, 'v, 'j, 'u>[(dict): '<'k, 'v>, (f): #['k, 'v] -> ['j, 'u]] {
     :doc "A dict rebuilt with each [key, value] entry transformed; duplicate result keys collapse."
-    to_iter $dict ~> %iter.map [~, &$f] ~> from_iter
+    to_iter $dict ~> %iter.map [~, $f] ~> from_iter ~
   },
 
   filter: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> (['k, 'v] | [])] {
     :doc "A dict keeping only the entries for which the predicate is non-nil."
-    to_iter $dict ~> %iter.filter [~, &$pred] ~> from_iter
+    to_iter $dict ~> %iter.filter [~, $pred] ~> from_iter ~
   },
 
   fold: #<'k, 'v, 'acc>[(dict): '<'k, 'v>, (init): 'acc, (f): #['acc, ['k, 'v]] -> 'acc] {
     :doc "Reduces a dict by folding each [key, value] entry into an accumulator, in unspecified order."
-    to_iter $dict ~> %iter.fold [~, $init, &$f]
+    to_iter $dict ~> %iter.fold [~, $init, $f]
   },
 
   find: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> (['k, 'v] | [])] {
     :doc "An entry for which the predicate is non-nil, or nil when none matches (unspecified order)."
-    to_iter $dict ~> %iter.find [~, &$pred]
+    to_iter $dict ~> %iter.find [~, $pred]
   },
 
   any?: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> (['k, 'v] | [])] {
     :doc "Whether any [key, value] entry satisfies the predicate."
-    to_iter $dict ~> %iter.any? [~, &$pred]
+    to_iter $dict ~> %iter.any? [~, $pred]
   },
 
   all?: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> (['k, 'v] | [])] {
     :doc "Whether every [key, value] entry satisfies the predicate."
-    to_iter $dict ~> %iter.all? [~, &$pred]
+    to_iter $dict ~> %iter.all? [~, $pred]
   },
 
   from: #<'k, 'v>'list<['k, 'v]> {
     :doc "Builds a dict from a list of [key, value] pairs; later pairs win on duplicate keys."
-    from [&from, Empty, ~]
+    from [from, Empty, ~]
   },
 
   merge: #<'k, 'v>[(dict): '<'k, 'v>, (with): '<'k, 'v>] {
     :doc "A dict with every entry of the second dict added; the second's values win on conflict."
-    Cons[$with, Nil] ~> entries [~, Nil] ~> from [&from, $dict, ~]
+    Cons[$with, Nil] ~> entries [~, Nil] ~> from [from, $dict, ~]
   },
-] ~> { :dialect &dict_dialect }
+] ~> { :dialect dict_dialect }

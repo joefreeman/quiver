@@ -92,7 +92,7 @@ p1 ~> ![~, 1000]
 send and self
 ==================
 
-42 ~> pid; &. ~> =self_pid
+42 ~> pid ~; . ~> =self_pid
 
 ---
 
@@ -100,11 +100,13 @@ send and self
   (sequence
     (chain
       (integer)
-      (access
-        source: (identifier)))
+      (application
+        function: (access
+          source: (identifier))
+        argument: (access
+          source: (ripple))))
     (chain
-      (reference
-        (self))
+      (self)
       (bind_match
         (identifier)))))
 
@@ -243,16 +245,15 @@ x ~> @counter 5
 spawn ripple with init argument
 ==================
 
-&f ~> @~ 3
+f ~> @~ 3
 
 ---
 
 (source_file
   (sequence
     (chain
-      (reference
-        (access
-          source: (identifier)))
+      (access
+        source: (identifier))
       (application
         function: (spawn
           (access

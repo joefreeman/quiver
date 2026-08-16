@@ -79,8 +79,9 @@ fn test_fallible_match_must_end_its_chain() {
 #[test]
 fn test_irrefutable_match_may_continue_chain() {
     // A bare binder always succeeds, so its binding is always valid and the chain may
-    // continue through it.
-    quiver().evaluate("5 ~> =x ~> %num.add [x, 1]").expect("6");
+    // continue through it. The value flowing on is the match's verdict, and the binding is
+    // in scope for the terms after it.
+    quiver().evaluate("5 ~> =x ~> [~, x]").expect("[Ok, 5]");
 }
 
 #[test]

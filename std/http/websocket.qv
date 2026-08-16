@@ -23,8 +23,7 @@ accept_key = #'%str {
   :doc "The Sec-WebSocket-Accept value for a Sec-WebSocket-Key: base64(sha1(key ++ GUID))."
   =Str[k]
 
-  %bin.concat [k, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" ~> .0] ~> %hash.sha1
-  ~> %bin.to_base64
+  %bin.concat [k, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" ~> .0] ~> %hash.sha1 ~ ~> %bin.to_base64 ~
 }
 
 handshake_response = #'%str {
@@ -186,7 +185,7 @@ recv = #' {
         }
         | {
           $
-          ~> Conn[..., buf: %bin.concat [$buf, chunk]] ~> ^
+          ~> Conn[..., buf: %bin.concat [$buf, chunk]] ~> ^ ~
         }
       }
     }

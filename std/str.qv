@@ -149,7 +149,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
 
   empty?: #' {
     :doc "Whether a string is empty."
-    .0 ~> %bin.length ~> =0; Ok
+    .0 ~> %bin.length ~ ~> =0; Ok
   },
 
   concat: #[', '] {
@@ -228,14 +228,14 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
 
   length: #' {
     :doc "The number of Unicode characters in a string."
-    .0 ~> chars ~> %iter.count
+    .0 ~> chars ~ ~> %iter.count ~
   },
 
   slice: #[(str): ', (start): 'int, (end): 'int] {
     :doc "The substring from start (inclusive) to end (exclusive), in character indices."
     Str[data] = $str
 
-    chars data ~> %iter.drop [~, $start] ~> %iter.take [~, %num.sub [$end, $start]] ~> from_chars
+    chars data ~> %iter.drop [~, $start] ~> %iter.take [~, %num.sub [$end, $start]] ~> from_chars ~
   },
 
   index_of: #[(str): ', (needle): '] {
@@ -267,13 +267,13 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
 
   collect: #'%iter<'int> {
     :doc "Builds a string from an iterator of Unicode codepoints."
-    from_chars
+    from_chars ~
   },
 
   join: #[(strs): '%iter<'>, (sep): '] {
     :doc "Joins an iterator of strings with a separator between each."
     Str[sep] = $sep
-    $strs ~> %iter.map [~, #' { .0 }] ~> %iter.intersperse [~, sep] ~> %iter.fold [~, 0x, &%bin.concat] ~> Str[
+    $strs ~> %iter.map [~, #' { .0 }] ~> %iter.intersperse [~, sep] ~> %iter.fold [~, 0x, %bin.concat] ~> Str[
       ~,
     ]
   },

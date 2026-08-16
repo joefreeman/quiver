@@ -514,7 +514,7 @@ fn analyze_match_pattern(
             }],
             value_type_id,
         )),
-        ast::Match::Reference(target) => {
+        ast::Match::Pin(target) => {
             // Pin pattern `&name` / `&name.field` / `&$x`: check the value equals the referenced
             // value at runtime. A variable root must reference a binding already in scope — if it
             // isn't found it's undefined, e.g. a name bound by a *sibling* sub-pattern of the same

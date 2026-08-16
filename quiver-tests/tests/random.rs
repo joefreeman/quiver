@@ -8,11 +8,11 @@ use common::*;
 fn test_bytes_length() {
     quiver()
         .with_io()
-        .evaluate("16 ~> %random.bytes ~> %bin.length")
+        .evaluate("16 ~> %random.bytes ~ ~> %bin.length ~")
         .expect("16");
     quiver()
         .with_io()
-        .evaluate("0 ~> %random.bytes ~> %bin.length")
+        .evaluate("0 ~> %random.bytes ~ ~> %bin.length ~")
         .expect("0");
 }
 
@@ -20,13 +20,13 @@ fn test_bytes_length() {
 fn test_hex_token() {
     quiver()
         .with_io()
-        .evaluate("8 ~> %random.hex ~> =Str[b]; b ~> %bin.length")
+        .evaluate("8 ~> %random.hex ~ ~> =Str[b]; b ~> %bin.length ~")
         .expect("16");
     // Two independent 16-byte tokens colliding would be a broken entropy source.
     quiver()
         .with_io()
         .evaluate(
-            "a = 16 ~> %random.hex; b = 16 ~> %random.hex; { | a ~> =&b => Same | Different }",
+            "a = 16 ~> %random.hex ~; b = 16 ~> %random.hex ~; { | a ~> =&b => Same | Different }",
         )
         .expect("Different");
 }
@@ -41,12 +41,12 @@ fn test_below_stays_in_range() {
             "chk = #'int {
                | =0 => Ok
                | {
-                 10 ~> %random.below ~> =('int)v
-                 [v, 10] ~> __integer_compare__ ~> =-1
-                 [$, 1] ~> __integer_subtract__ ~> ^
+                 10 ~> %random.below ~ ~> =('int)v
+                 [v, 10] ~> __integer_compare__ ~ ~> =-1
+                 [$, 1] ~> __integer_subtract__ ~ ~> ^ ~
                }
              };
-             40 ~> chk",
+             40 ~> chk ~",
         )
         .expect("Ok");
 }
@@ -55,11 +55,11 @@ fn test_below_stays_in_range() {
 fn test_below_edges() {
     quiver()
         .with_io()
-        .evaluate("1 ~> %random.below")
+        .evaluate("1 ~> %random.below ~")
         .expect("0");
     quiver()
         .with_io()
-        .evaluate("0 ~> %random.below")
+        .evaluate("0 ~> %random.below ~")
         .expect("[]");
 }
 
@@ -67,10 +67,10 @@ fn test_below_edges() {
 fn test_between_edges() {
     quiver()
         .with_io()
-        .evaluate("[5, 5] ~> %random.between")
+        .evaluate("[5, 5] ~> %random.between ~")
         .expect("5");
     quiver()
         .with_io()
-        .evaluate("[7, 3] ~> %random.between")
+        .evaluate("[7, 3] ~> %random.between ~")
         .expect("[]");
 }

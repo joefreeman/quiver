@@ -8,7 +8,7 @@
 // content, parsed as ONE host chain and spliced in the *caller's* scope — evaluated once
 // (bind-once, deduplicated by span), with the dialect term's flowing value as its chain
 // input, so `~` inside a span is the dialect input, a bare callable is called with it,
-// and `&f` passes by value, exactly as inline host code. `Call` applies an export of the
+// and a bare name passes the function by value, exactly as inline host code. `Call` applies an export of the
 // dialect's own module — or of the module its `module` field names (`"html"`,
 // `"html/live"`), resolved at the invocation site, so a dialect can reach a companion
 // module it doesn't itself import. An `Unquote` argument is folded into the call, which

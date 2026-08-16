@@ -23,7 +23,7 @@ fn track_samples_dependency_state() {
     quiver()
         .evaluate(
             r#"
-            store = 5 ~> @'int { !'int ~> { =n => ^ n } }
+            store = 5 ~> @'int { !'int ~> { =n => ^ n } } ~
             %proc.track #{ ?store }
             "#,
         )
@@ -37,9 +37,9 @@ fn wakeup_on_dependency_change() {
     quiver()
         .evaluate(
             r#"
-            store = 5 ~> @'int { !'int ~> { =n => ^ n } }
+            store = 5 ~> @'int { !'int ~> { =n => ^ n } } ~
             s1 = %proc.track #{ ?store }
-            10 ~> store
+            10 ~> store ~
             w = !'%proc.changed
             s2 = ?store
             [s1, s2]
@@ -54,8 +54,8 @@ fn tracked_render_rejects_effects() {
     quiver()
         .evaluate(
             r#"
-            store = 5 ~> @'int { !'int ~> { =n => ^ n } }
-            %proc.track #{ 1 ~> store; ?store }
+            store = 5 ~> @'int { !'int ~> { =n => ^ n } } ~
+            %proc.track #{ 1 ~> store ~; ?store }
             "#,
         )
         .expect_runtime_error(Error::OperationNotAllowed {
@@ -70,7 +70,7 @@ fn tracked_render_rejects_host_reads() {
     // could steer a branch with no subscribed dependency, silently going stale.
     quiver()
         .with_io()
-        .evaluate("%proc.track #{ %time.now }")
+        .evaluate("%proc.track #{ %time.now [] }")
         .expect_runtime_error(Error::OperationNotAllowed {
             operation: Operation::HostRead,
             context: RestrictedContext::TrackedRender,
@@ -82,7 +82,7 @@ fn tracked_render_rejects_ref_creation() {
     // A fresh ref per render is unstable identity (e.g. keys that never match across
     // re-renders); mint in the update step and carry the ref in state instead.
     quiver()
-        .evaluate("%proc.track #{ %ref }")
+        .evaluate("%proc.track #{ %ref [] }")
         .expect_runtime_error(Error::OperationNotAllowed {
             operation: Operation::CreateRef,
             context: RestrictedContext::TrackedRender,

@@ -10,10 +10,10 @@ use quiver_compiler::compiler::Error;
 #[test]
 fn test_render_static_elements() {
     quiver()
-        .evaluate(r#"%html{ <p>hi</p> } ~> %html.render"#)
+        .evaluate(r#"%html{ <p>hi</p> } ~> %html.render ~"#)
         .expect(r#""<p>hi</p>""#);
     quiver()
-        .evaluate(r#"%html{ <div><span>a</span><span>b</span></div> } ~> %html.render"#)
+        .evaluate(r#"%html{ <div><span>a</span><span>b</span></div> } ~> %html.render ~"#)
         .expect(r#""<div><span>a</span><span>b</span></div>""#);
 }
 
@@ -21,7 +21,7 @@ fn test_render_static_elements() {
 fn test_attributes() {
     // Static string values, bare boolean attributes, and dashed names.
     quiver()
-        .evaluate(r#"%html{ <a href="/x" data-k="v" hidden>go</a> } ~> %html.render"#)
+        .evaluate(r#"%html{ <a href="/x" data-k="v" hidden>go</a> } ~> %html.render ~"#)
         .expect(r#""<a href=\"/x\" data-k=\"v\" hidden>go</a>""#);
 }
 
@@ -29,14 +29,14 @@ fn test_attributes() {
 fn test_void_and_self_closing_elements() {
     // Void elements take no close tag; `/>` self-closes any element (rendered expanded).
     quiver()
-        .evaluate(r#"%html{ <img src="a.png"><br><div/> } ~> %html.render"#)
+        .evaluate(r#"%html{ <img src="a.png"><br><div/> } ~> %html.render ~"#)
         .expect(r#""<img src=\"a.png\"><br><div></div>""#);
 }
 
 #[test]
 fn test_multiple_roots_render_as_fragment() {
     quiver()
-        .evaluate(r#"%html{ <li>a</li><li>b</li> } ~> %html.render"#)
+        .evaluate(r#"%html{ <li>a</li><li>b</li> } ~> %html.render ~"#)
         .expect(r#""<li>a</li><li>b</li>""#);
 }
 
@@ -45,17 +45,17 @@ fn test_root_whitespace_is_trimmed_interior_preserved() {
     // Whitespace-only text at the root's edges is trimmed (so a single root splices bare);
     // interior whitespace is verbatim.
     quiver()
-        .evaluate("%html{\n  <p>hi</p>\n} ~> %html.render")
+        .evaluate("%html{\n  <p>hi</p>\n} ~> %html.render ~")
         .expect(r#""<p>hi</p>""#);
     quiver()
-        .evaluate("%html{ <ul>\n  <li>a</li>\n</ul> } ~> %html.render")
+        .evaluate("%html{ <ul>\n  <li>a</li>\n</ul> } ~> %html.render ~")
         .expect(r#""<ul>\n  <li>a</li>\n</ul>""#);
 }
 
 #[test]
 fn test_text_holes_are_escaped() {
     quiver()
-        .evaluate(r#"name = "<b>&\"x"; %html{ <p>{name}</p> } ~> %html.render"#)
+        .evaluate(r#"name = "<b>&\"x"; %html{ <p>{name}</p> } ~> %html.render ~"#)
         .expect(r#""<p>&lt;b&gt;&amp;\"x</p>""#);
 }
 
@@ -63,21 +63,21 @@ fn test_text_holes_are_escaped() {
 fn test_static_text_is_trusted() {
     // Author-written entities pass through verbatim — only hole values are escaped.
     quiver()
-        .evaluate(r#"%html{ <p>&amp; &#123;</p> } ~> %html.render"#)
+        .evaluate(r#"%html{ <p>&amp; &#123;</p> } ~> %html.render ~"#)
         .expect(r#""<p>&amp; &#123;</p>""#);
 }
 
 #[test]
 fn test_raw_opts_out_of_escaping() {
     quiver()
-        .evaluate(r#"%html{ <div>{ "<b>x</b>" ~> %html.raw }</div> } ~> %html.render"#)
+        .evaluate(r#"%html{ <div>{ "<b>x</b>" ~> %html.raw ~ }</div> } ~> %html.render ~"#)
         .expect(r#""<div><b>x</b></div>""#);
 }
 
 #[test]
 fn test_int_holes_render_as_digits() {
     quiver()
-        .evaluate(r#"%html{ <p>{ 42 }</p> } ~> %html.render"#)
+        .evaluate(r#"%html{ <p>{ 42 }</p> } ~> %html.render ~"#)
         .expect(r#""<p>42</p>""#);
 }
 
@@ -85,10 +85,10 @@ fn test_int_holes_render_as_digits() {
 fn test_nil_hole_renders_nothing() {
     // A hole is a host block; one that fails (nil) renders nothing — the conditional idiom.
     quiver()
-        .evaluate(r#"no = []; %html{ <p>x{ no => "yes" }y</p> } ~> %html.render"#)
+        .evaluate(r#"no = []; %html{ <p>x{ no => "yes" }y</p> } ~> %html.render ~"#)
         .expect(r#""<p>xy</p>""#);
     quiver()
-        .evaluate(r#"ok? = Ok; %html{ <p>{ ok? => "yes" }</p> } ~> %html.render"#)
+        .evaluate(r#"ok? = Ok; %html{ <p>{ ok? => "yes" }</p> } ~> %html.render ~"#)
         .expect(r#""<p>yes</p>""#);
 }
 
@@ -96,7 +96,7 @@ fn test_nil_hole_renders_nothing() {
 fn test_flowing_value_in_holes() {
     // `~` inside a hole is the value flowing into the dialect term.
     quiver()
-        .evaluate(r#"[name: "Ada"] ~> %html{ <p>{~.name}</p> } ~> %html.render"#)
+        .evaluate(r#"[name: "Ada"] ~> %html{ <p>{~.name}</p> } ~> %html.render ~"#)
         .expect(r#""<p>Ada</p>""#);
 }
 
@@ -104,10 +104,10 @@ fn test_flowing_value_in_holes() {
 fn test_attribute_holes() {
     // A Str renders as the value (escaped); an int as digits; Ok bare; nil omits.
     quiver()
-        .evaluate(r#"c = "a\"b"; %html{ <div class={c} data-n={ 7 }>x</div> } ~> %html.render"#)
+        .evaluate(r#"c = "a\"b"; %html{ <div class={c} data-n={ 7 }>x</div> } ~> %html.render ~"#)
         .expect(r#""<div class=\"a&quot;b\" data-n=\"7\">x</div>""#);
     quiver()
-        .evaluate(r#"%html{ <input disabled={ Ok } value={ [] }> } ~> %html.render"#)
+        .evaluate(r#"%html{ <input disabled={ Ok } value={ [] }> } ~> %html.render ~"#)
         .expect(r#""<input disabled>""#);
 }
 
@@ -116,10 +116,10 @@ fn test_node_list_holes_render_as_fragments() {
     quiver()
         .evaluate(
             r#"
-            items = %list{ "a", "b" } ~> %list.iter
-              ~> [~, #Str['bin] { %html{ <li>{$}</li> } }] ~> %iter.map
-              ~> %list.collect;
-            %html{ <ul>{items}</ul> } ~> %html.render
+            items = %list{ "a", "b" } ~> %list.iter ~
+              ~> [~, #Str['bin] { %html{ <li>{$}</li> } }] ~> %iter.map ~
+              ~> %list.collect ~;
+            %html{ <ul>{items}</ul> } ~> %html.render ~
             "#,
         )
         .expect(r#""<ul><li>a</li><li>b</li></ul>""#);
@@ -134,7 +134,7 @@ fn test_components_are_functions() {
             card = #<'e>[title: Str['bin], children: '%html<'e>] {
               %html{ <section><h2>{$title}</h2>{$children}</section> }
             };
-            %html{ <main>{ [title: "T", children: %html{ <p>b</p> }] ~> card }</main> } ~> %html.render
+            %html{ <main>{ [title: "T", children: %html{ <p>b</p> }] ~> card ~ }</main> } ~> %html.render ~
             "#,
         )
         .expect(r#""<main><section><h2>T</h2><p>b</p></section></main>""#);
@@ -154,14 +154,14 @@ fn test_tree_is_pattern_matchable() {
 #[test]
 fn test_comments_are_skipped() {
     quiver()
-        .evaluate(r#"%html{ <div><!-- note -->x</div> } ~> %html.render"#)
+        .evaluate(r#"%html{ <div><!-- note -->x</div> } ~> %html.render ~"#)
         .expect(r#""<div>x</div>""#);
 }
 
 #[test]
 fn test_page_prepends_doctype() {
     quiver()
-        .evaluate(r#"%html{ <p>hi</p> } ~> %html.page"#)
+        .evaluate(r#"%html{ <p>hi</p> } ~> %html.page ~"#)
         .expect(r#""<!doctype html><p>hi</p>""#);
 }
 

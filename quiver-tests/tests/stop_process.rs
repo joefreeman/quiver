@@ -131,7 +131,7 @@ fn stop_tears_down_spawned_children() {
     let session_pid = repl.process_id();
 
     // Spawn a child that waits forever, then block the session itself.
-    let request_id = begin(&mut environment, &mut repl, "child = @#{ !'int }; !'int");
+    let request_id = begin(&mut environment, &mut repl, "child = @#{ !'int } []; !'int");
     let child = await_child(&mut environment, session_pid, ProcessStatus::Waiting);
 
     environment
@@ -156,7 +156,7 @@ fn stop_sleeping_session_clears_persistence_and_cascades() {
 
     // The line completes — the session goes to sleep on its result — while the spawned
     // child outlives it, still owned across the sleep.
-    let request_id = begin(&mut environment, &mut repl, "child = @#{ !'int }; 1");
+    let request_id = begin(&mut environment, &mut repl, "child = @#{ !'int } []; 1");
     match poll(&mut environment, request_id) {
         RequestResult::Result(Ok(_)) => {}
         other => panic!("expected a value, got {other:?}"),
@@ -234,7 +234,9 @@ fn stop_releases_a_listener_with_an_accept_in_flight() {
     let request_id = begin(
         &mut environment,
         &mut repl,
-        &format!("[{port}, 16] ~> __tcp_listen__ ~> =(\\TcpListener)l; __tcp_listener_accept__ l"),
+        &format!(
+            "[{port}, 16] ~> __tcp_listen__ ~ ~> =(\\TcpListener)l; __tcp_listener_accept__ l"
+        ),
     );
     // Bind-probe readiness: the wildcard listener makes a local bind fail, without
     // connecting — a connect would complete the very accept that must stay in flight.

@@ -14,17 +14,17 @@
 // restart-intensity limit — tears the whole subtree down. A parent supervisor's
 // watcher sees that crash as an ordinary Down: escalation is just crashing.
 //
-//   spec = [id: "worker", restart: Permanent, start: &start_worker]
+//   spec = [id: "worker", restart: Permanent, start: start_worker]
 //   sup = [children: %list{ spec }, max_restarts: 3, window: 5000] ~> %sup.start
 //
 // A start closure spawns the child, wires its watcher, and answers the (widened)
-// pid — note the reference idiom, `&w`, wherever a pid sits in argument position:
+// pid — a pid sits in argument position as a plain name:
 //
 //   start_worker = #['%str, (@'%sup.down)] {
 //     =[id, sup]
-//     w = @worker
-//     %sup.watch [id, &w, &sup]
-//     &w
+//     w = @worker []
+//     %sup.watch [id, w, sup]
+//     w
 //   }
 
 'restart = Permanent | Transient | Temporary
@@ -52,31 +52,30 @@ watch = #<'r>[(id): '%str, (child): @!'r, (sup): @'down] {
   // parameter), so bind the fields locally — the pids by reference, as bare
   // pid terms would send.
   id = $id
-  child = &$child
-  sup = &$sup
+  child = $child
+  sup = $sup
   @{
-    r = !child
+    r = ![child]
     o = {
       | r:('%proc.crash)crash ~> =('%proc.crash)e => Crashed[e]
       | Done
     }
-    Down[id: id, pid: &child, outcome: o] ~> sup
-  }
+    Down[id: id, pid: child, outcome: o] ~> sup ~
+  } []
   Ok
 }
 
 // One table row per child: spawn via the spec's start closure (which wires the
 // watcher) and record the pid.
 start_row = #[(spec): 'spec, (sup): @'down] {
-  p = $spec ~> ~.start [$spec.id, &$sup]
-  [id: $spec.id, pid: &p, spec: $spec, restarts: Nil]
+  p = $spec ~> ~.start [$spec.id, $sup]; [id: $spec.id, pid: p, spec: $spec, restarts: Nil]
 }
 
 seed = #[(specs): 'specs, (sup): @'down] {
   // The fold's closure closes over the supervisor pid — by reference, as a bare
   // pid term would send.
-  sup = &$sup
-  %list.fold [$specs, %dict.new, #{ %dict.put [$0, $1.id, start_row [$1, &sup]] }]
+  sup = $sup
+  %list.fold [$specs, %dict.new [], #{ %dict.put [$0, $1.id, start_row [$1, sup]] }]
 }
 
 'verdict = Allowed['stamps] | Exceeded
@@ -117,17 +116,17 @@ loop = #'state {
       // for a reused id (drop, then add again) pin-fails and is dropped.
       | %dict.get [t, i] ~> =('row)r; r ~> =(pid: &dp) => {
         | restart? [r, o] => {
-          now = %time.monotonic
+          now = %time.monotonic []
           allow? [stamps: r.restarts, now: now, max: m, window: w] ~> {
             | =Allowed[recent] => {
-              p = r.spec ~> ~.start [i, &.]
+              p = r.spec ~> ~.start [i, .]
               ^ [
-                table: %dict.put [t, i, [id: i, pid: &p, spec: r.spec, restarts: recent]],
+                table: %dict.put [t, i, [id: i, pid: p, spec: r.spec, restarts: recent]],
                 max: m,
                 window: w,
               ]
             }
-            | "%sup: restart intensity exceeded" ~> __panic__
+            | "%sup: restart intensity exceeded" ~> __panic__ ~
           }
         }
         // No restart wanted: the child is done — drop its row.
@@ -139,18 +138,18 @@ loop = #'state {
       | ^ [table: t, max: m, window: w]
     }
     | =Add[s, reply] => {
-      | %dict.has? [t, s.id] => { Duplicate ~> reply; ^ [table: t, max: m, window: w] }
+      | %dict.has? [t, s.id] => { Duplicate ~> reply ~; ^ [table: t, max: m, window: w] }
       | {
-        row = start_row [s, &.]
+        row = start_row [s, .]
         row ~> =(pid: p)
-        Started[&p] ~> reply
+        Started[p] ~> reply ~
         ^ [table: %dict.put [t, s.id, row], max: m, window: w]
       }
     }
     | =Drop[i] => {
       // Remove the row BEFORE the kill, so the watcher's report finds nothing.
       | %dict.get [t, i] ~> =('row)r => {
-        t2 = %dict.remove [t, i]; r ~> =(pid: p); %proc.kill &p; ^ [table: t2, max: m, window: w]
+        t2 = %dict.remove [t, i]; r ~> =(pid: p); %proc.kill p; ^ [table: t2, max: m, window: w]
       }
       | ^ [table: t, max: m, window: w]
     }
@@ -158,22 +157,22 @@ loop = #'state {
 }
 
 run = #[specs: 'specs, max: 'int, window: 'int] {
-  =[specs: ss, max: m, window: w]; ^loop [table: seed [ss, &.], max: m, window: w]
+  =[specs: ss, max: m, window: w]; ^loop [table: seed [ss, .], max: m, window: w]
 }
 
 start = #[children: 'specs, max_restarts: 'int = 3, window: 'int = 5000] {
   :doc "Starts a supervisor over the child specs (one_for_one): each child is restarted per its spec's restart type, at most max_restarts times (default 3) within window ms (default 5000) — beyond that the supervisor gives up and crashes, tearing down its subtree. The child set is dynamic: `add` a child, `drop` one. Answers the supervisor's pid, owned by the caller."
-  =[children: ss, max_restarts: m, window: w]; [specs: ss, max: m, window: w] ~> @run
+  =[children: ss, max_restarts: m, window: w]; [specs: ss, max: m, window: w] ~> @run ~
 }
 
 add = #[(sup): @'msg, (spec): 'spec] {
   :doc "Adds a child to a running supervisor and awaits the verdict: Started[pid] (widened to an inert `(@)`), or Duplicate for an id the table already holds. The child is spawned in the supervisor's process — owned by it, supervised like any startup spec."
-  Add[$spec, &.] ~> $sup; !'started
+  Add[$spec, .] ~> $sup ~; !'started
 }
 
 drop = #[(sup): @'msg, (id): '%str] {
   :doc "Drops a supervised child: kills it (tearing down its owned subtree) and forgets its row — its watcher's report is disregarded, and the id may be supervised again. Asynchronous: the supervisor applies it in mailbox order."
-  Drop[$id] ~> $sup; Ok
+  Drop[$id] ~> $sup ~; Ok
 }
 
 (start, add, drop, watch)

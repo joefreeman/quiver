@@ -14,7 +14,7 @@ fn test_block_evaluation() {
 #[test]
 fn test_block_with_closure() {
     quiver()
-        .evaluate("x = 1; { 2 ~> =y; [x, y] ~> __integer_add__ }")
+        .evaluate("x = 1; { 2 ~> =y; [x, y] ~> __integer_add__ ~ }")
         .expect("3");
 }
 
@@ -26,7 +26,7 @@ fn test_block_with_parameter() {
 #[test]
 fn test_block_with_repeated_parameter() {
     quiver()
-        .evaluate("3 ~> { =x => [x, x] ~> __integer_add__ }")
+        .evaluate("3 ~> { =x => [x, x] ~> __integer_add__ ~ }")
         .expect("6");
 }
 
@@ -48,22 +48,22 @@ fn formatted(source: &str) -> String {
 fn test_format_preserves_behavior() {
     let cases = [
         // redundant block (as a chain term, and as a binding value)
-        ("5 ~> { [~, 1] ~> __integer_add__ }", "6"),
-        ("x = { [3, 4] ~> __integer_add__ }; x", "7"),
+        ("5 ~> { [~, 1] ~> __integer_add__ ~ }", "6"),
+        ("x = { [3, 4] ~> __integer_add__ ~ }; x", "7"),
         // nested redundant blocks
         ("{ { { 9 } } }", "9"),
         // a redundant block inside a narrowed branch
         (
-            "'u = A['int] | B; f = #'u { | =A[x] => { [x, x] ~> __integer_add__ } | =B => 0 }; A[5] ~> f",
+            "'u = A['int] | B; f = #'u { | =A[x] => { [x, x] ~> __integer_add__ ~ } | =B => 0 }; A[5] ~> f ~",
             "10",
         ),
         // a tail call wrapped in a redundant block (TCO must survive)
         (
-            "count = #'int { | =0 => Done | { [~, 1] ~> __integer_subtract__ ~> ^ } }; 100000 ~> count",
+            "count = #'int { | =0 => Done | { [~, 1] ~> __integer_subtract__ ~ ~> ^ ~ } }; 100000 ~> count ~",
             "Done",
         ),
         // `$`-access sugar
-        ("f = #['int, 'int] { $0 }; [7, 8] ~> f", "7"),
+        ("f = #['int, 'int] { $0 }; [7, 8] ~> f ~", "7"),
     ];
     for (source, expected) in cases {
         quiver().evaluate(source).expect(expected);
@@ -80,7 +80,7 @@ fn multi_step_block_is_a_noop() {
     // Every step starts from the block value, so both steps see the 1; the last one is the
     // block's result and the first is dead.
     quiver()
-        .evaluate("1 ~> { [~, 1] ~> __integer_add__; [~, 10] ~> __integer_add__ }")
+        .evaluate("1 ~> { [~, 1] ~> __integer_add__ ~; [~, 10] ~> __integer_add__ ~ }")
         .expect("11");
     // nil short-circuits identically whether or not the steps are wrapped.
     quiver().evaluate("[]; 5").expect("[]");
@@ -90,7 +90,7 @@ fn multi_step_block_is_a_noop() {
     // progress.
     quiver()
         .evaluate(
-            "f = #'int { | =0 => Done | { [~, 1] ~> __integer_subtract__ ~> ^ } }; 100000 ~> f",
+            "f = #'int { | =0 => Done | { [~, 1] ~> __integer_subtract__ ~ ~> ^ ~ } }; 100000 ~> f ~",
         )
         .expect("Done");
 }
@@ -130,14 +130,14 @@ fn fall_through_truncates_block_locals() {
 #[test]
 fn bare_binder_match_does_not_narrow_its_source() {
     quiver()
-        .evaluate("f = #(('int | [])) { $ ~> =y; $ ~> { =[] => 1 | 2 } }; [] ~> f")
+        .evaluate("f = #(('int | [])) { $ ~> =y; $ ~> { =[] => 1 | 2 } }; [] ~> f ~")
         .expect("1");
     quiver()
-        .evaluate("f = #(('int | [])) { $ ~> =y; y ~> =[]; 1 }; [] ~> f")
+        .evaluate("f = #(('int | [])) { $ ~> =y; y ~> =[]; 1 }; [] ~> f ~")
         .expect("1");
     // The sound half stays: a bare access step's result IS the variable, so passing the
     // short-circuit does narrow it (`=x, x, use-x`).
     quiver()
-        .evaluate("g = #'int { =0 => 1 }; 0 ~> g ~> =x; x; [x, 1] ~> __integer_add__")
+        .evaluate("g = #'int { =0 => 1 }; 0 ~> g ~ ~> =x; x; [x, 1] ~> __integer_add__ ~")
         .expect("2");
 }

@@ -545,7 +545,6 @@ fn render_term_atom(term: &Term) -> String {
         Term::Access(access) => render_access(access),
         Term::Self_ => ".".to_string(),
         Term::Process(index) => format!("@{}", index),
-        Term::Reference(access) => format!("&{}", render_access(access)),
         Term::State(access, _) => format!("?{}", render_access(access)),
         // Dialect content is opaque raw text and is preserved verbatim (including newlines):
         // re-indenting it would change what the dialect function receives.
@@ -762,7 +761,7 @@ fn pun_doc(trivia: &Trivia, field: &TupleField) -> Doc {
     let FieldValue::Chain(chain) = &field.value else {
         unreachable!("a punned entry is a chain")
     };
-    let [Term::Reference(path)] = chain.terms.as_slice() else {
+    let [Term::Access(path)] = chain.terms.as_slice() else {
         unreachable!("a punned entry is a lone reference")
     };
     pretty::concat(vec![
@@ -974,8 +973,7 @@ fn select_shorthand(chains: &[Chain]) -> Option<String> {
         return None;
     };
     match term {
-        // `!f`, `!p`, `!%mod.recv`, `!.` — the `&` is part of the sugar.
-        Term::Reference(access) => Some(format!("!{}", render_access(access))),
+        // `!f`, `!p`, `!%mod.recv` — a named source.
         // `!'int`, `!#Reply[...]` — a body-less identity receive.
         Term::Function(function)
             if function.type_parameters.is_empty()
@@ -1454,7 +1452,7 @@ pub(crate) fn render_match(pattern: &Match) -> String {
         Match::Star(None) => "*".to_string(),
         Match::Star(Some(name)) => format!("{}*", name),
         Match::Placeholder => "_".to_string(),
-        Match::Reference(target) => {
+        Match::Pin(target) => {
             let mut out = String::from("&");
             // As in `render_access`, a first accessor on `$` is written dotless (`&$x`, `&$0`).
             let dotless_first = matches!(target.root, PinRoot::Parameter { .. });
@@ -2024,8 +2022,8 @@ mod tests {
         // A consequence that is a single chain breaking into a `~>` pipeline is wrapped in grouping
         // braces, so the continuation reads as a delimited body instead of dangling at the bar.
         assert_formats(
-            "f = #'t { =Cons[[k, val], t] => [&put, d, k, val, k ~> hash, 0] ~> put ~> [&self, ~, t] ~> self | =Nil => d }",
-            "f = #'t {\n  | =Cons[[k, val], t] => {\n    [&put, d, k, val, k ~> hash, 0] ~> put\n    ~> [&self, ~, t] ~> self\n  }\n  | =Nil => d\n}\n",
+            "f = #'t { =Cons[k, t] => dict ~> put_entry ~ ~> normalise ~ ~> rebalance ~ ~> recount ~ ~> settle ~ ~> finish ~ | =Nil => dict }",
+            "f = #'t {\n  | =Cons[k, t] => {\n    dict\n    ~> put_entry ~ ~> normalise ~ ~> rebalance ~ ~> recount ~ ~> settle ~ ~> finish ~\n  }\n  | =Nil => dict\n}\n",
         );
         // A short consequence stays bare (it does not break).
         assert_formats(
@@ -2264,26 +2262,26 @@ mod tests {
             "5 //=> 5",
             "x = f y //=> Ok   the note runs to end of line",
             // --- argument-first application (chain terms joined by `~>`) ---
-            "[3, 4] ~> add ~> [~, 2] ~> mul",
-            "x ~> f",
-            "[[x] ~> g, y] ~> f",
-            "[3, 4] ~> __integer_add__",
-            "&g ~> f",
+            "[3, 4] ~> add ~ ~> [~, 2] ~> mul ~",
+            "x ~> f ~",
+            "[[x] ~> g ~, y] ~> f ~",
+            "[3, 4] ~> __integer_add__ ~",
+            "g ~> f ~",
             "5 ~> f",
             // --- bare ripple (flowing-value) terms: no juxtaposed argument ---
             "5 ~> ~",
             "num ~> ~.add",
-            "&g ~> ^~",
-            "&g ~> @~",
+            "g ~> ^~ []",
+            "g ~> @~ []",
             // --- argument-first tail calls ---
-            "[a, b] ~> ^",
-            "[x] ~> ^foo",
+            "[a, b] ~> ^ ~",
+            "[x] ~> ^foo ~",
             // --- spawn (the block is part of the spawn, so it stays a single term) ---
-            "@f",
-            "@{ 5 }",
+            "@f []",
+            "@{ 5 } []",
             "@'int { $ }",
             "@('int | 'bin) { $ }",
-            "x ~> @counter",
+            "x ~> @counter ~",
             // --- select / process / references ---
             "!'int",
             "!'int ~> { =0 => Ok | [] }",
@@ -2305,10 +2303,10 @@ mod tests {
             "![p, 1000]",
             "!p",
             "![]",
-            "&f",
-            "&.",
-            "&__integer_add__",
-            "42 ~> pid",
+            "f",
+            ".",
+            "__integer_add__",
+            "42 ~> pid ~",
             "@3",
             // --- ripple / spread values ---
             "5 ~> [~, 1]",

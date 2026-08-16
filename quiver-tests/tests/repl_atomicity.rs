@@ -93,7 +93,7 @@ fn split_line_runs_and_chains() {
         Some("Ok")
     );
     assert_eq!(
-        eval_split(&mut environment, &mut repl, "[x, 2] ~> __integer_add__").as_deref(),
+        eval_split(&mut environment, &mut repl, "[x, 2] ~> __integer_add__ ~").as_deref(),
         Some("42")
     );
 }
@@ -105,7 +105,7 @@ fn failed_compile_leaves_session_unpolluted() {
 
     let types = process_types(&mut environment);
     let prepared = repl
-        .prepare(&mut environment, "[x, nope] ~> __integer_add__", types)
+        .prepare(&mut environment, "[x, nope] ~> __integer_add__ ~", types)
         .expect("prepare failed");
     assert!(repl.compile(prepared).is_err());
 

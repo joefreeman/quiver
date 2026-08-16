@@ -7,12 +7,12 @@ fn test_module_import() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["mymath".to_string()],
-        "[add: &__integer_add__]".to_string(),
+        "[add: __integer_add__]".to_string(),
     );
 
     quiver()
         .with_modules(modules)
-        .evaluate("[1, 2] ~> %mymath.add")
+        .evaluate("[1, 2] ~> %mymath.add ~")
         .expect("3");
 }
 
@@ -21,7 +21,7 @@ fn test_destructured_import() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["mymath".to_string()],
-        r#"[add: &__integer_add__, sub: &__integer_subtract__]"#.to_string(),
+        r#"[add: __integer_add__, sub: __integer_subtract__]"#.to_string(),
     );
 
     quiver()
@@ -29,7 +29,7 @@ fn test_destructured_import() {
         .evaluate(
             r#"
             (add, sub) = %mymath;
-            [3, 4] ~> add ~> [~, 2] ~> sub
+            [3, 4] ~> add ~ ~> [~, 2] ~> sub ~
             "#,
         )
         .expect("5");
@@ -40,12 +40,12 @@ fn test_star_import() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["mymath".to_string()],
-        "[add: &__integer_add__]".to_string(),
+        "[add: __integer_add__]".to_string(),
     );
 
     quiver()
         .with_modules(modules)
-        .evaluate("* = %mymath; [3, 4] ~> add")
+        .evaluate("* = %mymath; [3, 4] ~> add ~")
         .expect("7");
 }
 
@@ -54,12 +54,12 @@ fn test_import_function_with_capture() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["capture".to_string()],
-        "x = 42; #{ [x, 2] ~> __integer_multiply__ }".to_string(),
+        "x = 42; #{ [x, 2] ~> __integer_multiply__ ~ }".to_string(),
     );
 
     quiver()
         .with_modules(modules)
-        .evaluate("[] ~> %capture")
+        .evaluate("[] ~> %capture ~")
         .expect("84");
 }
 
@@ -70,15 +70,15 @@ fn test_import_nested_function_captures() {
         vec!["nested".to_string()],
         r#"
         x = 10;
-        inner = #{ [x, 1] ~> __integer_add__ };
-        #{ [] ~> inner ~> [~, 2] ~> __integer_multiply__ }
+        inner = #{ [x, 1] ~> __integer_add__ ~ };
+        #{ [] ~> inner ~ ~> [~, 2] ~> __integer_multiply__ ~ }
         "#
         .to_string(),
     );
 
     quiver()
         .with_modules(modules)
-        .evaluate("[] ~> %nested")
+        .evaluate("[] ~> %nested ~")
         .expect("22");
 }
 
@@ -87,12 +87,12 @@ fn test_import_tuple_with_captured_function() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["tuple_capture".to_string()],
-        "x = 5; y = 3; [x, #{ [x, y] ~> __integer_add__ }, y]".to_string(),
+        "x = 5; y = 3; [x, #{ [x, y] ~> __integer_add__ ~ }, y]".to_string(),
     );
 
     quiver()
         .with_modules(modules)
-        .evaluate("t = %tuple_capture; f = &t.1; [] ~> f")
+        .evaluate("t = %tuple_capture; f = t.1; [] ~> f ~")
         .expect("8");
 }
 
@@ -101,13 +101,13 @@ fn test_multi_level_import_with_captures() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["level1".to_string()],
-        "base = 100; #{ [base, 1] ~> __integer_add__ }".to_string(),
+        "base = 100; #{ [base, 1] ~> __integer_add__ ~ }".to_string(),
     );
     modules.insert(
         vec!["level2".to_string()],
         r#"
         x = 3;
-        #{ [] ~> %level1 ~> [~, x] ~> __integer_multiply__ }
+        #{ [] ~> %level1 ~ ~> [~, x] ~> __integer_multiply__ ~ }
         "#
         .to_string(),
     );
@@ -115,19 +115,19 @@ fn test_multi_level_import_with_captures() {
         vec!["level3".to_string()],
         r#"
         x = 5;
-        [#{ [] ~> %level2 }, #{ [] ~> %level2 ~> [~, x] ~> __integer_add__ }]
+        [#{ [] ~> %level2 ~ }, #{ [] ~> %level2 ~ ~> [~, x] ~> __integer_add__ ~ }]
         "#
         .to_string(),
     );
 
     quiver()
         .with_modules(modules.clone())
-        .evaluate("funcs = %level3; f1 = &funcs.0; [] ~> f1")
+        .evaluate("funcs = %level3; f1 = funcs.0; [] ~> f1 ~")
         .expect("303"); // (100 + 1) * 3 = 303
 
     quiver()
         .with_modules(modules)
-        .evaluate("funcs = %level3; f2 = &funcs.1; [] ~> f2")
+        .evaluate("funcs = %level3; f2 = funcs.1; [] ~> f2 ~")
         .expect("308"); // ((100 + 1) * 3) + 5 = 308
 }
 
@@ -143,8 +143,8 @@ fn test_named_module_type_alias() {
         .evaluate(
             r#"
             'ok = '%types.ok;
-            double = #'ok { =Ok[x] => [x, 2] ~> __integer_multiply__ };
-            Ok[21] ~> double
+            double = #'ok { =Ok[x] => [x, 2] ~> __integer_multiply__ ~ };
+            Ok[21] ~> double ~
             "#,
         )
         .expect("42");
@@ -163,7 +163,7 @@ fn test_named_module_type_inline() {
         .evaluate(
             r#"
             unwrap = #'%types.result { =Ok[x] => x | =Err[x] => 0 };
-            Ok[42] ~> unwrap
+            Ok[42] ~> unwrap ~
             "#,
         )
         .expect("42");
@@ -182,7 +182,7 @@ fn test_default_module_type() {
         .evaluate(
             r#"
             unwrap = #'%result { =Ok[x] => x | =Err[x] => 0 };
-            Ok[42] ~> unwrap
+            Ok[42] ~> unwrap ~
             "#,
         )
         .expect("42");
@@ -249,7 +249,7 @@ fn test_self_default_type_reference() {
             r#"
             ' = Ok['int] | Err['int]
             unwrap = #' { =Ok[x] => x | =Err[_] => 0 }
-            Ok[42] ~> unwrap
+            Ok[42] ~> unwrap ~
             "#,
         )
         .expect("42");
@@ -262,7 +262,7 @@ fn test_self_default_type_parameterised() {
             r#"
             '<'t> = Nil | Cons['t, ^]
             len? = #'<'int> { =Nil => 0 | =Cons[_, _] => 1 }
-            Cons[7, Nil] ~> len?
+            Cons[7, Nil] ~> len? ~
             "#,
         )
         .expect("1");
@@ -276,7 +276,7 @@ fn test_module_ref_minting_rejected() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["tagged".to_string()],
-        r#"tag = %ref; [tag: tag]"#.to_string(),
+        r#"tag = %ref []; [tag: tag]"#.to_string(),
     );
 
     quiver()
@@ -288,7 +288,10 @@ fn test_module_ref_minting_rejected() {
 #[test]
 fn test_module_host_read_rejected() {
     let mut modules = HashMap::new();
-    modules.insert(vec!["stamped".to_string()], "[at: %time.now]".to_string());
+    modules.insert(
+        vec!["stamped".to_string()],
+        "[at: %time.now []]".to_string(),
+    );
 
     quiver()
         .with_modules(modules)
@@ -301,11 +304,11 @@ fn test_module_may_reference_ref_minting_function() {
     // Referencing the minting function is fine — only evaluation-time minting is
     // banned; the ref is minted at runtime, by the importer.
     let mut modules = HashMap::new();
-    modules.insert(vec!["util".to_string()], "[mk: &%ref]".to_string());
+    modules.insert(vec!["util".to_string()], "[mk: %ref]".to_string());
 
     quiver()
         .with_modules(modules)
-        .evaluate("%util.mk ~> ='ref")
+        .evaluate("%util.mk [] ~> ='ref")
         .expect("Ok");
 }
 
@@ -320,22 +323,22 @@ fn test_reexported_closure_with_foreign_capture() {
         let mut modules = HashMap::new();
         modules.insert(
             vec!["a".to_string()],
-            "[inc: #'int { [~, 1] ~> __integer_add__ }]".to_string(),
+            "[inc: #'int { [~, 1] ~> __integer_add__ ~ }]".to_string(),
         );
         modules.insert(
             vec!["b".to_string()],
-            "inc = &%a.inc\n[wrapped: #'int { $ ~> inc }]".to_string(),
+            "inc = %a.inc\n[wrapped: #'int { $ ~> inc ~ }]".to_string(),
         );
-        modules.insert(vec!["c".to_string()], "[go: &%b.wrapped]".to_string());
+        modules.insert(vec!["c".to_string()], "[go: %b.wrapped]".to_string());
         modules
     };
     quiver()
         .with_modules(modules())
-        .evaluate("5 ~> %c.go")
+        .evaluate("5 ~> %c.go ~")
         .expect("6");
     quiver()
         .with_modules(modules())
-        .evaluate("7 ~> %c.go")
+        .evaluate("7 ~> %c.go ~")
         .expect("8");
 }
 
@@ -392,7 +395,7 @@ fn hoisting_through_module_binding() {
     // A member reached through a whole-module binding captures by path; the closure
     // loads its slot rather than re-emitting the member's construction per call.
     quiver()
-        .evaluate("num = %num; f = #'int { num.sub [~, 1] }; 8 ~> f")
+        .evaluate("num = %num; f = #'int { num.sub [~, 1] }; 8 ~> f ~")
         .expect("7");
 }
 
@@ -405,7 +408,7 @@ fn module_spawn_rejected_at_compile_time() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["spawner".to_string()],
-        "p = @#{ 42 }; [x: 1]".to_string(),
+        "p = @#{ 42 } []; [x: 1]".to_string(),
     );
 
     quiver()
@@ -423,7 +426,7 @@ fn module_send_rejected_statically() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["sender".to_string()],
-        "42 ~> .; !'int; [x: 1]".to_string(),
+        "me = .; 42 ~> me ~; !'int; [x: 1]".to_string(),
     );
 
     quiver()

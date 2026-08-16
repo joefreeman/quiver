@@ -17,24 +17,24 @@
 serve = #\File {
   !'command ~> {
     | =Read[offset, length, reply, id] => {
-      __file_read__ [$, offset, length] ~> Reply[id, ~] ~> reply
+      __file_read__ [$, offset, length] ~> Reply[id, ~] ~> reply ~
 
       ^ $
     }
     | =Write[offset, data, reply, id] => {
-      __file_write__ [$, offset, data] ~> Reply[id, ~] ~> reply
+      __file_write__ [$, offset, data] ~> Reply[id, ~] ~> reply ~
 
       ^ $
     }
-    | =Flush[reply, id] => { __file_flush__ $ ~> Reply[id, ~] ~> reply; ^ $ }
+    | =Flush[reply, id] => { __file_flush__ $ ~> Reply[id, ~] ~> reply ~; ^ $ }
     | =Close => __file_close__ $
   }
 }
 
 // Send a read request to a file process and wait for the correlated reply.
 do_read = #[(f): ', (offset): 'int, (length): 'int] {
-  id = %ref
-  Read[$offset, $length, &., id] ~> $f.0
+  id = %ref []
+  Read[$offset, $length, ., id] ~> $f.0 ~
   !Reply['ref, ('bin | [])] { =Reply[&id, _]; Ok } ~> { =Reply[_, data] => data }
 }
 
@@ -91,7 +91,7 @@ lines_step = #[', 'int, 'bin, 'int] {
     // 420 = 0o644, the permission mode used when the file is created (O_CREAT).
     // A failed open answers nil carrying its `:error`, so the caller's sequence stops here.
     __file_open__ [name, flags, 420] ~> =(\File)fd
-    File[fd ~> @serve]
+    File[fd ~> @serve ~]
   },
 
   read: #[(file): ', (offset): 'int, (len): 'int] {
@@ -106,26 +106,26 @@ lines_step = #[', 'int, 'bin, 'int] {
 
   lines: #' {
     :doc "Iterates over the lines of the file, without their trailing newlines."
-    %iter.unfold [[~, 0, 0x, 0], &lines_step]
+    %iter.unfold [[~, 0, 0x, 0], lines_step]
   },
 
   write: #[(file): ', (offset): 'int, (data): 'bin] {
     :doc "Writes data at the given offset, returning the number of bytes written."
-    id = %ref
-    Write[$offset, $data, &., id] ~> $file.0
+    id = %ref []
+    Write[$offset, $data, ., id] ~> $file.0 ~
     !Reply['ref, ('int | [])] { =Reply[&id, _]; Ok } ~> { =Reply[_, written] => written }
   },
 
   flush: #' {
     :doc "Flushes buffered writes durably to disk (fsync), returning Ok once complete."
     =f
-    id = %ref
-    Flush[&., id] ~> f.0
+    id = %ref []
+    Flush[., id] ~> f.0 ~
     !Reply['ref, (Ok | [])] { =Reply[&id, _]; Ok } ~> { =Reply[_, ok] => ok }
   },
 
   close: #' {
     :doc "Closes the file, releasing the descriptor and stopping its process."
-    Close ~> $0; Ok
+    Close ~> $0 ~; Ok
   },
 ]

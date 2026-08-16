@@ -82,7 +82,10 @@ attempt = #[(url): '%url, (method): '%http.method, (headers): '%http.pairs, (bod
   m = $method
   hs = $headers
   b = $body
-  ![@{ exchange [url: u, method: m, headers: hs, body: b] }, $timeout]
+  ![
+    @{ exchange [url: u, method: m, headers: hs, body: b] } [],
+    $timeout
+  ]
 }
 
 // The redirect loop — which only turns where the mediator surfaces redirects (native); a
@@ -120,13 +123,11 @@ follow_loop = #[(url): '%url, (method): '%http.method, (headers): '%http.pairs, 
 
   head: #'%str {
     :doc "A HEAD for the URL, with default headers and timeout."
-    %url.parse $ ~> =('%url)u
-    follow_loop [u, HEAD, Nil, 0x, 30000, 5]
+    %url.parse $ ~> =('%url)u; follow_loop [u, HEAD, Nil, 0x, 30000, 5]
   },
 
   post: #[(url): '%str, (body): 'bin, headers: '%http.pairs = Nil] {
     :doc "A POST of the body to the URL, with the default timeout."
-    %url.parse $url ~> =('%url)u
-    follow_loop [u, POST, $headers, $body, 30000, 5]
+    %url.parse $url ~> =('%url)u; follow_loop [u, POST, $headers, $body, 30000, 5]
   },
 ]

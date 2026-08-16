@@ -138,7 +138,7 @@ fn a_serializing_worker_reaches_the_same_state_as_a_shared_one() {
         ("{ q ~> =&p; 1 | 0 }", Some("Int(1)")),
         // Closures through module combinators: function parameter rows.
         (
-            "%list{1, 2, 3} ~> %list.map [~, #{ %num.mul [$, 2] }] ~> %list.fold [~, init: 0, f: &%num.add]",
+            "%list{1, 2, 3} ~> %list.map [~, #{ %num.mul [$, 2] }] ~> %list.fold [~, init: 0, f: %num.add]",
             Some("Int(12)"),
         ),
         // A second module linked late: additions to rows that already existed.

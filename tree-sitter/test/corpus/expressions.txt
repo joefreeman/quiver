@@ -359,10 +359,10 @@ __integer_add__ [3, 4]
             (integer)))))))
 
 ==================
-reference as an argument
+a function named as an argument
 ==================
 
-map [xs, &double]
+map [xs, double]
 
 ---
 
@@ -377,9 +377,8 @@ map [xs, &double]
             (access
               source: (identifier)))
           (chain
-            (reference
-              (access
-                source: (identifier)))))))))
+            (access
+              source: (identifier))))))))
 
 ==================
 chained juxtaposed applications
@@ -448,11 +447,11 @@ id<'int> 42
         argument: (integer)))))
 
 ==================
-explicit type application on an import member and a reference
+explicit type application on an import member and a name
 ==================
 
 %iter.fold<'int, Str['bin]> [xs, 0, f]
-~> &id<'int>
+~> id<'int>
 
 ---
 
@@ -480,12 +479,11 @@ explicit type application on an import member and a reference
           (chain
             (access
               source: (identifier)))))
-      (reference
-        (access
-          source: (identifier)
-          (type_arguments
-            (type_identifier
-              name: (type_name))))))))
+      (access
+        source: (identifier)
+        (type_arguments
+          (type_identifier
+            name: (type_name)))))))
 
 ==================
 field punning

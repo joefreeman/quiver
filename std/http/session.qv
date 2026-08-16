@@ -45,7 +45,7 @@ get = #[(req): '%http, (key): 'bin] {
 put = #[(resp): '%http.response, (key): 'bin, (sess): 'pairs] {
   :doc "The response with a Set-Cookie header carrying the signed session (Path=/; HttpOnly; SameSite=Lax)."
   payload = %http.form_encode $sess
-  value = "{%bin.to_hex payload}.{%hash.hmac_sha256 [$key, payload] ~> %bin.to_hex}"
+  value = "{%bin.to_hex payload}.{%hash.hmac_sha256 [$key, payload] ~> %bin.to_hex ~}"
 
   h = %http.set_cookie ["session", value, %list{ "Path=/", "HttpOnly", "SameSite=Lax" }]
 

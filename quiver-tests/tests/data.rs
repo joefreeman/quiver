@@ -41,14 +41,14 @@ fn test_encode_rejects_non_data() {
     // Functions, builtins, processes, refs, and resources have no meaning outside the
     // program: encoding one is a runtime error, not a silent placeholder.
     quiver()
-        .evaluate(r#"f = #'int { $ }; %data.encode &f"#)
+        .evaluate(r#"f = #'int { $ }; %data.encode f"#)
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
             "cannot encode a function: %data notation carries data only (integers, \
              binaries, and tuples)"
                 .to_string(),
         ));
     quiver()
-        .evaluate(r#"%data.encode %ref"#)
+        .evaluate(r#"%ref [] ~> %data.encode ~"#)
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
             "cannot encode a ref: %data notation carries data only (integers, \
              binaries, and tuples)"
@@ -60,7 +60,7 @@ fn test_encode_rejects_non_data() {
 fn test_encode_drops_annotations() {
     // Annotations are data *about* the value: invisible to the notation.
     quiver()
-        .evaluate(r#"P[x: 1] ~> { :note "hi" } ~> %data.encode"#)
+        .evaluate(r#"P[x: 1] ~> { :note "hi" } ~> %data.encode ~"#)
         .expect(r#""P[x: 1]""#);
 }
 
@@ -171,7 +171,7 @@ fn test_decode_static_type_and_required_argument() {
         .expect_type("'int | []");
     // An *applied* decode must be instantiated; the requirement follows the member.
     quiver()
-        .evaluate(r#""5" ~> %data.decode"#)
+        .evaluate(r#""5" ~> %data.decode ~"#)
         .expect_compile_error(quiver_compiler::compiler::Error::TypeArgumentsRequired {
             builtin: "data_decode".to_string(),
             declared: 1,
@@ -184,7 +184,7 @@ fn test_round_trip() {
         .evaluate(
             r#"'pt = Point[x: 'int, y: Str['bin], z: (Nil | Cons['int, ^])]
                v = Point[x: -12345678901234567890123, y: "a\"b\\c\{d\ne", z: Cons[1, Cons[2, Nil]]]
-               d = %data.encode v ~> %data.decode<'pt>
+               d = %data.encode v ~> %data.decode<'pt> ~
                [v] ~> { | =[&d] => Same | Different }"#,
         )
         .expect("Same");
@@ -194,7 +194,7 @@ fn test_round_trip() {
 fn test_decode_through_reference_and_binding() {
     // The instantiation rides the value: bind it, pass it, call it later.
     quiver()
-        .evaluate(r#"d = &%data.decode<('int | Quit)>; d "Quit""#)
+        .evaluate(r#"d = %data.decode<('int | Quit)>; d "Quit""#)
         .expect("Quit");
 }
 
@@ -216,10 +216,10 @@ fn test_decoded_values_dispatch_through_sibling_patterns() {
                  }
                }
                [
-                 %data.decode<Ev['wire]> "Ev[Submit]" ~> f,
-                 %data.decode<Ev['wire]> "Ev[Toggle[1]]" ~> f,
-                 %data.decode<Ev['wire]> "Ev[Del[7]]" ~> f,
-                 %data.decode<Ev['wire]> "garbage" ~> f,
+                 %data.decode<Ev['wire]> "Ev[Submit]" ~> f ~,
+                 %data.decode<Ev['wire]> "Ev[Toggle[1]]" ~> f ~,
+                 %data.decode<Ev['wire]> "Ev[Del[7]]" ~> f ~,
+                 %data.decode<Ev['wire]> "garbage" ~> f ~,
                ]"#,
         )
         .expect("[S, T[1], D[7], Missed]");

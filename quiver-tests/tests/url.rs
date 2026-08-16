@@ -5,7 +5,7 @@ use common::*;
 // no host capability is involved, so these run on a bare registry.
 
 const PARTS: &str = r#"parts = #'%str {
-      %url.parse ~> =('%url)u
+      %url.parse ~ ~> =('%url)u
       [u.scheme, u.host, u.port, u.path, u.query, u.fragment]
     }
     "#;
@@ -61,10 +61,10 @@ fn test_parse_rejects_malformed_input() {
 #[test]
 fn test_format_omits_a_default_port_and_round_trips() {
     quiver()
-        .evaluate(r#""https://e.com:443/p" ~> %url.parse ~> =('%url)u; %url.format u"#)
+        .evaluate(r#""https://e.com:443/p" ~> %url.parse ~ ~> =('%url)u; %url.format u"#)
         .expect(r#""https://e.com/p""#);
     quiver()
-        .evaluate(r#""http://e.com:8080/p?q#f" ~> %url.parse ~> =('%url)u; %url.format u"#)
+        .evaluate(r#""http://e.com:8080/p?q#f" ~> %url.parse ~ ~> =('%url)u; %url.format u"#)
         .expect(r#""http://e.com:8080/p?q#f""#);
 }
 
@@ -72,17 +72,17 @@ fn test_format_omits_a_default_port_and_round_trips() {
 fn test_target_is_path_and_query_only() {
     // What goes in the request line — never the scheme, host or fragment.
     quiver()
-        .evaluate(r#""http://e.com/a?x=1#frag" ~> %url.parse ~> =('%url)u; %url.target u"#)
+        .evaluate(r#""http://e.com/a?x=1#frag" ~> %url.parse ~ ~> =('%url)u; %url.target u"#)
         .expect(r#""/a?x=1""#);
     quiver()
-        .evaluate(r#""http://e.com/a" ~> %url.parse ~> =('%url)u; %url.target u"#)
+        .evaluate(r#""http://e.com/a" ~> %url.parse ~ ~> =('%url)u; %url.target u"#)
         .expect(r#""/a""#);
 }
 
 #[test]
 fn test_resolve_covers_the_reference_forms_a_redirect_uses() {
     let resolve = r#"res = #'%str {
-          "http://example.com/a/b?x=1#f" ~> %url.parse ~> =('%url)base
+          "http://example.com/a/b?x=1#f" ~> %url.parse ~ ~> =('%url)base
           %url.resolve [base, $] ~> =('%url)u
           %url.format u
         }

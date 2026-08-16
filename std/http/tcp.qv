@@ -63,7 +63,7 @@ exchange = #[(url): '%url, (request): '%http] {
 }
 
 [
-  request: &exchange ~> {
+  request: exchange ~> {
     :doc "Performs one HTTP/1.1 exchange over TCP: resolve, connect, send, read the response, close. https:// upgrades the socket via %tls, verifying against the host's default anchors. A request lacking a Host header gains the URL's authority. Nil (carrying :error) on any failure."
   },
 ]

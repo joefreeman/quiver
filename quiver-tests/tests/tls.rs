@@ -183,7 +183,7 @@ fn test_a_failed_handshake_closes_the_socket() {
           %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
           { %tls.attach [socket: s, hostname: "localhost", roots: __DECOY__] => [] | Ok }
           %tcp.read [s, 1]
-        }
+        } []
         !p ~> :((message: Str['bin]))crash ~> =(message: m)
         %str.contains? [m, "not found"]
         "#,
@@ -264,7 +264,7 @@ fn test_tls_accept_serves_an_in_language_client() {
               %tcp.write [c, msg]
               %tcp.close c
               Done
-            }
+            } []
             // The server races the connect: retry (bounded) until its listener is up.
             connect = #'int {
               | %tcp.connect [0x7f000001, 4381] ~> =(\TcpSocket)c => c
@@ -305,9 +305,9 @@ fn test_https_serves_via_http_server() {
             }
             handler = #'%http { %http/server.text "secure hello" }
             @{
-              [port: 4382, handler: &handler, tls: [cert: __CERT__, key: __KEY__]]
-              ~> %http/server.serve
-            }
+              [port: 4382, handler: handler, tls: [cert: __CERT__, key: __KEY__]]
+              ~> %http/server.serve ~
+            } []
             // The server races the connect: retry (bounded) until it accepts and shakes
             // hands — a refused or half-up connection answers nil, and we go again.
             connect = #'int {

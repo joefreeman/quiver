@@ -83,7 +83,7 @@ fn test_consequence_ripple_fallback_branch() {
         .evaluate(
             r#"
             ok? = #'int { =0 => Ok };
-            5 ~> { | ok? => [~, 1] | [~, 2] }
+            5 ~> { | ok? ~ => [~, 1] | [~, 2] }
             "#,
         )
         .expect("[5, 2]");

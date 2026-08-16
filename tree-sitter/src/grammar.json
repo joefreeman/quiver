@@ -684,10 +684,6 @@
         },
         {
           "type": "SYMBOL",
-          "name": "reference"
-        },
-        {
-          "type": "SYMBOL",
           "name": "select"
         },
         {
@@ -1733,36 +1729,6 @@
         ]
       }
     },
-    "reference": {
-      "type": "PREC_RIGHT",
-      "value": 0,
-      "content": {
-        "type": "SEQ",
-        "members": [
-          {
-            "type": "STRING",
-            "value": "&"
-          },
-          {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "SYMBOL",
-                "name": "self"
-              },
-              {
-                "type": "SYMBOL",
-                "name": "builtin"
-              },
-              {
-                "type": "SYMBOL",
-                "name": "access"
-              }
-            ]
-          }
-        ]
-      }
-    },
     "self": {
       "type": "PREC",
       "value": -1,
@@ -2300,11 +2266,11 @@
                   },
                   {
                     "type": "SYMBOL",
-                    "name": "access"
+                    "name": "function"
                   },
                   {
                     "type": "SYMBOL",
-                    "name": "reference"
+                    "name": "access"
                   }
                 ]
               },
@@ -3165,18 +3131,6 @@
         "type": "SEQ",
         "members": [
           {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "STRING",
-                "value": "&"
-              },
-              {
-                "type": "BLANK"
-              }
-            ]
-          },
-          {
             "type": "FIELD",
             "name": "source",
             "content": {
@@ -3509,8 +3463,32 @@
       }
     },
     "star": {
-      "type": "STRING",
-      "value": "*"
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "name",
+              "content": {
+                "type": "SYMBOL",
+                "name": "tuple_name"
+              }
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "IMMEDIATE_TOKEN",
+          "content": {
+            "type": "STRING",
+            "value": "*"
+          }
+        }
+      ]
     },
     "placeholder": {
       "type": "STRING",
@@ -4232,6 +4210,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "intersection_type"
+        },
+        {
+          "type": "SYMBOL",
           "name": "_type_atom"
         }
       ]
@@ -4401,8 +4383,17 @@
           ]
         },
         {
-          "type": "SYMBOL",
-          "name": "_type_atom"
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "intersection_type"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "_type_atom"
+            }
+          ]
         },
         {
           "type": "REPEAT1",
@@ -4424,6 +4415,52 @@
               {
                 "type": "STRING",
                 "value": "|"
+              },
+              {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "_nl"
+                  },
+                  {
+                    "type": "BLANK"
+                  }
+                ]
+              },
+              {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "intersection_type"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "_type_atom"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "intersection_type": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_type_atom"
+        },
+        {
+          "type": "REPEAT1",
+          "content": {
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "&"
               },
               {
                 "type": "CHOICE",
@@ -5817,10 +5854,6 @@
     ],
     [
       "_access_source",
-      "pattern_pin"
-    ],
-    [
-      "_access_source",
       "spread_update"
     ],
     [
@@ -5876,10 +5909,6 @@
       "pun",
       "_pattern",
       "_partial_field"
-    ],
-    [
-      "pun",
-      "pattern_pin"
     ],
     [
       "annotation",

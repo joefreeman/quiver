@@ -176,7 +176,7 @@ fn test_marked_and_unmarked_spellings_are_one_type() {
             'plain = [foo: 'int]
             make = #'plain { $ }
             take = #'marked { $foo }
-            make [foo: 5] ~> take
+            make [foo: 5] ~> take ~
             "#,
         )
         .expect("5");
@@ -206,7 +206,7 @@ fn test_apply_argument_callable_adoption() {
     quiver()
         .evaluate(
             "f = #[(a): 'int, (b): 'int] { %num.sub [$a, $b] }; wrap = #'int { [$, $] }; \
-             [10, 3] ~> wrap f",
+             [10, 3] ~> f ~ ~> wrap ~",
         )
         .expect("[7, 7]");
 }

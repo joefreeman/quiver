@@ -5,30 +5,34 @@ use common::*;
 
 #[test]
 fn test_parse_int() {
-    quiver().evaluate("\"42\" ~> %str.parse_int").expect("42");
-    quiver().evaluate("\"-17\" ~> %str.parse_int").expect("-17");
-    quiver().evaluate("\"0\" ~> %str.parse_int").expect("0");
+    quiver().evaluate("\"42\" ~> %str.parse_int ~").expect("42");
+    quiver()
+        .evaluate("\"-17\" ~> %str.parse_int ~")
+        .expect("-17");
+    quiver().evaluate("\"0\" ~> %str.parse_int ~").expect("0");
 }
 
 #[test]
 fn test_parse_int_rejects_garbage() {
     quiver()
-        .evaluate("\"4x\" ~> %str.parse_int ~> { =[] => No | Yes }")
+        .evaluate("\"4x\" ~> %str.parse_int ~ ~> { =[] => No | Yes }")
         .expect("No");
     quiver()
-        .evaluate("\"\" ~> %str.parse_int ~> { =[] => No | Yes }")
+        .evaluate("\"\" ~> %str.parse_int ~ ~> { =[] => No | Yes }")
         .expect("No");
     quiver()
-        .evaluate("\"-\" ~> %str.parse_int ~> { =[] => No | Yes }")
+        .evaluate("\"-\" ~> %str.parse_int ~ ~> { =[] => No | Yes }")
         .expect("No");
 }
 
 #[test]
 fn test_from_int() {
-    quiver().evaluate("0 ~> %str.from_int").expect("\"0\"");
-    quiver().evaluate("-17 ~> %str.from_int").expect("\"-17\"");
+    quiver().evaluate("0 ~> %str.from_int ~").expect("\"0\"");
     quiver()
-        .evaluate("1000 ~> %str.from_int")
+        .evaluate("-17 ~> %str.from_int ~")
+        .expect("\"-17\"");
+    quiver()
+        .evaluate("1000 ~> %str.from_int ~")
         .expect("\"1000\"");
 }
 
@@ -37,27 +41,27 @@ fn test_from_int() {
 #[test]
 fn test_int_parser() {
     quiver()
-        .evaluate("[\"42\", &%parse.int] ~> %parse.run")
+        .evaluate("[\"42\", %parse.int] ~> %parse.run ~")
         .expect("42");
     quiver()
-        .evaluate("[\"-7\", &%parse.int] ~> %parse.run")
+        .evaluate("[\"-7\", %parse.int] ~> %parse.run ~")
         .expect("-7");
 }
 
 #[test]
 fn test_ident_and_quoted() {
     quiver()
-        .evaluate("[\"hello_1\", &%parse.ident] ~> %parse.run")
+        .evaluate("[\"hello_1\", %parse.ident] ~> %parse.run ~")
         .expect("\"hello_1\"");
     quiver()
-        .evaluate(r#"["\"hi\"", &%parse.quoted] ~> %parse.run"#)
+        .evaluate(r#"["\"hi\"", &%parse.quoted] ~> %parse.run ~"#)
         .expect("\"hi\"");
 }
 
 #[test]
 fn test_literal() {
     quiver()
-        .evaluate("p = [\"let\", \"'let'\"] ~> %parse.literal; [\"let\", &p] ~> %parse.run")
+        .evaluate("p = [\"let\", \"'let'\"] ~> %parse.literal ~; [\"let\", p] ~> %parse.run ~")
         .expect("Ok");
 }
 
@@ -67,7 +71,7 @@ fn test_run_requires_end_of_input() {
         .evaluate(
             r#"
             'e = Expected[offset: 'int, message: Str['bin]]
-            r = ["12x", &%parse.int] ~> %parse.run
+            r = ["12x", %parse.int] ~> %parse.run ~
             { | r:('e)error ~> =Expected(offset: 2) => Pass | Fail }
             "#,
         )
@@ -81,10 +85,10 @@ fn test_sep_by_and_between() {
     quiver()
         .evaluate(
             r#"
-            comma = [44, "','"] ~> %parse.byte
-            elems = [&%parse.int, &comma] ~> %parse.sep_by
-            p = [[91, "'['"] ~> %parse.byte, &elems, [93, "']'"] ~> %parse.byte] ~> %parse.between
-            ["[1,2,3]", &p] ~> %parse.run
+            comma = [44, "','"] ~> %parse.byte ~
+            elems = [%parse.int, comma] ~> %parse.sep_by ~
+            p = [[91, "'['"] ~> %parse.byte ~, elems, [93, "']'"] ~> %parse.byte ~] ~> %parse.between ~
+            ["[1,2,3]", p] ~> %parse.run ~
             "#,
         )
         .expect("Cons[1, Cons[2, Cons[3, Nil]]]");
@@ -95,10 +99,10 @@ fn test_sep_by_backtracks_trailing_separator() {
     quiver()
         .evaluate(
             r#"
-            comma = [44, "','"] ~> %parse.byte
-            elems = [&%parse.int, &comma] ~> %parse.sep_by
-            trailing = [&elems, &comma ~> %parse.opt] ~> %parse.left
-            ["1,2,", &trailing] ~> %parse.run
+            comma = [44, "','"] ~> %parse.byte ~
+            elems = [%parse.int, comma] ~> %parse.sep_by ~
+            trailing = [elems, comma ~> %parse.opt ~] ~> %parse.left ~
+            ["1,2,", trailing] ~> %parse.run ~
             "#,
         )
         .expect("Cons[1, Cons[2, Nil]]");
@@ -110,8 +114,8 @@ fn test_alt_keeps_furthest_failure() {
         .evaluate(
             r#"
             'e = Expected[offset: 'int, message: Str['bin]]
-            p = [&%parse.int, &%parse.quoted] ~> %parse.alt2
-            r = ["\"ab", &p] ~> %parse.run
+            p = [%parse.int, %parse.quoted] ~> %parse.alt2 ~
+            r = ["\"ab", &p] ~> %parse.run ~
             { | r:('e)error ~> =Expected(offset: 3) => Pass | Fail }
             "#,
         )
@@ -123,9 +127,9 @@ fn test_many0() {
     quiver()
         .evaluate(
             r#"
-            digit = [&%parse.int, [59, "';'"] ~> %parse.byte] ~> %parse.left
-            p = &digit ~> %parse.many0
-            ["1;2;", &p] ~> %parse.run
+            digit = [%parse.int, [59, "';'"] ~> %parse.byte ~] ~> %parse.left ~
+            p = digit ~> %parse.many0 ~
+            ["1;2;", p] ~> %parse.run ~
             "#,
         )
         .expect("Cons[1, Cons[2, Nil]]");
@@ -136,9 +140,9 @@ fn test_chainl_left_associativity() {
     quiver()
         .evaluate(
             r#"
-            sub_op = [[45, "'-'"] ~> %parse.byte, #{ &__integer_subtract__ }] ~> %parse.map
-            p = [&%parse.int, &sub_op] ~> %parse.chainl
-            ["10-3-2", &p] ~> %parse.run
+            sub_op = [[45, "'-'"] ~> %parse.byte ~, #{ __integer_subtract__ }] ~> %parse.map ~
+            p = [%parse.int, sub_op] ~> %parse.chainl ~
+            ["10-3-2", p] ~> %parse.run ~
             "#,
         )
         .expect("5");
@@ -150,8 +154,8 @@ fn test_label_replaces_message() {
         .evaluate(
             r#"
             'e = Expected[offset: 'int, message: Str['bin]]
-            p = [&%parse.int, "a count"] ~> %parse.label
-            r = ["x", &p] ~> %parse.run
+            p = [%parse.int, "a count"] ~> %parse.label ~
+            r = ["x", p] ~> %parse.run ~
             { | r:('e)error ~> =Expected(message: "a count") => Pass | Fail }
             "#,
         )
@@ -165,12 +169,12 @@ fn test_rec_ties_a_recursive_grammar() {
             r#"
             value = #['%parse.p<'int>, '%parse] {
               =[v, st]
-              p1 = [[40, "'('"] ~> %parse.byte, &v] ~> %parse.right
-              paren = [&p1, [41, "')'"] ~> %parse.byte] ~> %parse.left
-              core = [&%parse.int, &paren] ~> %parse.alt2
-              st ~> core
-            } ~> %parse.rec
-            ["((7))", &value] ~> %parse.run
+              p1 = [[40, "'('"] ~> %parse.byte ~, v] ~> %parse.right ~
+              paren = [p1, [41, "')'"] ~> %parse.byte ~] ~> %parse.left ~
+              core = [%parse.int, paren] ~> %parse.alt2 ~
+              st ~> core ~
+            } ~> %parse.rec ~
+            ["((7))", value] ~> %parse.run ~
             "#,
         )
         .expect("7");
@@ -182,8 +186,8 @@ fn test_sep_by_nullable_parsers_terminate() {
     quiver()
         .evaluate(
             r#"
-            p = [&%parse.ws, &%parse.ws] ~> %parse.sep_by
-            ["abc", &p] ~> %parse.run ~> { =[] => Terminated | Fail }
+            p = [%parse.ws, %parse.ws] ~> %parse.sep_by ~
+            ["abc", p] ~> %parse.run ~ ~> { =[] => Terminated | Fail }
             "#,
         )
         .expect("Terminated");
@@ -196,9 +200,9 @@ fn test_many0_zero_width_match_has_no_phantom_element() {
     quiver()
         .evaluate(
             r#"
-            digit? = #'int { [$, 48] ~> __integer_compare__ ~> =(0 | 1); [$, 57] ~> __integer_compare__ ~> =(-1 | 0); Ok }
-            p = &digit? ~> %parse.take_while ~> %parse.many0
-            ["12", &p] ~> %parse.run
+            digit? = #'int { [$, 48] ~> __integer_compare__ ~ ~> =(0 | 1); [$, 57] ~> __integer_compare__ ~ ~> =(-1 | 0); Ok }
+            p = digit? ~> %parse.take_while ~ ~> %parse.many0 ~
+            ["12", p] ~> %parse.run ~
             "#,
         )
         .expect("Cons[0x3132, Nil]");
@@ -210,11 +214,11 @@ fn test_chainl_nullable_operator_terminates() {
     quiver()
         .evaluate(
             r#"
-            digit? = #'int { [$, 48] ~> __integer_compare__ ~> =(0 | 1); [$, 57] ~> __integer_compare__ ~> =(-1 | 0); Ok }
-            p = &digit? ~> %parse.take_while
-            op = [&%parse.ws, #{ &%bin.concat }] ~> %parse.map
-            c = [&p, &op] ~> %parse.chainl
-            ["57", &c] ~> %parse.run
+            digit? = #'int { [$, 48] ~> __integer_compare__ ~ ~> =(0 | 1); [$, 57] ~> __integer_compare__ ~ ~> =(-1 | 0); Ok }
+            p = digit? ~> %parse.take_while ~
+            op = [%parse.ws, #{ %bin.concat }] ~> %parse.map ~
+            c = [p, op] ~> %parse.chainl ~
+            ["57", c] ~> %parse.run ~
             "#,
         )
         .expect("0x3537");
@@ -224,23 +228,23 @@ fn test_chainl_nullable_operator_terminates() {
 fn test_ident_accepts_host_identifier_grammar() {
     // Uppercase letters after the first character, and `?` then `!` suffixes.
     quiver()
-        .evaluate(r#"["xY_9z", &%parse.ident] ~> %parse.run"#)
+        .evaluate(r#"["xY_9z", %parse.ident] ~> %parse.run ~"#)
         .expect("\"xY_9z\"");
     quiver()
-        .evaluate(r#"["valid?", &%parse.ident] ~> %parse.run"#)
+        .evaluate(r#"["valid?", %parse.ident] ~> %parse.run ~"#)
         .expect("\"valid?\"");
     quiver()
-        .evaluate(r#"["go!", &%parse.ident] ~> %parse.run"#)
+        .evaluate(r#"["go!", %parse.ident] ~> %parse.run ~"#)
         .expect("\"go!\"");
     quiver()
-        .evaluate(r#"["ok?!", &%parse.ident] ~> %parse.run"#)
+        .evaluate(r#"["ok?!", %parse.ident] ~> %parse.run ~"#)
         .expect("\"ok?!\"");
 }
 
 #[test]
 fn test_quoted_backspace_and_formfeed_escapes() {
     quiver()
-        .evaluate(r#"["\"a\\b\\f\"", &%parse.quoted] ~> %parse.run ~> =Str[b]; b"#)
+        .evaluate(r#"["\"a\\b\\f\"", &%parse.quoted] ~> %parse.run ~ ~> =Str[b]; b"#)
         .expect("0x61080c");
 }
 
@@ -252,9 +256,9 @@ fn test_sep_by_keeps_furthest_failure_through_backtracking() {
         .evaluate(
             r#"
             'e = Expected[offset: 'int, message: Str['bin]]
-            comma = [44, "','"] ~> %parse.byte
-            elems = [&%parse.int, &comma] ~> %parse.sep_by
-            r = ["1,2,x", &elems] ~> %parse.run
+            comma = [44, "','"] ~> %parse.byte ~
+            elems = [%parse.int, comma] ~> %parse.sep_by ~
+            r = ["1,2,x", elems] ~> %parse.run ~
             { | r:('e)error ~> =Expected(offset: 4, message: "a number") => Pass | Fail }
             "#,
         )
@@ -269,9 +273,9 @@ fn test_opt_keeps_furthest_failure_through_backtracking() {
         .evaluate(
             r#"
             'e = Expected[offset: 'int, message: Str['bin]]
-            ab_cd = [["ab", "'ab'"] ~> %parse.literal, ["cd", "'cd'"] ~> %parse.literal] ~> %parse.then
-            p = &ab_cd ~> %parse.opt
-            r = ["abx", &p] ~> %parse.run
+            ab_cd = [["ab", "'ab'"] ~> %parse.literal ~, ["cd", "'cd'"] ~> %parse.literal ~] ~> %parse.then ~
+            p = ab_cd ~> %parse.opt ~
+            r = ["abx", p] ~> %parse.run ~
             { | r:('e)error ~> =Expected(offset: 2, message: "'cd'") => Pass | Fail }
             "#,
         )

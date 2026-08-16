@@ -42,10 +42,11 @@ fn test_trailing_comma_allowed() {
 
 #[test]
 fn test_bracket_field_calls_where_a_pun_references() {
-    // The contrast that defines the form: a field holds an expression, so the nilary `f` is
-    // called and the field lands on its result; a pun holds a name, so the field is the
-    // function itself — recovered here by applying it.
-    quiver().evaluate("f = #[] { 1 }; [f: f]").expect("[f: 1]");
+    // A field holds an expression and a pun holds a name, but neither calls: both land on
+    // the function itself, recovered here by applying it.
+    quiver()
+        .evaluate("f = #[] { 1 }; [f: f] ~> .f ~> ~ []")
+        .expect("1");
     quiver()
         .evaluate("f = #[] { 1 }; (f) ~> .f ~> ~ []")
         .expect("1");
@@ -56,24 +57,21 @@ fn test_leading_ampersand_accepted_and_redundant() {
     // `&` says what a pun already means, so it is allowed (shortening `[f: &f]` by deleting
     // the label alone) and carries no information; the formatter drops it.
     quiver()
-        .evaluate("f = #[] { 1 }; g = #[] { 2 }; (&f, &g) ~> .g ~> ~ []")
+        .evaluate("f = #[] { 1 }; g = #[] { 2 }; (f, g) ~> .g ~> ~ []")
         .expect("2");
 }
 
 #[test]
 fn test_record_of_functions_is_callable_through_the_field() {
     quiver()
-        .evaluate("inc = #'int { __integer_add__ [~, 1] }; r = (inc); 10 ~> r.inc")
+        .evaluate("inc = #'int { __integer_add__ [~, 1] }; r = (inc); 10 ~> r.inc ~")
         .expect("11");
 }
 
 #[test]
 fn test_flowing_value_does_not_reach_a_pun() {
-    // The bracket-tuple form calls `f` with the 5; the punned form must not — so the pun
-    // reads the flowing value nowhere, and piping into one discards it.
-    quiver()
-        .evaluate("f = #'int { __integer_add__ [~, 1] }; 5 ~> [f: f]")
-        .expect("[f: 6]");
+    // A pun reads the flowing value nowhere, so piping into one discards it — as piping
+    // into any tuple whose fields all ignore it does.
     quiver()
         .evaluate("f = #'int { __integer_add__ [~, 1] }; 5 ~> (f)")
         .expect_compile_error(quiver_compiler::compiler::Error::DiscardedChainValue);
@@ -115,7 +113,7 @@ fn test_nested_path_takes_final_segment() {
 #[test]
 fn test_import_member_pun() {
     quiver()
-        .evaluate("r = (%num.add); [3, 4] ~> r.add")
+        .evaluate("r = (%num.add); [3, 4] ~> r.add ~")
         .expect("7");
 }
 
@@ -138,7 +136,7 @@ fn test_pun_as_call_argument() {
 #[test]
 fn test_pun_piped_into_a_call() {
     quiver()
-        .evaluate("f = #[a: 'int, b: 'int] { $b }; a = 3; b = 4; (a, b) ~> f")
+        .evaluate("f = #[a: 'int, b: 'int] { $b }; a = 3; b = 4; (a, b) ~> f ~")
         .expect("4");
 }
 

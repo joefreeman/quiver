@@ -46,7 +46,7 @@ line_step = #['state, '%str] {
     }
     | =State[blocks: bs, cur: Cur[label: label, body: body]] => {
         | end_label line ~> =('%str)end => {
-          | end ~> =&label; Str[body] ~> %bin.from_base64 ~> =('bin)der => State[
+          | end ~> =&label; Str[body] ~> %bin.from_base64 ~ ~> =('bin)der => State[
             blocks: Cons[[label: label, der: der], bs],
             cur: Nil,
           ]
@@ -64,12 +64,12 @@ parse = #'%str {
   %str.split [
     $,
     "\n",
-  ] ~> %iter.fold [~, State[blocks: Nil, cur: Nil], &line_step] ~> =State[blocks: bs, cur: Nil]
+  ] ~> %iter.fold [~, State[blocks: Nil, cur: Nil], line_step] ~> =State[blocks: bs, cur: Nil]
   %list.reverse bs
 }
 
 [
-  blocks: &parse ~> {
+  blocks: parse ~> {
     :doc "Every PEM block in the text as [label, der], in order; nil when malformed (a mismatched END, an unterminated block, a body that is not base64). Text outside blocks is ignored."
   },
 

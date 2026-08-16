@@ -124,7 +124,7 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Term::Match(pattern) => {
                 // Match patterns can define variables or reference them (via &)
-                // We need to traverse the pattern to find Match::Reference nodes
+                // We need to traverse the pattern to find pin nodes
                 self.visit_match(pattern);
             }
             ast::Term::Block(block) => {
@@ -165,12 +165,8 @@ impl<'a> FreeVariableCollector<'a> {
                     }
                 }
             }
-            ast::Term::Reference(access) => {
-                // Reference to a value - same variable capture as Access
-                self.visit_access_capture(access);
-            }
             ast::Term::State(access, _) => {
-                // `?('t)p` references its target without calling it — same capture as `&p`.
+                // `?('t)p` names its target without calling it — the same capture as any name.
                 self.visit_access_capture(access);
             }
             // Dialects are expanded before capture collection (`compile_function`), so an
@@ -259,7 +255,7 @@ impl<'a> FreeVariableCollector<'a> {
 
     fn visit_match(&mut self, pattern: &ast::Match) {
         match pattern {
-            ast::Match::Reference(target) => {
+            ast::Match::Pin(target) => {
                 // `&name` / `&name.field` reference an existing variable (with its access path,
                 // so a closure captures exactly what expression accesses would); `&$$x` is an
                 // outer-parameter reference and captures like the expression `$$x`. An own-`$`

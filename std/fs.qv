@@ -33,8 +33,7 @@ walk_step = #'walk {
 // failure keeping its payload on the way out.
 stat = #'%str {
   .0
-  ~> __filesystem_stat__
-  ~> =[k, size, modified, mode]
+  ~> __filesystem_stat__ ~ ~> =[k, size, modified, mode]
 
   Stat[kind: k, size: size, modified: modified, mode: mode]
 }
@@ -44,26 +43,26 @@ stat = #'%str {
   // The underlying directory handle is closed automatically once the iterator is exhausted.
   list: #'%str {
     :doc "Lazily iterates the entries of a directory, yielding an Entry (name and kind) each. A failure ends the iteration carrying its :error — collect with %list.try_collect to see it rather than a short list."
-    .0 ~> __directory_read__ ~> %iter.unfold [~, &walk_step]
+    .0 ~> __directory_read__ ~ ~> %iter.unfold [~, walk_step]
   },
 
   stat: #'%str {
     :doc "Metadata for a path, following symlinks, or nil when it does not exist — or when the lookup failed, which the nil's :error payload distinguishes."
-    stat
+    stat ~
   },
 
   exists?: #'%str {
     :doc "Whether a path exists. Nil both when it does not and when the lookup failed; probe the :error payload to tell them apart."
-    stat => Ok
+    stat ~ => Ok
   },
 
   dir?: #'%str {
     :doc "Whether a path exists and is a directory."
-    stat ~> =(kind: Dir) => Ok
+    stat ~ ~> =(kind: Dir) => Ok
   },
 
   file?: #'%str {
     :doc "Whether a path exists and is a regular file."
-    stat ~> =(kind: File) => Ok
+    stat ~ ~> =(kind: File) => Ok
   },
 ]

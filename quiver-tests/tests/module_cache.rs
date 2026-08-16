@@ -18,11 +18,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// cached module (dispatch-table restore) and union folding of members differing
 /// only by annotation row — the shapes that regressed under cache reuse before.
 const BODY: &str = r#"
-    comma = [44, "','"] ~> %parse.byte
-    elems = [&%parse.int, &comma] ~> %parse.sep_by
-    a1 = [[91, "'['"] ~> %parse.byte, &elems] ~> %parse.right
-    a3 = [&a1, [93, "']'"] ~> %parse.byte] ~> %parse.left
-    %parse.map [&a3, #{ $ }]
+    comma = [44, "','"] ~> %parse.byte ~
+    elems = [%parse.int, comma] ~> %parse.sep_by ~
+    a1 = [[91, "'['"] ~> %parse.byte ~, elems] ~> %parse.right ~
+    a3 = [a1, [93, "']'"] ~> %parse.byte ~] ~> %parse.left ~
+    %parse.map [a3, #{ $ }]
 "#;
 
 const EXPECTED: &str = "#P[data: 'bin, pos: 'int, len: 'int, err: (Expected[offset: 'int, message: Str['bin]] | [])] -> ([(Cons['int, μ1] | Nil), P[data: 'bin, pos: 'int, len: 'int, err: (Expected[offset: 'int, message: Str['bin]] | [])]] | [])";
@@ -143,20 +143,20 @@ fn fresh_compile_baseline() {
 
 #[test]
 fn reused_from_direct_import() {
-    let warm = session(false, Some(r#"p = [44, "','"] ~> %parse.byte; Ok"#));
+    let warm = session(false, Some(r#"p = [44, "','"] ~> %parse.byte ~; Ok"#));
     assert_eq!(warm, EXPECTED);
 }
 
 #[test]
 fn reused_from_direct_import_debug() {
-    let warm = session(true, Some(r#"p = [44, "','"] ~> %parse.byte; Ok"#));
+    let warm = session(true, Some(r#"p = [44, "','"] ~> %parse.byte ~; Ok"#));
     assert_eq!(warm, EXPECTED);
 }
 
 #[test]
 fn reused_from_nested_import_via_list() {
     // %parse cached while compiling %list — the cache entry a nested import builds.
-    let warm = session(false, Some(r#"l = %list.new; Ok"#));
+    let warm = session(false, Some(r#"l = %list.new []; Ok"#));
     assert_eq!(warm, EXPECTED);
 }
 
@@ -172,7 +172,7 @@ fn reused_through_shared_store() {
     // into the harness's artifact store, the second links a fresh REPL from it.
     quiver()
         .debug()
-        .evaluate(r#"p = [44, "','"] ~> %parse.byte; Ok"#)
+        .evaluate(r#"p = [44, "','"] ~> %parse.byte ~; Ok"#)
         .expect("Ok");
     quiver().debug().evaluate(BODY).expect_type(EXPECTED);
 }
@@ -181,13 +181,13 @@ fn reused_through_shared_store() {
 fn reused_after_member_reference() {
     // Line 1 binds a *reference* to a module member (no call) — the shape recorded
     // as diverging when this repro was first captured.
-    let warm = session(false, Some(r#"p = &%parse.int; Ok"#));
+    let warm = session(false, Some(r#"p = %parse.int; Ok"#));
     assert_eq!(warm, EXPECTED);
 }
 
 #[test]
 fn reused_after_member_reference_debug() {
-    let warm = session(true, Some(r#"p = &%parse.int; Ok"#));
+    let warm = session(true, Some(r#"p = %parse.int; Ok"#));
     assert_eq!(warm, EXPECTED);
 }
 
@@ -339,8 +339,8 @@ fn a_dependency_change_rekeys_its_dependents_import() {
         modules.insert(vec!["b".to_string()], "[g: #'int { %a.f $ }]".to_string());
         project_store(modules, "%b.g 1")
     };
-    let first = build("[f: #'int { [$, 1] ~> __integer_add__ }]");
-    let second = build("[f: #'int { [$, 2] ~> __integer_add__ }]");
+    let first = build("[f: #'int { [$, 1] ~> __integer_add__ ~ }]");
+    let second = build("[f: #'int { [$, 2] ~> __integer_add__ ~ }]");
 
     let first_key = import_key(&first, "b", "a");
     let second_key = import_key(&second, "b", "a");
@@ -427,7 +427,7 @@ fn linked_receive_type_line_matches_cold_inference() {
     // value-imported, the artifact link must still leave the session identical to a
     // from-source compile — imports link before extraction resolves any types, so
     // the namespace is never built from source only for the link to overwrite it.
-    let line = "kill = &%proc.kill\n![#'%proc.changed, 0]";
+    let line = "kill = %proc.kill\n![#'%proc.changed, 0]";
     assert_eq!(session(false, Some(line)), EXPECTED);
     let store = build_artifacts(false);
     assert_eq!(session_with_artifacts(false, Some(line), &store), EXPECTED);
@@ -440,7 +440,7 @@ fn linked_session_is_link_order_independent() {
     let store = build_artifacts(false);
     let warm = session_with_artifacts(
         false,
-        Some(r#"a = %str.length "hi"; b = %list.new; Ok"#),
+        Some(r#"a = %str.length "hi"; b = %list.new []; Ok"#),
         &store,
     );
     assert_eq!(warm, EXPECTED);
@@ -536,8 +536,8 @@ fn linked_html_live_encodes_frames() {
         false,
         Some(
             r#"view = #[name: Str['bin]] { %html{ <p>{$name}</p> } }
-               f1 = view [name: "a"] ~> %html/live.frame
-               f2 = view [name: "b"] ~> %html/live.frame
+               f1 = view [name: "a"] ~> %html/live.frame ~
+               f2 = view [name: "b"] ~> %html/live.frame ~
                %html/live.diff [f1, f2] ~> %html/live.encode ["0", ~] ~> ='%str; Ok"#,
         ),
         &store,

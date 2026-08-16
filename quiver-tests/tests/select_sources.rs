@@ -19,7 +19,7 @@ fn test_listener_and_socket_as_select_sources() {
               %tcp.connect [0x7f000001, 4293] ~> =(\TcpSocket)s
               %tcp.write [s, "ping" ~> .0]
               !'int
-            }
+            } []
             ![l] ~> =('%tcp.listener_event)ev
             ev ~> =Accepted[listener: _, sock: conn]
             ![conn] ~> {
@@ -52,7 +52,7 @@ fn test_socket_select_races_timeout() {
         .evaluate(
             r#"
             %tcp.listen [4294, 8] ~> =(\TcpListener)l
-            c = @{ %tcp.connect [0x7f000001, 4294] ~> =(\TcpSocket)s; !'int }
+            c = @{ %tcp.connect [0x7f000001, 4294] ~> =(\TcpSocket)s; !'int } []
             ![l] ~> =Accepted[listener: _, sock: conn]
             ![conn, 50] ~> {
               | =Data[sock: _, data: _] => GotData
@@ -78,15 +78,16 @@ fn test_socket_select_races_mailbox() {
               !'int ~> =1
               %tcp.write [s, "later" ~> .0]
               Ok
-            }
+            } []
             ![l] ~> =Accepted[listener: _, sock: conn]
-            Hello ~> .
+            me = .
+            Hello ~> me ~
             first = ![conn, #Hello] ~> {
               | =Hello => MailboxFirst
               | =Data[sock: _, data: _] => SocketFirst
               | Neither
             }
-            1 ~> c
+            1 ~> c ~
             second = ![conn, 2000] ~> {
               | =Data[sock: _, data: d] => Str[d]
               | Other
@@ -109,7 +110,7 @@ fn test_socket_closed_event() {
               %tcp.connect [0x7f000001, 4296] ~> =(\TcpSocket)s
               %tcp.close s
               Done
-            }
+            } []
             ![l] ~> =Accepted[listener: _, sock: conn]
             !c
             ![conn, 2000] ~> {
@@ -136,13 +137,14 @@ fn test_plain_read_consumes_stashed_event() {
               !'int ~> =1
               %tcp.write [s, "stash me" ~> .0]
               !'int
-            }
+            } []
             ![l] ~> =Accepted[listener: _, sock: conn]
             // Arm the socket (no bytes exist yet), and let a queued message win.
-            Hi ~> .
+            me = .
+            Hi ~> me ~
             ![conn, #Hi] ~> =Hi
             // Release the write; the armed read completes into the stash.
-            1 ~> c
+            1 ~> c ~
             { ![150] | Ok }
             // The pull-read consumes the stashed event, in order.
             %tcp.read [conn, 8192] ~> Str[~]
@@ -167,7 +169,7 @@ fn test_scoped_host_rejects_io_builtins_at_call_time() {
     // is at the call: a host that never attached the implementation errors there.
     quiver()
         .scoped_no_io()
-        .evaluate(r#"f = &__tcp_connect__; Ok"#)
+        .evaluate(r#"f = __tcp_connect__; Ok"#)
         .expect("Ok");
     quiver()
         .scoped_no_io()
@@ -182,7 +184,7 @@ fn test_scoped_host_still_compiles_pure_code() {
     // The always-set (and pure std modules) work identically on a scoped host.
     quiver()
         .scoped_no_io()
-        .evaluate(r#"[1, 2] ~> %num.add ~> %str.from_int"#)
+        .evaluate(r#"[1, 2] ~> %num.add ~ ~> %str.from_int ~"#)
         .expect(r#""3""#);
     // Naming a resource TYPE needs no capability — only the builtins do.
     quiver()
@@ -198,7 +200,7 @@ fn test_system_only_host_runs_clocks_and_entropy() {
     // job: no effect backend, nothing parks, and `%time`/`%random` run unchanged.
     quiver()
         .scoped_system_only()
-        .evaluate(r#"%time.now ~> %num.gt? [~, 1700000000000]"#)
+        .evaluate(r#"%time.now [] ~> %num.gt? [~, 1700000000000]"#)
         .expect("Ok");
     quiver()
         .scoped_system_only()
@@ -207,7 +209,7 @@ fn test_system_only_host_runs_clocks_and_entropy() {
     // The pure half of the module composes over the host reading, as it does natively.
     quiver()
         .scoped_system_only()
-        .evaluate(r#"0 ~> %time.iso8601"#)
+        .evaluate(r#"0 ~> %time.iso8601 ~"#)
         .expect(r#""1970-01-01T00:00:00.000Z""#);
 }
 

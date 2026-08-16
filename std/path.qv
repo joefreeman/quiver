@@ -6,8 +6,8 @@ join = #[(self): #^ -> (' | []), (path): ', (with): '] {
     | =[_, Relative[0]] => $path
     | =[Root, Relative[_]] => []
     | =[Relative[m], Relative[n]] => %num.add [m, n] ~> Relative[~]
-    | =[Path[_, p], Relative[n]] => $self [&$self, p, Relative[%num.sub [n, 1]]]
-    | =[_, Path[s, parent]] => $self [&$self, $path, parent] ~> { =[] => [] | Path[s, ~] }
+    | =[Path[_, p], Relative[n]] => $self [$self, p, Relative[%num.sub [n, 1]]]
+    | =[_, Path[s, parent]] => $self [$self, $path, parent] ~> { =[] => [] | Path[s, ~] }
   }
 }
 
@@ -40,7 +40,7 @@ parse = #[(segments): '%list<'%str>, (init): '] {
     $init,
     #{
       $1 ~> {
-        | %str.empty? => $0
+        | %str.empty? ~ => $0
         | =Str[0x2e] => $0
         | =Str[0x2e2e] => $0 ~> {
           | =Path[_, parent] => parent
@@ -56,7 +56,7 @@ parse = #[(segments): '%list<'%str>, (init): '] {
 [
   parse: #'%str {
     :doc "Parses a slash-separated string into a path, normalising . and .. segments."
-    %str.split [~, "/"] ~> %list.collect ~> {
+    %str.split [~, "/"] ~> %list.collect ~ ~> {
       | =Nil => Relative[0]
       | =Cons[first, rest]; %str.empty? first => parse [rest, Root]
       | parse [~, Relative[0]]
@@ -97,6 +97,6 @@ parse = #[(segments): '%list<'%str>, (init): '] {
 
   join: #[(path): ', (with): '] {
     :doc "Joins the second path onto the first; nil when the second is absolute or escapes the root."
-    join [&join, $path, $with]
+    join [join, $path, $with]
   },
 ]

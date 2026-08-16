@@ -501,9 +501,7 @@ impl Collector {
                     self.block(body);
                 }
             }
-            ast::Term::Access(access)
-            | ast::Term::Reference(access)
-            | ast::Term::State(access, _) => self.access(access),
+            ast::Term::Access(access) | ast::Term::State(access, _) => self.access(access),
             ast::Term::Apply(access, argument) => {
                 self.access(access);
                 self.term(argument);
@@ -546,7 +544,7 @@ impl Collector {
             | ast::Match::String(..)
             | ast::Match::Star(_)
             | ast::Match::Placeholder
-            | ast::Match::Reference(_) => {}
+            | ast::Match::Pin(_) => {}
             ast::Match::Tuple(tuple) => {
                 for field in &tuple.fields {
                     self.pattern(&field.pattern);

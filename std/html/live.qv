@@ -158,7 +158,7 @@ live_policy = #'%html.pattr {
 // tree's typed data. The envelope is what the client echoes and `decode` reads back, so
 // it discriminates a decoded event from a dropped one; the `Data` marker is the tree's
 // and never reaches the wire.
-event_value = #<'t>'t { Ev[$] ~> %html.data_value }
+event_value = #<'t>'t { Ev[$] ~> %html.data_value ~ }
 
 // A live view's markup: an `%html` tree whose data attributes carry `'e` events. Spell a
 // view's own type with these rather than `'%html<…>`, which would have to name the wire
@@ -167,8 +167,8 @@ event_value = #<'t>'t { Ev[$] ~> %html.data_value }
 'nodes<'e> = '%html.nodes<Ev['e]>
 
 live_dialect = #(content: '%str, term: '%meta.cb) {
-  %html.parse [$content, &$term] ~> =('%html.pnodes)nodes
-  %html.rewrite_attrs [nodes, &live_policy] ~> =('%html.pnodes)rewritten
+  %html.parse [$content, $term] ~> =('%html.pnodes)nodes
+  %html.rewrite_attrs [nodes, live_policy] ~> =('%html.pnodes)rewritten
   %html.expand rewritten
 }
 
@@ -304,13 +304,13 @@ enc_attr = #<'e>'%html.attr_val<'e> {
 
 // A node's frame; self-passed to recurse into template slots.
 frame_of = #<'e>[(self): #^ -> 'frame, (node): '%html<'e>] {
-  | $node:('bnd)boundary ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: &st]
+  | $node:('bnd)boundary ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: st]
   | $node:('%html.tmpl<'e>)template
     ~> =(statics: s, holes: h) => {
       slots = %list.map [
         h,
         #{
-          | =Child[n] => $$self [&$$self, n]
+          | =Child[n] => $$self [$$self, n]
           | =Attr[elem: e, name: nm, value: v] => ALeaf[elem: e, name: nm, value: enc_attr v]
         },
       ]
@@ -324,7 +324,7 @@ frame_of = #<'e>[(self): #^ -> 'frame, (node): '%html<'e>] {
     Many[
       %list.map [
         items,
-        #{ k = $:('%str)key; [key: k, row: $$self [&$$self, $]] },
+        #{ k = $:('%str)key; [key: k, row: $$self [$$self, $]] },
       ],
     ]
   }
@@ -333,7 +333,7 @@ frame_of = #<'e>[(self): #^ -> 'frame, (node): '%html<'e>] {
 
 frame = #<'e>'%html<'e> {
   :doc "Derives a node tree's frame — the diffable shape of one render — from the :template provenance %html expansions attach. Un-annotated subtrees become Opaque (compared and replaced whole); event attribute values are encoded to their %data notation, so frames are event-type-erased."
-  frame_of [&frame_of, $]
+  frame_of [frame_of, $]
 }
 
 // Render a frame onto `acc`; self-passed to recurse into template slots.
@@ -359,7 +359,7 @@ render_of = #[(self): #^ -> 'bin, (f): 'frame, (acc): 'bin] {
           | =Cons[Str[st], srest] => {
             a2 = %bin.concat [$a, st]
             $slots ~> {
-              | =Cons[fr, frest] => ^ [srest, frest, $$self [&$$self, fr, a2]]
+              | =Cons[fr, frest] => ^ [srest, frest, $$self [$$self, fr, a2]]
               | a2
             }
           }
@@ -377,7 +377,7 @@ render_of = #[(self): #^ -> 'bin, (f): 'frame, (acc): 'bin] {
           | =Nil => $a
           | =Cons[[key: _, row: r], t] => {
             a2 = %bin.concat [$a, "<!--r-->" ~> .0]
-            a3 = $$self [&$$self, r, a2]
+            a3 = $$self [$$self, r, a2]
             ^ [t, %bin.concat [a3, "<!--/r-->" ~> .0]]
           }
         }
@@ -402,7 +402,7 @@ render_of = #[(self): #^ -> 'bin, (f): 'frame, (acc): 'bin] {
 
 render = #'frame {
   :doc "Renders a frame to instrumented HTML — statics interleaved with slot values, child-hole markers and data-q anchors included — for the initial region render and SetHtml patch payloads."
-  render_of [&render_of, $, 0x] ~> Str[~]
+  render_of [render_of, $, 0x] ~> Str[~]
 }
 
 // An inserted row's payload: the row rendered inside its own markers.
@@ -512,7 +512,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
             pt,
             nt,
             __integer_add__ [$i, 1],
-            $$self [&$$self, p, nx, Cons[$i, $$rpath], $a],
+            $$self [$$self, p, nx, Cons[$i, $$rpath], $a],
           ]
           | $a
         }
@@ -531,7 +531,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
               pt,
               nt,
               __integer_add__ [$i, 1],
-              $$self [&$$self, p, nx, Cons[$i, $$rpath], $a],
+              $$self [$$self, p, nx, Cons[$i, $$rpath], $a],
             ]
           | =[Nil, Cons[[key: _, row: nx], nt]] => ^ [
             Nil,
@@ -575,7 +575,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
                 wr ~> =(key: wk, row: wf)
                 {
                   | wk ~> =&nk => {
-                    a2 = $$self [&$$self, wf, nf, Cons[$i, $$rpath], $a]
+                    a2 = $$self [$$self, wf, nf, Cons[$i, $$rpath], $a]
                     ^ [wt, nt, __integer_add__ [$i, 1], a2]
                   }
                   | {
@@ -588,7 +588,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
                           MovRow[path: %list.reverse $$rpath, from: j, to: $i],
                           $a,
                         ]
-                        a3 = $$self [&$$self, mf, nf, Cons[$i, $$rpath], a2]
+                        a3 = $$self [$$self, mf, nf, Cons[$i, $$rpath], a2]
                         ^ [Cons[wr, wrest], nt, __integer_add__ [$i, 1], a3]
                       }
                       | {
@@ -639,7 +639,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
 
 diff = #[(prev): 'frame, (next): 'frame] {
   :doc "The patch list turning the first frame into the second, in document order: recursing where statics match, and emitting one subsuming patch where a slot's kind, template, or opaque content changed. Equal frames answer Nil. A Nil path addresses the root."
-  diff_of [&diff_of, $prev, $next, Nil, Nil] ~> %list.reverse
+  diff_of [diff_of, $prev, $next, Nil, Nil] ~> %list.reverse ~
 }
 
 // === The wire ===========================================================================
@@ -686,13 +686,13 @@ enc_patch = #'patch {
   ]
 }
 
-enc_patches = #'patches { %list.map [~, &enc_patch] }
+enc_patches = #'patches { %list.map [~, enc_patch] }
 
 encode = #[(vid): '%str, (ps): 'patches] {
   :doc "A frame message: one view's patches for one render as JSON text, `[1, vid, [patch, …]]`. Vids are hierarchical strings — the root view is \"0\", its children \"0.1\", \"0.2\", … — minted locally by each view, so no allocation is coordinated."
   Array[
     Cons[1, Cons[$vid, Cons[Array[enc_patches $ps], Nil]]],
-  ] ~> %json.stringify
+  ] ~> %json.stringify ~
 }
 
 // === The session ========================================================================
@@ -712,7 +712,7 @@ encode = #[(vid): '%str, (ps): 'patches] {
 // the client echoes back and `update` folds. `decode` turns that echo back into a typed
 // event: the payload arrives as %data notation in the `Ev` envelope, exactly as `on:*`
 // holes encode it, so the field is the instantiated codec itself,
-// `decode: &%data.decode<Ev['ev]>`. Every member of `'e` must be a tuple — it is what
+// `decode: %data.decode<Ev['ev]>`. Every member of `'e` must be a tuple — it is what
 // the browser metadata is stamped onto, and named payloads (`Inc`, `Del[id]`) are the
 // natural spelling anyway. It stays a field (rather than moving inside) because
 // `%data.decode` is type-consuming — it needs the concrete event type, which only the
@@ -733,19 +733,19 @@ with_nav = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
   {
     | c
       ~> =(mount: m, update: u, view: v, decode: d, nav: n) => [
-        mount: &m,
-        update: &u,
-        view: &v,
-        decode: &d,
-        nav: &n,
+        mount: m,
+        update: u,
+        view: v,
+        decode: d,
+        nav: n,
       ]
     | {
       c ~> =(mount: m, update: u, view: v, decode: d)
       [
-        mount: &m,
-        update: &u,
-        view: &v,
-        decode: &d,
+        mount: m,
+        update: u,
+        view: v,
+        decode: d,
         nav: #<'s>[(state): 's, (request): '%http] { $state },
       ]
     }
@@ -755,7 +755,7 @@ with_nav = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
 // Render inside a tracked region: the process re-subscribes to exactly the stores the
 // view sampled, and their next state change delivers a `Changed` wakeup.
 render_view = #<'i, 's, 'e>[(state): 's, (comp): 'component<'i, 's, 'e>] {
-  %proc.track #{ $$state ~> $$comp.view } ~> frame
+  %proc.track #{ $$state ~> $$comp.view ~ } ~> frame ~
 }
 
 // Re-root a value bound out of a '%json recursive position at the union's root: the
@@ -774,7 +774,7 @@ pairs_of = #'jsons {
       | pair_of $1 ~> =[n, v] => Cons[[n, v], $0]
       | $0
     },
-  ] ~> %list.reverse
+  ] ~> %list.reverse ~
 }
 
 // A JSON boolean as Quiver's truthiness convention; anything else reads false.
@@ -784,10 +784,10 @@ flag_of = #'%json { =True => Ok | [] }
 // one reads as no modifiers held rather than failing the whole event.
 mods_of = #'%json {
   | =Array[Cons[a, Cons[c, Cons[s, Cons[m, Nil]]]]] => [
-    alt?: a ~> jval ~> flag_of,
-    ctrl?: c ~> jval ~> flag_of,
-    shift?: s ~> jval ~> flag_of,
-    meta?: m ~> jval ~> flag_of,
+    alt?: a ~> jval ~ ~> flag_of ~,
+    ctrl?: c ~> jval ~ ~> flag_of ~,
+    shift?: s ~> jval ~ ~> flag_of ~,
+    meta?: m ~> jval ~ ~> flag_of ~,
   ]
   | [alt?: [], ctrl?: [], shift?: [], meta?: []]
 }
@@ -798,26 +798,26 @@ mods_of = #'%json {
 // their tag.
 pointer_of = #'jsons {
   =Cons[xj, Cons[yj, Cons[bj, Cons[mj, Nil]]]]
-  xj ~> jval ~> =('int)x
-  yj ~> jval ~> =('int)y
-  bj ~> jval ~> =('int)b
-  [x: x, y: y, button: b, mods: mj ~> jval ~> mods_of]
+  xj ~> jval ~ ~> =('int)x
+  yj ~> jval ~ ~> =('int)y
+  bj ~> jval ~ ~> =('int)b
+  [x: x, y: y, button: b, mods: mj ~> jval ~ ~> mods_of ~]
 }
 
-submit_of = #'jsons { =Cons[fj, Nil]; fj ~> jval ~> =Array[fs]; Submit[fields: pairs_of fs] }
+submit_of = #'jsons { =Cons[fj, Nil]; fj ~> jval ~ ~> =Array[fs]; Submit[fields: pairs_of fs] }
 
 // `input` and `change` report the same thing — the control's value and, for a checkbox or
 // radio, whether it is ticked — so they share a reader and differ only in their tag.
 field_of = #'jsons {
   =Cons[vj, Cons[cj, Nil]]
-  vj ~> jval ~> =Str[vb]
-  [value: Str[vb], checked?: cj ~> jval ~> flag_of]
+  vj ~> jval ~ ~> =Str[vb]
+  [value: Str[vb], checked?: cj ~> jval ~ ~> flag_of ~]
 }
 
 keydown_of = #'jsons {
   =Cons[kj, Cons[mj, Nil]]
-  kj ~> jval ~> =Str[kb]
-  KeyDown[key: Str[kb], mods: mj ~> jval ~> mods_of]
+  kj ~> jval ~ ~> =Str[kb]
+  KeyDown[key: Str[kb], mods: mj ~> jval ~ ~> mods_of ~]
 }
 
 // The browser metadata beside a payload, from its wire form — a tagged JSON array, one
@@ -829,7 +829,7 @@ keydown_of = #'jsons {
 // faithfully fold.
 event_of = #'%json {
   =Array[Cons[tagj, rest]]
-  tagj ~> jval ~> =Str[tb]
+  tagj ~> jval ~ ~> =Str[tb]
   Str[tb] ~> {
     | ="click" => pointer_of rest ~> Click[...]
     | ="mousedown" => pointer_of rest ~> MouseDown[...]
@@ -850,11 +850,11 @@ env_of = #'%str {
   %json.parse $ ~> =('%json)env
   env ~> =Array[es]
   es ~> =Cons[vidj, r1]
-  vidj ~> jval ~> =Str[vb]
+  vidj ~> jval ~ ~> =Str[vb]
   r1 ~> =Cons[payloadj, r2]
-  payloadj ~> jval ~> =Str[pb]
+  payloadj ~> jval ~ ~> =Str[pb]
   r2 ~> =Cons[evj, Nil]
-  evj ~> jval ~> event_of ~> =('event)ev
+  evj ~> jval ~ ~> event_of ~ ~> =('event)ev
   [Str[vb], Str[pb], ev]
 }
 
@@ -865,9 +865,9 @@ nav_of = #'%str {
   %json.parse $ ~> =('%json)env
   env ~> =Array[es]
   es ~> =Cons[tagj, r1]
-  tagj ~> jval ~> ="nav"
+  tagj ~> jval ~ ~> ="nav"
   r1 ~> =Cons[targetj, Nil]
-  targetj ~> jval ~> =Str[tb]
+  targetj ~> jval ~ ~> =Str[tb]
   Str[tb]
 }
 
@@ -903,11 +903,11 @@ sync_redirect = #<'s>[(state): 's, (synced): ('%str | []), (app): @'app_msg] {
   // The pin below needs a variable, and the pid is taken by reference (a bare
   // access would send), so bind the fields locally.
   synced = $synced
-  app = &$app
+  app = $app
   m = $state:('%str)redirect
   {
     | m ~> =&synced => synced
-    | m ~> =Str[p] => { Frame[url_sync Str[p]] ~> app; Str[p] }
+    | m ~> =Str[p] => { Frame[url_sync Str[p]] ~> app ~; Str[p] }
     | []
   }
 }
@@ -966,11 +966,11 @@ settle_deadline = 3000
 collect_of = #[(self): #^ -> 'bounds, (f): 'frame, (acc): 'bounds] {
   // The nested literals close over `self` (an inner `$` would be their own parameter),
   // so bind the field locally — by reference, as a bare `$self` term would call it.
-  self = &$self
+  self = $self
   $f ~> {
-    | =Boundary[key: k, vid: _, start: st] => Cons[[key: k, start: &st], $acc]
-    | =Tmpl[statics: _, slots: sl] => %list.fold [sl, $acc, #{ self [&self, $1, $0] }]
-    | =Many[rows] => %list.fold [rows, $acc, #{ $1 ~> =(row: r); self [&self, r, $0] }]
+    | =Boundary[key: k, vid: _, start: st] => Cons[[key: k, start: st], $acc]
+    | =Tmpl[statics: _, slots: sl] => %list.fold [sl, $acc, #{ self [self, $1, $0] }]
+    | =Many[rows] => %list.fold [rows, $acc, #{ $1 ~> =(row: r); self [self, r, $0] }]
     | $acc
   }
 }
@@ -1014,11 +1014,11 @@ assign_bounds = #[(bs): 'bounds, (kids): 'kids, (vid): '%str, (n): 'int, (acc): 
         | key_assigned? [$acc, k] => ^ [t, $kids, $vid, $n, $acc]
         | kid_of [$kids, k] ~> =KFound[kd] => {
           kd ~> =(vid: v, pid: p)
-          ^ [t, $kids, $vid, $n, Cons[AOld[key: k, vid: v, pid: &p], $acc]]
+          ^ [t, $kids, $vid, $n, Cons[AOld[key: k, vid: v, pid: p], $acc]]
         }
         | {
           v = %str.concat [$vid, %str.concat [".", %str.from_int $n]]
-          ^ [t, $kids, $vid, __integer_add__ [$n, 1], Cons[ANew[key: k, vid: v, start: &st], $acc]]
+          ^ [t, $kids, $vid, __integer_add__ [$n, 1], Cons[ANew[key: k, vid: v, start: st], $acc]]
         }
       }
     }
@@ -1038,22 +1038,22 @@ resolve_of = #[(self): #^ -> 'frame, (f): 'frame, (assigns): 'assigns] {
   // The nested literals close over `self` and `assigns` (an inner `$` would be their
   // own parameter), so bind the fields locally — `self` by reference, as a bare
   // `$self` term would call it.
-  self = &$self
+  self = $self
   assigns = $assigns
   $f ~> {
     | =Boundary[key: k, vid: _, start: st] => Boundary[
       key: k,
       vid: assigned_vid [assigns, k],
-      start: &st,
+      start: st,
     ]
     | =Tmpl[statics: ss, slots: sl] => Tmpl[
       statics: ss,
-      slots: %list.map [sl, #{ self [&self, $, assigns] }],
+      slots: %list.map [sl, #{ self [self, $, assigns] }],
     ]
     | =Many[rows] => Many[
       %list.map [
         rows,
-        #{ =(key: rk, row: r); [key: rk, row: self [&self, r, assigns]] },
+        #{ =(key: rk, row: r); [key: rk, row: self [self, r, assigns]] },
       ],
     ]
     | $f
@@ -1080,42 +1080,42 @@ dropped_kids = #[(kids): 'kids, (assigns): 'assigns] {
 exec_bounds = #[(assigns): 'assigns, (drops): 'kids, (app): @'app_msg, (me): @'view_msg, (acc): 'kids] -> 'kids {
   // The start closure closes over `app`, and the pids are taken by reference (a
   // bare access would send), so bind them locally.
-  app = &$app
-  me = &$me
+  app = $app
+  me = $me
   $drops ~> {
     | =Cons[kd, t] => {
       kd ~> =(vid: v, pid: p)
-      %proc.kill &p
-      Unroute[Str[v ~> .0]] ~> app
-      ^ [$assigns, t, &app, &me, $acc]
+      %proc.kill p
+      Unroute[Str[v ~> .0]] ~> app ~
+      ^ [$assigns, t, app, me, $acc]
     }
     | $assigns ~> {
       | =Nil => $acc
       | =Cons[AOld[key: k, vid: v, pid: p], t] => ^ [
         t,
         Nil,
-        &app,
-        &me,
-        Cons[[key: k, vid: v, pid: &p], $acc],
+        app,
+        me,
+        Cons[[key: k, vid: v, pid: p], $acc],
       ]
       | =Cons[ANew[key: k, vid: v, start: st], t] => {
         cs = #['%str, @'%sup.down] {
           =[id, supref]
-          p = st [v, &app, Replace]
-          %sup.watch [id, &p, &supref]
-          Route[Str[v ~> .0], &p] ~> app
-          &p
+          p = st [v, app, Replace]
+          %sup.watch [id, p, supref]
+          Route[Str[v ~> .0], p] ~> app ~
+          p
         }
 
         csup =
           [
-            children: Cons[[id: Str[v ~> .0], restart: Permanent, start: &cs], Nil],
+            children: Cons[[id: Str[v ~> .0], restart: Permanent, start: cs], Nil],
             max_restarts: restart_budget,
             window: restart_window,
-          ] ~> %sup.start
+          ] ~> %sup.start ~
 
-        %sup.watch [Str[v ~> .0], &csup, &me]
-        ^ [t, Nil, &app, &me, Cons[[key: k, vid: v, pid: &csup], $acc]]
+        %sup.watch [Str[v ~> .0], csup, me]
+        ^ [t, Nil, app, me, Cons[[key: k, vid: v, pid: csup], $acc]]
       }
     }
   }
@@ -1131,16 +1131,16 @@ as_frame = #'frame
 // reconcile. Answers [the new frame, the new kids, the next child ordinal].
 step_view = #<'i, 's, 'e>[(state): 's, (prev): 'frame, (comp): 'component<'i, 's, 'e>, (vid): '%str, (app): @'app_msg, (me): @'view_msg, (kids): 'kids, (n): 'int] {
   // The pids are taken by reference (a bare access would send), so bind them locally.
-  app = &$app
-  me = &$me
+  app = $app
+  me = $me
   f2 = render_view [$state, $comp]
-  ar = assign_bounds [collect_of [&collect_of, f2, Nil], $kids, $vid, $n, Nil]
-  rf = resolve_of [&resolve_of, f2, ar.0] ~> as_frame
+  ar = assign_bounds [collect_of [collect_of, f2, Nil], $kids, $vid, $n, Nil]
+  rf = resolve_of [resolve_of, f2, ar.0] ~> as_frame ~
   diff [$prev, rf] ~> {
     | =Nil => Ok
-    | =ps => { Frame[encode [$vid, ps]] ~> app; Ok }
+    | =ps => { Frame[encode [$vid, ps]] ~> app ~; Ok }
   }
-  kids2 = exec_bounds [ar.0, dropped_kids [$kids, ar.0], &app, &me, Nil]
+  kids2 = exec_bounds [ar.0, dropped_kids [$kids, ar.0], app, me, Nil]
   [rf, kids2, ar.1]
 }
 
@@ -1156,49 +1156,49 @@ step_view = #<'i, 's, 'e>[(state): 's, (prev): 'frame, (comp): 'component<'i, 's
 // is dropped.)
 vlife = #<'i, 's, 'e>[(mode): 'vmode, (state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e>, (vid): '%str, (app): @'app_msg, (kids): 'kids, (n): 'int, (synced): ('%str | [])] {
   // The pid is taken by reference (a bare access would send), so bind it locally.
-  app = &$app
-  me = &.
+  app = $app
+  me = .
   !'view_msg ~> {
     | =Event[payload, ev] => {
       s2 = fold_event [$state, $comp, payload, ev]
       // A `redirect` mark on the update result moves the client's address bar to match
       // the page this same update set — server-initiated navigation.
-      sy2 = sync_redirect [s2, $synced, &app]
-      r = step_view [s2, $f, $comp, $vid, &app, &me, $kids, $n]
-      ^ [$mode, s2, r.0, $comp, $vid, &app, r.1, r.2, sy2]
+      sy2 = sync_redirect [s2, $synced, app]
+      r = step_view [s2, $f, $comp, $vid, app, me, $kids, $n]
+      ^ [$mode, s2, r.0, $comp, $vid, app, r.1, r.2, sy2]
     }
     // A URL change: re-derive state from the new request (no remount — local state
     // survives), then re-render and patch like any other step. A `nav` may itself mark
     // its result with `:redirect` (URL canonicalization) — synced like an update's.
     | =Nav[req] => {
       s2 = $comp.nav [state: $state, request: req]
-      sy2 = sync_redirect [s2, $synced, &app]
-      r = step_view [s2, $f, $comp, $vid, &app, &me, $kids, $n]
-      ^ [$mode, s2, r.0, $comp, $vid, &app, r.1, r.2, sy2]
+      sy2 = sync_redirect [s2, $synced, app]
+      r = step_view [s2, $f, $comp, $vid, app, me, $kids, $n]
+      ^ [$mode, s2, r.0, $comp, $vid, app, r.1, r.2, sy2]
     }
-    | =Park => ^ [Idle, $state, $f, $comp, $vid, &app, $kids, $n, $synced]
+    | =Park => ^ [Idle, $state, $f, $comp, $vid, app, $kids, $n, $synced]
     | =Wake => {
       drain_changed []
-      r = step_view [$state, $f, $comp, $vid, &app, &me, $kids, $n]
-      ^ [Live, $state, r.0, $comp, $vid, &app, r.1, r.2, $synced]
+      r = step_view [$state, $f, $comp, $vid, app, me, $kids, $n]
+      ^ [Live, $state, r.0, $comp, $vid, app, r.1, r.2, $synced]
     }
     | =Down(id: dv) => kid_by_vid [$kids, dv] ~> {
       | =KFound[_] => {
         Frame[
           encode [dv, Cons[SetHtml[path: Nil, html: crash_html], Nil]],
-        ] ~> app
-        Unroute[dv] ~> app
-        ^ [$mode, $state, $f, $comp, $vid, &app, $kids, $n, $synced]
+        ] ~> app ~
+        Unroute[dv] ~> app ~
+        ^ [$mode, $state, $f, $comp, $vid, app, $kids, $n, $synced]
       }
-      | ^ [$mode, $state, $f, $comp, $vid, &app, $kids, $n, $synced]
+      | ^ [$mode, $state, $f, $comp, $vid, app, $kids, $n, $synced]
     }
     | ='%proc.changed => $mode ~> {
       | =Live => {
         drain_changed []
-        r = step_view [$state, $f, $comp, $vid, &app, &me, $kids, $n]
-        ^ [Live, $state, r.0, $comp, $vid, &app, r.1, r.2, $synced]
+        r = step_view [$state, $f, $comp, $vid, app, me, $kids, $n]
+        ^ [Live, $state, r.0, $comp, $vid, app, r.1, r.2, $synced]
       }
-      | ^ [Idle, $state, $f, $comp, $vid, &app, $kids, $n, $synced]
+      | ^ [Idle, $state, $f, $comp, $vid, app, $kids, $n, $synced]
     }
   }
 }
@@ -1227,29 +1227,29 @@ settle = #<'i, 's, 'e>[(state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e>,
 // splice into it at the app).
 view_run = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>, '%str, @'app_msg, 'vboot] {
   =[init, comp, vid, app, boot]
-  // `&.` before any receiving call: taken later, its inferred send would be the
+  // `.` before any receiving call: taken later, its inferred send would be the
   // partially-widened receive (just the settle drain's `Changed`), which no longer
   // narrows into `@'view_msg` params. Taken here it is still the unknown-send
   // handle, which does.
-  me = &.
+  me = .
   state = comp.mount init
   f = settle [state, render_view [state, comp], comp, settle_deadline]
-  ar = assign_bounds [collect_of [&collect_of, f, Nil], Nil, vid, 1, Nil]
-  rf = resolve_of [&resolve_of, f, ar.0] ~> as_frame
+  ar = assign_bounds [collect_of [collect_of, f, Nil], Nil, vid, 1, Nil]
+  rf = resolve_of [resolve_of, f, ar.0] ~> as_frame ~
   boot ~> {
-    | =Reply[reply] => { Region[render rf] ~> reply; Ok }
+    | =Reply[reply] => { Region[render rf] ~> reply ~; Ok }
     | =Replace => {
       Frame[
         encode [vid, Cons[SetHtml[path: Nil, html: render rf], Nil]],
-      ] ~> app
+      ] ~> app ~
       Ok
     }
   }
-  kids = exec_bounds [ar.0, Nil, &app, &me, Nil]
+  kids = exec_bounds [ar.0, Nil, app, me, Nil]
   mode = boot ~> { =Reply[_] => Idle | Live }
   // The sync tracker starts at the mount state's own mark, if any: the page was served
   // for the URL that produced this state, so only a mark that changes needs syncing.
-  vlife [mode, state, rf, comp, vid, &app, kids, ar.1, state:('%str)redirect]
+  vlife [mode, state, rf, comp, vid, app, kids, ar.1, state:('%str)redirect]
 }
 
 // Define a component from its record: answers the **placeable component** — a
@@ -1263,13 +1263,13 @@ view_run = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>, '%str, @'app_msg, 'vboot] {
 // re-declares `<'i>`: a nested signature reaches the enclosing type parameters by
 // re-declaration — suffix inheritance makes it the same variable.)
 component = #<'e, 'i, 's>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
-  :doc "Defines a component from its `[mount, update, view, decode]` record — `decode` reads the `on:*` payload the client echoes back, %data notation in the `Ev` envelope, so the field is the instantiated codec itself, `decode: &%data.decode<Ev['ev]>` (add a `nav: #[(state): 's, (request): '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. Pin the event type — `component<'ev> [...]` — to compile-check the view's `on:*` payloads against it (unpinned, a stray payload widens the inferred union and is only dropped at decode). What the browser knows and the payload cannot carry — a click's coordinates, a submit's fields, an input's value — rides the event as the `:event` annotation, read in `update` with a checked retrieval (`e:(Submit(fields: '%http.pairs))event`). The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
+  :doc "Defines a component from its `[mount, update, view, decode]` record — `decode` reads the `on:*` payload the client echoes back, %data notation in the `Ev` envelope, so the field is the instantiated codec itself, `decode: %data.decode<Ev['ev]>` (add a `nav: #[(state): 's, (request): '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. Pin the event type — `component<'ev> [...]` — to compile-check the view's `on:*` payloads against it (unpinned, a stray payload widens the inferred union and is only dropped at decode). What the browser knows and the payload cannot carry — a click's coordinates, a submit's fields, an input's value — rides the event as the `:event` annotation, read in `update` with a checked retrieval (`e:(Submit(fields: '%http.pairs))event`). The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
   comp = with_nav $
   #<'i>'place<'i> {
     i = $init
     k = $key
-    st = #['%str, @'app_msg, 'vboot] { =[v, a, boot]; [i, comp, v, &a, boot] ~> @view_run }
-    Fragment[Nil] ~> { :boundary [key: k, start: &st] }
+    st = #['%str, @'app_msg, 'vboot] { =[v, a, boot]; [i, comp, v, a, boot] ~> @view_run ~ }
+    Fragment[Nil] ~> { :boundary [key: k, start: st] }
   }
 }
 
@@ -1319,7 +1319,7 @@ take_entry = #[(items): 'reg_entries, (token): '%str, (acc): 'reg_entries] {
   $items ~> {
     | =Nil => [found: Missing, rest: $acc]
     | =Cons[e, t] => {
-      | e.token ~> =&token => [found: Found[&e.pid], rest: %list.chain [%list.reverse $acc, t]]
+      | e.token ~> =&token => [found: Found[e.pid], rest: %list.chain [%list.reverse $acc, t]]
       | ^ [t, token, Cons[e, $acc]]
     }
   }
@@ -1330,16 +1330,16 @@ take_entry = #[(items): 'reg_entries, (token): '%str, (acc): 'reg_entries] {
 // so unclaimed tokens cannot accumulate.
 registry_loop = #'reg_entries {
   !'reg_msg ~> =msg
-  now = %time.monotonic
+  now = %time.monotonic []
   live = __integer_subtract__ [now, prune_ms] ~> prune_entries [$, ~]
   msg ~> {
-    | =Register[t, p] => ^ Cons[[token: t, pid: &p, at: now], live]
-    | =Claim[t, reply] => { (found, rest) = take_entry [live, t, Nil]; found ~> reply; ^ rest }
+    | =Register[t, p] => ^ Cons[[token: t, pid: p, at: now], live]
+    | =Claim[t, reply] => { (found, rest) = take_entry [live, t, Nil]; found ~> reply ~; ^ rest }
   }
 }
 
 // The app registry: token → parked app, one-shot claims, stale entries pruned.
-registry = #[] { Nil ~> @registry_loop }
+registry = #[] { Nil ~> @registry_loop ~ }
 
 // The root the app machinery runs: a placeable component whose init is the HTTP
 // request. The constructor below composes every accepted config into this shape —
@@ -1362,15 +1362,15 @@ registry = #[] { Nil ~> @registry_loop }
 'root_mapped<'i> = [root: #'place<'i> -> '%html<[]>, init: #'%http -> 'i]
 
 app = #<'i>('root_free | 'root_mapped<'i>) {
-  :doc "Declares an app — the unit `handle` serves. `[root: &comp]` names the root view (a placeable component from `component`, referenced with `&`), which mounts from nil; add `init: #'%http -> 'i` to derive the root's mount init from the request instead (`init: #'%http \{ $ }` passes the request itself). Further views are placed in view markup, not declared here. Spawns the app's parking registry, so create once at startup — the calling process owns it — and share the record with every `handle` call."
+  :doc "Declares an app — the unit `handle` serves. `[root: comp]` names the root view (a placeable component from `component`), which mounts from nil; add `init: #'%http -> 'i` to derive the root's mount init from the request instead (`init: #'%http \{ $ }` passes the request itself). Further views are placed in view markup, not declared here. Spawns the app's parking registry, so create once at startup — the calling process owns it — and share the record with every `handle` call."
   | =(init: f, root: r) => {
     rooted = #'place<'%http> { k = $key; r [init: f $init, key: k] }
-    [root: &rooted, reg: registry]
+    [root: rooted, reg: registry []]
   }
   | {
     =(root: r)
     rooted = #'place<'%http> { k = $key; r [init: [], key: k] }
-    [root: &rooted, reg: registry]
+    [root: rooted, reg: registry []]
   }
 }
 
@@ -1400,7 +1400,7 @@ route_of = #[(rs): 'routes, (v): '%str] -> 'route_hit {
   // in flow position, or bare in a field, would be *sent* the flowing value.
   v = $v
   {
-    | %list.find [$rs, #{ =(vid: rv); rv ~> =&v; $ }] ~> =(pid: rp) => RFound[&rp]
+    | %list.find [$rs, #{ =(vid: rv); rv ~> =&v; $ }] ~> =(pid: rp) => RFound[rp]
     | RMissing
   }
 }
@@ -1415,7 +1415,7 @@ del_route = #[(rs): 'routes, (v): '%str] {
 tell_views = #[(routes): 'routes, (m): (Park | Wake)] {
   $routes ~> {
     | =Nil => Ok
-    | =Cons[r, t] => { r ~> =(pid: p); $m ~> p; ^ [t, $m] }
+    | =Cons[r, t] => { r ~> =(pid: p); $m ~> p ~; ^ [t, $m] }
   }
 }
 
@@ -1432,7 +1432,7 @@ route_events = #[(req): '%http, (messages): '%http/websocket.messages, (routes):
         // The three-element event envelope first — events dominate, so the common path
         // parses once (a two-element nav message can't match it).
         | env_of t ~> =[v, payload, ev]; route_of [$routes, v] ~> =RFound[p] => {
-          Event[payload, ev] ~> p; Ok
+          Event[payload, ev] ~> p ~; Ok
         }
         // A live-navigation message re-derives the root: build the request for the new
         // target (keeping the initial request's method/headers/cookies) and hand it to
@@ -1441,7 +1441,7 @@ route_events = #[(req): '%http, (messages): '%http/websocket.messages, (routes):
           %http.split_target Str[tb] ~> =[path, query]
           Nav[
             req[..., target: Str[tb], path: path, query: query],
-          ] ~> p
+          ] ~> p ~
           Ok
         }
         | Ok
@@ -1463,7 +1463,7 @@ route_events = #[(req): '%http, (messages): '%http/websocket.messages, (routes):
 // wait queued regardless).
 alife = #[(req): '%http, (mode): 'amode, (buffer): 'strs, (token): ('%str | []), (registry): @'reg_msg, (routes): 'routes] {
   // The pid is taken by reference (a bare access would send), so bind it locally.
-  reg = &$registry
+  reg = $registry
   $mode ~> {
     | =Parked => ![#'app_msg, park_ms] ~> {
       | =Attach[conn] => {
@@ -1471,20 +1471,20 @@ alife = #[(req): '%http, (mode): 'amode, (buffer): 'strs, (token): ('%str | []),
         tell_views [$routes, Wake]
         %http/websocket.on_data [conn, 0x] ~> =[msgs, c2]
         route_events [$req, msgs, $routes] ~> {
-          | =Go => ^ [$req, Attached[c2], Nil, $token, &reg, $routes]
+          | =Go => ^ [$req, Attached[c2], Nil, $token, reg, $routes]
           | Ok
         }
       }
-      | =Frame[s] => ^ [$req, Parked, Cons[s, $buffer], $token, &reg, $routes]
+      | =Frame[s] => ^ [$req, Parked, Cons[s, $buffer], $token, reg, $routes]
       | =Route[v, p] => ^ [
         $req,
         Parked,
         $buffer,
         $token,
-        &reg,
-        Cons[[vid: v, pid: &p], del_route [$routes, v]],
+        reg,
+        Cons[[vid: v, pid: p], del_route [$routes, v]],
       ]
-      | =Unroute[v] => ^ [$req, Parked, $buffer, $token, &reg, del_route [$routes, v]]
+      | =Unroute[v] => ^ [$req, Parked, $buffer, $token, reg, del_route [$routes, v]]
       | Ok
     }
     | =Attached[conn] => ![
@@ -1494,31 +1494,31 @@ alife = #[(req): '%http, (mode): 'amode, (buffer): 'strs, (token): ('%str | []),
       | =Data[sock: _, data: d] => {
         %http/websocket.on_data [conn, d] ~> =[msgs, c2]
         route_events [$req, msgs, $routes] ~> {
-          | =Go => ^ [$req, Attached[c2], Nil, $token, &reg, $routes]
+          | =Go => ^ [$req, Attached[c2], Nil, $token, reg, $routes]
           | Ok
         }
       }
       | =Frame[s] => {
         %http/websocket.send_text [conn, s]
-        ^ [$req, Attached[conn], Nil, $token, &reg, $routes]
+        ^ [$req, Attached[conn], Nil, $token, reg, $routes]
       }
       | =Route[v, p] => ^ [
         $req,
         Attached[conn],
         Nil,
         $token,
-        &reg,
-        Cons[[vid: v, pid: &p], del_route [$routes, v]],
+        reg,
+        Cons[[vid: v, pid: p], del_route [$routes, v]],
       ]
-      | =Unroute[v] => ^ [$req, Attached[conn], Nil, $token, &reg, del_route [$routes, v]]
+      | =Unroute[v] => ^ [$req, Attached[conn], Nil, $token, reg, del_route [$routes, v]]
       // A clean `Closed`, or the nil of a failed read — a reset is how a browser tab
       // usually vanishes. Either way the socket is gone, and gone means park: the
       // recovery is deliberate, so the clean/failed difference is dropped with the nil.
       | $token ~> {
         | =Str[tb] => {
           tell_views [$routes, Park]
-          Register[Str[tb], &.] ~> reg
-          ^ [$req, Parked, Nil, Str[tb], &reg, $routes]
+          Register[Str[tb], .] ~> reg ~
+          ^ [$req, Parked, Nil, Str[tb], reg, $routes]
         }
         | Ok
       }
@@ -1547,17 +1547,16 @@ classify_frame = #'%str -> 'fclass {
       env ~> =Array[es]
       es ~> =Cons[_, r1]
       r1 ~> =Cons[vidj, r2]
-      vidj ~> jval ~> =Str[vb]
+      vidj ~> jval ~ ~> =Str[vb]
       r2 ~> =Cons[patchesj, Nil]
-      patchesj ~> jval ~> =Array[Cons[pj, Nil]]
+      patchesj ~> jval ~ ~> =Array[Cons[pj, Nil]]
 
       pj
-      ~> jval
-      ~> =Array[Cons[tagj, Cons[pathj, Cons[htmlj, Nil]]]]
+      ~> jval ~ ~> =Array[Cons[tagj, Cons[pathj, Cons[htmlj, Nil]]]]
 
-      tagj ~> jval ~> ="h"
-      pathj ~> jval ~> =Array[Nil]
-      htmlj ~> jval ~> =Str[hb]
+      tagj ~> jval ~ ~> ="h"
+      pathj ~> jval ~ ~> =Array[Nil]
+      htmlj ~> jval ~ ~> =Str[hb]
       FirstFrame[vid: Str[vb], html: Str[hb]]
     }
     | OtherFrame
@@ -1644,64 +1643,55 @@ reprocess = #[(page): '%str, (pending): 'strs, (keep): 'strs] -> ['%str, 'strs] 
 // complete page — or whatever assembled by the deadline. Then park.
 compose = #[(handler): @'%str, (page): ('%str | []), (buffer): 'strs, (token): ('%str | []), (registry): @'reg_msg, (routes): 'routes, (end): 'int, (req): '%http] {
   // The pids are taken by reference (a bare access would send), so bind them locally.
-  handler = &$handler
-  reg = &$registry
+  handler = $handler
+  reg = $registry
   {
     | composed? $page => {
       $page ~> =Str[pb]
-      Str[pb] ~> handler
-      alife [$req, Parked, $buffer, $token, &reg, $routes]
+      Str[pb] ~> handler ~
+      alife [$req, Parked, $buffer, $token, reg, $routes]
     }
-    | %num.lt? [%time.monotonic, $end] => ![#'app_msg, settle_quiet] ~> {
+    | %num.lt? [%time.monotonic [], $end] => ![#'app_msg, settle_quiet] ~> {
       | =Region[h] => {
         r = reprocess [h, %list.reverse $buffer, Nil]
-        ^ [&handler, r.0, r.1, $token, &reg, $routes, $end, $req]
+        ^ [handler, r.0, r.1, $token, reg, $routes, $end, $req]
       }
       | =Frame[s] => $page ~> {
         | =Str[pb] => classify_frame s ~> {
           | =FirstFrame[vid: Str[vb], html: Str[hb]] => ^ [
-            &handler,
+            handler,
             splice [Str[pb], Str[vb], Str[hb]],
             $buffer,
             $token,
-            &reg,
+            reg,
             $routes,
             $end,
             $req,
           ]
-          | ^ [&handler, Str[pb], Cons[s, $buffer], $token, &reg, $routes, $end, $req]
+          | ^ [handler, Str[pb], Cons[s, $buffer], $token, reg, $routes, $end, $req]
         }
-        | ^ [&handler, [], Cons[s, $buffer], $token, &reg, $routes, $end, $req]
+        | ^ [handler, [], Cons[s, $buffer], $token, reg, $routes, $end, $req]
       }
       | =Route[v, p] => ^ [
-        &handler,
+        handler,
         $page,
         $buffer,
         $token,
-        &reg,
-        Cons[[vid: v, pid: &p], del_route [$routes, v]],
+        reg,
+        Cons[[vid: v, pid: p], del_route [$routes, v]],
         $end,
         $req,
       ]
-      | =Unroute[v] => ^ [
-        &handler,
-        $page,
-        $buffer,
-        $token,
-        &reg,
-        del_route [$routes, v],
-        $end,
-        $req,
-      ]
+      | =Unroute[v] => ^ [handler, $page, $buffer, $token, reg, del_route [$routes, v], $end, $req]
       // An Attach cannot arrive before the page (the token is in it); dropping the
       // impossible conn closes it and the client retries cold.
-      | =Attach[_] => ^ [&handler, $page, $buffer, $token, &reg, $routes, $end, $req]
-      | ^ [&handler, $page, $buffer, $token, &reg, $routes, $end, $req]
+      | =Attach[_] => ^ [handler, $page, $buffer, $token, reg, $routes, $end, $req]
+      | ^ [handler, $page, $buffer, $token, reg, $routes, $end, $req]
     }
     // Deadline: answer with what assembled (a stuck view's boundary stays empty).
     | {
-      $page ~> { =Str[pb] => Str[pb] ~> handler | Ok }
-      alife [$req, Parked, $buffer, $token, &reg, $routes]
+      $page ~> { =Str[pb] => Str[pb] ~> handler ~ | Ok }
+      alife [$req, Parked, $buffer, $token, reg, $routes]
     }
   }
 }
@@ -1716,10 +1706,10 @@ compose = #[(handler): @'%str, (page): ('%str | []), (buffer): 'strs, (token): (
 app_run = #['%http, 'root_view, @'reg_msg, ('%str | []), 'aboot] {
   =[req, root, reg, token, boot]
   {
-    | token ~> =Str[tb] => { Register[Str[tb], &.] ~> reg; Ok }
+    | token ~> =Str[tb] => { Register[Str[tb], .] ~> reg ~; Ok }
     | Ok
   }
-  me = &.
+  me = .
   // The root is consumed through the boundary door: place it against the request,
   // take the spawn thunk off the node, and run it as vid "0" with the app's boot.
   // (A root that didn't come from `view` carries no :boundary — the retrieval
@@ -1728,15 +1718,15 @@ app_run = #['%http, 'root_view, @'reg_msg, ('%str | []), 'aboot] {
   node:('bnd)boundary ~> =(start: st)
   boot ~> {
     | =Dead[handler] => {
-      v = st ["0", &me, Reply[&me]]
-      %proc.link &v
-      end = %num.add [%time.monotonic, settle_deadline]
-      compose [&handler, [], Nil, token, &reg, Cons[[vid: "0", pid: &v], Nil], end, req]
+      v = st ["0", me, Reply[me]]
+      %proc.link v
+      end = %num.add [%time.monotonic [], settle_deadline]
+      compose [handler, [], Nil, token, reg, Cons[[vid: "0", pid: v], Nil], end, req]
     }
     | =Cold => {
-      v = st ["0", &me, Replace]
-      %proc.link &v
-      alife [req, Parked, Nil, token, &reg, Cons[[vid: "0", pid: &v], Nil]]
+      v = st ["0", me, Replace]
+      %proc.link v
+      alife [req, Parked, Nil, token, reg, Cons[[vid: "0", pid: v], Nil]]
     }
   }
 }
@@ -1746,7 +1736,7 @@ app_run = #['%http, 'root_view, @'reg_msg, ('%str | []), 'aboot] {
 // so it terminates on disconnect instead of parking, and detached, so it survives
 // this connection process ending.
 run_cold = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (registry): @'reg_msg] {
-  a = [$req, &$root, &$registry, [], Cold] ~> @app_run; %proc.detach &a; Attach[$conn] ~> a; Ok
+  a = [$req, $root, $registry, [], Cold] ~> @app_run ~; %proc.detach a; Attach[$conn] ~> a ~; Ok
 }
 
 // The upgrade side: the client's first frame is its token. A claimed app is sent
@@ -1754,14 +1744,14 @@ run_cold = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (regis
 // then ends owning nothing. Anything else falls back to the cold path.
 join = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (registry): @'reg_msg] {
   // The pid is taken by reference (a bare access would send), so bind it locally.
-  reg = &$registry
+  reg = $registry
   %http/websocket.recv $conn ~> =[first, c2]
   first ~> {
     | =Text[tok] => {
-      Claim[tok, &.] ~> reg
+      Claim[tok, .] ~> reg ~
       !'claim ~> {
-        | =Found[p] => { Attach[c2] ~> p; Ok }
-        | run_cold [c2, $req, &$root, &reg]
+        | =Found[p] => { Attach[c2] ~> p ~; Ok }
+        | run_cold [c2, $req, $root, reg]
       }
     }
     | Ok
@@ -2185,20 +2175,20 @@ page_shell = #[(region): '%str, (token): '%str] {
 }
 
 handle = #[(req): '%http, (app): 'app] {
-  :doc "The app's HTTP handler body. A plain GET spawns a detached app process whose root view mounts once; the view answers the region HTML and the app parks behind the page's claim token. A websocket-upgrade request reads the token from the client's first frame and hands the claimed app the socket (an unknown token falls back to a cold fresh mount). Wire it as `#'%http \{ %html/live.handle [$, app] }` with an `%html/live.app [root: &comp]` created once at startup."
+  :doc "The app's HTTP handler body. A plain GET spawns a detached app process whose root view mounts once; the view answers the region HTML and the app parks behind the page's claim token. A websocket-upgrade request reads the token from the client's first frame and hands the claimed app the socket (an unknown token falls back to a cold fresh mount). Wire it as `#'%http \{ %html/live.handle [$, app] }` with an `%html/live.app [root: comp]` created once at startup."
   // The upgrade handler closes over `req` (an inner `$` would be its own
   // parameter), so bind the field locally.
   req = $req
   $app ~> =(root: rt, reg: rg)
   {
     | %http.header [req.headers, "sec-websocket-key"] => Upgrade[
-      handler: #'%http/websocket { join [$, req, &rt, &rg] },
+      handler: #'%http/websocket { join [$, req, rt, rg] },
     ]
     | {
       token = %random.hex 16
-      me = &.
-      ap = [req, &rt, &rg, token, Dead[&me]] ~> @app_run
-      %proc.detach &ap
+      me = .
+      ap = [req, rt, rg, token, Dead[me]] ~> @app_run ~
+      %proc.detach ap
       ![#'%str, 5000] ~> {
         | =Str[region] => {
           page_shell [Str[region], token] ~> =Str[b]
@@ -2215,7 +2205,7 @@ handle = #[(req): '%http, (app): 'app] {
 }
 
 {
-  :dialect &live_dialect
+  :dialect live_dialect
   (
     frame,
     render,

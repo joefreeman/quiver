@@ -1138,7 +1138,7 @@ fn pin_pattern(input: Span) -> IResult<Span, Match> {
     let (accessors, accessor_spans): (Vec<_>, Vec<_>) = leading.into_iter().chain(dotted).unzip();
     Ok((
         rest,
-        Match::Reference(PinTarget {
+        Match::Pin(PinTarget {
             root,
             accessors,
             accessor_spans,
@@ -2036,11 +2036,9 @@ fn select_term(input: Span) -> IResult<Span, Term> {
                 pair(named_tuple_type, opt(preceded(opt(hspace1), block))),
                 |(param_type, body)| make_receive(param_type, body),
             ),
-            // access (variable / module member) → reference it as a single source. Select
-            // sources are a tuple of values, so a callable source must be referenced rather
-            // than called: the tight form `!f` desugars to `![&f]` (the `&` is part of the
-            // sugar). A process variable references harmlessly (`&p` is just `p`).
-            map(access, |acc| single_source(Term::Reference(acc))),
+            // access (variable / module member) → a single source. Select sources are a
+            // tuple of values, and a name is a value, so `!f` is exactly `![f]`.
+            map(access, |acc| single_source(Term::Access(acc))),
             // #type - `#`-typed receive: `!#'int`, `!#Reply[...]`, or a filter with a body
             // (`!#'int { … }`).
             map(
@@ -2153,17 +2151,12 @@ fn pun_label(path: &Access) -> Option<String> {
 }
 
 /// A punned tuple entry: a bare access path standing for both a field label and its value, so
-/// `(a, p.x)` abbreviates `[a: &a, x: &p.x]`. The value is always taken *by reference* — an
-/// identifier inside `(…)` is a name, not an expression, so there is nothing for the flowing
-/// value to flow into and a callable entry names the function rather than calling it. That is
-/// what a record of functions wants, and it makes a punned tuple pure repackaging.
-///
-/// A leading `&` is accepted and discarded: it says exactly what a pun already means, so it
-/// carries no information, and the formatter renders the canonical spelling without it. This
-/// lets `[f: &f, g: &g]` be shortened by deleting the labels alone.
+/// `(a, p.x)` abbreviates `[a: a, x: p.x]`. An entry is a *name*, not an expression, so the
+/// flowing value has nothing to flow into — which, now that every call is written, is all that
+/// separates a pun from the spelled-out field. A punned tuple is pure repackaging.
 fn pun_field(input: Span) -> IResult<Span, TupleField> {
     let start = input;
-    let (rest, path) = preceded(opt(char('&')), access)(input)?;
+    let (rest, path) = access(input)?;
     let Some(name) = pun_label(&path) else {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -2183,7 +2176,7 @@ fn pun_field(input: Span) -> IResult<Span, TupleField> {
             name: Some(name),
             name_span,
             span: Spanned(Some(span_between(start, rest))),
-            value: FieldValue::Chain(make_source_chain(Term::Reference(path))),
+            value: FieldValue::Chain(make_source_chain(Term::Access(path))),
         },
     ))
 }
@@ -2761,28 +2754,6 @@ fn process_ref_term(input: Span) -> IResult<Span, Term> {
     )(input)
 }
 
-/// Reference term: &identifier, &module.func, or &. — an explicit reference, without calling.
-fn reference_term(input: Span) -> IResult<Span, Term> {
-    preceded(
-        char('&'),
-        alt((
-            // &. - reference to self
-            map(char('.'), |_| {
-                Term::Reference(Access {
-                    source: Some(AccessSource::Self_),
-                    accessors: vec![],
-                    accessor_spans: vec![],
-                    type_arguments: vec![],
-                    base_span: Spanned::default(),
-                    span: Spanned::default(),
-                })
-            }),
-            // &identifier, &module.func, or &__builtin__ (a builtin is an access source)
-            map(access, Term::Reference),
-        )),
-    )(input)
-}
-
 fn primary(input: Span) -> IResult<Span, Term> {
     alt((
         // String terms (before literals to handle quotes)
@@ -2804,8 +2775,6 @@ fn primary(input: Span) -> IResult<Span, Term> {
         map(tuple_term, Term::Tuple),
         map(function, Term::Function),
         map(block, Term::Block),
-        // Reference (must come before access to parse &f before f)
-        reference_term,
         // Name-preserving spread-update (`~[..., y]`, `a[..., y]`) — before access, which would
         // otherwise consume the `~`/identifier as a bare reference.
         spread_update,
@@ -3226,11 +3195,11 @@ mod tests {
         assert_eq!(access.type_arguments.len(), 2);
         assert_eq!(slice(source, access.span.get().unwrap()), "map");
 
-        // Reference and import-member heads take the suffix too.
-        let program = parse("&%iter.fold<'int>").unwrap();
-        let Term::Reference(access) = &program.steps[0].as_chain().expect("chain step").terms[0]
+        // An import-member head takes the suffix too.
+        let program = parse("%iter.fold<'int>").unwrap();
+        let Term::Access(access) = &program.steps[0].as_chain().expect("chain step").terms[0]
         else {
-            panic!("expected reference term");
+            panic!("expected access term");
         };
         assert_eq!(access.type_arguments.len(), 1);
     }

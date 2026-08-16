@@ -27,7 +27,7 @@
 'expr = '%meta.expr
 
 // A byte token with leading whitespace skipped.
-tok = #[(b): 'int, (what): '%str] { %parse.right [&%parse.ws, %parse.byte [$b, $what]] }
+tok = #[(b): 'int, (what): '%str] { %parse.right [%parse.ws, %parse.byte [$b, $what]] }
 
 // `~`: the value flowing into the dialect term, spliced as its own 1-byte host span.
 ripple_p = #'%parse {
@@ -56,55 +56,55 @@ word_p = #'%parse {
 // The value grammar, self-passed to tie the value↔array/object recursion.
 value_step = #[#^ -> (['expr, '%parse] | []), '%parse] {
   =[self, st]
-  value = #'%parse { self [&self, $] }
+  value = #'%parse { self [self, $] }
 
   comma = tok [44, "','"]
 
-  elems = %parse.sep_end_by [&value, &comma]
+  elems = %parse.sep_end_by [value, comma]
 
-  a1 = %parse.right [%parse.byte [91, "'['"], &elems]
+  a1 = %parse.right [%parse.byte [91, "'['"], elems]
 
-  a2 = %parse.left [&a1, tok [93, "']'"]]
+  a2 = %parse.left [a1, tok [93, "']'"]]
 
   array = %parse.map [
-    &a2,
+    a2,
     #{
       Tuple[name: "Array", fields: Cons[%meta.list_expr $, Nil]]
     },
   ]
 
-  key = %parse.right [&%parse.ws, &%parse.quoted]
-  k1 = %parse.left [&key, tok [58, "':'"]]
+  key = %parse.right [%parse.ws, %parse.quoted]
+  k1 = %parse.left [key, tok [58, "':'"]]
 
-  pair = %parse.map [%parse.then [&k1, &value], #{ %meta.pair2 [$0, $1] }]
+  pair = %parse.map [%parse.then [k1, value], #{ %meta.pair2 [$0, $1] }]
 
-  pairs = %parse.sep_end_by [&pair, &comma]
+  pairs = %parse.sep_end_by [pair, comma]
 
-  o1 = %parse.right [%parse.byte [123, "'\{'"], &pairs]
+  o1 = %parse.right [%parse.byte [123, "'\{'"], pairs]
 
-  o2 = %parse.left [&o1, tok [125, "'}'"]]
+  o2 = %parse.left [o1, tok [125, "'}'"]]
 
   object = %parse.map [
-    &o2,
+    o2,
     #{
       Tuple[name: "Object", fields: Cons[%meta.list_expr $, Nil]]
     },
   ]
 
-  composite = %parse.alt4 [&array, &object, &%parse.quoted, &%parse.int]
+  composite = %parse.alt4 [array, object, %parse.quoted, %parse.int]
 
-  leaf = %parse.alt2 [&ripple_p, &word_p]
-  core = %parse.alt2 [&composite, &leaf]
-  core_ws = %parse.right [&%parse.ws, &core]
+  leaf = %parse.alt2 [ripple_p, word_p]
+  core = %parse.alt2 [composite, leaf]
+  core_ws = %parse.right [%parse.ws, core]
 
   core_ws st
 }
 
-value = #'%parse { value_step [&value_step, $] }
+value = #'%parse { value_step [value_step, $] }
 
 // The dialect entry point: the compiler calls this with the dialect context record; the
 // grammar needs only the content (escape spans come from its own positions).
-json = #(content: '%str) { full = %parse.left [&value, &%parse.ws]; %parse.run [$content, &full] }
+json = #(content: '%str) { full = %parse.left [value, %parse.ws]; %parse.run [$content, full] }
 
 // === Runtime codec ======================================================================
 // `parse`/`stringify` read and write JSON at runtime, over `'%str`. They share the
@@ -127,7 +127,7 @@ digit? = #'int {
   __integer_compare__ [$, 48] ~> =(0 | 1); __integer_compare__ [$, 57] ~> =(-1 | 0); $
 }
 
-digits = %parse.take_while &digit?
+digits = %parse.take_while digit?
 
 // The byte at the parse state's position, or nil at end of input.
 peek_at = #'%parse { %num.lt? [$pos, $len]; %bin.get_byte [$data, $pos] }
@@ -173,8 +173,7 @@ number = #'%parse {
 
   frac = {
     | peek_at st2 ~> =46 => {
-      st2[..., pos: %num.add [st2.pos, 1]] ~> digits
-      ~> =[fbb, st3a]
+      st2[..., pos: %num.add [st2.pos, 1]] ~> digits ~ ~> =[fbb, st3a]
 
       {
         | %bin.length fbb ~> =0 => %parse.fail_in [st2, "digits after '.'"]
@@ -217,22 +216,22 @@ parse_value = #['%parse.p<'>, '%parse] {
 
   comma = tok [44, "','"]
 
-  elems = %parse.sep_end_by [&value_p, &comma]
+  elems = %parse.sep_end_by [value_p, comma]
 
-  a1 = %parse.right [%parse.byte [91, "'['"], &elems]
+  a1 = %parse.right [%parse.byte [91, "'['"], elems]
 
-  a2 = %parse.left [&a1, tok [93, "']'"]]
-  array = %parse.map [&a2, #{ Array[$] }]
+  a2 = %parse.left [a1, tok [93, "']'"]]
+  array = %parse.map [a2, #{ Array[$] }]
 
-  key = %parse.right [&%parse.ws, &%parse.quoted]
-  k1 = %parse.left [&key, tok [58, "':'"]]
-  pair = %parse.then [&k1, &value_p]
-  pairs = %parse.sep_end_by [&pair, &comma]
+  key = %parse.right [%parse.ws, %parse.quoted]
+  k1 = %parse.left [key, tok [58, "':'"]]
+  pair = %parse.then [k1, value_p]
+  pairs = %parse.sep_end_by [pair, comma]
 
-  o1 = %parse.right [%parse.byte [123, "'\{'"], &pairs]
+  o1 = %parse.right [%parse.byte [123, "'\{'"], pairs]
 
-  o2 = %parse.left [&o1, tok [125, "'}'"]]
-  object = %parse.map [&o2, #{ Object[$] }]
+  o2 = %parse.left [o1, tok [125, "'}'"]]
+  object = %parse.map [o2, #{ Object[$] }]
 
   keyword = #'%parse {
     =kst
@@ -245,19 +244,19 @@ parse_value = #['%parse.p<'>, '%parse] {
     }
   }
 
-  composite = %parse.alt4 [&array, &object, &%parse.quoted, &number]
+  composite = %parse.alt4 [array, object, %parse.quoted, number]
 
-  core = %parse.alt2 [&composite, &keyword]
-  core_ws = %parse.right [&%parse.ws, &core]
+  core = %parse.alt2 [composite, keyword]
+  core_ws = %parse.right [%parse.ws, core]
 
   core_ws st
 }
 
-parse_p = %parse.rec &parse_value
+parse_p = %parse.rec parse_value
 
 parse = #'%str {
   :doc "Parses a JSON string into a '%json value, or nil with a positioned :error on malformed input."
-  full = %parse.left [&parse_p, &%parse.ws]; %parse.run [$, &full]
+  full = %parse.left [parse_p, %parse.ws]; %parse.run [$, full]
 }
 
 // Escape a string's interior bytes. Only the escapes the parser understands are emitted
@@ -290,7 +289,7 @@ escape_str = #'%str {
 // Concatenate a list's elements — each rendered to a string by `render` — separated by
 // commas.
 join_strs = #<'x>[(items): '%list<'x>, (render): #'x -> '%str] {
-  %list.iter $items ~> %iter.map [~, &$render] ~> %str.join [~, ","]
+  %list.iter $items ~> %iter.map [~, $render] ~> %str.join [~, ","]
 }
 
 // A binary of `n` copies of byte `b`.
@@ -306,7 +305,7 @@ strip_zeros = #'bin {
   {
     | len ~> =0 => b
     | %bin.get_byte [b, __integer_subtract__ [len, 1]] ~> =48 => {
-        %bin.slice [b, 0, __integer_subtract__ [len, 1]] ~> ^
+        %bin.slice [b, 0, __integer_subtract__ [len, 1]] ~> ^ ~
       }
     | b
   }
@@ -318,7 +317,7 @@ frac_bytes = #[(fracpart): 'int, (width): 'int] {
   ds = %str.from_int $fracpart ~> .0
   pad = __integer_subtract__ [$width, %bin.length ds]
 
-  [repeat_byte [0x, 48, pad], ds] ~> strip_zeros %bin.concat
+  [repeat_byte [0x, 48, pad], ds] ~> %bin.concat ~ ~> strip_zeros ~
 }
 
 // Format a canonical rational `n/d` (`d > 0`, gcd 1) as a JSON decimal: the exact finite
@@ -362,7 +361,7 @@ format_rational = #[(n): 'int, (d): 'int] {
 // Serialize a `'%json` value to its compact string form, self-passed to recurse.
 str_step = #[#^ -> '%str, '] -> '%str {
   =[self, v]
-  go = #' { self [&self, $] }
+  go = #' { self [self, $] }
   v ~> {
     | =Null => "null"
     | =True => "true"
@@ -371,13 +370,13 @@ str_step = #[#^ -> '%str, '] -> '%str {
     | =Rational[n, d] => format_rational [n, d]
     | =Str[bytes] => escape_str Str[bytes]
     | =Array[items] => {
-      body = join_strs [items, &go]
+      body = join_strs [items, go]
 
       %str.concat ["[", body] ~> %str.concat [~, "]"]
     }
     | =Object[pairs] => {
       render = #['%str, '] { %str.concat [escape_str $0, ":"] ~> %str.concat [~, go $1] }
-      body = join_strs [pairs, &render]
+      body = join_strs [pairs, render]
 
       %str.concat ["\{", body] ~> %str.concat [~, "}"]
     }
@@ -386,7 +385,7 @@ str_step = #[#^ -> '%str, '] -> '%str {
 
 stringify = #' {
   :doc "Serializes a '%json value to its compact JSON string form."
-  str_step [&str_step, $]
+  str_step [str_step, $]
 }
 
 // === Query and update ===================================================================
@@ -488,10 +487,7 @@ set_step = #[#^ -> 'opt, 'opt, '%list<('%str | 'int)>, '] -> 'opt {
   path ~> {
     | =Nil => new
     | =Cons[k, Nil] => set1 [value, k, new]
-    | =Cons[k, rest] => {
-      self [&self, get1 [value, k], rest, new] ~> =(')sub
-      set1 [value, k, sub]
-    }
+    | =Cons[k, rest] => { self [self, get1 [value, k], rest, new] ~> =(')sub; set1 [value, k, sub] }
   }
 }
 
@@ -500,7 +496,7 @@ set = #[(value): 'opt, (key): 'key, (new): 'opt] -> 'opt {
   $new ~> =(')j
   $key ~> {
     | =('%str | 'int)k => set1 [$value, k, j]
-    | =('%list<('%str | 'int)>)path => set_step [&set_step, $value, path, j]
+    | =('%list<('%str | 'int)>)path => set_step [set_step, $value, path, j]
   }
 }
 
@@ -547,7 +543,7 @@ delete_step = #[#^ -> 'opt, 'opt, '%list<('%str | 'int)>] -> 'opt {
     | =Nil => []
     | =Cons[k, Nil] => delete1 [value, k]
     | =Cons[k, rest] => get1 [value, k] ~> {
-      | =(')child => { self [&self, child, rest] ~> =(')sub; set1 [value, k, sub] }
+      | =(')child => { self [self, child, rest] ~> =(')sub; set1 [value, k, sub] }
       | value
     }
   }
@@ -557,7 +553,7 @@ delete = #[(value): 'opt, (key): 'key] -> 'opt {
   :doc "The value without what a key or path names; unchanged when already absent (the empty path deletes the whole value: nil). Nil when the kind mismatches."
   $key ~> {
     | =('%str | 'int)k => delete1 [$value, k]
-    | =('%list<('%str | 'int)>)path => delete_step [&delete_step, $value, path]
+    | =('%list<('%str | 'int)>)path => delete_step [delete_step, $value, path]
   }
 }
 
@@ -599,15 +595,15 @@ array = #'%list<'> -> ' {
 // admitting nil makes its key optional: absent or `null` decode as nil, and a nil field
 // is omitted on encode. A `'%json`-typed part passes the raw subtree through verbatim.
 
-decode = &__json_decode__ ~> {
+decode = __json_decode__ ~> {
   :doc "Decodes a '%json value (or nil, which passes through) as the explicitly-given expected type: `%json.decode<'user> doc` answers `'user | []` — nil for any mismatch. Unions decode by ordered choice, like %data.decode. The expected type must be concrete at the naming site; `parse ~> decode<'t>` covers text."
 }
 
-encode = &__json_encode__ ~> {
+encode = __json_encode__ ~> {
   :doc "Encodes a value of the explicitly-given type as a '%json document: `%json.encode<'user> u ~> %json.stringify` — the inverse of `decode`. Values with no JSON form (functions, processes, refs, resources, binaries, dicts, unlabelled tuples) are a runtime error."
 }
 
 {
-  :dialect &json
+  :dialect json
   (parse, stringify, get, set, update, delete, merge, to_dict, object, array, decode, encode)
 }

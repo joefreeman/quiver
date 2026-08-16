@@ -21,7 +21,7 @@ int_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'int] {
 
 bin_int = #'bin { int_loop [$, 0, %bin.length $, 0] }
 
-// The smallest byte count `k` (and its `power` 256^k) such that `256^k >= n`, from k = 1.
+// The smallest byte count `k` (and its `power` 256^k []) such that `256^k >= n`, from k = 1.
 klen_loop = #[(n): 'int, (k): 'int, (p): 'int] {
   {
     | __integer_compare__ [$p, $n] ~> =(0 | 1) => [count: $k, power: $p]
@@ -32,7 +32,7 @@ klen_loop = #[(n): 'int, (k): 'int, (p): 'int] {
 // Draw k bytes as an integer until it falls below `limit` (a multiple of n), then take
 // the remainder — uniform in [0, n) with no modulo bias.
 draw_loop = #[(n): 'int, (k): 'int, (limit): 'int] {
-  v = __random_bytes__ $k ~> bin_int
+  v = __random_bytes__ $k ~> bin_int ~
   {
     | __integer_compare__ [v, $limit] ~> =-1 => __integer_modulo__ [v, $n]
     | ^ [$n, $k, $limit]
@@ -54,8 +54,7 @@ between = #[(min): 'int, (max): 'int] {
   :doc "A uniform random integer from lo to hi inclusive; nil when lo > hi."
   __integer_compare__ [$min, $max] ~> =(-1 | 0)
 
-  __integer_add__ [__integer_subtract__ [$max, $min], 1] ~> below
-  ~> =('int)r
+  __integer_add__ [__integer_subtract__ [$max, $min], 1] ~> below ~ ~> =('int)r
 
   __integer_add__ [$min, r]
 }
@@ -72,9 +71,9 @@ hex_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
     | {
       b = %bin.get_byte [$data, $pos]
 
-      acc2 = %bin.append [$acc, __integer_divide__ [b, 16] ~> hex_digit, 1] ~> %bin.append [
+      acc2 = %bin.append [$acc, __integer_divide__ [b, 16] ~> hex_digit ~, 1] ~> %bin.append [
         ~,
-        __integer_modulo__ [b, 16] ~> hex_digit,
+        __integer_modulo__ [b, 16] ~> hex_digit ~,
         1,
       ]
 
@@ -89,10 +88,10 @@ hex = #'int {
 }
 
 [
-  bytes: &__random_bytes__ ~> {
+  bytes: __random_bytes__ ~> {
     :doc "The given number of cryptographically secure random bytes from the host's entropy source."
   },
-  below: &below,
-  between: &between,
-  hex: &hex,
+  below: below,
+  between: between,
+  hex: hex,
 ]

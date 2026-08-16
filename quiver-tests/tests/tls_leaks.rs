@@ -17,7 +17,7 @@ fn test_repeated_tls_sessions_hold_no_descriptors() {
         .with_timeout(Duration::from_secs(30))
         .evaluate(&server.program(
             r#"
-            count_fds = #[] { %fs.list "/proc/self/fd" ~> %iter.count }
+            count_fds = #[] { %fs.list "/proc/self/fd" ~> %iter.count ~ }
 
             cycle = #[] {
               %tcp.connect [0x7f000001, __PORT__] ~> =(\TcpSocket)s
@@ -37,7 +37,7 @@ fn test_repeated_tls_sessions_hold_no_descriptors() {
 
             repeat = #[(n): 'int, (ok?): (Ok | No)] {
               | $n ~> =0 => Ok
-              | { $ok? ~> =Ok => cycle | failed_cycle }; [%num.sub [$n, 1], $ok?] ~> ^
+              | { $ok? ~> =Ok => cycle | failed_cycle }; [%num.sub [$n, 1], $ok?] ~> ^ ~
             }
 
             // Warm up anything allocated lazily on first use — sockets, timers, the

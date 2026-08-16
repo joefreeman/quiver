@@ -63,12 +63,12 @@ fn test_piped_literal_omits_too() {
     // A literal piped into a statically-known callable elaborates exactly as an argument
     // does — the same position in which it already adopts omittable labels.
     quiver()
-        .evaluate("f = #[(a): 'int, b: 'int] { :defaults [b: 20]; [$a, $b] }; [1] ~> f")
+        .evaluate("f = #[(a): 'int, b: 'int] { :defaults [b: 20]; [$a, $b] }; [1] ~> f ~")
         .expect("[1, 20]");
     quiver()
         .evaluate(
             "f = #[(a): 'int, b: 'int, c: 'int] { :defaults [b: 20, c: 30]; [$a, $b, $c] }
-             [1, c: 3] ~> f",
+             [1, c: 3] ~> f ~",
         )
         .expect("[1, 20, 3]");
 }
@@ -112,14 +112,14 @@ fn test_defaults_shed_at_declared_boundary() {
         .evaluate(
             "f = #[a: 'int] { :defaults [a: 1]; $a }
              h = #[g: #[a: 'int] -> 'int] { $g [a: 5] }
-             h [g: &f]",
+             h [g: f]",
         )
         .expect("5");
     quiver()
         .evaluate(
             "f = #[a: 'int] { :defaults [a: 1]; $a }
              h = #[g: #[a: 'int] -> 'int] { $g [] }
-             h [g: &f]",
+             h [g: f]",
         )
         .expect_type_mismatch();
     // While a direct call still fills it.
@@ -150,7 +150,7 @@ fn test_default_value_is_evaluated_once_at_closure_build() {
     quiver()
         .evaluate(
             "base = 5
-             f = #[(a): 'int, b: 'int] { :defaults [b: [base, 15] ~> __integer_add__]; [$a, $b] }
+             f = #[(a): 'int, b: 'int] { :defaults [b: [base, 15] ~> __integer_add__ ~]; [$a, $b] }
              f [1]",
         )
         .expect("[1, 20]");
@@ -206,7 +206,7 @@ fn test_sugar_leaves_the_parameter_type_alone() {
         .evaluate(
             "f = #[a: 'int = 1] { $a }
              h = #[g: #[a: 'int] -> 'int] { $g [a: 5] }
-             h [g: &f]",
+             h [g: f]",
         )
         .expect("5");
 }

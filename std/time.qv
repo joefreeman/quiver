@@ -129,13 +129,13 @@ iso8601 = #'int {
 }
 
 [
-  now: &__time_now__ ~> {
+  now: __time_now__ ~> {
     :doc "The wall-clock time as milliseconds since the Unix epoch (UTC)."
   },
-  monotonic: &__time_monotonic__ ~> {
+  monotonic: __time_monotonic__ ~> {
     :doc "Milliseconds since an arbitrary per-run origin: steady, for measuring durations; unrelated to the wall clock."
   },
-  parts: &parts,
-  http_date: &http_date,
-  iso8601: &iso8601,
+  parts: parts,
+  http_date: http_date,
+  iso8601: iso8601,
 ]

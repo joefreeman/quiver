@@ -211,7 +211,7 @@ const SOURCES: [(&str, &str); 6] = [
         "Cons[2, Cons[4, Cons[6, Nil]]]",
     ),
     (
-        "%list{1, 2, 3} ~> %list.fold [~, init: 0, f: &%num.add]",
+        "%list{1, 2, 3} ~> %list.fold [~, init: 0, f: %num.add]",
         "6",
     ),
     ("%str.from_int 12345", "\"12345\""),
@@ -249,7 +249,7 @@ fn units_link_under_either_registration_policy() {
 fn module_a(n: &str) -> HashMap<Vec<String>, String> {
     HashMap::from([(
         vec!["a".to_string()],
-        format!("[f: #'int {{ [$, {n}] ~> __integer_add__ }}]"),
+        format!("[f: #'int {{ [$, {n}] ~> __integer_add__ ~ }}]"),
     )])
 }
 
@@ -417,7 +417,7 @@ fn a_program_that_is_not_executable_still_extracts() {
     // `quiv compile` accepts a top level that does not evaluate to a function, so that
     // `quiv inspect` can still show it. The unit form of that is an entry of `None` over
     // everything the compile registered — not an empty unit.
-    let compiled = compile("[1, 2] ~> __integer_add__", false);
+    let compiled = compile("[1, 2] ~> __integer_add__ ~", false);
     let unit = quiver_compiler::extract_unit(
         &compiled.program,
         &compiled.module_cache,
@@ -941,10 +941,7 @@ fn the_in_process_repl_runs_lines_as_units() {
     for (source, expected) in [
         ("%num.mul [7, 6]", Some("Int(42)")),
         ("xs = %list{1, 2, 3}", None),
-        (
-            "xs ~> %list.fold [~, init: 0, f: &%num.add]",
-            Some("Int(6)"),
-        ),
+        ("xs ~> %list.fold [~, init: 0, f: %num.add]", Some("Int(6)")),
         ("double = #'int { %num.mul [$, 2] }", None),
         ("double 21", Some("Int(42)")),
         ("double 21 ~> %num.add [~, 1]", Some("Int(43)")),

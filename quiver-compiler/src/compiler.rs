@@ -197,6 +197,15 @@ pub enum Error {
     /// scrutinee's refinement) unsound. A fallible match must end its chain, so that
     /// its verdict directly gates a step boundary (`=P; …`) or a branch (`=P => …`).
     FallibleMatchNotChainFinal,
+    /// A tail call or spawn is written without its argument. Every call states what it is
+    /// called with, nil included (`f []`), and these are calls: `^ []` recurses on nil,
+    /// `@f []` spawns a nilary function. An omitted argument is one the source never
+    /// states — legal only where the callee happens to be nilary, which is exactly what
+    /// makes it worth writing.
+    MissingCallArgument {
+        /// The form as written (`^`, `^~`, `@f`), for the message.
+        form: String,
+    },
     /// A chain term other than the head ignores the value flowing into it, silently
     /// dropping everything the chain computed before it. A chain threads a value through
     /// its terms; a term that wants a fresh start is a step (`;`), which is also what
@@ -257,7 +266,7 @@ fn block_references_parameter(block: &ast::Block) -> bool {
 fn term_references_parameter(term: &ast::Term) -> bool {
     let chain = |chain: &ast::Chain| chain.terms.iter().any(term_references_parameter);
     match term {
-        ast::Term::Access(access) | ast::Term::Reference(access) => {
+        ast::Term::Access(access) => {
             matches!(
                 access.source,
                 Some(ast::AccessSource::Parameter { depth: 0 })
@@ -334,15 +343,15 @@ fn term_uses_flow(term: &ast::Term) -> bool {
         // a reference and a state sample all replace it outright.
         ast::Term::Literal(_)
         | ast::Term::Function(_)
-        | ast::Term::Reference(_)
         | ast::Term::State(..)
         | ast::Term::Process(_) => false,
-        // Consumed directly: as a scrutinee, as a block or expansion's input, as the
-        // message sent to self, or as the process awaited by a bare `!`.
+        // `.` names the current process, like any other name.
+        ast::Term::Self_ => false,
+        // Consumed directly: as a scrutinee, as a block or expansion's input, or as the
+        // process awaited by a bare `!`.
         ast::Term::Match(_)
         | ast::Term::Block(_)
         | ast::Term::Dialect(_)
-        | ast::Term::Self_
         | ast::Term::Select(None, _) => true,
         // Each field receives a copy of the flowing value, so the tuple uses it exactly
         // when some field does. A bare `...` spreads the flowing value itself.
@@ -354,20 +363,15 @@ fn term_uses_flow(term: &ast::Term) -> bool {
         ast::Term::String(_, segments) => segments
             .iter()
             .any(|segment| matches!(segment, ast::StrSegment::Hole(_))),
-        // TODO: a bare callable name is applied to the flowing value today (`5 ~> f`), so
-        // it consumes it — and callability is not syntactic, so every access is taken to.
-        // When application is spelled only by juxtaposition this becomes
-        // `access_reads_flow(access)`, and every other access becomes the discard it
-        // already is.
-        ast::Term::Access(_) => true,
+        ast::Term::Access(access) => access_reads_flow(access),
         // A ripple head (`~ x`, `^~ x`) consumes the value itself; otherwise it reaches
         // the argument, so the application uses it exactly when the argument does.
         ast::Term::Apply(head, argument) => access_reads_flow(head) || term_uses_flow(argument),
-        // `@f x` takes its init from the argument, `x ~> @f` from the flowing value; `@~`
-        // spawns the flowing value whichever way the init is written.
+        // A spawn's init is written like a call's argument (`@f x`, `@f ~`, `@f []`);
+        // `@~` additionally spawns the flowing value itself.
         ast::Term::Spawn(function, argument, _) => {
             matches!(function.as_ref(), ast::Term::Access(a) if access_reads_flow(a))
-                || argument.as_deref().is_none_or(term_uses_flow)
+                || argument.as_deref().is_some_and(term_uses_flow)
         }
         // `![a, b]` names its own sources, so it uses the flowing value only if one does.
         ast::Term::Select(Some(sources), _) => sources.iter().any(chain),
@@ -380,7 +384,7 @@ fn term_error_span(term: &ast::Term) -> Option<SourceSpan> {
     match term {
         ast::Term::Tuple(tuple) => tuple.span.get(),
         ast::Term::Function(function) => function.span.get(),
-        ast::Term::Reference(access) | ast::Term::Apply(access, _) => access.span.get(),
+        ast::Term::Apply(access, _) => access.span.get(),
         ast::Term::Spawn(_, _, span) | ast::Term::Select(_, span) | ast::Term::State(_, span) => {
             span.get()
         }
@@ -540,6 +544,13 @@ impl std::fmt::Display for Error {
                      whether or not the match succeeded. Separate the steps (`=P; ...`) \
                      so the match gates what follows, or test for a failed match with a \
                      block (`{{ =P => [] | Ok }}`)"
+                )
+            }
+            Error::MissingCallArgument { form } => {
+                write!(
+                    f,
+                    "`{form}` is missing its argument: a call states what it is called with, \
+                     nil included, so write `{form} []` to call on nil (as `f []` does)"
                 )
             }
             Error::DiscardedChainValue => {
@@ -951,33 +962,6 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     _phantom: std::marker::PhantomData<E>,
 }
 
-/// Collect the name and source span of every binding identifier in a pattern, recursing
-/// through tuple and partial sub-patterns. Used by the language server to index pattern
-/// bindings (destructuring, mid-chain `=x`, block branches, and bare partial fields like
-/// `(double)`) for hover/go-to-definition.
-/// Build a hover label from a base symbol and an accessor chain, e.g. `foo` + `[.bar]` →
-/// `foo.bar`, `$` + `[.0]` → `$.0`, `%num` + `[.add]` → `%num.add`.
-fn accessors_label(base: &str, accessors: &[ast::AccessPath]) -> String {
-    let mut label = base.to_string();
-    for accessor in accessors {
-        match accessor {
-            ast::AccessPath::Field(name) => {
-                label.push('.');
-                label.push_str(name);
-            }
-            ast::AccessPath::Index(index) => {
-                label.push('.');
-                label.push_str(&index.to_string());
-            }
-            ast::AccessPath::Annotation(name, _) => {
-                label.push(':');
-                label.push_str(name);
-            }
-        }
-    }
-    label
-}
-
 fn collect_binding_spans(pattern: &ast::Match, out: &mut Vec<(String, SourceSpan)>) {
     match pattern {
         ast::Match::Identifier(name, span) => {
@@ -1025,7 +1009,7 @@ fn collect_binding_spans(pattern: &ast::Match, out: &mut Vec<(String, SourceSpan
 /// the pattern's read references, the counterpart of `collect_binding_spans`' write sites.
 fn collect_pin_targets<'m>(pattern: &'m ast::Match, out: &mut Vec<&'m ast::PinTarget>) {
     match pattern {
-        ast::Match::Reference(target) => out.push(target),
+        ast::Match::Pin(target) => out.push(target),
         ast::Match::Tuple(tuple) => {
             for field in &tuple.fields {
                 collect_pin_targets(&field.pattern, out);
@@ -1752,9 +1736,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let (field_type, field_prov) = match &field.value {
                 ast::FieldValue::Chain(chain) => {
                     // Each field chain receives a copy of the enclosing (piped) value as its
-                    // input, so a leading callable field is called with it (and `&` is needed
-                    // to pass a callable by value). The original value remains lower on the
-                    // stack for nested `~` references and is cleaned up below if owned.
+                    // input, which it reads by naming `~`. The original value remains lower on
+                    // the stack for nested `~` references and is cleaned up below if owned.
                     let input = ripple_context.map(|ctx| {
                         // Duplicate the piped value to the top of the stack as the input.
                         self.codegen
@@ -2438,9 +2421,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         receive_types.push(resolved_type);
                     }
                 }
-                ast::Term::Reference(access) => {
-                    // A referenced receiver (`&f`, `&%int.and`) — the form the tight `!f`/`!var`
-                    // sugar produces. Resolve its type from either a lexical variable or a module
+                ast::Term::Access(access) => {
+                    // A named receiver (`f`, `%int.and`) — the form the tight `!f`/`!var` sugar
+                    // produces. Resolve its type from either a lexical variable or a module
                     // member, then take its parameter type as the message type.
                     let receiver_type = match &access.source {
                         Some(ast::AccessSource::Identifier(identifier)) => {
@@ -4401,14 +4384,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// The type a chain term is expected to produce — the parameter type of whatever consumes its
     /// result. This is what lets an un-annotated function literal infer its parameter:
     /// - the **final** term's consumer is external, so the chain's own `chain_expected` applies;
-    /// - any **earlier** term flows its result into the next term, so when that next term is a
-    ///   looked-up callable, *its* parameter type is this term's expected type.
+    /// - an **earlier** term is consumed only by a following `f ~`, whose argument it becomes,
+    ///   so `f`'s parameter type is that term's expected type.
     ///
-    /// It is the postfix counterpart of an `Apply` argument inferring from its callee: with
-    /// application written `[args, #{…}] ~> f`, the `#{…}` infers from `f` exactly as `f [args,
-    /// #{…}]` once did — the inference reads off the value flow rather than a bundled call node.
-    /// Only `Tuple`/`Function` terms consume an expected type (every other term ignores it), so we
-    /// only bother looking ahead for those.
+    /// It is the piped spelling of an `Apply` argument inferring from its callee: in
+    /// `[args, #{…}] ~> f ~` the `#{…}` infers from `f` exactly as it does in `f [args, #{…}]`,
+    /// because it *is* the argument either way. Only `Tuple`/`Function` terms consume an
+    /// expected type (every other term ignores it), so we only look ahead for those.
     #[allow(clippy::too_many_arguments)]
     fn compile_chain_with_input(
         &mut self,
@@ -4462,31 +4444,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 return Err(Error::DiscardedChainValue);
             }
             // The statically-resolvable callable a non-final literal term flows into — the
-            // piped counterpart of an Apply's head.
+            // piped counterpart of an Apply's head. Only `[…] ~> f ~` pipes a literal into a
+            // call: the literal *is* the argument, so the head is the callee. (A bare access
+            // no longer calls, so nothing else can consume a piped literal.)
             let piped_callee = if i == last_index {
                 None
             } else if matches!(term, ast::Term::Tuple(_) | ast::Term::Function(_))
-                && let Some(next) = terms.get(i + 1)
+                && let Some(ast::Term::Apply(head, argument)) = terms.get(i + 1)
+                && argument.is_bare_ripple()
+                && !matches!(
+                    head.source,
+                    Some(ast::AccessSource::Ripple | ast::AccessSource::TailCallRipple)
+                )
             {
-                match next {
-                    ast::Term::Access(next) => Some(next),
-                    // `x ~> f g`: the flow becomes `g`'s argument when `g` is a bare
-                    // callable, so `g`'s parameter is the previous literal's expected
-                    // type. A ripple head (`~ g`, `^~ g`) consumes the flow itself, so
-                    // its argument receives nothing.
-                    ast::Term::Apply(head, argument)
-                        if !matches!(
-                            head.source,
-                            Some(ast::AccessSource::Ripple | ast::AccessSource::TailCallRipple)
-                        ) =>
-                    {
-                        match argument.as_ref() {
-                            ast::Term::Access(callable) => Some(callable),
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                }
+                Some(head)
             } else {
                 None
             };
@@ -5388,7 +5359,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             | ast::Term::Access(_)
             | ast::Term::Self_
             | ast::Term::Process(_)
-            | ast::Term::Reference(_)
             | ast::Term::State(..) => {}
         }
         Ok(())
@@ -5806,23 +5776,22 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// (`@f x`, `argument` is `Some`), by the chained value (`x ~> @f`, carried in `value_type`),
     /// or not at all (`@f`, `@{ … }`). For a ripple function (`@~`) the chained value *is* the
     /// function being spawned, so a juxtaposed argument is evaluated without it.
+    /// Spawn `function` with `init_type` — the written init argument, already on the stack
+    /// — or with nil when none is written (`@f`, which the function must then take).
     fn compile_spawn(
         &mut self,
         function: ast::Term,
-        value_type: Option<usize>,
-        explicit_argument: bool,
+        init_type: Option<usize>,
     ) -> Result<usize, Error> {
         // `@~`: the chained value is the function to spawn (already on the stack), spawned with
         // nil — so the flowing function must be nilary.
         if function.is_bare_ripple() {
-            let fn_type = value_type.ok_or_else(|| {
-                Error::FeatureUnsupported("Ripple spawn requires piped value".to_string())
-            })?;
-            return self.emit_nil_param_spawn(fn_type);
+            return Err(Error::MissingCallArgument {
+                form: "@~".to_string(),
+            });
         }
 
-        // The chained value (if any) is the init argument. A nilary process function ignores this
-        // implicit flow and is spawned with nil — the value is discarded, like a call.
+        // The function goes on the stack above the init argument, where `spawn` wants it.
         let (fn_type, _prov) = self.compile_term(
             function,
             FlowingValue {
@@ -5836,75 +5805,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             false,
         )?;
 
-        let param_is_nil = matches!(
-            self.program
-                .lookup_base(fn_type),
-            Some(Type::Callable { parameter, .. }) if self.is_nil(*parameter)
-        );
-
-        if let Some(arg_type) = value_type {
-            if param_is_nil {
-                if explicit_argument {
-                    // An explicit juxtaposed argument (`@f x`) to a nilary process function is
-                    // rejected, exactly as an explicit call argument to a nilary function is —
-                    // only the implicit flow (`x ~> @f`) is quietly discarded.
-                    return Err(Error::TypeMismatch {
-                        expected: "function with nil parameter (no argument)".to_string(),
-                        found: format!(
-                            "argument {}",
-                            quiver_core::format::format_type_by_id(&*self.program, arg_type)
-                        ),
-                    });
-                }
-                // Discard the chained value (Stack: [value, function] -> [function]), spawn with nil.
-                self.codegen.add_instruction(Instruction::rotate(2));
-                self.codegen.add_instruction(Instruction::pop());
-                self.emit_nil_param_spawn(fn_type)
-            } else {
-                self.emit_arg_spawn(fn_type, arg_type)
-            }
-        } else {
-            self.emit_nil_param_spawn(fn_type)
+        match init_type {
+            Some(arg_type) => self.emit_arg_spawn(fn_type, arg_type),
+            None => Err(Error::MissingCallArgument {
+                form: "@f".to_string(),
+            }),
         }
-    }
-
-    /// Emit spawn for nil-parameter function (cases 1 and 3)
-    /// Stack before: [function]
-    fn emit_nil_param_spawn(&mut self, fn_type_id: usize) -> Result<usize, Error> {
-        let Some(Type::Callable {
-            parameter,
-            result,
-            receive,
-            states,
-        }) = self.program.lookup_base(fn_type_id)
-        else {
-            return Err(Error::FeatureUnsupported(
-                "Can only spawn functions".to_string(),
-            ));
-        };
-        let (parameter, result, receive, states) = (*parameter, *result, *receive, *states);
-
-        let nil_type_id = self.program.register_type(Type::nil());
-        if parameter != nil_type_id {
-            return Err(Error::TypeMismatch {
-                expected: "function with nil parameter".to_string(),
-                found: format!(
-                    "function with parameter {}",
-                    quiver_core::format::format_type_by_id(&*self.program, parameter)
-                ),
-            });
-        }
-
-        // Stack: [function] -> [nil, function] -> spawn
-        self.codegen.add_instruction(Instruction::tuple(NIL));
-        self.codegen.add_instruction(Instruction::rotate(2));
-        self.codegen.add_instruction(Instruction::spawn());
-
-        Ok(self.program.register_type(Type::Process {
-            send: Some(receive),
-            receive: Some(result),
-            state: states,
-        }))
     }
 
     /// Emit spawn with argument (case 2)
@@ -5941,13 +5847,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     /// Compile access expression: .x, $.x, foo.x, etc. Records each component (the base symbol
     /// and each accessor) for the LSP, then delegates to the implementation.
+    /// Compile an access. `applied` marks it as the head of a juxtaposition (`f x`), whose
+    /// argument is on the stack as `value_type` — the only thing that calls. A bare access
+    /// is the value it names, so a value flowing into one is dropped, as it is for a
+    /// literal.
     fn compile_access(
         &mut self,
         access: ast::Access,
         value_type: Option<usize>,
         value_provenance: Provenance,
         ripple_context: Option<&RippleContext>,
-        implicit_flow: bool,
+        applied: bool,
     ) -> Result<(usize, Provenance), Error> {
         // Capture the components before `access` is moved into the inner compiler.
         let source = access.source.clone();
@@ -5965,7 +5875,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             value_type,
             value_provenance,
             ripple_context,
-            implicit_flow,
+            applied,
         );
 
         // Record each component on its own span (`%util` vs `triple`, `foo` vs `bar`, `$` vs `0`)
@@ -6226,16 +6136,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_type: Option<usize>,
         value_provenance: Provenance,
         ripple_context: Option<&RippleContext>,
-        implicit_flow: bool,
+        applied: bool,
     ) -> Result<(usize, Provenance), Error> {
         // Explicit type arguments (`f<'int>`) instantiate the accessed callable's type —
         // applied once the accessed type is known, before any application, so the pinned
         // parameters are what unification checks the argument against.
         let type_args = access.type_arguments;
-        // An access produces a value (a variable, parameter, import member, builtin, or a field
-        // of the flowing value). When that value is callable and a flowing value is present
-        // (the chained value of the surrounding step), it is invoked with it. The flowing value
-        // arrives as `value_type` and sits on the stack.
+        // An access produces the value it names (a variable, parameter, import member, builtin,
+        // or a field of the flowing value). It is invoked only as the head of a juxtaposition
+        // (`applied`), whose argument arrives as `value_type` and sits on the stack. A bare
+        // access names its value and nothing more, so a value flowing into one is dropped.
         match access.source {
             None => {
                 // Field/positional access (.x, .0) reads off the flowing value.
@@ -6269,24 +6179,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         written: ast::parameter_sigils(depth),
                     });
                 };
-                let is_applicable = self.is_applicable_type(peeked_type);
+                let is_applicable = applied && self.is_applicable_type(peeked_type);
 
-                // Non-applicable accessed with a flowing value: drop the value before loading.
-                if !is_applicable && value_type.is_some() {
-                    self.codegen.add_instruction(Instruction::pop());
+                if !is_applicable {
+                    self.drop_flowing_value(value_type);
                 }
                 let (accessed_type, accessed_prov) =
                     self.compile_member_access(&name, access.accessors)?;
                 let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
+                self.check_applied(applied, accessed_type)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
-                    let ty = self.apply_value_to_type(
-                        accessed_type,
-                        val_type,
-                        implicit_flow,
-                        None,
-                        None,
-                    )?;
+                    let ty = self.apply_value_to_type(accessed_type, val_type, None, None)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((accessed_type, accessed_prov))
@@ -6298,11 +6202,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 // Peek at the accessed type to determine if applicable (without emitting code).
                 let peeked_type = self.peek_accessor_type(param_type, &access.accessors, "$");
-                let is_applicable = peeked_type.is_ok_and(|ty| self.is_applicable_type(ty));
+                let is_applicable =
+                    applied && peeked_type.is_ok_and(|ty| self.is_applicable_type(ty));
 
-                // Non-applicable accessed with a flowing value: drop the value before loading.
-                if !is_applicable && value_type.is_some() {
-                    self.codegen.add_instruction(Instruction::pop());
+                if !is_applicable {
+                    self.drop_flowing_value(value_type);
                 }
                 self.codegen.add_instruction(Instruction::load(param_local));
                 let (accessed_type, accessed_prov) = self.compile_accessor(
@@ -6312,15 +6216,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     Provenance::Parameter,
                 )?;
                 let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
+                self.check_applied(applied, accessed_type)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
-                    let ty = self.apply_value_to_type(
-                        accessed_type,
-                        val_type,
-                        implicit_flow,
-                        None,
-                        None,
-                    )?;
+                    let ty = self.apply_value_to_type(accessed_type, val_type, None, None)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((accessed_type, accessed_prov))
@@ -6336,24 +6235,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         self.peek_accessor_type(base_type, &access.accessors, &name)
                             .ok()
                     });
-                let is_applicable = peeked_type.is_some_and(|ty| self.is_applicable_type(ty));
+                let is_applicable =
+                    applied && peeked_type.is_some_and(|ty| self.is_applicable_type(ty));
 
-                // Non-applicable accessed with a flowing value: drop the value before loading.
-                if !is_applicable && value_type.is_some() {
-                    self.codegen.add_instruction(Instruction::pop());
+                if !is_applicable {
+                    self.drop_flowing_value(value_type);
                 }
                 let (accessed_type, accessed_prov) =
                     self.compile_member_access(&name, access.accessors)?;
                 let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
+                self.check_applied(applied, accessed_type)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
-                    let ty = self.apply_value_to_type(
-                        accessed_type,
-                        val_type,
-                        implicit_flow,
-                        None,
-                        None,
-                    )?;
+                    let ty = self.apply_value_to_type(accessed_type, val_type, None, None)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((accessed_type, accessed_prov))
@@ -6400,22 +6294,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
                 // A member holding a type-consuming builtin instantiates here
                 // (`%data.decode<'ev>`), so the emitted value carries the type id.
-                let resolved_value = self.instantiate_builtin_member(
-                    resolved_value,
-                    &type_args,
-                    value_type.is_some(),
-                )?;
+                let resolved_value =
+                    self.instantiate_builtin_member(resolved_value, &type_args, applied)?;
 
-                let is_applicable = self.is_applicable_type(accessed_type);
+                self.check_applied(applied, accessed_type)?;
+                let is_applicable = applied && self.is_applicable_type(accessed_type);
 
-                // Non-applicable accessed with a flowing value: drop the value before loading.
-                if !is_applicable && value_type.is_some() {
-                    self.codegen.add_instruction(Instruction::pop());
+                if !is_applicable {
+                    self.drop_flowing_value(value_type);
                 }
                 // Wrapper elision: an applied member that is a statically-known trivial
                 // forwarder compiles as its builtin, so the callee is never pushed.
                 let forwarder = if is_applicable && value_type.is_some() && type_args.is_empty() {
-                    self.forwarder_for_member(&resolved_value, accessed_type, implicit_flow)
+                    self.forwarder_for_member(&resolved_value, accessed_type)
                 } else {
                     None
                 };
@@ -6444,7 +6335,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     let ty = self.apply_value_to_type(
                         accessed_type,
                         val_type,
-                        implicit_flow,
                         callee_fn,
                         forwarder.as_ref(),
                     )?;
@@ -6459,7 +6349,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 if let Some(span) = access.base_span.get() {
                     self.current_span = Some(span);
                 }
-                let builtin_type = self.compile_builtin(&name, &type_args, value_type.is_some())?;
+                // Before `compile_builtin` pushes it: the drop targets the stack top.
+                if !applied {
+                    self.drop_flowing_value(value_type);
+                }
+                let builtin_type = self.compile_builtin(&name, &type_args, applied)?;
                 // A builtin has no fields, so accessors (`__x__.field`) fail here as a non-tuple.
                 let (callable_type, _) = self.compile_accessor(
                     builtin_type,
@@ -6469,24 +6363,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 )?;
                 let callable_type = self.instantiate_type_arguments(callable_type, &type_args)?;
 
-                if let Some(val_type) = value_type {
-                    let ty = self.apply_value_to_type(
-                        callable_type,
-                        val_type,
-                        implicit_flow,
-                        None,
-                        None,
-                    )?;
+                if let (true, Some(val_type)) = (applied, value_type) {
+                    let ty = self.apply_value_to_type(callable_type, val_type, None, None)?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((callable_type, Provenance::Unknown))
                 }
             }
             Some(ast::AccessSource::TailCall(identifier)) => {
-                // `^` / `^f` / `^f.field` - a tail call (TCO). The flowing value (chained, or the
-                // argument of an enclosing `Apply`) is the call argument, already on the stack.
+                // `^` / `^f` / `^f.field` - a tail call (TCO). Its argument is written, like any
+                // other call's: the juxtaposed one, already on the stack. Bare `^` is a nilary
+                // tail call, so a value flowing into it is dropped.
+                if !applied {
+                    self.drop_flowing_value(value_type);
+                }
+                let argument = applied.then_some(value_type).flatten();
                 let ty =
-                    self.compile_tail_call(identifier.as_deref(), &access.accessors, value_type)?;
+                    self.compile_tail_call(identifier.as_deref(), &access.accessors, argument)?;
                 Ok((ty, Provenance::Unknown))
             }
             Some(ast::AccessSource::TailCallRipple) => {
@@ -6495,10 +6388,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok((ty, Provenance::Unknown))
             }
             Some(ast::AccessSource::Self_) => {
-                // Self_ should only appear in Term::Reference, not Term::Access
+                // Self_ has its own term; it never reaches an Access source
                 Err(Error::InternalError {
-                    message: "Self_ source in Access (should use Term::Self_ or Term::Reference)"
-                        .to_string(),
+                    message: "Self_ source in Access (should use Term::Self_)".to_string(),
                 })
             }
         }
@@ -6776,19 +6668,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
         match term {
             ast::Term::Literal(literal) => {
-                // Literals don't use the piped value, drop it
-                if value_type.is_some() {
-                    self.codegen.add_instruction(Instruction::pop());
-                }
+                self.drop_flowing_value(value_type);
                 let ty = self.compile_literal(literal)?;
                 Ok((ty, Provenance::Unknown))
             }
             ast::Term::Tuple(tuple) => {
                 let tuple_span = tuple.span.get();
                 // Always flow the piped value into the tuple's fields: each field receives a
-                // copy as its input, so a callable field is called with it (and `&` is needed
-                // to pass a callable by value), while non-callable fields drop it. The original
-                // is owned and cleaned up by compile_tuple.
+                // copy as its input, and reads it by naming `~`; a field that never does drops
+                // it. The original is owned and cleaned up by compile_tuple.
                 let ripple_context_value;
                 let ripple_context_param = if let Some(vt) = value_type.as_ref() {
                     ripple_context_value = RippleContext {
@@ -6843,11 +6731,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.compile_string(segments, value_type, value_provenance)
             }
             ast::Term::Function(func) => {
-                // Function literals always produce functions - they don't auto-call.
-                // To call an inline function, bind it first: f = #'int {...}, 5 f
-                if value_type.is_some() {
-                    self.codegen.add_instruction(Instruction::pop());
-                }
+                self.drop_flowing_value(value_type);
 
                 let span = func.span.get();
                 // An un-annotated literal infers its parameter from the expected callable type.
@@ -6896,13 +6780,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 {
                     n.disable();
                 }
-                // A bare access in a chain receives the implicit chain flow.
+                // A bare access names its value; only `f x` calls.
                 self.compile_access(
                     access,
                     value_type,
                     value_provenance.clone(),
                     ripple_context,
-                    true,
+                    false,
                 )
             }
             ast::Term::Match(pattern) => {
@@ -6969,11 +6853,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         self.codegen.add_instruction(Instruction::rotate(2));
                         self.emit_arg_spawn(fn_type, arg_type)?
                     }
+                    // `x ~> @`: the flowing value is the *function*, spawned with nil.
+                    (true, None) => self.compile_spawn(*function, value_type)?,
                     (_, argument) => {
-                        // A juxtaposed argument (`@f x`) supplies the init, with the flowing
-                        // value flowing into it (`10 ~> @adder [~, 5]`); otherwise the flowing
-                        // value itself is the (implicit) init.
-                        let explicit = argument.is_some();
+                        // The init is written, like a call's argument (`@f x`, `@f ~`, `@f []`),
+                        // and the flowing value flows into it (`10 ~> @adder [~, 5]`). With none
+                        // written, the spawned function is nilary and a value flowing in is
+                        // dropped.
                         let init_type = match argument {
                             Some(argument) => Some(
                                 self.compile_term(
@@ -6990,9 +6876,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                 )?
                                 .0,
                             ),
-                            None => value_type,
+                            None => {
+                                if value_type.is_some() {
+                                    self.codegen.add_instruction(Instruction::pop());
+                                }
+                                None
+                            }
                         };
-                        self.compile_spawn(*function, init_type, explicit)?
+                        self.compile_spawn(*function, init_type)?
                     }
                 };
                 // Hover on `@` shows the spawned process's type.
@@ -7020,7 +6911,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     value_type,
                     value_provenance,
                     ripple_context,
-                    true,
+                    false,
                 )?;
                 let (arg_type, _) = self.compile_term(
                     *argument,
@@ -7037,7 +6928,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // The callable is below the argument on the stack; swap so the call sees it on
                 // top. An explicit argument is type-checked, not an implicit flow.
                 self.codegen.add_instruction(Instruction::rotate(2));
-                let ty = self.apply_value_to_type(callable_type, arg_type, false, None, None)?;
+                let ty = self.apply_value_to_type(callable_type, arg_type, None, None)?;
                 Ok((ty, Provenance::Unknown))
             }
             ast::Term::Apply(access, argument) => {
@@ -7074,9 +6965,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 {
                     n.disable();
                 }
-                // The head is invoked with the explicit argument, not an implicit flow, so a
-                // nilary head rejects it rather than ignoring it.
-                self.compile_access(access, Some(arg_type), arg_prov, None, false)
+                // The head is invoked with the written argument — the one thing that calls.
+                self.compile_access(access, Some(arg_type), arg_prov, None, true)
             }
             ast::Term::Select(select, span) => {
                 let ty = self.compile_select(select, value_type)?;
@@ -7085,6 +6975,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok((ty, Provenance::Unknown))
             }
             ast::Term::Self_ => {
+                // `.` names the current process; sending to it is written as a call (`. x`).
+                self.drop_flowing_value(value_type);
                 self.codegen.add_instruction(Instruction::self_());
                 // Return a process type with the current function's receive type.
                 // Return type is None since a process can't know its own return type;
@@ -7096,14 +6988,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     receive: None,
                     state: None,
                 });
-
-                // Apply value if present (for message sends like `10 ~> .`)
-                let result_type = if let Some(val_type) = value_type {
-                    self.apply_value_to_type(self_type, val_type, false, None, None)?
-                } else {
-                    self_type
-                };
-                Ok((result_type, Provenance::Unknown))
+                Ok((self_type, Provenance::Unknown))
             }
             ast::Term::Process(process_id) => {
                 // Look up process info from the map (REPL-only feature)
@@ -7117,6 +7002,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 // The target's id travels as an ordinary integer constant, which `Process`
                 // pops; the instruction itself names only the root function.
+                self.drop_flowing_value(value_type);
                 let id_constant = self
                     .program
                     .register_constant(Constant::Integer(process_id.into()));
@@ -7125,13 +7011,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.codegen
                     .add_instruction(Instruction::process(function_index));
 
-                // Apply value if present (for message sends like `10 ~> @1`)
-                let result_type = if let Some(val_type) = value_type {
-                    self.apply_value_to_type(process_type, val_type, false, None, None)?
-                } else {
-                    process_type
-                };
-                Ok((result_type, Provenance::Unknown))
+                Ok((process_type, Provenance::Unknown))
             }
             ast::Term::Dialect(dialect) => {
                 // Expand at compile time to an ordinary block term (which receives the
@@ -7156,15 +7036,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // the target process type's state component: inferred at spawn sites, or
                 // stated with a `?'s` clause on a declared process type. No runtime test —
                 // soundness rests on every state write being compile-checked, plus the
-                // strict state subtyping at declared boundaries. The flowing value is
-                // unused: the target names the process explicitly.
-                if value_type.is_some() {
-                    self.codegen.add_instruction(Instruction::pop());
-                }
+                // strict state subtyping at declared boundaries. The target names the
+                // process explicitly, so the flowing value is unused.
+                self.drop_flowing_value(value_type);
 
-                // Load the target without calling it (exactly as `&p` compiles).
+                // Load the target without calling it — as any bare name does.
                 let (target_type, _) = self.compile_term(
-                    ast::Term::Reference(access),
+                    ast::Term::Access(access),
                     FlowingValue {
                         ty: None,
                         provenance: Provenance::Unknown,
@@ -7195,124 +7073,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 self.record_typed(span.get(), result, SymbolKind::Expression, None);
                 Ok((result, Provenance::Unknown))
-            }
-            ast::Term::Reference(access) => {
-                // Explicit reference: drop incoming value and load the referenced value without calling
-                if value_type.is_some() {
-                    self.codegen.add_instruction(Instruction::pop());
-                }
-
-                // The reference's span (`foo` in `&foo`, `%num.add` in `&%num.add`), for
-                // hover and go-to-definition on the referenced symbol.
-                let ref_span = access.span.get();
-
-                // Explicit type arguments (`&f<'int>`): instantiate the referenced
-                // callable's type after loading — the value is untouched.
-                let type_args = access.type_arguments;
-
-                // Load the referenced value
-                let (ty, prov) = match access.source {
-                    Some(ast::AccessSource::Identifier(ref name)) => {
-                        let label = accessors_label(name, &access.accessors);
-                        let (accessed_type, accessed_prov) =
-                            self.compile_member_access(name, access.accessors)?;
-                        self.record_reference(ref_span, name, label, accessed_type);
-                        Ok((accessed_type, accessed_prov))
-                    }
-                    Some(ast::AccessSource::Parameter { depth: 0 }) => {
-                        // &$ - reference to function parameter
-                        let (param_type, param_local) =
-                            scopes::get_function_parameter(&self.scopes)?;
-                        self.codegen.add_instruction(Instruction::load(param_local));
-                        let (accessed_type, accessed_prov) = self.compile_accessor(
-                            param_type,
-                            access.accessors,
-                            "$",
-                            Provenance::Parameter,
-                        )?;
-                        self.record_typed(
-                            ref_span,
-                            accessed_type,
-                            SymbolKind::Parameter,
-                            Some("$".to_string()),
-                        );
-                        Ok((accessed_type, accessed_prov))
-                    }
-                    Some(ast::AccessSource::Parameter { depth }) => {
-                        // `&$$…` references the captured outer value, like a captured variable.
-                        let name = variables::CaptureSource::OuterParameter(depth).scope_name();
-                        if scopes::lookup_variable(&self.scopes, &name, &access.accessors)
-                            .or_else(|| scopes::lookup_variable(&self.scopes, &name, &[]))
-                            .is_none()
-                        {
-                            return Err(Error::ParameterDepthExceeded {
-                                written: ast::parameter_sigils(depth),
-                            });
-                        }
-                        let (accessed_type, accessed_prov) =
-                            self.compile_member_access(&name, access.accessors)?;
-                        self.record_typed(
-                            ref_span,
-                            accessed_type,
-                            SymbolKind::Parameter,
-                            Some(name),
-                        );
-                        Ok((accessed_type, accessed_prov))
-                    }
-                    Some(ast::AccessSource::Import(ref module)) => {
-                        let label =
-                            accessors_label(&format!("%{}", module.join("/")), &access.accessors);
-                        let (ty, origin) =
-                            self.compile_import(module, &access.accessors, &type_args)?;
-                        self.record_import(
-                            ref_span,
-                            ty,
-                            Some(label),
-                            origin,
-                            module,
-                            &access.accessors,
-                        );
-                        Ok((ty, Provenance::Unknown))
-                    }
-                    Some(ast::AccessSource::Self_) => {
-                        // &. - reference to self (current process); state ungranted, as
-                        // for bare `.` (see the Self_ term arm).
-                        self.codegen.add_instruction(Instruction::self_());
-                        let self_type = self.program.register_type(Type::Process {
-                            send: Some(self.current_receive_type_id),
-                            receive: None,
-                            state: None,
-                        });
-                        Ok((self_type, Provenance::Unknown))
-                    }
-                    Some(ast::AccessSource::Builtin(ref name)) => {
-                        // &__builtin__ - the builtin function value, without applying it. A
-                        // type-consuming builtin may be referenced un-instantiated (this is
-                        // how a module exports one).
-                        let builtin_type = self.compile_builtin(name, &type_args, false)?;
-                        self.record_typed(
-                            ref_span,
-                            builtin_type,
-                            SymbolKind::Builtin,
-                            Some(format!("__{}__", name)),
-                        );
-                        Ok((builtin_type, Provenance::Unknown))
-                    }
-                    Some(ast::AccessSource::Ripple) => Err(Error::FeatureUnsupported(
-                        "Cannot reference ripple (~) - use it directly".to_string(),
-                    )),
-                    Some(ast::AccessSource::TailCall(_) | ast::AccessSource::TailCallRipple) => {
-                        Err(Error::FeatureUnsupported(
-                            "Cannot reference a tail call (^) - reference the function instead"
-                                .to_string(),
-                        ))
-                    }
-                    None => Err(Error::FeatureUnsupported(
-                        "Reference requires an identifier (e.g., &f)".to_string(),
-                    )),
-                }?;
-                let ty = self.instantiate_type_arguments(ty, &type_args)?;
-                Ok((ty, prov))
             }
         }
     }
@@ -7584,12 +7344,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    /// Whether a flowing value *applies* to a value of this type (a call or a send)
-    /// rather than replacing it. Callables and processes apply — and so does a union
-    /// with any callable or process member: `apply_value_to_type` then either compiles
-    /// the send (a union of only process types) or rejects the application, so a handle
-    /// hidden in a union can never silently compile as a replace that discards the
-    /// flowing value.
+    /// A juxtaposition (`f x`) states a call, so its head must be something an argument can
+    /// be applied to. Anything else is a call written on a value that cannot take one, and
+    /// would otherwise compile as the value with its argument silently dropped.
+    fn check_applied(&self, applied: bool, accessed_type: usize) -> Result<(), Error> {
+        if applied && !self.is_applicable_type(accessed_type) {
+            return Err(Error::TypeMismatch {
+                expected: "a callable or process to apply the argument to".to_string(),
+                found: quiver_core::format::format_type_by_id(&*self.program, accessed_type),
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether an argument *applies* to a value of this type (a call or a send). Callables
+    /// and processes apply — and so does a union with any callable or process member:
+    /// `apply_value_to_type` then either compiles the send (a union of only process types)
+    /// or rejects the application, rather than letting a handle hidden in a union slip
+    /// through as a non-call.
     fn is_applicable_type(&self, type_id: usize) -> bool {
         match self.program.lookup_base(type_id) {
             Some(Type::Callable { .. }) | Some(Type::Process { .. }) => true,
@@ -7703,14 +7475,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// The wrapper-elision summary for an applied import member, when every
     /// precondition holds: a capture-free function value; a contract-free callee type
     /// (an elided call must not skip `:pre`/`:post` enforcement, which is read from
-    /// the same rows); a non-nilary parameter under implicit flow (a nilary callee
-    /// discards the flowing value instead of forwarding it); and a body that analyzes
-    /// as a trivial forwarder.
+    /// the same rows); and a body that analyzes as a trivial forwarder.
     fn forwarder_for_member(
         &mut self,
         resolved_value: &Value,
         accessed_type: usize,
-        implicit_flow: bool,
     ) -> Option<elision::Forwarder> {
         let Value::Function(function_index, payload) = resolved_value else {
             return None;
@@ -7725,11 +7494,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if has_pre || has_post {
             return None;
         }
-        let Some(Type::Callable { parameter, .. }) = self.program.lookup_base(accessed_type) else {
-            return None;
-        };
-        let parameter = *parameter;
-        if implicit_flow && self.is_nil(parameter) {
+        if !matches!(
+            self.program.lookup_base(accessed_type),
+            Some(Type::Callable { .. })
+        ) {
             return None;
         }
         if let Some(memo) = self.forwarder_memo.get(&function_index) {
@@ -7847,6 +7615,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.codegen.add_instruction(Instruction::pop());
     }
 
+    /// Drop the value flowing into a term that *names* something rather than consuming it —
+    /// a literal, a closure, a bare access, `.`, a pid, a state sample. Since every call is
+    /// written, a term with no argument takes nothing, and the flow is discarded exactly as a
+    /// literal discards it. Must run before the term pushes its own value: the drop takes the
+    /// stack top.
+    fn drop_flowing_value(&mut self, value_type: Option<usize>) {
+        if value_type.is_some() {
+            self.codegen.add_instruction(Instruction::pop());
+        }
+    }
+
     /// Apply the value on the stack to the callable (or process) `target_type_id`
     /// denotes, emitting the call and answering its result type.
     ///
@@ -7858,7 +7637,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         target_type_id: usize,
         value_type: usize,
-        implicit_flow: bool,
         callee_fn: Option<usize>,
         elide: Option<&elision::Forwarder>,
     ) -> Result<usize, Error> {
@@ -7882,15 +7660,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let result_id = *result;
             let receive_id = *receive;
 
-            // A nilary callable ignores an implicitly-flowing value: it is called with nil and the
-            // value is discarded, like a literal. An explicit argument (`implicit_flow == false`,
-            // e.g. `f [5]`) is still type-checked, so handing a value to a nilary callable errors.
-            let ignore_value = implicit_flow && self.is_nil(param_id);
-            let arg_type = if ignore_value {
-                self.program.register_type(Type::nil())
-            } else {
-                value_type
-            };
+            // Every call is written, so its argument is always type-checked: a nilary
+            // callable takes `f []` and rejects anything else.
+            let arg_type = value_type;
 
             // Check if function has type variables - if so, perform unification
             let has_vars_param = typing::contains_variables(param_id, &*self.program);
@@ -7939,18 +7711,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             if let Some(forwarder) = elide {
                 // Wrapper elision: the callee was never pushed, and the argument on the
                 // stack compiles into the forwarded builtin call directly. The gate
-                // excluded the nilary-flow juggle and contract-carrying callees.
+                // excluded contract-carrying callees.
                 self.emit_elided_forwarder(forwarder);
             } else {
-                // A nilary callable ignoring a non-nil flow: replace the value on the stack
-                // with nil before calling. Stack: [value, callable] -> [callable] -> [nil, callable].
-                if ignore_value && !self.is_nil(value_type) {
-                    self.codegen.add_instruction(Instruction::rotate(2));
-                    self.codegen.add_instruction(Instruction::pop());
-                    self.codegen.add_instruction(Instruction::tuple(NIL));
-                    self.codegen.add_instruction(Instruction::rotate(2));
-                }
-
                 // Execute the call, wrapping it with debug-mode `:pre`/`:post` contract
                 // enforcement when the callee's static type carries those contracts.
                 self.emit_call_with_contracts(target_type_id, param_id, result_id)?;
@@ -8166,6 +7929,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         accessors: &[ast::AccessPath],
         arg_type: Option<usize>,
     ) -> Result<usize, Error> {
+        if arg_type.is_none() {
+            return Err(Error::MissingCallArgument {
+                form: match identifier {
+                    Some(name) => format!("^{name}"),
+                    None => "^".to_string(),
+                },
+            });
+        }
         // Handle argument - if none provided, check if function parameter is nil and use that
         let arg_type = if let Some(arg_t) = arg_type {
             arg_t
@@ -8240,6 +8011,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         argument: Option<ast::Term>,
         value_type: Option<usize>,
     ) -> Result<usize, Error> {
+        if argument.is_none() {
+            return Err(Error::MissingCallArgument {
+                form: "^~".to_string(),
+            });
+        }
         let fn_type = value_type.ok_or_else(|| {
             Error::FeatureUnsupported("`^~` tail call requires a piped function".to_string())
         })?;

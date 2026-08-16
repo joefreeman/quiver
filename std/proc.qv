@@ -15,19 +15,19 @@
 'changed = Changed
 
 // Note the reference idiom throughout: a bare pid receiving a flowing value is a
-// send, so pass pids as `&p` — `%proc.detach &p`, `%proc.kill &p`, `%proc.link &p`.
+// send, so name the pid — `%proc.detach p`, `%proc.kill p`, `%proc.link p`.
 
 [
-  detach: &__process_detach__ ~> {
+  detach: __process_detach__ ~> {
     :doc "Detaches an owned child from the calling process, so it survives the caller's termination. Parent-only: errors unless the argument is a process the caller currently owns."
   },
-  kill: &__process_kill__ ~> {
+  kill: __process_kill__ ~> {
     :doc "Kills the process — always effective (there is no trapping). Its awaiters observe the Killed crash kind, its owned subtree is torn down, and its link peers are killed. A no-op on an already-terminated process."
   },
-  link: &__process_link__ ~> {
+  link: __process_link__ ~> {
     :doc "Links the calling process and the target for symmetric fate-sharing: if either terminates abnormally (crash or kill), the other is killed. Normal completion never propagates; linking an already-crashed process kills the caller immediately. Idempotent; self-link is a no-op."
   },
-  track: &__track__ ~> {
+  track: __track__ ~> {
     :doc "Runs a nilary thunk with reactive dependency tracking, returning its result. Each process the thunk samples with `?` becomes a dependency: when any of them next changes state, the calling process is sent a `'%proc.changed` wakeup. Subscriptions are reconciled on each call, so a dependency no longer sampled is dropped. The thunk must be pure (no spawns, sends, effects, or selects)."
   },
 ]

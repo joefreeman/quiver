@@ -75,7 +75,7 @@ lcm_denoms = #[(acc): 'int, (nums): '%list<'%num>] {
 // value that maps to nil (overflow or not representable) turns the accumulator nil,
 // which propagates through `push`.
 buildValues = #[(vec): 'opt, (f): 'mapper, (values): '%list<'%num>] {
-  f = &$f; %list.fold [$values, $vec, #{ push [$0, f $1] }]
+  f = $f; %list.fold [$values, $vec, #{ push [$0, f $1] }]
 }
 
 // Multiply every lane of a buffer by an integer `factor` (used to rescale to a finer scale).
@@ -103,8 +103,8 @@ reconcile = #[(sa): '%num, (sb): '%num] {
   __integer_divide__ [__integer_multiply__ [q, t], __integer_gcd__ [q, t]] ~> =l
 
   norm Rational[g, l] ~> =s
-  %num.div [$sa, s] ~> %num.numer ~> =('int)fa
-  %num.div [$sb, s] ~> %num.numer ~> =('int)fb
+  %num.div [$sa, s] ~> %num.numer ~ ~> =('int)fa
+  %num.div [$sb, s] ~> %num.numer ~ ~> =('int)fb
   [scale: s, factor_a: fa, factor_b: fb]
 }
 
@@ -149,7 +149,7 @@ align = #['vec, 'vec] {
     $values ~> =('%list<'%num>)values
     norm scale ~> =s
     m = #'%num { %num.div [~, s] ~> =Rational[n, 1]; n }
-    buildValues [Vec[dtype: $dtype, scale: s, data: 0x], &m, values]
+    buildValues [Vec[dtype: $dtype, scale: s, data: 0x], m, values]
   },
 
   // Like `of_exact`, but each lane is `value / scale` rounded to the nearest integer (halves
@@ -159,8 +159,8 @@ align = #['vec, 'vec] {
     $scale ~> =('%num)scale
     $values ~> =('%list<'%num>)values
     norm scale ~> =s
-    m = #'%num { %num.div [~, s] ~> %num.round }
-    buildValues [Vec[dtype: $dtype, scale: s, data: 0x], &m, values]
+    m = #'%num { %num.div [~, s] ~> %num.round ~ }
+    buildValues [Vec[dtype: $dtype, scale: s, data: 0x], m, values]
   },
 
   // Build from a list of values alone, inferring the finest scale (`1/lcm` of all
@@ -171,12 +171,12 @@ align = #['vec, 'vec] {
     $values ~> =('%list<'%num>)values
     lcm_denoms [1, values] ~> =('int)cap
     norm Rational[1, cap] ~> =s
-    m = #'%num { %num.mul [~, cap] ~> %num.numer }
-    buildValues [Vec[dtype: $dtype, scale: s, data: 0x], &m, values]
+    m = #'%num { %num.mul [~, cap] ~> %num.numer ~ }
+    buildValues [Vec[dtype: $dtype, scale: s, data: 0x], m, values]
   },
 
   // Append one stored lane.
-  push: &push,
+  push: push,
 
   // Number of lanes.
   len: #'opt {

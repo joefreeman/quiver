@@ -15,7 +15,7 @@
  *   and a single argument primary is one application term: `f x`, `add [3, 4]`, `^f [~, 1]`,
  *   `~ [args]`, `@f x`. Applicable heads are a *sourced* access (a variable, `$`, `~`,
  *   import member, builtin, or tail call) or a spawn (`@f`); literals, tuples, blocks,
- *   function literals, references (`&f`), selects and bare `.field` accessors are not. The
+ *   function literals, selects and bare `.field` accessors are not. The
  *   argument is a single primary (`f x y` is an error).
  * - **A sequence is chains separated by semicolon or newline** (the two are synonyms). This
  *   is where the value short-circuits on nil and where binding scope advances.
@@ -87,9 +87,6 @@ module.exports = grammar({
     [$.tuple, $.pattern_tuple],
     [$._pattern, $._access_source],
     [$._pattern, $._primary],
-    // `&x` inside brackets may be a pinned pattern (`[&y, x]`) or a reference term
-    // (`[&inc, 100]`).
-    [$._access_source, $.pattern_pin],
     // `~.f` / `a.b` / `$x.y` may be an ordinary access or the source path of a
     // spread-update (`~.f[..., y]`); the glued `[` decides via GLR.
     [$._access_source, $.spread_update],
@@ -130,8 +127,6 @@ module.exports = grammar({
     // or after one as `=(a, b)`); the surrounding position decides, via GLR.
     [$.pun, $._partial_field],
     [$.pun, $._pattern, $._partial_field],
-    // A leading `&` inside `(…)` may begin a pinned pattern (`=(&y)`) or a redundant-`&` pun.
-    [$.pun, $.pattern_pin],
     // A `:key` token may open a block-prefix annotation (`:key value`) or be an
     // annotation-retrieval accessor on the flowing value; what follows decides, via GLR.
     [$.annotation, $._leading_accessor],
@@ -297,7 +292,6 @@ module.exports = grammar({
       $.spawn,
       $.self,
       $.bind_match,
-      $.reference,
       $.select,
       $.state,
       $.tail_call,
@@ -450,17 +444,6 @@ module.exports = grammar({
       repeat($._accessor),
     )),
 
-    // `&name`/`&mod.f` (reference), `&.` (self ref), `&__b__`. References a value without
-    // calling it; the target is required (a fresh ref is minted via the `%ref` module).
-    reference: $ => prec.right(seq(
-      '&',
-      choice(
-        $.self,
-        $.builtin,
-        $.access,
-      ),
-    )),
-
     // `.` referring to the current process (not followed by an identifier/digit, which
     // would make it a field accessor).
     self: _ => prec(-1, '.'),
@@ -530,8 +513,8 @@ module.exports = grammar({
       optional(choice(
         seq(field('parameter', choice($.module_type, $.type_identifier, $.tuple_type, $._paren_type)), $.block),
         $.block,
+        $.function,
         $.access,
-        $.reference,
       )),
     )),
 
@@ -605,9 +588,7 @@ module.exports = grammar({
     // so `(a, p.x)` builds `[a: &a, x: &p.x]`. Rooted at a variable, the parameter, or an
     // import; the label is the path's final named segment, so an index or annotation step
     // cannot end one, and a ripple root is not punnable.
-    // A leading `&` is accepted and redundant — a pun is always by reference.
     pun: $ => prec.right(seq(
-      optional('&'),
       field('source', choice($.identifier, $.parameter, $.import)),
       repeat(seq('.', field('field', $.identifier))),
     )),
@@ -668,7 +649,9 @@ module.exports = grammar({
       field('binding', alias($._identifier_immediate, $.identifier)),
     ),
     _identifier_immediate: _ => token.immediate(/[a-z][a-zA-Z0-9_]*\??!?/),
-    star: _ => '*',
+    // `*` binds every named field; `Name*` additionally requires the tuple's name. The `*`
+    // is glued to the name, as a tuple pattern's name is glued to its bracket.
+    star: $ => seq(optional(field('name', $.tuple_name)), token.immediate('*')),
     placeholder: _ => '_',
 
     // An alternation of patterns: `(p | q | …)`, two or more `|`-separated patterns. Shares the
@@ -707,6 +690,7 @@ module.exports = grammar({
     _type: $ => choice(
       $.function_type,
       $.union_type,
+      $.intersection_type,
       $._type_atom,
     ),
 
@@ -724,8 +708,16 @@ module.exports = grammar({
 
     union_type: $ => seq(
       optional(seq('|', optional($._nl))),
+      choice($.intersection_type, $._type_atom),
+      repeat1(seq(optional($._nl), '|', optional($._nl),
+        choice($.intersection_type, $._type_atom))),
+    ),
+
+    // `'t & 'u`: the type of values satisfying every member. Binds tighter than `|`, so
+    // `'t & 'u | 'v` is `('t & 'u) | 'v` — hence a union's members, not the other way round.
+    intersection_type: $ => seq(
       $._type_atom,
-      repeat1(seq(optional($._nl), '|', optional($._nl), $._type_atom)),
+      repeat1(seq('&', optional($._nl), $._type_atom)),
     ),
 
     _type_atom: $ => choice(

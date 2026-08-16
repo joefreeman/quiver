@@ -22,7 +22,7 @@
       }
     }
     | =[_, 0] => []
-    | __integer_divide__
+    | __integer_divide__ ~
   },
 
   mod: #['int, 'int] {
@@ -41,7 +41,7 @@
       }
     }
     | =[_, 0] => []
-    | __integer_modulo__
+    | __integer_modulo__ ~
   },
 
   sqrt: #'int {
@@ -61,16 +61,16 @@
       }
     }
     | __integer_compare__ [$, 0] ~> =-1 => []
-    | __integer_sqrt__
+    | __integer_sqrt__ ~
   },
 
-  and: &__integer_and__ ~> { :doc "The bitwise AND of two integers." },
-  or: &__integer_or__ ~> { :doc "The bitwise OR of two integers." },
-  xor: &__integer_xor__ ~> { :doc "The bitwise XOR of two integers." },
-  not: &__integer_not__ ~> { :doc "The bitwise complement of an integer." },
-  shift: &__integer_shift__ ~> {
+  and: __integer_and__ ~> { :doc "The bitwise AND of two integers." },
+  or: __integer_or__ ~> { :doc "The bitwise OR of two integers." },
+  xor: __integer_xor__ ~> { :doc "The bitwise XOR of two integers." },
+  not: __integer_not__ ~> { :doc "The bitwise complement of an integer." },
+  shift: __integer_shift__ ~> {
     :doc "The integer shifted by a number of bits — left when positive, right when negative."
   },
 
-  popcount: &__integer_popcount__ ~> { :doc "The number of set bits (population count)." },
+  popcount: __integer_popcount__ ~> { :doc "The number of set bits (population count)." },
 ]
