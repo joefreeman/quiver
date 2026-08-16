@@ -24,12 +24,7 @@ use std::rc::Rc;
 const FUEL: u64 = 500_000_000;
 
 fn builtins() -> BuiltinRegistry<NativeEffect> {
-    let mut builtins =
-        BuiltinRegistry::<NativeEffect>::with_modules(&quiver_core::builtins::core_modules());
-    for module in quiver_core::builtins::io_modules() {
-        module(&mut builtins);
-    }
-    builtins
+    BuiltinRegistry::<NativeEffect>::with_modules(&quiver_core::builtins::universal_modules())
 }
 
 /// A store shared by every test in this binary, so std compiles once per thread.

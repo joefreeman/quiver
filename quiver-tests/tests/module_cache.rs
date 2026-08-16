@@ -94,15 +94,9 @@ fn run_session(
 ) -> String {
     let virtual_time_ms = Arc::new(AtomicU64::new(0));
 
-    let mut builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
-        &quiver_core::builtins::core_modules(),
+    let builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
+        &quiver_core::builtins::universal_modules(),
     );
-    for module in quiver_core::builtins::io_modules()
-        .into_iter()
-        .chain(quiver_core::builtins::tls_modules())
-    {
-        module(&mut builtins);
-    }
 
     let (waker, _wake) = quiver::native_transport::wake_channel();
     let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
@@ -198,16 +192,9 @@ fn reused_after_member_reference_debug() {
 }
 
 fn builtins() -> quiver_core::builtins::BuiltinRegistry<NativeEffect> {
-    let mut builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
-        &quiver_core::builtins::core_modules(),
-    );
-    for module in quiver_core::builtins::io_modules()
-        .into_iter()
-        .chain(quiver_core::builtins::tls_modules())
-    {
-        module(&mut builtins);
-    }
-    builtins
+    quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
+        &quiver_core::builtins::universal_modules(),
+    )
 }
 
 fn options(debug: bool) -> quiver_compiler::compiler::CompileOptions {

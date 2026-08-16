@@ -1953,16 +1953,18 @@ impl<E: Effect> Executor<E> {
 
         // Pop the fields (releasing each as it leaves the stack), then push the tuple, whose
         // deep retain re-counts them in their new home — a net-zero move into the tuple.
-        // `with_capacity` is not decoration: `Vec`'s minimum non-zero capacity for a 24-byte
-        // `Value` is 4, so growing from empty allocates 96 bytes for every tuple of arity 1-4
-        // — 72 wasted on the arity-1 case, which is among the most common.
-        let mut values = Vec::with_capacity(size);
-        for _ in 0..size {
-            let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
-            values.push(value);
+        //
+        // Straight into the payload, never through a `Vec`: for a tuple small enough to hold
+        // its elements inline that vector *is* the second allocation, so building one would
+        // give back exactly what the inline storage saves. The depth check up front is what
+        // lets the fill be infallible.
+        if proc.stack.len() < size {
+            return Err(Error::StackUnderflow);
         }
-        values.reverse();
-        self.push_value(proc, Value::tuple(type_id, values));
+        let payload = Payload::from_reversed_fn(size, || {
+            self.pop_value(proc).expect("stack depth checked above")
+        });
+        self.push_value(proc, Value::Tuple(type_id, payload.shared()));
 
         if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;

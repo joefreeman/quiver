@@ -36,11 +36,9 @@ pub enum Binary {
 #[derive(Debug, Deserialize)]
 #[serde(from = "PayloadData")]
 pub struct Payload {
-    /// Boxed rather than a `Vec`: a payload is immutable once built, so the spare capacity and
-    /// the capacity word a `Vec` carries are both dead weight — 8 bytes on every tuple in the
-    /// system. Elements are still mutated *in place* (the iterative drop vacates them), which a
-    /// boxed slice supports; only growth is given up, and nothing grows one.
-    elements: Box<[Value]>,
+    /// The elements, stored in the payload itself when there are one or two of them (see
+    /// [`Elements`]).
+    elements: Elements,
     /// Everything a payload only *sometimes* carries, in one box, so an ordinary tuple pays a
     /// single pointer-sized `None` for all of it. Both parts are rare and neither is on a read
     /// path, which is what makes the shared indirection the right trade: `type_argument` in
@@ -51,6 +49,107 @@ pub struct Payload {
     /// which reads the flat shape and routes through the ordinary constructors.
     #[serde(skip)]
     extras: Option<Box<Extras>>,
+}
+
+/// Where a payload's elements live. A payload sits behind an `Rc`, so holding the elements
+/// *in* it makes a small tuple one heap allocation rather than two — but only for a caller
+/// that never builds a `Vec`, since that vector is itself the second allocation (see
+/// [`Elements::from_reversed_fn`]).
+///
+/// One variant per small arity rather than an array plus a length: the length is then static
+/// per variant, every array is fully initialised, and the whole type needs no `unsafe` — no
+/// `MaybeUninit`, no raw slice reconstruction, no hand-written `Drop`.
+///
+/// One and two, because that is where the mass is. Measured payload-allocation arities: a JSON
+/// parse is 70% two-field and 78% at most two; an arithmetic loop is 100% two-field (every call
+/// argument is a pair); list building is 98%; HTML rendering, the widest of the four, is 64% at
+/// most two and 95% at most three. The cost is that the enum is sized to `Two`, so a one-field
+/// tuple occupies a two-field footprint and a `Heap` payload carries 48 bytes it never uses —
+/// which is what stops this growing to three or four.
+///
+/// The arrays are what make the slice free: `&[Value; 2]` coerces to `&[Value]` with the
+/// elements guaranteed adjacent, where two separate fields would need `repr(C)` and pointer
+/// arithmetic to span. (`One` could hold a bare `Value` and reach a slice through
+/// `slice::from_ref`; it is an array only to match `Two`.)
+#[derive(Debug)]
+enum Elements {
+    /// No elements. Most such payloads are interned by [`Payload::shared`] and never reach
+    /// here, but one carrying annotations is not — an `:error`-bearing nil is exactly that,
+    /// and `%parse` builds one per failed alternative.
+    Zero,
+    One([Value; 1]),
+    Two([Value; 2]),
+    /// Any larger arity: a separate buffer, and a second allocation.
+    Heap(Box<[Value]>),
+}
+
+impl From<Vec<Value>> for Elements {
+    /// Handed a `Vec`, a payload saves no allocation — the vector is the second one, and
+    /// `into_boxed_slice` was reusing it for free. Small arities still convert, so that the
+    /// representation is canonical whatever built it, and so the vector is released rather
+    /// than retained.
+    fn from(elements: Vec<Value>) -> Self {
+        if elements.is_empty() {
+            return Elements::Zero;
+        }
+        let elements = match <[Value; 2]>::try_from(elements) {
+            Ok(two) => return Elements::Two(two),
+            Err(elements) => elements,
+        };
+        match <[Value; 1]>::try_from(elements) {
+            Ok(one) => Elements::One(one),
+            Err(elements) => Elements::Heap(elements.into_boxed_slice()),
+        }
+    }
+}
+
+impl Elements {
+    /// Build from `size` elements produced **last first** — the order popping a stack yields
+    /// them — without an intermediate `Vec`. This is the path that makes the inline storage
+    /// pay: it is the only way a small tuple costs one allocation instead of two.
+    fn from_reversed_fn(size: usize, next: &mut impl FnMut() -> Value) -> Elements {
+        match size {
+            0 => Elements::Zero,
+            1 => Elements::One([next()]),
+            2 => {
+                let second = next();
+                let first = next();
+                Elements::Two([first, second])
+            }
+            _ => {
+                let mut values = Vec::with_capacity(size);
+                for _ in 0..size {
+                    values.push(next());
+                }
+                values.reverse();
+                Elements::Heap(values.into_boxed_slice())
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for Elements {
+    type Target = [Value];
+
+    fn deref(&self) -> &[Value] {
+        match self {
+            Elements::Zero => &[],
+            Elements::One(values) => values,
+            Elements::Two(values) => values,
+            Elements::Heap(values) => values,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Elements {
+    fn deref_mut(&mut self) -> &mut [Value] {
+        match self {
+            Elements::Zero => &mut [],
+            Elements::One(values) => values,
+            Elements::Two(values) => values,
+            Elements::Heap(values) => values,
+        }
+    }
 }
 
 /// The occasional cargo of a [`Payload`]. Never constructed empty — a payload with nothing to
@@ -90,7 +189,7 @@ impl Serialize for Payload {
             1 + usize::from(!annotations.is_empty()) + usize::from(type_argument.is_some());
 
         let mut payload = serializer.serialize_struct("Payload", fields)?;
-        payload.serialize_field("elements", &self.elements)?;
+        payload.serialize_field("elements", &*self.elements)?;
         if !annotations.is_empty() {
             payload.serialize_field("annotations", annotations)?;
         }
@@ -129,10 +228,18 @@ impl From<PayloadData> for Payload {
 impl Payload {
     pub fn new(elements: Vec<Value>) -> Self {
         Payload {
-            // Free when capacity equals length, which the runtime's construction sites
-            // guarantee (`handle_tuple`/`handle_function` size their vectors exactly). A
-            // caller that over-allocates pays one shrink here, on a cold path.
-            elements: elements.into_boxed_slice(),
+            elements: elements.into(),
+            extras: None,
+        }
+    }
+
+    /// Build from `size` elements produced **last first** — the order popping a stack yields
+    /// them — without an intermediate `Vec`. The runtime's tuple construction goes through
+    /// here: with a `Vec` the inline storage saves nothing (see [`Elements::from_reversed_fn`]),
+    /// so this is what turns a small tuple into one allocation instead of two.
+    pub fn from_reversed_fn(size: usize, mut next: impl FnMut() -> Value) -> Self {
+        Payload {
+            elements: Elements::from_reversed_fn(size, &mut next),
             extras: None,
         }
     }
@@ -148,7 +255,7 @@ impl Payload {
             "duplicate annotation key"
         );
         Payload {
-            elements: elements.into_boxed_slice(),
+            elements: elements.into(),
             extras: Some(Box::new(Extras {
                 annotations,
                 type_argument: None,
@@ -749,11 +856,9 @@ impl Value {
             .cloned()
             .collect();
         annotations.push((key, annotation));
-        // `into_vec` on the clone is free (a boxed slice is already exactly sized), and
-        // `with_annotations` re-boxes it.
-        let elements = payload
-            .map(|p| p.elements.clone().into_vec())
-            .unwrap_or_default();
+        // Copied out and rebuilt: annotating is a cold path, and `with_annotations` puts the
+        // elements back into whichever `Elements` variant fits.
+        let elements = payload.map(|p| p.elements.to_vec()).unwrap_or_default();
         // Re-attach preserves a builtin's type argument — it is operational, not metadata.
         let type_argument = payload.and_then(Payload::type_argument);
         let payload = Payload::with_annotations(elements, annotations)

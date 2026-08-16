@@ -522,7 +522,17 @@ pub fn warm_std_store<E: Effect>(
         None,
         options,
     )
-    .unwrap_or_else(|e| panic!("standard library must compile: {:?}", e.error));
+    .unwrap_or_else(|e| {
+        // Nearly always a registry that is missing a capability group rather than a broken
+        // std: the signatures a group registers are what the modules over it type-check
+        // against, so an omitted group surfaces here as an ordinary type error in whichever
+        // std module used it. A compiling registry wants `universal_modules`.
+        panic!(
+            "standard library must compile — check the builtin registry covers every \
+             capability group ({:?})",
+            e.error
+        )
+    });
 }
 
 /// An insertion-ordered id set. Artifact-local ids are assigned by *first reach* in

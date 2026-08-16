@@ -19,12 +19,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 fn builtins() -> BuiltinRegistry<NativeEffect> {
-    let mut builtins =
-        BuiltinRegistry::<NativeEffect>::with_modules(&quiver_core::builtins::core_modules());
-    for module in quiver_core::builtins::io_modules() {
-        module(&mut builtins);
-    }
-    builtins
+    BuiltinRegistry::<NativeEffect>::with_modules(&quiver_core::builtins::universal_modules())
 }
 
 /// A worker handle that round-trips every command and event through serde, and reports

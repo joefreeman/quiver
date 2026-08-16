@@ -19,7 +19,7 @@ const DEADLINE: Duration = Duration::from_secs(10);
 fn session() -> (Environment<NativeEffect>, Repl<NativeEffect>) {
     let virtual_time = Arc::new(AtomicU64::new(0));
     let builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
-        &quiver_core::builtins::core_modules(),
+        &quiver_core::builtins::universal_modules(),
     );
     let (waker, _wake) = quiver::native_transport::wake_channel();
     let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
