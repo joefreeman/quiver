@@ -22,6 +22,25 @@ impl InstructionBuilder {
         self.instructions.push(instruction)
     }
 
+    /// Whether the instructions from `addr` on may be rewritten: true when no jump
+    /// already lands beyond `addr`, so cutting there moves no jump's target. Jump
+    /// operands are *relative* and are fixed at patch time, so removing instructions
+    /// silently retargets every jump that reaches past the cut — this is what tells a
+    /// rewrite when to leave the tail alone.
+    ///
+    /// A jump *to* `addr` is fine: a rewrite starts its replacement there, so that
+    /// target keeps meaning "the code that continues from here".
+    ///
+    /// Answered by scanning rather than by a watermark the emitters maintain: the
+    /// buffer is swapped out and back for every nested body, so a watermark would have
+    /// to travel with it, and a rewrite reading a stale one would be silently wrong.
+    pub fn rewritable_from(&self, addr: usize) -> bool {
+        !self.instructions[..addr].iter().enumerate().any(|(a, i)| {
+            matches!(i.opcode(), Opcode::Jump | Opcode::JumpIf)
+                && (a as Offset) + 1 + i.offset() > addr as Offset
+        })
+    }
+
     /// Emits a jump placeholder and returns the address to patch later
     pub fn emit_jump_placeholder(&mut self) -> usize {
         let addr = self.instructions.len();

@@ -83,6 +83,20 @@ pub struct ModuleCache {
     pub key_cache: HashMap<ModuleId, u64>,
     /// Modules whose keys are currently being computed, for cycle detection.
     pub key_stack: Vec<ModuleId>,
+    /// Modules whose *value* a compile read, attributed to the innermost in-progress
+    /// module compile — `None` for the entry, which [`Self::begin_entry_reads`] scopes
+    /// to one compile.
+    ///
+    /// Extraction derives import entries from surviving function references, but a read
+    /// can bake a module's content into the reader with no reference left to find: an
+    /// elided forwarder body, a data member reconstructed inline, a dialect's expansion.
+    /// The reader still depends on that exact version, so extraction adds a key-only
+    /// entry for every read it did not already name, and version validation covers it.
+    ///
+    /// Type-namespace loads are deliberately not reads: a unit carries its types by
+    /// value, so nothing of the module's *code* is baked in, and the calls that would
+    /// notice a drift are validated through their own function-reference entries.
+    pub module_reads: HashMap<Option<ModuleId>, std::collections::HashSet<ModuleId>>,
 }
 
 impl Default for ModuleCache {
@@ -106,7 +120,42 @@ impl ModuleCache {
             recording: Vec::new(),
             key_cache: HashMap::new(),
             key_stack: Vec::new(),
+            module_reads: HashMap::new(),
         }
+    }
+
+    /// Record that the innermost module compile read `id`'s value (`None` = the entry).
+    /// A module reading itself is not a dependency, so it is not recorded.
+    pub fn note_value_read(&mut self, id: &ModuleId) {
+        let frame = self.recording.last().map(|frame| frame.id.clone());
+        if frame.as_ref() == Some(id) {
+            return;
+        }
+        self.module_reads
+            .entry(frame)
+            .or_default()
+            .insert(id.clone());
+    }
+
+    /// Start a fresh entry-compile read set. A cache outlives the compile that fills it
+    /// — the REPL clones one per line and commits it back — so without this a line's
+    /// unit would name the modules *earlier* lines read, putting session history in an
+    /// artifact. Module frames need no such reset: a module is compiled and extracted
+    /// once. The function dedup floor scopes a line's own functions the same way.
+    pub fn begin_entry_reads(&mut self) {
+        self.module_reads.remove(&None);
+    }
+
+    /// The modules `owner`'s compile read the value of (`None` = the entry), in
+    /// canonical order.
+    pub fn value_reads_of(&self, owner: Option<&ModuleId>) -> Vec<ModuleId> {
+        let mut reads: Vec<ModuleId> = self
+            .module_reads
+            .get(&owner.cloned())
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default();
+        reads.sort();
+        reads
     }
 
     /// Record a module's transitive value-import closure: its direct value imports

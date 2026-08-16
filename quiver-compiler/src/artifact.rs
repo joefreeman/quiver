@@ -950,6 +950,18 @@ pub(crate) fn extract(
             }
         }
     }
+    // Key-only entries for dependencies this module read but reaches no function of:
+    // its code was baked against their exact versions all the same, so the import table
+    // must name them for link-time version validation. An unkeyable one makes this
+    // module uncacheable, like any other dependency — and cannot arise on its own, since
+    // a module's key already requires every declared reference to be keyable.
+    for read in module_cache.value_reads_of(Some(id)) {
+        if imports.iter().any(|(module, _, _)| *module == read) {
+            continue;
+        }
+        let key = module_cache.content_key(&read)?;
+        imports.push((read, key, vec![]));
+    }
 
     // Assign artifact-local ids in ascending global order (preserving topological
     // ordering within each table) and build the global→local remap.
@@ -1367,6 +1379,20 @@ pub fn extract_unit(
                 imports.push((module.clone(), key, vec![*dep_index]));
             }
         }
+    }
+    // Key-only entries for dependencies this unit read but reaches no function of (see
+    // the module extraction's twin loop): its code was baked against these versions, so
+    // validation must still see them. A non-suppliable one is inlined territory — its
+    // semantics travel with the unit exactly as inlined functions do — so it needs no
+    // entry.
+    for read in module_cache.value_reads_of(None) {
+        if !eligible.contains(&read) || imports.iter().any(|(module, _, _)| *module == read) {
+            continue;
+        }
+        let key = module_cache
+            .content_key(&read)
+            .expect("a suppliable module has a stored artifact");
+        imports.push((read, key, vec![]));
     }
 
     let mut remaps = IdRemaps {

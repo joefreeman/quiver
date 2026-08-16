@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- `%json` gained a document-model query/update API: a polymorphic `get`/`set`/`update`/`delete` keyed by an object key, a 0-based array index, or a path list of either; a shallow `merge`; and `%dict`/`%list` bridges (`to_dict`, `object`, `array`). Every JSON-valued operand accepts `'%json.opt` (`'%json | []`) and a miss answers nil, so deep lookups and edits chain like `%num` arithmetic — and in debug builds the provenance stamp names the first step that missed.
+
 ## [0.4.0] - 2026-08-05
 
 - Calling is now explicit: a bare callable is always called, wherever it appears — in a chain, a tuple field, a call argument — and `&` references one without calling it (`%list.map [xs, &double]`). Application is written with a space (`%num.add [3, 4]`) rather than glued brackets.

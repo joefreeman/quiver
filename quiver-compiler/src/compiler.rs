@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 mod annotations;
 mod codegen;
 mod dialect;
+mod elision;
 mod helpers;
 mod modules;
 mod narrowing;
@@ -35,7 +36,7 @@ use crate::{
 };
 
 use quiver_core::{
-    bytecode::{Constant, Function, Instruction},
+    bytecode::{Constant, Function, Instruction, Opcode},
     program::Program,
     types::{NIL, OK, Type, TypeLookup},
     value::{Binary, Payload, Value},
@@ -822,6 +823,9 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     /// dispatch deltas (membership there would depend on which module referenced the
     /// builtin first — session history an artifact must not contain).
     builtin_type_params: HashMap<usize, Vec<String>>,
+    /// Wrapper-elision summaries, memoized per function index: `Some` for a trivial
+    /// forwarder (see `elision::analyze`), `None` for an ineligible body.
+    forwarder_memo: HashMap<usize, Option<elision::Forwarder>>,
     /// How many function-literal bodies the compiler is currently inside. The dialect
     /// pre-expansion walk runs only at depth 0 — the outermost `compile_function` expands
     /// every nested body in one pass, so re-walking per nested literal would be
@@ -971,6 +975,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     ) -> Result<Compiled, LocatedError> {
         let never_id = program.never();
         let current_package = resolver.entry_package();
+        // This is the only entry point for a top-level compile, so it is where the
+        // entry's module reads are scoped to the compile that makes them.
+        module_cache.begin_entry_reads();
 
         let mut compiler = Self {
             codegen: InstructionBuilder::new(),
@@ -993,6 +1000,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             type_param_suffix: None,
             suffix_scopes: Vec::new(),
             builtin_type_params: HashMap::new(),
+            forwarder_memo: HashMap::new(),
             function_depth: 0,
             debug: options.debug,
             current_module: options.source_name,
@@ -4621,6 +4629,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // An in-body reference the enclosing module compile did not declare (one only
         // a dialect expansion surfaces) marks that module hidden — uncacheable.
         self.module_cache.note_module_reference(&id);
+        // Reading a module's value can bake its content into the reader with no function
+        // reference left behind (an elided forwarder, an inlined data member, a dialect
+        // expansion), so the dependency is recorded here, where the read happens, rather
+        // than at each site that might consume it.
+        self.module_cache.note_value_read(&id);
 
         // Check for circular imports
         if self.module_cache.import_stack.contains(&id) {
@@ -6158,8 +6171,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
-                    let ty =
-                        self.apply_value_to_type(accessed_type, val_type, implicit_flow, None)?;
+                    let ty = self.apply_value_to_type(
+                        accessed_type,
+                        val_type,
+                        implicit_flow,
+                        None,
+                        None,
+                    )?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((accessed_type, accessed_prov))
@@ -6187,8 +6205,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
-                    let ty =
-                        self.apply_value_to_type(accessed_type, val_type, implicit_flow, None)?;
+                    let ty = self.apply_value_to_type(
+                        accessed_type,
+                        val_type,
+                        implicit_flow,
+                        None,
+                        None,
+                    )?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((accessed_type, accessed_prov))
@@ -6215,8 +6238,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
-                    let ty =
-                        self.apply_value_to_type(accessed_type, val_type, implicit_flow, None)?;
+                    let ty = self.apply_value_to_type(
+                        accessed_type,
+                        val_type,
+                        implicit_flow,
+                        None,
+                        None,
+                    )?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((accessed_type, accessed_prov))
@@ -6275,10 +6303,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 if !is_applicable && value_type.is_some() {
                     self.codegen.add_instruction(Instruction::pop());
                 }
+                // Wrapper elision: an applied member that is a statically-known trivial
+                // forwarder compiles as its builtin, so the callee is never pushed.
+                let forwarder = if is_applicable && value_type.is_some() && type_args.is_empty() {
+                    self.forwarder_for_member(&resolved_value, accessed_type, implicit_flow)
+                } else {
+                    None
+                };
                 // Hoisted-slot gate, as in `compile_import`: load the synthetic capture
                 // when the enclosing function registered one, else emit inline (sharing
                 // repeated nodes).
-                if type_args.is_empty()
+                if forwarder.is_some() {
+                    // Elided: no callee push.
+                } else if type_args.is_empty()
                     && let Some((_, index)) = scopes::lookup_variable(
                         &self.scopes,
                         &variables::CaptureSource::Import(module.to_vec()).scope_name(),
@@ -6300,6 +6337,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         val_type,
                         implicit_flow,
                         callee_fn,
+                        forwarder.as_ref(),
                     )?;
                     Ok((ty, Provenance::Unknown))
                 } else {
@@ -6323,8 +6361,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let callable_type = self.instantiate_type_arguments(callable_type, &type_args)?;
 
                 if let Some(val_type) = value_type {
-                    let ty =
-                        self.apply_value_to_type(callable_type, val_type, implicit_flow, None)?;
+                    let ty = self.apply_value_to_type(
+                        callable_type,
+                        val_type,
+                        implicit_flow,
+                        None,
+                        None,
+                    )?;
                     Ok((ty, Provenance::Unknown))
                 } else {
                     Ok((callable_type, Provenance::Unknown))
@@ -6885,7 +6928,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // The callable is below the argument on the stack; swap so the call sees it on
                 // top. An explicit argument is type-checked, not an implicit flow.
                 self.codegen.add_instruction(Instruction::rotate(2));
-                let ty = self.apply_value_to_type(callable_type, arg_type, false, None)?;
+                let ty = self.apply_value_to_type(callable_type, arg_type, false, None, None)?;
                 Ok((ty, Provenance::Unknown))
             }
             ast::Term::Apply(access, argument) => {
@@ -6947,7 +6990,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 // Apply value if present (for message sends like `10 ~> .`)
                 let result_type = if let Some(val_type) = value_type {
-                    self.apply_value_to_type(self_type, val_type, false, None)?
+                    self.apply_value_to_type(self_type, val_type, false, None, None)?
                 } else {
                     self_type
                 };
@@ -6975,7 +7018,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 // Apply value if present (for message sends like `10 ~> @1`)
                 let result_type = if let Some(val_type) = value_type {
-                    self.apply_value_to_type(process_type, val_type, false, None)?
+                    self.apply_value_to_type(process_type, val_type, false, None, None)?
                 } else {
                     process_type
                 };
@@ -7548,12 +7591,167 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         })
     }
 
+    /// The wrapper-elision summary for an applied import member, when every
+    /// precondition holds: a capture-free function value; a contract-free callee type
+    /// (an elided call must not skip `:pre`/`:post` enforcement, which is read from
+    /// the same rows); a non-nilary parameter under implicit flow (a nilary callee
+    /// discards the flowing value instead of forwarding it); and a body that analyzes
+    /// as a trivial forwarder.
+    fn forwarder_for_member(
+        &mut self,
+        resolved_value: &Value,
+        accessed_type: usize,
+        implicit_flow: bool,
+    ) -> Option<elision::Forwarder> {
+        let Value::Function(function_index, payload) = resolved_value else {
+            return None;
+        };
+        let function_index = *function_index;
+        if !payload.is_empty() {
+            return None;
+        }
+        let pre_key = annotations::intern_key(self.program, annotations::PRE);
+        let post_key = annotations::intern_key(self.program, annotations::POST);
+        let (has_pre, has_post) = self.contract_presence(accessed_type, pre_key, post_key);
+        if has_pre || has_post {
+            return None;
+        }
+        let Some(Type::Callable { parameter, .. }) = self.program.lookup_base(accessed_type) else {
+            return None;
+        };
+        let parameter = *parameter;
+        if implicit_flow && self.is_nil(parameter) {
+            return None;
+        }
+        if let Some(memo) = self.forwarder_memo.get(&function_index) {
+            return memo.clone();
+        }
+        let summary = elision::analyze(self.program, function_index);
+        self.forwarder_memo.insert(function_index, summary.clone());
+        summary
+    }
+
+    /// Emit the elided form of a forwarder call. Stack: `[argument]` -> `[result]`,
+    /// exactly what push-callee + `Call` would leave.
+    fn emit_elided_forwarder(&mut self, forwarder: &elision::Forwarder) {
+        if !self.fuse_argument_build(forwarder) {
+            self.rebuild_argument(&forwarder.argument);
+        }
+        self.codegen
+            .add_instruction(Instruction::builtin(forwarder.builtin));
+        self.codegen.add_instruction(Instruction::call());
+        for wrap in &forwarder.wraps {
+            self.codegen.add_instruction(Instruction::tuple(*wrap));
+        }
+    }
+
+    /// Argument fusion: when the argument was just built by a `Tuple` whose fields the
+    /// forwarder consumes in order (`[data, 1] ~> %bin.get_byte`-shaped sites), cancel
+    /// that build and feed the fields straight into the builtin's argument — the
+    /// caller-side tuple never exists. Sound whatever lies beneath: the tail
+    /// `Tuple(n); Rotate(2); Pop` left `[argument]` on top of the surrounding stack, so
+    /// truncating the build to `[X, fields..]` and dropping `X` with `Rotate(n+1); Pop`
+    /// reaches the identical state minus the intermediate tuple.
+    ///
+    /// This is the compiler's only rewrite of already-emitted code, so it is also the
+    /// only place that must ask `rewritable_from` whether a jump reaches into what it is
+    /// about to cut.
+    ///
+    /// Answers whether it fired; on success the builtin's argument is on top, as
+    /// [`Self::rebuild_argument`] would have left it.
+    fn fuse_argument_build(&mut self, forwarder: &elision::Forwarder) -> bool {
+        let elision::Argument::Rebuild { tuple_id, sources } = &forwarder.argument else {
+            return false;
+        };
+        let Some(field_count) = elision::fusible_prefix(sources) else {
+            return false;
+        };
+        let tail = &self.codegen.instructions;
+        let len = tail.len();
+        let juggled = len >= 3
+            && tail[len - 3].opcode() == Opcode::Tuple
+            && tail[len - 2] == Instruction::rotate(2)
+            && tail[len - 1] == Instruction::pop();
+        let tuple_at = if juggled {
+            len - 3
+        } else if len >= 1 && tail[len - 1].opcode() == Opcode::Tuple {
+            len - 1
+        } else {
+            return false;
+        };
+        if !self.codegen.rewritable_from(tuple_at) {
+            return false;
+        }
+        let caller_tuple = tail[tuple_at].operand() as usize;
+        let arity = self
+            .program
+            .lookup_tuple(caller_tuple)
+            .map(|info| info.fields.len());
+        if arity != Some(field_count) {
+            return false;
+        }
+
+        self.codegen.instructions.truncate(tuple_at);
+        if juggled {
+            self.codegen
+                .add_instruction(Instruction::rotate(field_count + 1));
+            self.codegen.add_instruction(Instruction::pop());
+        }
+        for source in &sources[field_count..] {
+            let elision::ArgSource::Constant(constant) = source else {
+                unreachable!("fusible_prefix admits only trailing constants");
+            };
+            self.codegen
+                .add_instruction(Instruction::constant(*constant));
+        }
+        self.codegen.add_instruction(Instruction::tuple(*tuple_id));
+        true
+    }
+
+    /// Reshape the argument on the stack into the one the forwarded builtin takes,
+    /// leaving it on top. The general form, for when fusion does not apply.
+    fn rebuild_argument(&mut self, argument: &elision::Argument) {
+        // The parameter passes through whole: the argument already is it.
+        let elision::Argument::Rebuild { tuple_id, sources } = argument else {
+            return;
+        };
+        // Each source lands above the argument, which sits at depth = sources pushed so
+        // far; the rebuilt tuple then replaces it.
+        for (depth, source) in sources.iter().enumerate() {
+            match source {
+                elision::ArgSource::Parameter => {
+                    self.codegen.add_instruction(Instruction::pick(depth));
+                }
+                elision::ArgSource::ParameterField(field) => {
+                    self.codegen.add_instruction(Instruction::pick(depth));
+                    self.codegen
+                        .add_instruction(Instruction::get_positional(*field));
+                }
+                elision::ArgSource::Constant(constant) => {
+                    self.codegen
+                        .add_instruction(Instruction::constant(*constant));
+                }
+            }
+        }
+        self.codegen.add_instruction(Instruction::tuple(*tuple_id));
+        self.codegen.add_instruction(Instruction::rotate(2));
+        self.codegen.add_instruction(Instruction::pop());
+    }
+
+    /// Apply the value on the stack to the callable (or process) `target_type_id`
+    /// denotes, emitting the call and answering its result type.
+    ///
+    /// `elide` carries a wrapper-elision summary: when it is set — and the callee
+    /// therefore was never pushed — the call emits as the forwarded builtin instead of
+    /// `Call`. Typing is identical either way, so only the import arm, which is the only
+    /// site that can resolve a statically-known callee, ever passes one.
     fn apply_value_to_type(
         &mut self,
         target_type_id: usize,
         value_type: usize,
         implicit_flow: bool,
         callee_fn: Option<usize>,
+        elide: Option<&elision::Forwarder>,
     ) -> Result<usize, Error> {
         let target_type =
             self.program
@@ -7629,18 +7827,25 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // type widens the current context's.
             self.widen_receive_type(receive_id);
 
-            // A nilary callable ignoring a non-nil flow: replace the value on the stack with nil
-            // before calling. Stack: [value, callable] -> [callable] -> [nil, callable].
-            if ignore_value && !self.is_nil(value_type) {
-                self.codegen.add_instruction(Instruction::rotate(2));
-                self.codegen.add_instruction(Instruction::pop());
-                self.codegen.add_instruction(Instruction::tuple(NIL));
-                self.codegen.add_instruction(Instruction::rotate(2));
-            }
+            if let Some(forwarder) = elide {
+                // Wrapper elision: the callee was never pushed, and the argument on the
+                // stack compiles into the forwarded builtin call directly. The gate
+                // excluded the nilary-flow juggle and contract-carrying callees.
+                self.emit_elided_forwarder(forwarder);
+            } else {
+                // A nilary callable ignoring a non-nil flow: replace the value on the stack
+                // with nil before calling. Stack: [value, callable] -> [callable] -> [nil, callable].
+                if ignore_value && !self.is_nil(value_type) {
+                    self.codegen.add_instruction(Instruction::rotate(2));
+                    self.codegen.add_instruction(Instruction::pop());
+                    self.codegen.add_instruction(Instruction::tuple(NIL));
+                    self.codegen.add_instruction(Instruction::rotate(2));
+                }
 
-            // Execute the call, wrapping it with debug-mode `:pre`/`:post` contract
-            // enforcement when the callee's static type carries those contracts.
-            self.emit_call_with_contracts(target_type_id, param_id, result_id)?;
+                // Execute the call, wrapping it with debug-mode `:pre`/`:post` contract
+                // enforcement when the callee's static type carries those contracts.
+                self.emit_call_with_contracts(target_type_id, param_id, result_id)?;
+            }
             Ok(result_type)
         } else if let Type::Process {
             send: send_type, ..

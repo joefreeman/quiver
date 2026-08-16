@@ -259,6 +259,29 @@ fn module_a(n: &str) -> HashMap<Vec<String>, String> {
 }
 
 #[test]
+fn a_dependency_reached_by_no_function_keeps_a_key_only_import_entry() {
+    // `%a.f` is a trivial forwarder, so its application compiles as the builtin —
+    // wrapper elision — and no function reference reaches `%a`. Extraction derives
+    // import entries from surviving references, so this one comes from the *read*
+    // instead: the table names `%a` with an empty function list, and version validation
+    // covers the baked-in body. Doubles as the structural proof that elision fired.
+    let built = compile_project("%a.f 1", module_a("1"), Rc::new(ArtifactStore::in_memory()));
+    let unit = quiver_compiler::extract_unit(
+        &built.program,
+        &built.module_cache,
+        Some(built.entry),
+        built.own_floor,
+        quiver_compiler::Imports::Bundle,
+    );
+    assert_eq!(unit.imports.len(), 1, "the read dependency is still named");
+    assert_eq!(unit.imports[0].0.name, vec!["a".to_string()]);
+    assert!(
+        unit.imports[0].2.is_empty(),
+        "no function is imported — the forwarder body was elided into the caller"
+    );
+}
+
+#[test]
 #[should_panic(expected = "but the session linked")]
 fn resolving_imports_against_another_version_of_a_module_is_refused() {
     // Phase 1's deferred check, now that phase 3 has given it a public entry point. The
@@ -974,6 +997,35 @@ fn a_repeated_line_keeps_taking_the_unit_path() {
             assert!(rendered.contains("Int(42)"), "`{source}` gave {rendered}");
         }
     }
+}
+
+#[test]
+fn a_lines_imports_are_its_own_reads_only() {
+    // A module cache outlives the compile that fills it — the REPL clones one per line
+    // and commits it back — so a line's recorded reads must be reset at the start of its
+    // compile. Otherwise a line inherits whatever earlier lines read, and a unit's import
+    // table carries session history: the same source would extract differently depending
+    // on what preceded it. `%bin.get_byte` is a forwarder, so line 2 reaches no function
+    // of `%bin` and names it by read alone — exactly the entry that used to persist.
+    let mut environment = environment();
+    let mut repl = repl_on(&mut environment, true);
+
+    evaluate(
+        &mut environment,
+        &mut repl,
+        "double = #'int { %num.mul [$, 2] }",
+    );
+    let (bundled, _) = evaluate_observing_payload(
+        &mut environment,
+        &mut repl,
+        "%bin.get_byte [bin: 0x616263, index: 1]",
+    );
+    assert!(bundled, "the line that reads %bin names it");
+
+    // Reaches only an earlier line's binding, so it depends on no module at all.
+    let (bundled, rendered) = evaluate_observing_payload(&mut environment, &mut repl, "double 21");
+    assert!(!bundled, "a line inherited the previous line's reads");
+    assert!(rendered.contains("Int(42)"), "`double 21` gave {rendered}");
 }
 
 #[test]
