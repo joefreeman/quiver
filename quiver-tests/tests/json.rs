@@ -419,3 +419,181 @@ fn test_dict_and_list_bridges() {
         .evaluate(r#"%json{ { "m": { "x": 7 } } } ~> %json.to_dict ~> =('%dict<'%str, '%json>)d; %json.object d ~> %json.get [~, %list{ "m", "x" }]"#)
         .expect("7");
 }
+
+// === Typed boundary: decode<'t> / encode<'t> ============================================
+
+#[test]
+fn test_decode_scalars_and_mismatches() {
+    quiver()
+        .evaluate(r#"%json{ 42 } ~> %json.decode<'int>"#)
+        .expect("42");
+    quiver()
+        .evaluate(r#"%json{ "hi" } ~> %json.decode<'%str>"#)
+        .expect(r#""hi""#);
+    quiver()
+        .evaluate(r#"%json{ true } ~> %json.decode<(True | False)>"#)
+        .expect("True");
+    // Any mismatch is nil, like a failed match — including 3.5 into 'int.
+    quiver()
+        .evaluate(r#"%json{ "hi" } ~> %json.decode<'int>"#)
+        .expect("[]");
+    quiver()
+        .evaluate(r#""3.5" ~> %json.parse ~> %json.decode<'int>"#)
+        .expect("[]");
+    quiver()
+        .evaluate(r#""3.5" ~> %json.parse ~> %json.decode<'%num.coeff>"#)
+        .expect("7/2");
+}
+
+#[test]
+fn test_decode_object_to_labelled_tuple() {
+    // Keys match by label, order-free; extra keys are ignored; the tuple's name is
+    // Quiver-side only.
+    quiver()
+        .evaluate(
+            r#""\{\"age\": 36, \"name\": \"ada\", \"x\": true}" ~> %json.parse ~> %json.decode<User[name: '%str, age: 'int]>"#,
+        )
+        .expect(r#"User[name: "ada", age: 36]"#);
+    // A missing non-optional key is a mismatch.
+    quiver()
+        .evaluate(
+            r#""\{\"name\": \"ada\"}" ~> %json.parse ~> %json.decode<[name: '%str, age: 'int]>"#,
+        )
+        .expect("[]");
+}
+
+#[test]
+fn test_decode_optional_fields_collapse_absent_and_null() {
+    quiver()
+        .evaluate(r#""\{\"a\": 1}" ~> %json.parse ~> %json.decode<[a: 'int, b: '%str | []]>"#)
+        .expect(r#"[a: 1, b: []]"#);
+    quiver()
+        .evaluate(r#""\{\"a\": 1, \"b\": null}" ~> %json.parse ~> %json.decode<[a: 'int, b: '%str | []]>"#)
+        .expect(r#"[a: 1, b: []]"#);
+}
+
+#[test]
+fn test_decode_arrays_and_nesting() {
+    quiver()
+        .evaluate(r#"%json{ [1, 2, 3] } ~> %json.decode<'%list<'int>>"#)
+        .expect("Cons[1, Cons[2, Cons[3, Nil]]]");
+    quiver()
+        .evaluate(
+            r#"%json{ { "users": [{ "name": "ada" }] } } ~> %json.decode<[users: '%list<[name: '%str]>]>"#,
+        )
+        .expect(r#"[users: Cons[[name: "ada"], Nil]]"#);
+    // An array element failing to decode fails the whole array.
+    quiver()
+        .evaluate(r#"%json{ [1, "x"] } ~> %json.decode<'%list<'int>>"#)
+        .expect("[]");
+}
+
+#[test]
+fn test_decode_unions_by_ordered_choice() {
+    quiver()
+        .evaluate(r#"%json{ "x" } ~> %json.decode<('int | '%str)>"#)
+        .expect(r#""x""#);
+    // Objects discriminate structurally between union members.
+    quiver()
+        .evaluate(
+            r#""\{\"width\": 2, \"height\": 3}" ~> %json.parse ~> %json.decode<(Circle[radius: 'int] | Rect[width: 'int, height: 'int])>"#,
+        )
+        .expect("Rect[width: 2, height: 3]");
+    quiver()
+        .evaluate(
+            r#""\{\"radius\": 5}" ~> %json.parse ~> %json.decode<(Circle[radius: 'int] | Rect[width: 'int, height: 'int])>"#,
+        )
+        .expect("Circle[radius: 5]");
+}
+
+#[test]
+fn test_decode_recursive_type() {
+    quiver()
+        .evaluate(
+            r#"'tree = Leaf[value: 'int] | Node[left: ^, right: ^]; "\{\"left\": \{\"value\": 1}, \"right\": \{\"value\": 2}}" ~> %json.parse ~> %json.decode<'tree>"#,
+        )
+        .expect("Node[left: Leaf[value: 1], right: Leaf[value: 2]]");
+}
+
+#[test]
+fn test_decode_json_typed_part_passes_subtree_through() {
+    // A '%json-typed field captures the raw subtree verbatim (null included — the
+    // optional-field collapse only applies where a nil is admitted instead).
+    quiver()
+        .evaluate(r#"doc = %json{ { "a": [1, null] } }; %json.decode<'%json> doc ~> =&doc"#)
+        .expect("Ok");
+    quiver()
+        .evaluate(
+            r#"%json{ { "meta": { "x": [true] } } } ~> %json.decode<[meta: '%json]> ~> =[meta: m]; m ~> %json.stringify"#,
+        )
+        .expect(r#""{\"x\":[true]}""#);
+}
+
+#[test]
+fn test_decode_accepts_nil_so_queries_chain() {
+    quiver()
+        .evaluate(r#"%json{ { "a": 1 } } ~> %json.get [~, "zzz"] ~> %json.decode<'int>"#)
+        .expect("[]");
+}
+
+#[test]
+fn test_encode_objects_lists_and_scalars() {
+    quiver()
+        .evaluate(
+            r#"%json.encode<[name: '%str, age: 'int]> [name: "ada", age: 36] ~> %json.stringify"#,
+        )
+        .expect(r#""{\"name\":\"ada\",\"age\":36}""#);
+    // The tuple's name is Quiver-side only; a nil optional field is omitted.
+    quiver()
+        .evaluate(r#"%json.encode<Point[x: 'int, y: 'int]> Point[x: 1, y: 2] ~> %json.stringify"#)
+        .expect(r#""{\"x\":1,\"y\":2}""#);
+    quiver()
+        .evaluate(r#"%json.encode<[a: 'int, b: '%str | []]> [a: 1, b: []] ~> %json.stringify"#)
+        .expect(r#""{\"a\":1}""#);
+    quiver()
+        .evaluate(r#"%json.encode<'%list<'int>> %list{ 1, 2, 3 } ~> %json.stringify"#)
+        .expect(r#""[1,2,3]""#);
+    // A nil in a nil-admitting element position becomes `null`.
+    quiver()
+        .evaluate(r#"%json.encode<'%list<'int | []>> %list{ 1, [] } ~> %json.stringify"#)
+        .expect(r#""[1,null]""#);
+    quiver()
+        .evaluate(r#"%json.encode<(True | False)> False ~> %json.stringify"#)
+        .expect(r#""false""#);
+    // Exact rationals pass through as '%num.coeff; formatting stays stringify's.
+    quiver()
+        .evaluate(r#"%num.div [1, 2] ~> =('%num.coeff)h; h ~> %json.encode<'%num.coeff> ~> %json.stringify"#)
+        .expect(r#""0.5""#);
+}
+
+#[test]
+fn test_encode_json_typed_part_and_unencodable_values() {
+    // A '%json-typed part passes through whole (normalized across tuple-id families).
+    quiver()
+        .evaluate(r#"doc = %json{ { "a": [1, true, null] } }; %json.encode<'%json> doc ~> =&doc"#)
+        .expect("Ok");
+    // A value with no JSON form is a runtime error, like %data.encode's.
+    quiver()
+        .evaluate(r#"%json.encode<#'int -> 'int> #'int { $ }"#)
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "cannot encode as JSON: the value does not fit the stated type's mapping \
+             (functions, processes, refs, resources, binaries, dicts and unlabelled \
+             tuples have no JSON form)"
+                .to_string(),
+        ));
+}
+
+#[test]
+fn test_typed_round_trips() {
+    // encode<'t> ~> decode<'t> is identity, directly and through text.
+    quiver()
+        .evaluate(
+            r#"u = [name: "ada", age: 36, email: []]; %json.encode<[name: '%str, age: 'int, email: '%str | []]> u ~> %json.decode<[name: '%str, age: 'int, email: '%str | []]> ~> =&u"#,
+        )
+        .expect("Ok");
+    quiver()
+        .evaluate(
+            r#"'tree = Leaf[value: 'int] | Node[left: ^, right: ^]; t = Node[left: Leaf[value: 1], right: Node[left: Leaf[value: 2], right: Leaf[value: 3]]]; %json.encode<'tree> t ~> %json.stringify ~> %json.parse ~> %json.decode<'tree> ~> =&t"#,
+        )
+        .expect("Ok");
+}

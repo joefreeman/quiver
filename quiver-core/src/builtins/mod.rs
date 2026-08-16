@@ -67,6 +67,7 @@ pub mod binary;
 pub mod data;
 pub mod integer;
 pub mod io;
+pub mod json;
 pub mod reference;
 pub mod registry;
 pub mod vector;
@@ -111,6 +112,10 @@ pub struct BuiltinContext<'a, E: Effect> {
     /// off the called builtin value; `None` for ordinary builtins. Resolve it against
     /// the executor's `TypeLookup`.
     type_argument: Option<usize>,
+    /// The builtin's registered result type, from its instantiated table row — how an
+    /// implementation that constructs typed results (`__json_encode__`'s `'%json`
+    /// shapes) obtains their ids without minting any.
+    result_type: Option<usize>,
 }
 
 impl<'a, E: Effect> BuiltinContext<'a, E> {
@@ -119,6 +124,7 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
         process: &'a mut Process,
         executor: &'a mut Executor<E>,
         type_argument: Option<usize>,
+        result_type: Option<usize>,
     ) -> Self {
         Self {
             executor,
@@ -126,6 +132,7 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
             process,
             action: None,
             type_argument,
+            result_type,
         }
     }
 
@@ -138,6 +145,11 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
     /// builtin's `<'t>`), or `None` when called without one.
     pub fn type_argument(&self) -> Option<usize> {
         self.type_argument
+    }
+
+    /// The builtin's registered result type id, from its table row.
+    pub fn result_type(&self) -> Option<usize> {
+        self.result_type
     }
 
     /// Take the routed action a verb queued, for the dispatch site to return from the step.
@@ -285,6 +297,10 @@ pub enum TypeSpec {
         parameter: Box<TypeSpec>,
         result: Box<TypeSpec>,
     },
+    /// A recursive back-reference, mirroring [`Type::Cycle`]: reads `depth` union
+    /// boundaries up from the reference (1 is the nearest enclosing union). Lets a
+    /// spec spell a recursive type like `'%json`.
+    Cycle(usize),
 }
 
 impl TypeSpec {
@@ -347,6 +363,7 @@ impl TypeSpec {
                     states: None,
                 }
             }
+            TypeSpec::Cycle(depth) => Type::Cycle(*depth),
         }
     }
 }
@@ -933,6 +950,29 @@ pub fn register_data_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     );
 }
 
+/// The JSON typed boundary: `__json_decode__<'t>` / `__json_encode__<'t>`, converting
+/// between `'%json` values and ordinary typed values.
+pub fn register_json_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let nil = TypeSpec::Tuple(None, vec![]);
+    registry.register_generic(
+        "json_decode".to_string(),
+        coerce_builtin(json::builtin_json_decode),
+        Purity::Pure,
+        // `'%json | []`: nil passes through, so a failed document-model query chains.
+        TypeSpec::Union(vec![json::json_spec(), nil.clone()]),
+        TypeSpec::Union(vec![TypeSpec::Var("t"), nil]),
+        vec!["t".to_string()],
+    );
+    registry.register_generic(
+        "json_encode".to_string(),
+        coerce_builtin(json::builtin_json_encode),
+        Purity::Pure,
+        TypeSpec::Var("t"),
+        json::json_spec(),
+        vec!["t".to_string()],
+    );
+}
+
 /// Detach an owned child from the calling process (the parent-only `%proc.detach`):
 /// the child survives the caller's termination. Errors when the argument is not an
 /// owned child of the caller — ownership is the parent's to relinquish, like operating
@@ -1103,6 +1143,7 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
         register_reference_builtins,
         register_control_builtins,
         register_data_builtins,
+        register_json_builtins,
         register_process_builtins,
         register_registry_builtins,
     ]

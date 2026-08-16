@@ -123,6 +123,18 @@ fn test_decode_unions_and_recursion() {
 }
 
 #[test]
+fn test_decode_cycle_through_sibling_boundaries() {
+    // Regression: a cycle followed back to the root, then descending a *different*
+    // member with its own inner union, must resolve that member's cycles at the
+    // target's depth — boundaries pushed by the abandoned sibling branch (here the
+    // Object pair list) must not skew them. '%json is the natural witness: an Array
+    // inside an Object value reaches Array's list only via the pair's root cycle.
+    quiver()
+        .evaluate(r#"%data.decode<'%json> "Object[Cons[[\"a\", Array[Cons[1, Nil]]], Nil]]""#)
+        .expect(r#"Object[Cons[["a", Array[Cons[1, Nil]]], Nil]]"#);
+}
+
+#[test]
 fn test_decode_failures_answer_nil() {
     // Unknown name for the expected type, arity mismatch, odd hex, trailing input, a
     // raw newline in a string, and a partial expected type (no layout to construct).

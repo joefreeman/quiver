@@ -249,8 +249,14 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
                 if stack.len() < depth {
                     return Ok(None);
                 }
-                let target = stack[stack.len() - depth];
-                self.decode_type(target, stack)
+                // Re-enter the target at its own depth: boundaries pushed since it
+                // (sibling branches of this walk) would otherwise skew the depths of
+                // cycles resolved inside the target, so they are set aside and restored.
+                let saved = stack.split_off(stack.len() - depth + 1);
+                let target = *stack.last().expect("cycle target on the stack");
+                let result = self.decode_type(target, stack);
+                stack.extend(saved);
+                result
             }
             Type::Integer => Ok(self.parse_int()),
             Type::Binary => self.parse_binary(),

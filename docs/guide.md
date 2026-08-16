@@ -1326,7 +1326,7 @@ __integer_add__ [3, 4]              //=> 7
 | `%vec` | packed fixed-point numeric vectors |
 | `%ref` | mints unique opaque identifiers |
 | `%data` | Quiver data notation: `encode` and `decode<'t>` |
-| `%json` | JSON parsing, rendering, querying and editing, plus `%json{ … }` |
+| `%json` | JSON parsing, rendering, querying and editing, typed `decode<'t>`/`encode<'t>`, plus `%json{ … }` |
 | `%parse` | parser combinators over binary input |
 | `%meta` | the expression IR a dialect returns |
 | `%proc` | process management: `detach`, `kill`, `link`, `track` |

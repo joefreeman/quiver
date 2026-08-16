@@ -591,7 +591,23 @@ array = #'%list<'> -> ' {
   Array[$]
 }
 
+// === Typed boundary =====================================================================
+// `decode<'t>`/`encode<'t>` convert between the document model and ordinary typed
+// values, driven by an explicit type argument (type-consuming, like `%data.decode`).
+// Objects map to tuples with labelled fields (keys matched by label, order-free, extra
+// keys ignored), arrays to `%list`, `true`/`false` to `True`/`False`, and a field type
+// admitting nil makes its key optional: absent or `null` decode as nil, and a nil field
+// is omitted on encode. A `'%json`-typed part passes the raw subtree through verbatim.
+
+decode = &__json_decode__ ~> {
+  :doc "Decodes a '%json value (or nil, which passes through) as the explicitly-given expected type: `%json.decode<'user> doc` answers `'user | []` — nil for any mismatch. Unions decode by ordered choice, like %data.decode. The expected type must be concrete at the naming site; `parse ~> decode<'t>` covers text."
+}
+
+encode = &__json_encode__ ~> {
+  :doc "Encodes a value of the explicitly-given type as a '%json document: `%json.encode<'user> u ~> %json.stringify` — the inverse of `decode`. Values with no JSON form (functions, processes, refs, resources, binaries, dicts, unlabelled tuples) are a runtime error."
+}
+
 {
   :dialect &json
-  (parse, stringify, get, set, update, delete, merge, to_dict, object, array)
+  (parse, stringify, get, set, update, delete, merge, to_dict, object, array, decode, encode)
 }
