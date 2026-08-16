@@ -1770,3 +1770,55 @@ fn test_nested_type_alias_may_name_a_module_type() {
         )
         .expect("Cons[4, Nil]");
 }
+
+#[test]
+fn test_process_type_spells_grants_as_operations() {
+    // A process type lists what its holder may do, each clause written as the
+    // operation: a glued head (send, what application takes), `!'r` (await, what
+    // selecting on the pid yields), `?'s` (sample, what `?` reads) — in that order,
+    // with no parentheses required.
+    quiver()
+        .evaluate("'h = @'int !'bin ?'int")
+        .expect_alias("h", "@'int !'bin ?'int");
+}
+
+#[test]
+fn test_process_type_sigil_glues_to_bare_at() {
+    quiver().evaluate("'a = @!'int").expect_alias("a", "@!'int");
+    quiver().evaluate("'w = @?'int").expect_alias("w", "@?'int");
+}
+
+#[test]
+fn test_process_type_clauses_bind_before_a_union() {
+    quiver()
+        .evaluate("'u = 'int | @'int ?'int")
+        .expect_alias("u", "'int | (@'int ?'int)");
+}
+
+#[test]
+fn test_function_output_trailing_clause_is_the_functions() {
+    // In `#'a -> @ !'c` the clause is the function's receive; granting await on the
+    // returned pid takes a parenthesized output, `#'a -> (@!'r)`.
+    quiver()
+        .evaluate("'f = #'int -> @ !'int")
+        .expect_alias("f", "#'int -> @ !'int");
+    quiver()
+        .evaluate("'g = #'int -> (@!'int)")
+        .expect_alias("g", "#'int -> (@!'int)");
+}
+
+#[test]
+fn test_process_type_clause_stops_at_a_newline() {
+    // A clause sigil needs horizontal whitespace, so the `!'int` on its own line is a
+    // receive step, not an await clause reaching across the step boundary.
+    quiver()
+        .evaluate("f = #{\n  'p = @'int\n  !'int\n}\nq = @f\n7 ~> q\n!q")
+        .expect("7");
+}
+
+#[test]
+fn test_process_type_arrow_form_is_gone() {
+    // The pre-clause spelling `@'m -> 'r` no longer parses: sending a message does
+    // not yield the result — awaiting does, and that grant is spelled `!'r`.
+    quiver().evaluate("'bad = @'int -> 'int").expect_parse_failure();
+}

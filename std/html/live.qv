@@ -259,7 +259,7 @@ key_opts = #[(keys): ('keys | []) = [], (debounce): ('int | []) = [], (throttle)
 // declared process type, and the app consumes the root through the same door. The
 // handle grants await too, so the placer's watcher can observe a crash; it narrows
 // to the send-only `@'view_msg` everywhere else.
-'vstart = #['%str, @'app_msg, 'vboot] -> (@'view_msg -> [])
+'vstart = #['%str, @'app_msg, 'vboot] -> (@'view_msg ![])
 
 // A placement argument: what a placeable component is called with.
 'place<'i> = [init: 'i, key: '%str]

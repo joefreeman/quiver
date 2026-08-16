@@ -393,3 +393,23 @@ receive on a named tuple type
             name: (tuple_name))))
       (access
         source: (identifier)))))
+
+==================
+process type clause grants
+==================
+
+'h = @'int !'bin ?'int
+
+---
+
+(source_file
+  (sequence
+    (type_alias
+      name: (type_name)
+      definition: (process_type
+        message: (type_identifier
+          name: (type_name))
+        result: (type_identifier
+          name: (type_name))
+        state: (type_identifier
+          name: (type_name))))))

@@ -1624,11 +1624,18 @@ fn render_type(type_def: &Type) -> String {
 }
 
 /// Render a type where the grammar expects a `base_type`/atom (intersection members, process
-/// receive/return, function input/output): wrap an intersection or function in parentheses. A union
-/// is already parenthesised by `render_type`.
+/// heads and clauses, function input/output): wrap an intersection or function in parentheses,
+/// and a clause-bearing process type — nested, its clauses would bind to the wrong head (and a
+/// function output's trailing clauses are the function's). A union is already parenthesised by
+/// `render_type`.
 fn render_type_atom(type_def: &Type) -> String {
     match type_def {
         Type::Intersection(_) | Type::Function(_) => {
+            format!("({})", render_type(type_def))
+        }
+        Type::Process(process_type)
+            if process_type.return_type.is_some() || process_type.state_type.is_some() =>
+        {
             format!("({})", render_type(type_def))
         }
         _ => render_type(type_def),
@@ -1760,11 +1767,12 @@ fn render_process_type(process_type: &ProcessType) -> String {
     if let Some(receive) = &process_type.receive_type {
         body.push_str(&render_type_atom(receive));
     }
+    // Clause sigils glue to a bare `@` and take a space after a head or earlier clause.
     if let Some(ret) = &process_type.return_type {
         if process_type.receive_type.is_some() {
             body.push(' ');
         }
-        body.push_str("-> ");
+        body.push('!');
         body.push_str(&render_type_atom(ret));
     }
     if let Some(state) = &process_type.state_type {
@@ -1774,12 +1782,7 @@ fn render_process_type(process_type: &ProcessType) -> String {
         body.push('?');
         body.push_str(&render_type_atom(state));
     }
-    // The bare forms (`@`, `@'msg`) need no parens; any arrow/state clause does.
-    if process_type.return_type.is_some() || process_type.state_type.is_some() {
-        format!("({})", body)
-    } else {
-        body
-    }
+    body
 }
 
 #[cfg(test)]
@@ -2378,8 +2381,12 @@ mod tests {
             "'mt = '%list<'int>",
             "'mn = '%shapes.circle",
             "'recv = @'int",
-            "'both = (@'int -> 'bin)",
-            "'ret = (@-> 'bin)",
+            "'both = @'int !'bin",
+            "'ret = @!'bin",
+            "'all = @'int !'bin ?'int",
+            "'watch = @?'int",
+            "'punion = 'int | @'int ?'int",
+            "'pout = #'int -> (@'int !'bin)",
             "'res = \\File",
             "'post = Post[...'entity, title: Str['bin], ...'updateable]",
             "' = Str['bin]",

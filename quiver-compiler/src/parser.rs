@@ -1591,52 +1591,61 @@ fn type_cycle(input: Span) -> IResult<Span, Type> {
     )(input)
 }
 
-// A process type: bare `@'msg`, or the parenthesized clause forms
-// `(@['msg] [-> 'r] [?'s])` — e.g. `(@'msg -> 'r)`, `(@'evt ?'status)`, `(@-> 'r ?'s)`,
-// `(@?'s)`. The `?` clause sigil needs preceding whitespace after a type (type names may
-// end in `?`), but glues directly to `@` in the state-only form.
+// A process type spells each grant as the operation that exercises it: a glued head
+// type (send — what applying the pid takes), a `!'r` clause (await — what selecting on
+// the pid yields), and a `?'s` clause (sample — what `?` reads), in that order:
+// `@['msg] [!'r] [?'s]`. A clause sigil glues directly to `@` when it is the first
+// thing after it (`@!'r`, `@?'s`); otherwise it needs preceding *horizontal*
+// whitespace — type names may end in `!`/`?`, and a newline must stay a step boundary.
+// Clauses bind to the nearest sigil-head on their left, so a clause-bearing process
+// type nested as another's head is parenthesized — as is one in a function type's
+// output position, where trailing clauses are the function's (`process_type_head`).
 fn process_type(input: Span) -> IResult<Span, Type> {
-    map(
-        alt((
-            // (@...) - parenthesized clause forms (@ is inside parens)
-            delimited(
-                char('('),
-                preceded(
-                    char('@'),
-                    alt((
-                        // (@?'s) - state only, glued to the @
-                        map(preceded(char('?'), base_type), |state| {
-                            (None, None, Some(state))
-                        }),
-                        // (@['msg] [-> 'r] [ ?'s])
-                        tuple((
-                            opt(base_type),
-                            opt(preceded(tuple((ws0, tag("->"), ws1)), base_type)),
-                            opt(preceded(pair(ws1, char('?')), base_type)),
-                        )),
-                    )),
-                ),
-                char(')'),
-            ),
-            // @ with optional type - no clauses (@ is outside)
-            map(preceded(char('@'), opt(base_type)), |receive_type| {
-                (receive_type, None, None)
-            }),
-        )),
-        |(receive_type, return_type, state_type)| {
-            Type::Process(ProcessType {
-                receive_type: receive_type.map(Box::new),
-                return_type: return_type.map(Box::new),
-                state_type: state_type.map(Box::new),
-            })
-        },
-    )(input)
+    let (input, receive_type) = preceded(char('@'), opt(base_type))(input)?;
+    let glued = receive_type.is_none();
+    let (input, return_type) = opt(preceded(clause_sigil('!', glued), base_type))(input)?;
+    let glued = glued && return_type.is_none();
+    let (input, state_type) = opt(preceded(clause_sigil('?', glued), base_type))(input)?;
+    Ok((
+        input,
+        Type::Process(ProcessType {
+            receive_type: receive_type.map(Box::new),
+            return_type: return_type.map(Box::new),
+            state_type: state_type.map(Box::new),
+        }),
+    ))
+}
+
+// The sigil introducing a process-type clause: glued when nothing has been parsed
+// since the `@`, preceded by horizontal whitespace otherwise.
+fn clause_sigil(sigil: char, glued: bool) -> impl FnMut(Span) -> IResult<Span, char> {
+    move |input| {
+        if glued {
+            char(sigil)(input)
+        } else {
+            preceded(hspace1, char(sigil))(input)
+        }
+    }
+}
+
+// A process type in a function's output position: bare `@`/`@'msg` only — trailing
+// `!`/`?` clauses there are the function's own. A clause-bearing process output is
+// parenthesized: `#'a -> (@'m !'r) ?'d`.
+fn process_type_head(input: Span) -> IResult<Span, Type> {
+    map(preceded(char('@'), opt(base_type)), |receive_type| {
+        Type::Process(ProcessType {
+            receive_type: receive_type.map(Box::new),
+            return_type: None,
+            state_type: None,
+        })
+    })(input)
 }
 
 // A callable type: `#'a -> 'b`, with optional clauses ` !'c` (receive) and ` ?'d`
 // (states beyond the parameter), in that order. The clause sigil must be preceded by
-// whitespace (type names may themselves end in `?`/`!`, so `'b!'c` would tokenize as
-// the name `'b!`) and glued to its clause type, mirroring the select sugar `!'int`.
+// *horizontal* whitespace (type names may themselves end in `?`/`!`, so `'b!'c` would
+// tokenize as the name `'b!`, and a newline must stay a step boundary) and glued to
+// its clause type, mirroring the select sugar `!'int`.
 fn function_type(input: Span) -> IResult<Span, Type> {
     map(
         preceded(
@@ -1644,8 +1653,8 @@ fn function_type(input: Span) -> IResult<Span, Type> {
             tuple((
                 function_input_type,
                 preceded(tuple((ws1, tag("->"), ws1)), function_output_type),
-                opt(preceded(pair(ws1, char('!')), base_type)),
-                opt(preceded(pair(ws1, char('?')), base_type)),
+                opt(preceded(pair(hspace1, char('!')), base_type)),
+                opt(preceded(pair(hspace1, char('?')), base_type)),
             )),
         ),
         |(input, output, receive, states)| {
@@ -1680,7 +1689,8 @@ fn function_output_type(input: Span) -> IResult<Span, Type> {
         tuple_type,
         resource_type,
         type_cycle,
-        process_type,
+        // Head only: a trailing `!`/`?` clause after the output is the function's.
+        process_type_head,
         module_type, // Must come before type_identifier to match '% before trying identifier
         type_identifier,
         self_default_type, // Bare `'`; after type_identifier/module_type so `'int`/`'%mod` win

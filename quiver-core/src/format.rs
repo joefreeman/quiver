@@ -66,8 +66,8 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
             receive,
             state,
         } => {
-            // Compose the written clause forms: `@'msg`, `@'msg -> 'r`, `@-> 'r`, and the
-            // sampling clause ` ?'s` (glued directly after a bare `@`: `@?'s`).
+            // Compose the written clause forms: `@'msg`, `@'msg !'r`, `@!'r`, and the
+            // sampling clause ` ?'s` (a sigil glues directly after a bare `@`: `@?'s`).
             let fmt = |id: usize| {
                 lookup
                     .lookup_type(id)
@@ -82,7 +82,7 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
                 if send.is_some() {
                     formatted.push(' ');
                 }
-                formatted.push_str("-> ");
+                formatted.push('!');
                 formatted.push_str(&fmt(*id));
             }
             if let Some(id) = state {
@@ -93,7 +93,9 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
                 formatted.push_str(&fmt(*id));
             }
 
-            if nested {
+            // Only the clause forms need parenthesising in a nested position — nested,
+            // their clauses would otherwise bind to the enclosing sigil-head.
+            if nested && (receive.is_some() || state.is_some()) {
                 format!("({})", formatted)
             } else {
                 formatted

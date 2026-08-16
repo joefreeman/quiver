@@ -967,9 +967,11 @@ test — every state write is compile-checked.
 
 ### Capabilities in written types
 
-A pid's capabilities are inferred, but a *declared* type grants only what it spells. A
-process type takes an optional `-> 'r` result and a `?` state clause, whitespace before
-the sigil:
+A pid's capabilities are inferred, but a *declared* type grants only what it spells, and
+each grant is written as the operation that exercises it: a glued head type is the send
+grant (what applying the pid takes), `!'r` the await grant (what selecting on the pid
+yields), and `?'s` the sample grant (what `?` reads) — in that order. A clause sigil
+glues to a bare `@` and takes a space after anything else:
 
 ```quiver
 'status = Loading | Done['int]
@@ -977,14 +979,22 @@ step = #'status { =Loading => 7 ~> ^ Done[~] | =Done[x] => x }
 p = Loading ~> @step
 
 watch = #(@?'status) { ?$ }         // sample-only
-await = #(@ -> 'int) { !$ }         // awaitable
+await = #(@!'int) { !$ }            // awaitable
 watch &p ~> ='status                //=> Ok
 await &p                            //=> 7
 ```
 
+No parentheses are needed where the type ends at a natural boundary — a tuple field
+`[room: @'post ?'msgs]`, a type argument `%registry.lookup<@'int !'int>` — and a clause
+always binds to the nearest sigil-head on its left, so in a function's output position a
+clause-bearing process type is parenthesized: in `#'init -> @ !'cmd` the clause is the
+function's own.
+
 A function type takes `!` and `?` clauses in that order — `!'c` is what running it
 receives, `?'d` the states beyond its parameter — which matters when the function is to be
-spawned: `#'config -> 'r !'cmd ?'connected`.
+spawned: `#'config -> 'r !'cmd ?'connected`. The two sides mirror the `!` expression: a
+function type's clause reads from inside the process (what a select in the body
+receives), a process type's from outside (what a select on the pid yields).
 
 An omitted clause is **not granted**: `?` on a plain `@'msg` is a compile error. Sends are
 contravariant (a process that receives more fits a narrower promise), the await result is

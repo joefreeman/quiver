@@ -46,7 +46,7 @@
 'table = '%dict<'%str, 'row>
 'state = [table: 'table, max: 'int, window: 'int]
 
-watch = #<'r>[(id): '%str, (child): (@-> 'r), (sup): @'down] {
+watch = #<'r>[(id): '%str, (child): @!'r, (sup): @'down] {
   :doc "Spawns a watcher for a child: awaits it, classifies the outcome (Done, or Crashed with the '%proc.crash payload), and reports Down[id, pid, outcome] to the supervisor — the pid identifies WHICH incarnation went down, so a late report for a reused id is harmless. Call from a start closure, passing the child and supervisor by reference."
   // The spawned watcher closes over these (an inner `$` would be its own
   // parameter), so bind the fields locally — the pids by reference, as bare

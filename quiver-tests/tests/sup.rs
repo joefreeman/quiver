@@ -169,7 +169,7 @@ fn test_killing_the_supervisor_tears_down_its_children() {
             sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start
             // The declared message type spells the await grant (`-> []`): a declared
             // type grants only what it spells, and this test awaits the child.
-            p1 = !#(@'int -> [])
+            p1 = !#(@'int ![])
             %proc.kill &sup
             r = !p1
             r:(Killed)crash

@@ -1868,7 +1868,7 @@ pub fn unify(
                 unify(bindings, *st1, *st2, program)?;
             }
             // Send and receive likewise: unify only when both are stated. A generic
-            // param like `(@ -> 'r)` accepts any pid whose receive pins 'r — the
+            // param like `@!'r` accepts any pid whose receive pins 'r — the
             // send grant is simply dropped, exactly as the covariant subtype allows
             // (a declared clause grants a capability; omitting one never demands
             // the value lack it). Send is contravariant (the message set the handle

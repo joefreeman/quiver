@@ -93,7 +93,7 @@ fn test_pipe_into_mixed_union_is_error() {
         "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::UnionApplication {
-            union: "'int | (@'int -> 'int ?'int)".to_string(),
+            union: "'int | (@'int !'int ?'int)".to_string(),
             all_functions: false,
         });
 }
@@ -616,7 +616,7 @@ fn test_await_process_type_checking() {
     quiver()
         .evaluate(
             r#"
-            await_fn = #(@-> 'int) { =p => !p };
+            await_fn = #(@!'int) { =p => !p };
             f = #{ 42 };
             @f ~> await_fn
             "#,

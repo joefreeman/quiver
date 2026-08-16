@@ -50,11 +50,11 @@ fn lookup_grants_exactly_what_it_spells() {
         .expect("Ok")
         .then_evaluate("%registry.lookup<@'bin> Typed")
         .expect("[]")
-        .then_evaluate("%registry.lookup<(@ -> 'bin)> Typed")
+        .then_evaluate("%registry.lookup<@!'bin> Typed")
         .expect("[]")
         .then_evaluate("%registry.lookup<(@?'int)> Typed")
         .expect("[]")
-        .then_evaluate("%registry.lookup<(@ -> 'int)> Typed ~> =((@ -> 'int))")
+        .then_evaluate("%registry.lookup<@!'int> Typed ~> =(@!'int)")
         .expect("Ok");
 }
 
@@ -102,7 +102,7 @@ fn cascade_teardown_frees_the_name() {
         .evaluate(
             "parent = &. ~> @#(@Ready) { c = @#{ !'int }; %registry.register [Child, &c]; \
              Ready ~> $; !'bin }; \
-             !Ready; %registry.lookup<(@'int -> 'int)> Child ~> =((@'int -> 'int))c; \
+             !Ready; %registry.lookup<@'int !'int> Child ~> =(@'int !'int)c; \
              %proc.kill &parent; !c ~> =[]; %registry.lookup<@'int> Child",
         )
         .expect("[]");
@@ -153,7 +153,7 @@ fn registered_service_survives_its_spawner_and_collection() {
         )
         .expect("Ok")
         .force_collection()
-        .then_evaluate("%registry.lookup<(@'int -> 'int)> Svc ~> =((@'int -> 'int))q; 14 ~> q; !q")
+        .then_evaluate("%registry.lookup<@'int !'int> Svc ~> =(@'int !'int)q; 14 ~> q; !q")
         .expect("42");
 }
 

@@ -809,18 +809,17 @@ module.exports = grammar({
     resource_type: $ => /\\[A-Z][a-zA-Z0-9_]*/,
     cycle_type: $ => prec.right(seq('^', optional($.index))),
 
-    // Process type: bare `@'msg`, or the parenthesized clause forms
-    // `(@['msg] [-> 'r] [?'s])` (e.g. `(@'evt ?'status)`, `(@?'s)`).
-    process_type: $ => choice(
-      seq(
-        '(', optional($._nl), '@',
-        optional(field('message', $._type_atom)),
-        optional(seq(optional($._nl), '->', optional($._nl), field('result', $._type_atom))),
-        optional(seq(optional($._nl), '?', field('state', $._type_atom))),
-        optional($._nl), ')',
-      ),
-      prec.right(seq('@', optional(field('message', $._type_atom)))),
-    ),
+    // Process type: each grant spelled as the operation that exercises it — a glued
+    // head (send), `!'r` (await), `?'s` (sample): `@['msg] [!'r] [?'s]`, e.g.
+    // `@'evt ?'status`, `@!'r`, `@?'s`. The real parser requires *horizontal*
+    // whitespace before a clause sigil after a head, and a function output's trailing
+    // clauses are the function's; with whitespace as extras, both are approximate here.
+    process_type: $ => prec.right(seq(
+      '@',
+      optional(field('message', $._type_atom)),
+      optional(seq('!', field('result', $._type_atom))),
+      optional(seq('?', field('state', $._type_atom))),
+    )),
 
     // ------------------------------------------------------------------- terminals
 
