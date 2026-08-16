@@ -32,9 +32,11 @@ fn test_standalone_ripple() {
 
 #[test]
 fn test_standalone_ripple_with_nested_chain() {
-    // The ripple in "5 ~" refers to 5, not to the outer 10
-    // The outer value 10 is dropped (implicit continuation allows ignoring values)
-    quiver().evaluate("10 ~> [5 ~> ~]").expect("[5]");
+    // The ripple in "5 ~> ~" refers to 5, not to the outer 10 — so no field reads the
+    // outer value, and the tuple would drop it.
+    quiver()
+        .evaluate("10 ~> [5 ~> ~]")
+        .expect_compile_error(quiver_compiler::compiler::Error::DiscardedChainValue);
 }
 
 #[test]
@@ -44,9 +46,28 @@ fn test_nested_chain_outer_value_used() {
 }
 
 #[test]
-fn test_nested_chain_value_dropped() {
-    // Outer value 1 is dropped, tuple [2, 3] is returned
-    quiver().evaluate("1 ~> [2, 3 ~> ~]").expect("[2, 3]");
+fn test_chain_term_must_use_the_flowing_value() {
+    // A chain threads a value through its terms, so a term that ignores the one flowing
+    // into it drops the work before it — which is a mistake, not a way to start over.
+    let cases = [
+        "1 ~> [2, 3 ~> ~]", // no field reads the 1
+        "5 ~> 99",
+        "5 ~> \"abc\"",
+        "5 ~> &__integer_add__",
+        "5 ~> #'int { $ }",
+        "5 ~> __integer_add__ [1, 2]", // the argument ignores it, so the call does
+    ];
+    for case in cases {
+        quiver()
+            .evaluate(case)
+            .expect_compile_error(quiver_compiler::compiler::Error::DiscardedChainValue);
+    }
+    // Only the head is exempt: that is where a chain chooses what it starts from.
+    quiver().evaluate("f = #'int { 99 }; 5 ~> f").expect("99");
+    quiver().evaluate("[2, 3 ~> ~]").expect("[2, 3]");
+    // A block takes the value and may ignore it, which is how a step runs for its effect
+    // and continues whatever its result — `;` would gate on the nil instead.
+    quiver().evaluate("5 ~> { []; 1 | 2 }").expect("2");
 }
 
 #[test]

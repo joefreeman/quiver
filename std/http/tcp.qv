@@ -58,7 +58,7 @@ exchange = #[(url): '%url, (request): '%http] {
   response = read_loop [sock, 0x]
   // Discard the close's own result — a close failure must not lose a response we already
   // have, and teardown is the backstop either way.
-  %tcp.close sock ~> Ok
+  { %tcp.close sock; Ok | Ok }
   response
 }
 

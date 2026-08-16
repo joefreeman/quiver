@@ -197,6 +197,12 @@ pub enum Error {
     /// scrutinee's refinement) unsound. A fallible match must end its chain, so that
     /// its verdict directly gates a step boundary (`=P; …`) or a branch (`=P => …`).
     FallibleMatchNotChainFinal,
+    /// A chain term other than the head ignores the value flowing into it, silently
+    /// dropping everything the chain computed before it. A chain threads a value through
+    /// its terms; a term that wants a fresh start is a step (`;`), which is also what
+    /// gates on nil. Only the head is exempt — that is where a chain chooses its
+    /// starting value, and the block's input is a starting value like any other.
+    DiscardedChainValue,
     /// A fallible match that binds variables appears in a value chain — a tuple field,
     /// an argument, an annotation value — where its verdict is data and gates nothing:
     /// the surrounding code runs whether or not it matched, so the bindings cannot be
@@ -297,6 +303,88 @@ fn term_references_parameter(term: &ast::Term) -> bool {
         | ast::Term::Select(None, _)
         | ast::Term::Process(_)
         | ast::Term::Dialect(_) => false,
+    }
+}
+
+/// Whether an access reads the value flowing into it rather than naming something else:
+/// `~` and `^~` consume it, and a sourceless access is a bare accessor path (`.y`) that
+/// reads it.
+fn access_reads_flow(access: &ast::Access) -> bool {
+    matches!(
+        access.source,
+        None | Some(ast::AccessSource::Ripple | ast::AccessSource::TailCallRipple)
+    )
+}
+
+/// Whether a chain term uses the value flowing into it. Every term but the head must
+/// (see [`Error::DiscardedChainValue`]); the head is where a chain picks its starting
+/// value, so it may ignore the block's input.
+///
+/// A term that *receives* the value counts even if it then ignores it: a block, an
+/// interpolation hole and a select source each open a sequence whose own head is free to
+/// start from anything, exactly as a function body may ignore `$`. That makes a block the
+/// way to spell "continue whatever the result", which is otherwise unspellable — `;` is
+/// the other way to drop a value, but it gates on nil. A *redundant* block (`{ Ok }`) is
+/// not one: `simplify` splices it into the chain before this runs, so it discards the
+/// value exactly as its bare contents would, and is rejected the same way.
+fn term_uses_flow(term: &ast::Term) -> bool {
+    let chain = |chain: &ast::Chain| chain.terms.first().is_none_or(term_uses_flow);
+    match term {
+        // `compile_term` pops the flowing value for each of these: a literal, a closure,
+        // a reference and a state sample all replace it outright.
+        ast::Term::Literal(_)
+        | ast::Term::Function(_)
+        | ast::Term::Reference(_)
+        | ast::Term::State(..)
+        | ast::Term::Process(_) => false,
+        // Consumed directly: as a scrutinee, as a block or expansion's input, as the
+        // message sent to self, or as the process awaited by a bare `!`.
+        ast::Term::Match(_)
+        | ast::Term::Block(_)
+        | ast::Term::Dialect(_)
+        | ast::Term::Self_
+        | ast::Term::Select(None, _) => true,
+        // Each field receives a copy of the flowing value, so the tuple uses it exactly
+        // when some field does. A bare `...` spreads the flowing value itself.
+        ast::Term::Tuple(tuple) => tuple.fields.iter().any(|field| match &field.value {
+            ast::FieldValue::Chain(c) => chain(c),
+            ast::FieldValue::Spread(source) => source.as_ref().is_none_or(access_reads_flow),
+        }),
+        // Only a hole receives the value; literal text does not.
+        ast::Term::String(_, segments) => segments
+            .iter()
+            .any(|segment| matches!(segment, ast::StrSegment::Hole(_))),
+        // TODO: a bare callable name is applied to the flowing value today (`5 ~> f`), so
+        // it consumes it — and callability is not syntactic, so every access is taken to.
+        // When application is spelled only by juxtaposition this becomes
+        // `access_reads_flow(access)`, and every other access becomes the discard it
+        // already is.
+        ast::Term::Access(_) => true,
+        // A ripple head (`~ x`, `^~ x`) consumes the value itself; otherwise it reaches
+        // the argument, so the application uses it exactly when the argument does.
+        ast::Term::Apply(head, argument) => access_reads_flow(head) || term_uses_flow(argument),
+        // `@f x` takes its init from the argument, `x ~> @f` from the flowing value; `@~`
+        // spawns the flowing value whichever way the init is written.
+        ast::Term::Spawn(function, argument, _) => {
+            matches!(function.as_ref(), ast::Term::Access(a) if access_reads_flow(a))
+                || argument.as_deref().is_none_or(term_uses_flow)
+        }
+        // `![a, b]` names its own sources, so it uses the flowing value only if one does.
+        ast::Term::Select(Some(sources), _) => sources.iter().any(chain),
+    }
+}
+
+/// The span to blame for a term-level error, for the terms that carry one. A literal
+/// carries none, so the caller falls back to the enclosing chain.
+fn term_error_span(term: &ast::Term) -> Option<SourceSpan> {
+    match term {
+        ast::Term::Tuple(tuple) => tuple.span.get(),
+        ast::Term::Function(function) => function.span.get(),
+        ast::Term::Reference(access) | ast::Term::Apply(access, _) => access.span.get(),
+        ast::Term::Spawn(_, _, span) | ast::Term::Select(_, span) | ast::Term::State(_, span) => {
+            span.get()
+        }
+        other => other.span(),
     }
 }
 
@@ -452,6 +540,16 @@ impl std::fmt::Display for Error {
                      whether or not the match succeeded. Separate the steps (`=P; ...`) \
                      so the match gates what follows, or test for a failed match with a \
                      block (`{{ =P => [] | Ok }}`)"
+                )
+            }
+            Error::DiscardedChainValue => {
+                write!(
+                    f,
+                    "A chain term must use the value flowing into it: this one ignores \
+                     it, dropping everything the chain computed before it. Write `~` \
+                     where the value belongs (`f ~`, `f [~, x]`), or start a new step \
+                     with `;`. To run a step and continue whatever its result, use a \
+                     block (`{{ step; Ok | Ok }}`)"
                 )
             }
             Error::FallibleMatchBindingsInValueChain { bindings } => {
@@ -4332,6 +4430,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // gating chains; see the fallible-match checks in the term loop.
         gating: bool,
     ) -> Result<(usize, Provenance), Error> {
+        // Fallback location for a term-level error, for the terms that carry no span of
+        // their own (a literal, a string).
+        let chain_span = chain.span.get();
         // Determine initial value:
         // - If input_type is provided, use it (value already on stack)
         // - If implicit_continuation is true, load the parameter from scope
@@ -4352,6 +4453,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let terms: Vec<_> = chain.terms.into_iter().collect();
         let last_index = terms.len().saturating_sub(1);
         for (i, term) in terms.iter().enumerate() {
+            // A chain threads a value through its terms, so every term but the head must use
+            // the one flowing into it — otherwise the work before it is silently dropped.
+            if i > 0 && !term_uses_flow(term) {
+                if let Some(span) = term_error_span(term).or(chain_span) {
+                    self.current_span = Some(span);
+                }
+                return Err(Error::DiscardedChainValue);
+            }
             // The statically-resolvable callable a non-final literal term flows into — the
             // piped counterpart of an Apply's head.
             let piped_callee = if i == last_index {

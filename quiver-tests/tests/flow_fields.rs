@@ -39,7 +39,7 @@ fn amp_builtin_reference_in_record() {
 fn amp_passes_callable_by_value() {
     // `&inc` stores the function (not called with 5); it can be called later.
     quiver()
-        .evaluate(&format!("{INC} t = 5 ~> [&inc, 100]; 10 ~> t.0"))
+        .evaluate(&format!("{INC} t = 5 ~> [&inc, ~]; 10 ~> t.0"))
         .expect("11");
 }
 

@@ -51,7 +51,7 @@ fn test_send_through_all_process_union() {
         .evaluate(
             r#"
             f = #'int { !'int };
-            g = #'int { !'int ~> "hi" };
+            g = #'int { !'int ~> [~] };
             a = 0 ~> @f;
             p = Ok ~> { | =Ok => &a | 0 ~> @g };
             42 ~> p;

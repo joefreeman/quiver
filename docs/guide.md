@@ -162,22 +162,30 @@ the input to the next, and `~` always names the value flowing in.
 ```
 
 What a term does with the value it receives depends on what the term is. A callable is
-called with it, a literal replaces it, and `~` puts it wherever you want it — including
-inside a tuple being built, whose fields each receive a copy.
+called with it, and `~` puts it wherever you want it — including inside a tuple being
+built, whose fields each receive a copy.
 
 ```quiver
 double = #'int { %num.mul [~, 2] }
 
 5 ~> double                   //=> 10
-5 ~> 99                       //=> 99
 5 ~> [~, 1]                   //=> [5, 1]
 5 ~> [double, 1]              //=> [10, 1]
 ```
 
-`&` is the opt-out: it references a callable instead of calling it.
+Every term must use the value flowing into it. One that ignores it drops everything the
+chain computed before it, so it is a compile error — to start from something else, start
+a new step. Only the head is exempt: that is where a chain chooses what it starts from.
+
+```quiver ignore
+5 ~> 99                       // error: DiscardedChainValue — the 99 ignores the 5
+5 ~> [1, 2]                   // error: so do both fields
+```
+
+`&` is the opt-out for calling: it references a callable instead.
 
 ```quiver
-5 ~> [&double, 1] ~> =[f, _]; f 4   //=> 8
+5 ~> [&double, ~] ~> =[f, n]; f n   //=> 10
 ```
 
 The `~>` is mandatory: whitespace alone does not join terms. To spread one chain over
@@ -215,8 +223,8 @@ Nil short-circuiting is the other half. Note that this is a property of *steps*,
 chains: within a chain nil flows onward like any other value.
 
 ```quiver
-[] ~> 5                       //=> 5    one step; nil flows through the chain
-{ []; 5 }                   //=> []   two steps; the first is nil, so it stops
+[] ~> [~, 5]                  //=> [[], 5]   one step; nil flows through the chain
+{ []; 5 }                   //=> []       two steps; the first is nil, so it stops
 ```
 
 That is the whole model: **a chain pipes, a sequence restarts and can fail.**
@@ -268,8 +276,8 @@ access paths, labelled by the final segment; `(…)` takes puns and nothing else
 p = [x: 1, y: 2]
 (p.x, p.y)                    //=> [x: 1, y: 2]
 
-5 ~> [f: double]                    //=> [f: 10]   a field is an expression: called
-5 ~> (double) ~> .double ~> ~ 4     //=> 8         a pun is a name: referenced
+5 ~> [f: double]                  //=> [f: 10]   a field is an expression: called
+(double) ~> .double ~> ~ 4        //=> 8         a pun is a name: referenced
 ```
 
 ### Field access

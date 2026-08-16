@@ -69,9 +69,16 @@ fn test_record_of_functions_is_callable_through_the_field() {
 
 #[test]
 fn test_flowing_value_does_not_reach_a_pun() {
-    // The bracket-tuple form would call `f` with the 5; the punned form must not.
+    // The bracket-tuple form calls `f` with the 5; the punned form must not — so the pun
+    // reads the flowing value nowhere, and piping into one discards it.
     quiver()
-        .evaluate("f = #'int { __integer_add__ [~, 1] }; 5 ~> (f) ~> .f ~> ~ 100")
+        .evaluate("f = #'int { __integer_add__ [~, 1] }; 5 ~> [f: f]")
+        .expect("[f: 6]");
+    quiver()
+        .evaluate("f = #'int { __integer_add__ [~, 1] }; 5 ~> (f)")
+        .expect_compile_error(quiver_compiler::compiler::Error::DiscardedChainValue);
+    quiver()
+        .evaluate("f = #'int { __integer_add__ [~, 1] }; (f) ~> .f ~> ~ 100")
         .expect("101");
 }
 
