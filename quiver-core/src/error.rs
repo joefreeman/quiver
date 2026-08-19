@@ -121,25 +121,32 @@ pub enum Error {
     ScopeUnderflow,
 }
 
-impl Error {
-    /// A human-readable message for crash delivery (the `message` field of a `'crash`
-    /// value). Internal-invariant errors (stack/scope/table
-    /// misuse — compiler bugs, not user-reachable) all read as internal errors.
-    pub fn crash_message(&self) -> String {
+impl fmt::Display for Error {
+    /// The error's human-readable message. It reaches a reader two ways, and reads the same
+    /// in both: printed by a host (`quiv run`, the REPL, the test runner), and carried as the
+    /// `message` field of a `'crash` value to whoever awaits the failed process.
+    ///
+    /// Errors that can only mean a broken internal invariant — stack, frame, scope and table
+    /// misuse, which no Quiver program can provoke — say "internal error" first, so a reader
+    /// can tell "your program did this" from "this is a bug, report it". They are still
+    /// spelled out rather than dumped as `Debug`: a bug report is worth more with a
+    /// legible symptom in it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Panic(message) => message.clone(),
-            Error::Killed => "killed".to_string(),
+            Error::Panic(message) => f.write_str(message),
+            Error::Killed => f.write_str("killed"),
             Error::TypeMismatch { expected, found } => {
-                format!("type mismatch: expected {expected}, found {found}")
+                write!(f, "type mismatch: expected {expected}, found {found}")
             }
             Error::ArityMismatch { expected, found } => {
-                format!("arity mismatch: expected {expected}, found {found}")
+                write!(f, "arity mismatch: expected {expected}, found {found}")
             }
-            Error::InvalidArgument(message) => message.clone(),
+            Error::InvalidArgument(message) => f.write_str(message),
+            Error::VariableUndefined(name) => write!(f, "undefined variable: {name}"),
             Error::OperationNotAllowed { operation, context } => {
-                format!("{operation} is not allowed in {context}")
+                write!(f, "{operation} is not allowed in {context}")
             }
-            Error::NotAnOwnedChild => "detach requires an owned child of the caller".to_string(),
+            Error::NotAnOwnedChild => f.write_str("detach requires an owned child of the caller"),
             Error::UnsupportedAtCompileTime { operation } => {
                 let doing = match operation {
                     Operation::Spawn => "spawning a process",
@@ -156,23 +163,49 @@ impl Error {
                     Operation::CreateRef => "creating a ref",
                     Operation::Registry => "a registry operation",
                 };
-                format!(
+                write!(
+                    f,
                     "{doing} is not supported in compile-time execution (module bodies \
                      are evaluated at compile time — move process and effect work into a \
                      function the module exports, or into the program that imports it)"
                 )
             }
-            Error::StalledAtCompileTime => "waiting to receive a message that can never \
-                 arrive in compile-time execution (module bodies are evaluated at compile \
-                 time — receive inside a function instead)"
-                .to_string(),
-            Error::ExhaustedAtCompileTime => "compile-time execution exceeded its step \
-                 budget (module bodies are evaluated at compile time — move long-running \
-                 work into a function the module exports)"
-                .to_string(),
-            Error::CancelledAtCompileTime => "compile-time execution was cancelled".to_string(),
-            Error::VariableUndefined(name) => format!("undefined variable: {name}"),
-            other => format!("internal error: {other:?}"),
+            Error::StalledAtCompileTime => f.write_str(
+                "waiting to receive a message that can never arrive in compile-time \
+                 execution (module bodies are evaluated at compile time — receive inside \
+                 a function instead)",
+            ),
+            Error::ExhaustedAtCompileTime => f.write_str(
+                "compile-time execution exceeded its step budget (module bodies are \
+                 evaluated at compile time — move long-running work into a function the \
+                 module exports)",
+            ),
+            Error::CancelledAtCompileTime => f.write_str("compile-time execution was cancelled"),
+
+            // Broken internal invariants from here down.
+            Error::StackUnderflow => f.write_str("internal error: stack underflow"),
+            Error::FrameUnderflow => f.write_str("internal error: call frame underflow"),
+            Error::ScopeUnderflow => f.write_str("internal error: scope underflow"),
+            Error::ScopeCountInvalid { expected, found } => write!(
+                f,
+                "internal error: expected {expected} scopes, found {found}"
+            ),
+            Error::CallInvalid => {
+                f.write_str("internal error: call of a value that is not callable")
+            }
+            Error::FunctionUndefined(index) => {
+                write!(f, "internal error: no function at index {index}")
+            }
+            Error::BuiltinUndefined(index) => {
+                write!(f, "internal error: no builtin at index {index}")
+            }
+            Error::ConstantUndefined(index) => {
+                write!(f, "internal error: no constant at index {index}")
+            }
+            Error::FieldAccessInvalid(index) => {
+                write!(f, "internal error: tuple has no field at index {index}")
+            }
+            Error::TupleEmpty => f.write_str("internal error: expected a non-empty tuple"),
         }
     }
 }

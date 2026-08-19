@@ -9,6 +9,19 @@ use quiver_core::program::Program;
 use quiver_core::types::{Type, TypeLookup};
 use std::collections::HashMap;
 
+/// Render a compile failure for the terminal: the source position, then the error's own
+/// message. `Display` is what carries the guidance an author can act on (`Debug` shows the
+/// variant's fields instead), so it is what a user-facing path prints.
+pub fn format_compile_error(e: &quiver_compiler::compiler::LocatedError) -> String {
+    match e.span {
+        Some(span) => format!(
+            "Compile error at {}:{}: {}",
+            span.line, span.column, e.error
+        ),
+        None => format!("Compile error: {}", e.error),
+    }
+}
+
 /// Compile source into a Program and a nilary entry function: the program's top level,
 /// followed by a call of the function it evaluates to. The top level thus runs at boot, in
 /// the root process — compilation never executes user code.
@@ -42,13 +55,7 @@ pub fn compile_entry(
         None, // no semantic recorder for the CLI
         options,
     )
-    .map_err(|e| match e.span {
-        Some(span) => format!(
-            "Compile error at {}:{}: {:?}",
-            span.line, span.column, e.error
-        ),
-        None => format!("Compile error: {:?}", e.error),
-    })?;
+    .map_err(|e| format_compile_error(&e))?;
 
     let instructions = compilation_result.instructions;
     let receive_type = compilation_result.receive_type;

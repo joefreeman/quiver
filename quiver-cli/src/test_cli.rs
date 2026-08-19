@@ -337,7 +337,7 @@ impl Runner {
             drop(env);
             match self.wait(request) {
                 RequestResult::Result(Ok(_)) => Ok(()),
-                RequestResult::Result(Err(error)) => Err(error.crash_message()),
+                RequestResult::Result(Err(error)) => Err(error.to_string()),
                 _ => Err("unexpected result".to_string()),
             }
         })();
@@ -438,7 +438,7 @@ impl Runner {
 
         match self.wait(request) {
             RequestResult::Result(Ok(value)) => Ok(Some(value)),
-            RequestResult::Result(Err(error)) => Err(Fault::Runtime(error.crash_message())),
+            RequestResult::Result(Err(error)) => Err(Fault::Runtime(error.to_string())),
             _ => Err(Fault::Runtime("unexpected result".to_string())),
         }
     }
@@ -480,8 +480,8 @@ impl From<ReplError> for Fault {
     fn from(error: ReplError) -> Self {
         match error {
             ReplError::Parser(e) => Fault::Static(format!("{e}")),
-            ReplError::Compiler(e) => Fault::Static(format!("{e:?}")),
-            ReplError::Runtime(e) => Fault::Runtime(e.crash_message()),
+            ReplError::Compiler(e) => Fault::Static(format!("{e}")),
+            ReplError::Runtime(e) => Fault::Runtime(e.to_string()),
             ReplError::Environment(e) => Fault::Runtime(format!("{e}")),
         }
     }

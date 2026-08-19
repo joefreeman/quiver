@@ -547,7 +547,7 @@ fn run_resume(
                 Ok(Outcome::Interrupted)
             } else {
                 Ok(Outcome::Error {
-                    message: e.crash_message(),
+                    message: e.to_string(),
                 })
             }
         }
@@ -746,7 +746,7 @@ fn render_event(
                 result: info.result.map(|result| match result {
                     Ok(value) => render_value(env, &value),
                     Err(error) => Outcome::Error {
-                        message: error.crash_message(),
+                        message: error.to_string(),
                     },
                 }),
                 heap: info.heap,

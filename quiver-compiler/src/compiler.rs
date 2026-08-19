@@ -427,11 +427,7 @@ impl std::fmt::Display for Error {
                 write!(f, "Parse error in module '{module}': {error}")
             }
             Error::ModuleExecution { module, error } => {
-                write!(
-                    f,
-                    "Execution error in module '{module}': {}",
-                    error.crash_message()
-                )
+                write!(f, "Execution error in module '{module}': {error}",)
             }
             Error::ModuleTypeMissing { type_name, module } => {
                 write!(f, "Type '{type_name}' not found in module '{module}'")
@@ -6610,7 +6606,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             provenance: value_provenance,
         } = value;
         // Track the span of the term being compiled so a compile error can be located.
-        if let Some(span) = term.span() {
+        // `term_error_span` rather than `Term::span`: the latter covers only accesses and
+        // dialects, which left an error raised while compiling a function literal, tuple,
+        // apply or spawn pointing at whatever access preceded it — or nowhere at all.
+        if let Some(span) = term_error_span(&term) {
             self.current_span = Some(span);
         }
         match term {
@@ -6890,6 +6889,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 ) && let Some(n) = narrowing.as_deref_mut()
                 {
                     n.disable();
+                }
+                // Compiling the argument moved `current_span` into it, so re-assert the
+                // call's: a failure the *call* raises — an argument that does not fit the
+                // parameter, a violated `:pre` — belongs at the call, not inside the value
+                // it was handed.
+                if let Some(span) = access.span.get() {
+                    self.current_span = Some(span);
                 }
                 // The head is invoked with the written argument — the one thing that calls.
                 self.compile_access(access, Some(arg_type), arg_prov, None, true)

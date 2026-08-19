@@ -571,7 +571,7 @@ impl<E: Effect> Executor<E> {
                             "no function index for crashed process {pid}"
                         ))
                     })?;
-                let message_binary = self.allocate_binary(error.crash_message().into_bytes())?;
+                let message_binary = self.allocate_binary(error.to_string().into_bytes())?;
                 let message = Value::tuple(table.str_tuple, vec![Value::Binary(message_binary)]);
                 let kind_tuple = match error {
                     Error::Panic(_) => table.panic_tuple,

@@ -37,8 +37,8 @@ impl std::fmt::Display for ReplError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReplError::Parser(e) => write!(f, "Parse error: {}", e),
-            ReplError::Compiler(e) => write!(f, "Compile error: {:?}", e),
-            ReplError::Runtime(e) => write!(f, "Runtime error: {:?}", e),
+            ReplError::Compiler(e) => write!(f, "Compile error: {}", e),
+            ReplError::Runtime(e) => write!(f, "Runtime error: {}", e),
             ReplError::Environment(e) => write!(f, "Environment error: {}", e),
         }
     }

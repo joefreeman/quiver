@@ -181,12 +181,13 @@ fn test_pre_contract_holds_is_transparent() {
 
 #[test]
 fn test_pre_contract_violation_aborts() {
-    // A violated precondition raises a contract-violation runtime error at the call site.
+    // A violated precondition raises a contract-violation runtime error at the call site —
+    // the callee (`f`), not the `~` standing in for its argument.
     quiver()
         .debug()
         .evaluate("f = #'int { :pre #{ [~, 0] ~> __integer_compare__ ~ ~> =1 }; [~, 2] ~> __integer_multiply__ ~ }; -5 ~> f ~")
         .expect_runtime_error(quiver_core::error::Error::Panic(
-            "Precondition violated at test:1:106".to_string(),
+            "Precondition violated at test:1:104".to_string(),
         ));
 }
 
@@ -197,7 +198,7 @@ fn test_post_contract_violation_aborts() {
         .debug()
         .evaluate("f = #'int { :post #{ $ ~> =[in: i, out: o]; [o, i] ~> __integer_compare__ ~ ~> =0 }; [~, 1] ~> __integer_add__ ~ }; 5 ~> f ~")
         .expect_runtime_error(quiver_core::error::Error::Panic(
-            "Postcondition violated at test:1:124".to_string(),
+            "Postcondition violated at test:1:122".to_string(),
         ));
 }
 

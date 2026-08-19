@@ -740,7 +740,7 @@ impl Environment {
                 let message = if matches!(e, quiver_core::error::Error::Killed) {
                     "Interrupted".to_string()
                 } else {
-                    format!("Runtime error: {:?}", e)
+                    format!("Runtime error: {e}")
                 };
                 callback.invoke::<EvaluationResult>(crate::types::Result::err(message));
             }
@@ -784,7 +784,7 @@ impl Environment {
                             },
                         },
                         Err(e) => crate::types::Result::Err {
-                            error: format!("{:?}", e),
+                            error: e.to_string(),
                         },
                     });
 

@@ -126,7 +126,17 @@ enum ServerAction {
     Stop,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    // Print the error's own message rather than returning it: the default `Termination`
+    // renders a `Box<dyn Error>` with `Debug`, which for the `String` errors these commands
+    // produce wraps the whole message in escaped quotes.
+    if let Err(error) = run() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Repl) => run_repl()?,
@@ -265,13 +275,7 @@ fn compile_command(
                 None, // no semantic recorder for the CLI
                 options,
             )
-            .map_err(|e| match e.span {
-                Some(span) => format!(
-                    "Compile error at {}:{}: {:?}",
-                    span.line, span.column, e.error
-                ),
-                None => format!("Compile error: {:?}", e.error),
-            })?;
+            .map_err(|e| quiver_cli::compile::format_compile_error(&e))?;
             (program, module_cache, None)
         }
     };
