@@ -203,7 +203,7 @@ fn test_resource_ownership_transfers_on_send() {
         .evaluate(&format!(
             r#"
             'reader = Read[\File];
-            r = @{{
+            r = @[] {{
                 !#'reader ~> {{ =Read[f] => [f, 0, 5] ~> __file_read__ ~ ~> Str[~] }}
             }} [];
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(\File)file;
@@ -233,7 +233,7 @@ fn test_resource_ownership_transfers_in_an_annotation() {
         .evaluate(&format!(
             r#"
             'msg = Go;
-            r = @{{
+            r = @[] {{
                 !#'msg ~> {{
                     =m
                     m:(\File)handle ~> =(\File)f
@@ -267,7 +267,7 @@ fn test_resource_ownership_enforced_after_transfer() {
         .evaluate(&format!(
             r#"
             'holder = Hold[\File];
-            h = @{{
+            h = @[] {{
                 !#'holder ~> {{ =Hold[_] => [] ~> ^ ~ }}
             }} [];
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(\File)file;
@@ -298,7 +298,7 @@ fn test_resource_cleanup_on_owner_completion() {
         .evaluate(&format!(
             r#"
             'reader = Read[\File];
-            r = @{{
+            r = @[] {{
                 !#'reader ~> {{ =Read[f] => [f, 0, 5] ~> __file_read__ ~ ~> Str[~] }}
             }} [];
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(\File)file;

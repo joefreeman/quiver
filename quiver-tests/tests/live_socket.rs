@@ -41,7 +41,7 @@ fn test_socket_round_trip_with_parking() {
             counterc = %html/live.component counter
             a = %html/live.app [root: counterc]
             handler = #'%http { %html/live.handle [$, a] }
-            @{ [port: 4186, handler: handler] ~> %http/server.serve ~ } []
+            @[] { [port: 4186, handler: handler] ~> %http/server.serve ~ } []
             { ![50] | Ok }
 
             read_page = #[\TcpSocket, 'bin] {
@@ -154,7 +154,7 @@ fn test_nested_child_view_over_socket() {
             ]
             a = %html/live.app [root: parent, init: #'%http { 0 }]
             handler = #'%http { %html/live.handle [$, a] }
-            @{ [port: 4187, handler: handler] ~> %http/server.serve ~ } []
+            @[] { [port: 4187, handler: handler] ~> %http/server.serve ~ } []
             { ![50] | Ok }
 
             read_to = #[\TcpSocket, 'bin, Str['bin]] {
@@ -254,7 +254,7 @@ fn test_child_crash_restart_and_budget() {
             ]
             a = %html/live.app [root: parent]
             handler = #'%http { %html/live.handle [$, a] }
-            @{ [port: 4188, handler: handler] ~> %http/server.serve ~ } []
+            @[] { [port: 4188, handler: handler] ~> %http/server.serve ~ } []
             { ![50] | Ok }
 
             read_to = #[\TcpSocket, 'bin, Str['bin]] {
@@ -343,7 +343,7 @@ fn test_live_navigation_patches_root() {
             ]
             a = %html/live.app [root: root, init: #'%http { $ }]
             handler = #'%http { %html/live.handle [$, a] }
-            @{ [port: 4189, handler: handler] ~> %http/server.serve ~ } []
+            @[] { [port: 4189, handler: handler] ~> %http/server.serve ~ } []
             { ![50] | Ok }
 
             read_to = #[\TcpSocket, 'bin, Str['bin]] {
@@ -411,7 +411,7 @@ fn test_server_redirect_syncs_url() {
             ]
             a = %html/live.app [root: root, init: #'%http { $ }]
             handler = #'%http { %html/live.handle [$, a] }
-            @{ [port: 4190, handler: handler] ~> %http/server.serve ~ } []
+            @[] { [port: 4190, handler: handler] ~> %http/server.serve ~ } []
             { ![50] | Ok }
 
             read_to = #[\TcpSocket, 'bin, Str['bin]] {
@@ -489,7 +489,7 @@ fn test_stale_redirect_mark_is_not_resynced() {
             ]
             a = %html/live.app [root: root, init: #'%http { $ }]
             handler = #'%http { %html/live.handle [$, a] }
-            @{ [port: 4191, handler: handler] ~> %http/server.serve ~ } []
+            @[] { [port: 4191, handler: handler] ~> %http/server.serve ~ } []
             { ![50] | Ok }
 
             read_to = #[\TcpSocket, 'bin, Str['bin]] {

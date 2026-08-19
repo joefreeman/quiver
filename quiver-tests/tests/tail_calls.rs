@@ -63,8 +63,8 @@ fn test_factorial() {
 
 #[test]
 fn test_tail_call_with_nil_argument() {
-    quiver().evaluate("f = #{ [] ~> ^ ~ }");
-    quiver().evaluate("f = #{ ^ }");
+    quiver().evaluate("f = #[] { [] ~> ^ ~ }");
+    quiver().evaluate("f = #[] { ^ }");
 }
 
 #[test]
@@ -89,8 +89,8 @@ fn test_ripple_tail_call_without_argument() {
     quiver()
         .evaluate(
             r#"
-            g = #{ 42 };
-            f = #{ g ~> ^~ [] };
+            g = #[] { 42 };
+            f = #[] { g ~> ^~ [] };
             [] ~> f ~
             "#,
         )

@@ -7,7 +7,7 @@ use common::quiver;
 // then waits: 0 makes it crash, any other int completes it normally.
 //
 // The shared shape:
-//   worker:  @{ &. ~> me ~; !'int ~> { =0 => panic | ... } } []
+//   worker:  @[] { &. ~> me ~; !'int ~> { =0 => panic | ... } } []
 //   start:   spawns the worker, wires its watcher (%sup.watch), answers the pid
 
 #[test]
@@ -19,7 +19,7 @@ fn test_supervisor_restarts_crashed_child() {
             me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @{
+              w = @[] {
                 . ~> me ~
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ }
               } []
@@ -48,7 +48,7 @@ fn test_restart_intensity_limit_escalates() {
             me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @{
+              w = @[] {
                 . ~> me ~
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ }
               } []
@@ -77,7 +77,7 @@ fn test_temporary_child_is_not_restarted() {
             me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @{
+              w = @[] {
                 . ~> me ~
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | Ok }
               } []
@@ -103,7 +103,7 @@ fn test_transient_child_restarts_on_crash() {
             me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @{
+              w = @[] {
                 . ~> me ~
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | Ok }
               } []
@@ -130,7 +130,7 @@ fn test_transient_child_not_restarted_after_normal_completion() {
             me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @{
+              w = @[] {
                 . ~> me ~
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | Ok }
               } []
@@ -158,7 +158,7 @@ fn test_killing_the_supervisor_tears_down_its_children() {
             me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @{
+              w = @[] {
                 . ~> me ~
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ }
               } []
@@ -189,7 +189,7 @@ fn test_add_supervises_child_dynamically() {
             me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @{
+              w = @[] {
                 . ~> me ~
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ }
               } []
@@ -217,7 +217,7 @@ fn test_add_duplicate_id_rejected() {
             me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @{ . ~> me ~; !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ } } []
+              w = @[] { . ~> me ~; !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ } } []
               %sup.watch [id, w, sup]
               w
             }
@@ -244,7 +244,7 @@ fn test_drop_forgets_and_id_is_reusable() {
             me = .
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @{ . ~> me ~; !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ } } []
+              w = @[] { . ~> me ~; !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ } } []
               %sup.watch [id, w, sup]
               w
             }

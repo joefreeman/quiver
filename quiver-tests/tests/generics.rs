@@ -270,7 +270,7 @@ fn test_rigid_type_variable_rejects_concrete_requirement() {
             r#"
             g = #<'t>['int, 't] { =[a, b]; [a, 1] ~> __integer_add__ ~ };
             f = #<'u>'u { [$, 5] ~> g ~ };
-            #{ "x" ~> f ~ }
+            #[] { "x" ~> f ~ }
             "#,
         )
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(

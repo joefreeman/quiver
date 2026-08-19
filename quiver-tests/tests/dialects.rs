@@ -438,7 +438,7 @@ fn test_expansion_inside_nested_function_literals() {
     // Dialects in doubly nested bodies are expanded by the outermost walk exactly once.
     quiver()
         .with_modules(dialect_module("$ ~> %str.parse_int ~", "Ok"))
-        .evaluate("f = #{ g = #{ [%m{7}, 1] ~> __integer_add__ ~ }; g [] }; f []")
+        .evaluate("f = #[] { g = #[] { [%m{7}, 1] ~> __integer_add__ ~ }; g [] }; f []")
         .expect("8");
 }
 

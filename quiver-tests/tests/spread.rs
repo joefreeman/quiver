@@ -206,10 +206,10 @@ fn test_identifier_spread_with_ripple_in_field() {
 fn spread_source_is_captured_in_a_closure() {
     // A closure that spreads a variable (`[...a]` or the `a` of `a[..., y]`) must capture it.
     quiver()
-        .evaluate("a = A[x: 1]; g = #{ a[..., y: 2] }; [] ~> g ~")
+        .evaluate("a = A[x: 1]; g = #[] { a[..., y: 2] }; [] ~> g ~")
         .expect("A[x: 1, y: 2]");
     quiver()
-        .evaluate("a = [x: 1]; g = #{ [...a, y: 2] }; [] ~> g ~")
+        .evaluate("a = [x: 1]; g = #[] { [...a, y: 2] }; [] ~> g ~")
         .expect("[x: 1, y: 2]");
 }
 
@@ -290,7 +290,7 @@ fn test_spread_update_ripple_field() {
 #[test]
 fn test_spread_update_outer_parameter() {
     quiver()
-        .evaluate("f = #[c: P[x: 'int]] { g = #{ $$c[..., x: 9] }; g [] }; f [c: P[x: 1]]")
+        .evaluate("f = #[c: P[x: 'int]] { g = #[] { $$c[..., x: 9] }; g [] }; f [c: P[x: 1]]")
         .expect("P[x: 9]");
 }
 
@@ -312,7 +312,7 @@ fn test_sourced_spread_in_tuple() {
 fn test_spread_source_captured_path_in_closure() {
     // A sourced spread in a closure captures its access path, like the expression would.
     quiver()
-        .evaluate("p = [q: A[x: 1]]; f = #{ p.q[..., x: 2] }; f []")
+        .evaluate("p = [q: A[x: 1]]; f = #[] { p.q[..., x: 2] }; f []")
         .expect("A[x: 2]");
 }
 

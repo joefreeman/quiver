@@ -206,6 +206,10 @@ pub enum Error {
         /// The form as written (`^`, `^~`, `@f`), for the message.
         form: String,
     },
+    /// A function literal written without a parameter type (`#{ … }`) where no expected
+    /// callable type is available to infer it from. The form means "infer from context"
+    /// and there is no context here — a nilary function is written `#[] { … }`.
+    ParameterNotInferable,
     /// A chain term other than the head ignores the value flowing into it, silently
     /// dropping everything the chain computed before it. A chain threads a value through
     /// its terms; a term that wants a fresh start is a step (`;`), which is also what
@@ -239,80 +243,6 @@ pub enum Error {
     InternalError {
         message: String,
     },
-
-    /// An error augmented with a usage hint — e.g. the Apply-site-inference note attached
-    /// when a `#{…}` literal that reads `$` fell back to a nil parameter and its body failed.
-    Noted {
-        error: Box<Error>,
-        note: String,
-    },
-}
-
-/// Whether an expression's chains read the enclosing function's parameter (`$`, `$x`, `$0`) —
-/// without descending into nested function literals, whose `$` is their own. Used to decide
-/// whether a failed fallback-nil `#{…}` literal deserves the Apply-site-inference note.
-fn block_references_parameter(block: &ast::Block) -> bool {
-    let chain = |chain: &ast::Chain| chain.terms.iter().any(term_references_parameter);
-    block.annotations.iter().any(|a| chain(&a.value))
-        || block.branches.iter().any(|branch| {
-            branch.condition.chains().any(chain)
-                || branch
-                    .consequence
-                    .as_ref()
-                    .is_some_and(|c| c.chains().any(chain))
-        })
-}
-
-fn term_references_parameter(term: &ast::Term) -> bool {
-    let chain = |chain: &ast::Chain| chain.terms.iter().any(term_references_parameter);
-    match term {
-        ast::Term::Access(access) => {
-            matches!(
-                access.source,
-                Some(ast::AccessSource::Parameter { depth: 0 })
-            )
-        }
-        ast::Term::State(access, _) => {
-            matches!(
-                access.source,
-                Some(ast::AccessSource::Parameter { depth: 0 })
-            )
-        }
-        ast::Term::Tuple(tuple) => tuple.fields.iter().any(|field| match &field.value {
-            ast::FieldValue::Chain(c) => chain(c),
-            // A sourced spread reads its access: `...$k` is an own-parameter read.
-            ast::FieldValue::Spread(source) => source.as_ref().is_some_and(|access| {
-                matches!(
-                    access.source,
-                    Some(ast::AccessSource::Parameter { depth: 0 })
-                )
-            }),
-        }),
-        ast::Term::String(_, segments) => segments.iter().any(|segment| match segment {
-            ast::StrSegment::Hole(block) => block_references_parameter(block),
-            ast::StrSegment::Text(_) => false,
-        }),
-        ast::Term::Block(block) => block_references_parameter(block),
-        // A nested function literal's `$` is its own parameter.
-        ast::Term::Function(_) => false,
-        ast::Term::Apply(access, argument) => {
-            matches!(
-                access.source,
-                Some(ast::AccessSource::Parameter { depth: 0 })
-            ) || term_references_parameter(argument)
-        }
-        ast::Term::Spawn(inner, argument, _) => {
-            term_references_parameter(inner)
-                || argument.as_deref().is_some_and(term_references_parameter)
-        }
-        ast::Term::Select(Some(sources), _) => sources.iter().any(chain),
-        ast::Term::Literal(_)
-        | ast::Term::Match(_)
-        | ast::Term::Self_
-        | ast::Term::Select(None, _)
-        | ast::Term::Process(_)
-        | ast::Term::Dialect(_) => false,
-    }
 }
 
 /// Whether an access reads the value flowing into it rather than naming something else:
@@ -400,7 +330,6 @@ impl std::fmt::Display for Error {
                 f,
                 "'{written}' reaches above the outermost function: each '$' names one enclosing function"
             ),
-            Error::Noted { error, note } => write!(f, "{error} ({note})"),
             Error::BuiltinUndefined(name) => {
                 write!(f, "unknown builtin `__{name}__`")
             }
@@ -551,6 +480,16 @@ impl std::fmt::Display for Error {
                     f,
                     "`{form}` is missing its argument: a call states what it is called with, \
                      nil included, so write `{form} []` to call on nil (as `f []` does)"
+                )
+            }
+            Error::ParameterNotInferable => {
+                write!(
+                    f,
+                    "`#{{...}}` infers its parameter from the type expected where it is \
+                     written, and nothing expects a function here. Write the parameter \
+                     type (`#'t {{ ... }}`), or `#[] {{ ... }}` for a function that takes \
+                     nil. Inference needs a known callee: `f [..., #{{...}}]`, or piped \
+                     directly as `[..., #{{...}}] ~> f ~`"
                 )
             }
             Error::DiscardedChainValue => {
@@ -2647,22 +2586,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             None => {
                 // No annotation: infer the parameter from the expected callable type at the use
-                // site when one is available and usable. A type variable the callee has yet to
-                // solve is not usable — there's nothing to pin it, so the literal couldn't act on
-                // its parameter — so fall back to nil, preserving the `#{ ... }` nilary-function
-                // shorthand. A *rigid* variable is usable: an earlier sibling argument pinned the
-                // callee's variable to one of the enclosing generic's own parameters (`%list.map
-                // [$list, #{ $ }]` inside `#<'t>['%list<'t>, …]`), which is an opaque but real
-                // type the literal can pass through. Falling back there would infer `#[] -> []`
-                // and silently widen the caller's `'t` to `'t | []`.
+                // site. A type variable the callee has yet to solve is not usable — there's
+                // nothing to pin it, so the literal couldn't act on its parameter. A *rigid*
+                // variable is usable: an earlier sibling argument pinned the callee's variable to
+                // one of the enclosing generic's own parameters (`%list.map [$list, #{ $ }]`
+                // inside `#<'t>['%list<'t>, …]`), which is an opaque but real type the literal
+                // can pass through.
                 let usable = expected_parameter.filter(|&ep| match self.program.lookup_type(ep) {
                     Some(Type::Variable(name)) => typing::is_rigid_variable(name, inherited_suffix),
                     _ => true,
                 });
-                match usable {
-                    Some(ep) => ep,
-                    None => self.program.register_type(Type::nil()),
-                }
+                usable.ok_or(Error::ParameterNotInferable)?
             }
         };
 
@@ -6757,28 +6691,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         Some(Type::Callable { parameter, .. }) => Some(*parameter),
                         _ => None,
                     });
-                // With no callable expected type, an un-annotated literal falls back to a nil
-                // parameter. If its body then fails while actually reading `$`, the real
-                // problem is almost always the missed inference: point at where it works.
-                let inference_fell_back = func.parameter_type.is_none()
-                    && expected_parameter.is_none()
-                    && func.body.as_ref().is_some_and(block_references_parameter);
-                let function_type =
-                    self.compile_function(func, expected_parameter)
-                        .map_err(|e| {
-                            if inference_fell_back {
-                                Error::Noted {
-                                    error: Box::new(e),
-                                    note: "this `#{…}` literal's parameter defaulted to nil — \
-                                       inference needs a known callee (`f […, #{…}]`, or piped \
-                                       directly: `[…, #{…}] ~> f`), so restructure the call or \
-                                       annotate the parameter"
-                                        .to_string(),
-                                }
-                            } else {
-                                e
-                            }
-                        })?;
+                let function_type = self.compile_function(func, expected_parameter)?;
                 // Hover on `#` shows the inferred function type.
                 self.record_typed(span, function_type, SymbolKind::Expression, None);
                 Ok((function_type, Provenance::Unknown))

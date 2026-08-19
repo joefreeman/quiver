@@ -156,7 +156,7 @@ fn test_ripple_retrieval_in_chain() {
 #[test]
 fn test_annotated_process_result() {
     quiver()
-        .evaluate("make = #{ [x: 1] ~> { :tag 5 } }; p = @make []; !p ~> :tag")
+        .evaluate("make = #[] { [x: 1] ~> { :tag 5 } }; p = @make []; !p ~> :tag")
         .expect("5");
 }
 
@@ -305,7 +305,7 @@ fn test_error_payload_propagates_through_a_failed_match() {
     ";
     quiver()
         .evaluate(&format!(
-            "{source} g = #{{ [4, 0] ~> div ~ ~> =('int)x; 5 }}; g [] ~> :error"
+            "{source} g = #[] {{ [4, 0] ~> div ~ ~> =('int)x; 5 }}; g [] ~> :error"
         ))
         .expect("DivisionByZero");
     // The two-step spelling answers the same, for a different reason: the first step is the
@@ -313,7 +313,7 @@ fn test_error_payload_propagates_through_a_failed_match() {
     // payload, which is what makes the one-liner a faithful rewrite of the two-stepper.
     quiver()
         .evaluate(&format!(
-            "{source} g = #{{ [4, 0] ~> div ~; =x; 5 }}; g [] ~> :error"
+            "{source} g = #[] {{ [4, 0] ~> div ~; =x; 5 }}; g [] ~> :error"
         ))
         .expect("DivisionByZero");
 }

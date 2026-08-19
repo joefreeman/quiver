@@ -258,7 +258,7 @@ fn concurrent_sessions_evaluate_and_run_independently() {
                     .resume(
                         pid,
                         ResumePayload {
-                            unit: program(&format!("#{{ [{n}, 1] ~> __integer_add__ ~ }}")),
+                            unit: program(&format!("#[] {{ [{n}, 1] ~> __integer_add__ ~ }}")),
                             modules: Vec::new(),
                         },
                         None,
@@ -304,7 +304,7 @@ fn cancel_interrupts_and_a_fresh_session_recovers() {
             client.resume(
                 pid,
                 ResumePayload {
-                    unit: program("#{ f = #[] { ^ [] }; f [] }"),
+                    unit: program("#[] { f = #[] { ^ [] }; f [] }"),
                     modules: Vec::new(),
                 },
                 None,
@@ -335,7 +335,7 @@ fn concurrent_resumes_answer_conflict() {
             client.resume(
                 pid,
                 ResumePayload {
-                    unit: program("#{ f = #[] { ^ [] }; f [] }"),
+                    unit: program("#[] { f = #[] { ^ [] }; f [] }"),
                     modules: Vec::new(),
                 },
                 None,
@@ -347,7 +347,7 @@ fn concurrent_resumes_answer_conflict() {
     let overlap = client.resume(
         pid,
         ResumePayload {
-            unit: program("#{ 1 }"),
+            unit: program("#[] { 1 }"),
             modules: Vec::new(),
         },
         None,
@@ -378,7 +378,7 @@ fn abandoned_processes_stay_visible_and_collectable() {
             client.resume(
                 pid,
                 ResumePayload {
-                    unit: program("#{ f = #[] { ^ [] }; f [] }"),
+                    unit: program("#[] { f = #[] { ^ [] }; f [] }"),
                     modules: Vec::new(),
                 },
                 None,
@@ -516,7 +516,7 @@ fn connect_or_spawn_starts_a_server_when_absent() {
     let client = quiver_cli::client::connect_or_spawn(&spawned.socket, &exe())
         .expect("connect_or_spawn failed");
     assert_eq!(
-        quick_value(&client, "#{ [40, 2] ~> __integer_add__ ~ }"),
+        quick_value(&client, "#[] { [40, 2] ~> __integer_add__ ~ }"),
         "42"
     );
     client.shutdown().expect("shutdown failed");
@@ -530,7 +530,7 @@ fn connect_or_spawn_reuses_a_running_server() {
         std::fs::read_to_string(quiver_cli::protocol::pidfile_path(&server.socket)).unwrap();
     let client = quiver_cli::client::connect_or_spawn(&server.socket, &exe())
         .expect("connect_or_spawn failed");
-    assert_eq!(quick_value(&client, "#{ 1 }"), "1");
+    assert_eq!(quick_value(&client, "#[] { 1 }"), "1");
     let pid_after =
         std::fs::read_to_string(quiver_cli::protocol::pidfile_path(&server.socket)).unwrap();
     assert_eq!(pid_before, pid_after, "a second server was spawned");
@@ -546,7 +546,10 @@ fn racing_spawns_converge_on_one_server() {
             scope.spawn(move || {
                 let client = quiver_cli::client::connect_or_spawn(socket, &exe())
                     .expect("connect_or_spawn failed");
-                assert_eq!(quick_value(&client, &format!("#{{ {n} }}")), n.to_string());
+                assert_eq!(
+                    quick_value(&client, &format!("#[] {{ {n} }}")),
+                    n.to_string()
+                );
             });
         }
     });
@@ -594,7 +597,7 @@ fn takeover_replaces_an_incompatible_server() {
     let client =
         quiver_cli::client::connect_or_spawn(&spawned.socket, &exe()).expect("takeover failed");
     assert_eq!(
-        quick_value(&client, "#{ [40, 2] ~> __integer_add__ ~ }"),
+        quick_value(&client, "#[] { [40, 2] ~> __integer_add__ ~ }"),
         "42"
     );
     client.shutdown().expect("shutdown failed");
@@ -1071,7 +1074,7 @@ fn registry_rendezvous_across_sessions() {
     let mut a = Session::open(&server);
     assert_eq!(
         a.evaluate_value(
-            "svc = @#{ !'int ~> %num.mul [~, 2] } []; %proc.detach svc; \
+            "svc = @#[] { !'int ~> %num.mul [~, 2] } []; %proc.detach svc; \
              %registry.register [Shared, svc]"
         ),
         "Ok"
@@ -1087,7 +1090,7 @@ fn registry_rendezvous_across_sessions() {
     );
     // The name is taken environment-wide: B's own registration answers nil.
     assert_eq!(
-        b.evaluate_value("p = @#{ !'int } []; %registry.register [Shared, p] ~> =[]"),
+        b.evaluate_value("p = @#[] { !'int } []; %registry.register [Shared, p] ~> =[]"),
         "Ok"
     );
 
@@ -1113,7 +1116,7 @@ fn registry_names_free_when_session_teardown_kills_the_service() {
     // down its subtree, and the cascade's death must free the name for everyone.
     let mut a = Session::open(&server);
     assert_eq!(
-        a.evaluate_value("svc = @#{ !'int } []; %registry.register [Owned, svc]"),
+        a.evaluate_value("svc = @#[] { !'int } []; %registry.register [Owned, svc]"),
         "Ok"
     );
     let mut b = Session::open(&server);
@@ -1140,7 +1143,7 @@ fn registry_names_free_when_session_teardown_kills_the_service() {
 
     // The freed name is immediately reusable, from any session.
     assert_eq!(
-        b.evaluate_value("mine = @#{ !'int } []; %registry.register [Owned, mine]"),
+        b.evaluate_value("mine = @#[] { !'int } []; %registry.register [Owned, mine]"),
         "Ok"
     );
 }

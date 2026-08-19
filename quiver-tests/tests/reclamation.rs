@@ -10,7 +10,7 @@ fn unheld_tombstone_is_reclaimed() {
     // Spawn a process and await it without ever binding its pid: once the line completes no
     // handle to it survives, so a reclamation round sweeps the tombstone.
     quiver()
-        .evaluate("@#{ 42 } [] ~> ![~]")
+        .evaluate("@#[] { 42 } [] ~> ![~]")
         .expect("42")
         .force_collection()
         .expect_reclaimed_at_least(1);
@@ -22,7 +22,7 @@ fn held_pid_keeps_tombstone_and_late_await_still_works() {
     // later `!p` must still return the original result. This is the guarantee reclamation
     // must preserve — observable as long as a handle exists.
     quiver()
-        .evaluate("p = @#{ 42 } []; !p")
+        .evaluate("p = @#[] { 42 } []; !p")
         .expect("42")
         .force_collection()
         .expect_reclaimed(0)
@@ -36,7 +36,7 @@ fn reclaims_many_unheld_tombstones_across_workers() {
     // scope). Below the auto-trigger threshold, so the forced round sweeps all of them.
     quiver()
         .evaluate(
-            "loop = #'int { | =0 => Done | =n => { c = @#{ Ok } []; !c; %num.sub [n, 1] ~> ^ ~ } }; 20 ~> loop ~",
+            "loop = #'int { | =0 => Done | =n => { c = @#[] { Ok } []; !c; %num.sub [n, 1] ~> ^ ~ } }; 20 ~> loop ~",
         )
         .expect("Done")
         .force_collection()
@@ -51,7 +51,7 @@ fn reclamation_bounds_process_population_under_load() {
     quiver()
         .with_collection_threshold(40)
         .evaluate(
-            "loop = #'int { | =0 => Done | =n => { c = @#{ Ok } []; !c; %num.sub [n, 1] ~> ^ ~ } }; 150 ~> loop ~",
+            "loop = #'int { | =0 => Done | =n => { c = @#[] { Ok } []; !c; %num.sub [n, 1] ~> ^ ~ } }; 150 ~> loop ~",
         )
         .expect("Done")
         .force_collection()

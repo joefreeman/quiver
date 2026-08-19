@@ -219,7 +219,7 @@ fn test_client_over_a_real_socket_against_a_real_server() {
                 | %http/server.not_found []
               }
             }
-            @{ [port: 4291, handler: handler] ~> %http/server.serve ~ } []
+            @[] { [port: 4291, handler: handler] ~> %http/server.serve ~ } []
             { ![100] | Ok }
 
             %http/client.get "http://127.0.0.1:4291/echo/hello" ~> =('%http.response)a

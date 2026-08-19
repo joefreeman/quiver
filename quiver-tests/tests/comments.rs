@@ -9,7 +9,7 @@ fn test_comments() {
     quiver()
         .evaluate(
             r#"
-            #{
+            #[] {
               5 // comment
             }
             "#,

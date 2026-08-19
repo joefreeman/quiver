@@ -83,7 +83,7 @@ attempt = #[(url): '%url, (method): '%http.method, (headers): '%http.pairs, (bod
   hs = $headers
   b = $body
   ![
-    @{ exchange [url: u, method: m, headers: hs, body: b] } [],
+    @[] { exchange [url: u, method: m, headers: hs, body: b] } [],
     $timeout
   ]
 }

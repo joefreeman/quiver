@@ -15,7 +15,7 @@ fn test_listener_and_socket_as_select_sources() {
         .evaluate(
             r#"
             %tcp.listen [4293, 8] ~> =(\TcpListener)l
-            c = @{
+            c = @[] {
               %tcp.connect [<7f000001>, 4293] ~> =(\TcpSocket)s
               %tcp.write [s, "ping" ~> .0]
               !'int
@@ -52,7 +52,7 @@ fn test_socket_select_races_timeout() {
         .evaluate(
             r#"
             %tcp.listen [4294, 8] ~> =(\TcpListener)l
-            c = @{ %tcp.connect [<7f000001>, 4294] ~> =(\TcpSocket)s; !'int } []
+            c = @[] { %tcp.connect [<7f000001>, 4294] ~> =(\TcpSocket)s; !'int } []
             ![l] ~> =Accepted[listener: _, sock: conn]
             ![conn, 50] ~> {
               | =Data[sock: _, data: _] => GotData
@@ -73,7 +73,7 @@ fn test_socket_select_races_mailbox() {
         .evaluate(
             r#"
             %tcp.listen [4295, 8] ~> =(\TcpListener)l
-            c = @{
+            c = @[] {
               %tcp.connect [<7f000001>, 4295] ~> =(\TcpSocket)s
               !'int ~> =1
               %tcp.write [s, "later" ~> .0]
@@ -106,7 +106,7 @@ fn test_socket_closed_event() {
         .evaluate(
             r#"
             %tcp.listen [4296, 8] ~> =(\TcpListener)l
-            c = @{
+            c = @[] {
               %tcp.connect [<7f000001>, 4296] ~> =(\TcpSocket)s
               %tcp.close s
               Done
@@ -132,7 +132,7 @@ fn test_plain_read_consumes_stashed_event() {
         .evaluate(
             r#"
             %tcp.listen [4297, 8] ~> =(\TcpListener)l
-            c = @{
+            c = @[] {
               %tcp.connect [<7f000001>, 4297] ~> =(\TcpSocket)s
               !'int ~> =1
               %tcp.write [s, "stash me" ~> .0]

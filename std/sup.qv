@@ -54,7 +54,7 @@ watch = #<'r>[(id): '%str, (child): @!'r, (sup): @'down] {
   id = $id
   child = $child
   sup = $sup
-  @{
+  @[] {
     r = ![child]
     o = {
       | r:('%proc.crash)crash ~> =('%proc.crash)e => Crashed[e]

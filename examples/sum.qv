@@ -7,6 +7,6 @@ sum = #['list<'int>, (acc): 'int = 0] {
   | =[Cons[head, tail], acc] => %num.add [head, acc] ~> ^ [tail, ~]
 }
 
-#{
+#[] {
   %list{ 1, 2, 3 } ~> sum [~] //=> 6
 }

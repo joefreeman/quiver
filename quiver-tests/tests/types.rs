@@ -1396,7 +1396,7 @@ fn test_same_named_alias_and_binding_in_function_body() {
         .evaluate(
             r#"
             'room = Str['bin]
-            main = #{
+            main = #[] {
               room = #'int { $ }
               g = #'room { Ok }
               ["hi" ~> g ~, 7 ~> room ~]
@@ -1546,7 +1546,7 @@ fn test_type_alias_in_function_body() {
     quiver()
         .evaluate(
             r#"
-            main = #{
+            main = #[] {
               'p = [x: 'int]
               g = #'p { $x }
               g [x: 5]
@@ -1562,7 +1562,7 @@ fn test_type_alias_in_block() {
     quiver()
         .evaluate(
             r#"
-            main = #{
+            main = #[] {
               {
                 'p = [x: 'int]
                 g = #'p { $x }
@@ -1581,7 +1581,7 @@ fn test_type_alias_scoped_to_its_block() {
     quiver()
         .evaluate(
             r#"
-            main = #{
+            main = #[] {
               { 'p = [x: 'int]; 1 }
               g = #'p { $x }
               g [x: 5]
@@ -1603,7 +1603,7 @@ fn test_type_alias_shadows_outer() {
             r#"
             'p = 'int
             outer = #'p { $ }
-            main = #{
+            main = #[] {
               inner = { 'p = 'bin; f = #'p { $ }; f <0a> }
               [inner, 3 ~> outer ~]
             }
@@ -1620,7 +1620,7 @@ fn test_type_alias_is_branch_local() {
     quiver()
         .evaluate(
             r#"
-            main = #{
+            main = #[] {
               { | [] => { 'p = 'int; 1 } | g = #'p { $ }; g 2 }
             }
             main []
@@ -1656,7 +1656,7 @@ fn test_type_alias_step_is_transparent_to_the_flow() {
     quiver()
         .evaluate(
             r#"
-            main = #{
+            main = #[] {
               5 ~> __integer_add__ [~, 1]
               'p = 'int
               __integer_add__ [7, 2]
@@ -1670,7 +1670,7 @@ fn test_type_alias_step_is_transparent_to_the_flow() {
     quiver()
         .evaluate(
             r#"
-            main = #{
+            main = #[] {
               []
               'p = 'int
               7
@@ -1686,7 +1686,7 @@ fn test_type_alias_step_does_not_stop_nil_short_circuit() {
     quiver()
         .evaluate(
             r#"
-            main = #{
+            main = #[] {
               []
               'p = 'int
               7
@@ -1704,7 +1704,7 @@ fn test_alias_only_block_is_nil() {
     quiver()
         .evaluate(
             r#"
-            main = #{ [{ 'p = 'int }, 5] }
+            main = #[] { [{ 'p = 'int }, 5] }
             main []
             "#,
         )
@@ -1717,7 +1717,7 @@ fn test_type_alias_forward_reference_in_block_fails() {
     quiver()
         .evaluate(
             r#"
-            main = #{
+            main = #[] {
               g = #'p { $ }
               'p = 'int
               g 2
@@ -1760,7 +1760,7 @@ fn test_nested_type_alias_may_name_a_module_type() {
     quiver()
         .evaluate(
             r#"
-            main = #{
+            main = #[] {
               'ints = '%list<'int>
               %list.new [] ~> %list.prepend [~, 4] ~> =('ints)xs
               xs
@@ -1812,7 +1812,7 @@ fn test_process_type_clause_stops_at_a_newline() {
     // A clause sigil needs horizontal whitespace, so the `!'int` on its own line is a
     // receive step, not an await clause reaching across the step boundary.
     quiver()
-        .evaluate("f = #{\n  'p = @'int\n  !'int\n}\nq = @f []\n7 ~> q ~\n!q")
+        .evaluate("f = #[] {\n  'p = @'int\n  !'int\n}\nq = @f []\n7 ~> q ~\n!q")
         .expect("7");
 }
 

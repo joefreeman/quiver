@@ -54,7 +54,7 @@ fn test_import_function_with_capture() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["capture".to_string()],
-        "x = 42; #{ [x, 2] ~> __integer_multiply__ ~ }".to_string(),
+        "x = 42; #[] { [x, 2] ~> __integer_multiply__ ~ }".to_string(),
     );
 
     quiver()
@@ -70,8 +70,8 @@ fn test_import_nested_function_captures() {
         vec!["nested".to_string()],
         r#"
         x = 10;
-        inner = #{ [x, 1] ~> __integer_add__ ~ };
-        #{ [] ~> inner ~ ~> [~, 2] ~> __integer_multiply__ ~ }
+        inner = #[] { [x, 1] ~> __integer_add__ ~ };
+        #[] { [] ~> inner ~ ~> [~, 2] ~> __integer_multiply__ ~ }
         "#
         .to_string(),
     );
@@ -87,7 +87,7 @@ fn test_import_tuple_with_captured_function() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["tuple_capture".to_string()],
-        "x = 5; y = 3; [x, #{ [x, y] ~> __integer_add__ ~ }, y]".to_string(),
+        "x = 5; y = 3; [x, #[] { [x, y] ~> __integer_add__ ~ }, y]".to_string(),
     );
 
     quiver()
@@ -101,13 +101,13 @@ fn test_multi_level_import_with_captures() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["level1".to_string()],
-        "base = 100; #{ [base, 1] ~> __integer_add__ ~ }".to_string(),
+        "base = 100; #[] { [base, 1] ~> __integer_add__ ~ }".to_string(),
     );
     modules.insert(
         vec!["level2".to_string()],
         r#"
         x = 3;
-        #{ [] ~> %level1 ~ ~> [~, x] ~> __integer_multiply__ ~ }
+        #[] { [] ~> %level1 ~ ~> [~, x] ~> __integer_multiply__ ~ }
         "#
         .to_string(),
     );
@@ -115,7 +115,7 @@ fn test_multi_level_import_with_captures() {
         vec!["level3".to_string()],
         r#"
         x = 5;
-        [#{ [] ~> %level2 ~ }, #{ [] ~> %level2 ~ ~> [~, x] ~> __integer_add__ ~ }]
+        [#[] { [] ~> %level2 ~ }, #[] { [] ~> %level2 ~ ~> [~, x] ~> __integer_add__ ~ }]
         "#
         .to_string(),
     );
@@ -408,7 +408,7 @@ fn module_spawn_rejected_at_compile_time() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["spawner".to_string()],
-        "p = @#{ 42 } []; [x: 1]".to_string(),
+        "p = @#[] { 42 } []; [x: 1]".to_string(),
     );
 
     quiver()

@@ -46,7 +46,7 @@ fn test_type_argument_rides_the_value() {
         .expect("42");
     // Into a spawned process, by capture and by init argument.
     quiver()
-        .evaluate(r#"f = __data_decode__<'int>; p = @#{ f "42" } []; !p"#)
+        .evaluate(r#"f = __data_decode__<'int>; p = @#[] { f "42" } []; !p"#)
         .expect("42");
     quiver()
         .evaluate(

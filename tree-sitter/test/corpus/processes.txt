@@ -2,7 +2,7 @@
 spawn and receive
 ==================
 
-p = @{ !'int { =0 => "done" | [] ~> ^ } }
+p = @[] { !'int { =0 => "done" | [] ~> ^ } }
 
 ---
 
@@ -11,6 +11,7 @@ p = @{ !'int { =0 => "done" | [] ~> ^ } }
     (chain
       binding: (identifier)
       (spawn
+        parameter: (tuple_type)
         (block
           (branch
             (sequence

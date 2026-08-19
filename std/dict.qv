@@ -370,7 +370,7 @@ dict_dialect = #(content: '%str, chain: '%meta.cb) {
 }
 
 [
-  new: #{
+  new: #[] {
     :doc "Creates an empty dict."
     Empty
   },

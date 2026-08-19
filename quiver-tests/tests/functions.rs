@@ -3,12 +3,12 @@ use common::*;
 
 #[test]
 fn test_simple_function() {
-    quiver().evaluate("f = #{ 42 }; [] ~> f ~").expect("42");
+    quiver().evaluate("f = #[] { 42 }; [] ~> f ~").expect("42");
 }
 
 #[test]
 fn test_nil_function() {
-    quiver().evaluate("f = #{ [] }; [] ~> f ~").expect("[]");
+    quiver().evaluate("f = #[] { [] }; [] ~> f ~").expect("[]");
 }
 
 #[test]
@@ -21,7 +21,7 @@ fn test_function_with_parameter() {
 #[test]
 fn test_function_closure() {
     quiver()
-        .evaluate("x = 1; f = #{ x }; x = 2; [] ~> f ~")
+        .evaluate("x = 1; f = #[] { x }; x = 2; [] ~> f ~")
         .expect("1");
 }
 
@@ -94,7 +94,7 @@ fn test_closure_captures_nested_member_access() {
         .evaluate(
             r#"
             obj = [inner: [value: 42]];
-            get_value = #{ obj.inner.value };
+            get_value = #[] { obj.inner.value };
             [] ~> get_value ~
             "#,
         )
@@ -106,7 +106,7 @@ fn test_nested_function_captures() {
     quiver()
         .evaluate(
             r#"
-            f = #{
+            f = #[] {
               inc = #'int { [~, 1] ~> %num.add ~ };
               42 ~> inc ~
             };
@@ -130,7 +130,7 @@ fn test_function_call_with_ripple() {
 
 #[test]
 fn test_function_call_no_args() {
-    quiver().evaluate("f = #{ 42 }; f []").expect("42");
+    quiver().evaluate("f = #[] { 42 }; f []").expect("42");
 }
 
 #[test]
@@ -432,19 +432,19 @@ fn test_nilary_call_ignores_chained_value() {
     // A nilary function takes nil and nothing else: the flowing value is an argument
     // like any other, so handing it to one is a type error.
     quiver()
-        .evaluate("make = #{ 99 }; 5 ~> make ~")
+        .evaluate("make = #[] { 99 }; 5 ~> make ~")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "function parameter compatible with []".to_string(),
             found: "'int".to_string(),
         });
-    quiver().evaluate("make = #{ 99 }; make []").expect("99");
+    quiver().evaluate("make = #[] { 99 }; make []").expect("99");
 }
 
 #[test]
 fn test_nilary_call_ignores_block_parameter() {
     // `make` as the leading term of the body names the function; calling it is written.
     quiver()
-        .evaluate("make = #{ 99 }; use = #'int { make [] }; 5 ~> use ~")
+        .evaluate("make = #[] { 99 }; use = #'int { make [] }; 5 ~> use ~")
         .expect("99");
 }
 
@@ -452,7 +452,7 @@ fn test_nilary_call_ignores_block_parameter() {
 fn test_nilary_call_explicit_nil_argument() {
     // A nilary function ignores the flowing value, so flowing nil into it just calls it.
     quiver()
-        .evaluate("make = #{ 99 }; [] ~> make ~")
+        .evaluate("make = #[] { 99 }; [] ~> make ~")
         .expect("99");
 }
 
@@ -526,10 +526,10 @@ fn test_outer_parameter_pin() {
 fn test_outer_parameter_in_spawn_and_string_hole() {
     // Spawned closures capture outer parameters like any capture (moving them to the child).
     quiver()
-        .evaluate("f = #'int { p = @#{ $$ } []; !p }; f 7")
+        .evaluate("f = #'int { p = @#[] { $$ } []; !p }; f 7")
         .expect("7");
     quiver()
-        .evaluate("f = #[name: '%str] { g = #{ \"hi {$$name}\" }; g [] }; f [name: \"joe\"]")
+        .evaluate("f = #[name: '%str] { g = #[] { \"hi {$$name}\" }; g [] }; f [name: \"joe\"]")
         .expect("\"hi joe\"");
 }
 
@@ -538,7 +538,7 @@ fn test_outer_parameter_capture_time_snapshot() {
     // `$$` is captured when the closure is built: a tail call re-entering the outer
     // function does not retroactively change an existing closure's view.
     quiver()
-        .evaluate("f = #'int { | %num.gt? [$, 0] => #{ $$ } | ^ 5 }; g = 0 ~> f ~; g []")
+        .evaluate("f = #'int { | %num.gt? [$, 0] => #[] { $$ } | ^ 5 }; g = 0 ~> f ~; g []")
         .expect("5");
 }
 

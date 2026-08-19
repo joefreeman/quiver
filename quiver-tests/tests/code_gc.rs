@@ -56,7 +56,7 @@ fn tombstone_result_on_another_worker_keeps_code_alive() {
     // Awaiting after the sweep hands the closure back and calls it — a missed
     // cross-worker root would surface as "reclaimed code invoked".
     quiver()
-        .evaluate("f = #'int { [$, 7] ~> __integer_add__ ~ }; p = @#{ f } []; Ok")
+        .evaluate("f = #'int { [$, 7] ~> __integer_add__ ~ }; p = @#[] { f } []; Ok")
         .then_evaluate("f = 5")
         .force_code_collection()
         .then_evaluate("!p ~> =(#'int -> 'int)h; h 3")

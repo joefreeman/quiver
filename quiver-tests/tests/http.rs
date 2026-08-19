@@ -163,7 +163,7 @@ fn test_served_connection_end_to_end() {
                 | %http/server.not_found []
               }
             };
-            @{ [port: 4181, handler: handler] ~> %http/server.serve ~ } [];
+            @[] { [port: 4181, handler: handler] ~> %http/server.serve ~ } [];
             { ![50] | Ok };
             [<7f000001>, 4181] ~> __tcp_connect__ ~ ~> =(\TcpSocket)sock;
             [sock, "GET /n/one HTTP/1.1\r\n\r\nGET /n/two HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __tcp_socket_write__ ~;
@@ -192,7 +192,7 @@ fn test_crashed_handler_answers_500_and_connection_survives() {
                 | %http/server.not_found []
               }
             };
-            @{ [port: 4182, handler: handler] ~> %http/server.serve ~ } [];
+            @[] { [port: 4182, handler: handler] ~> %http/server.serve ~ } [];
             { ![50] | Ok };
             [<7f000001>, 4182] ~> __tcp_connect__ ~ ~> =(\TcpSocket)sock;
             [sock, "GET /boom HTTP/1.1\r\n\r\nGET /ok HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __tcp_socket_write__ ~;

@@ -85,7 +85,7 @@ fn test_sample_nilary_process_state_is_nil() {
     quiver()
         .evaluate(
             r#"
-            p = @{ 42 } [];
+            p = @[] { 42 } [];
             !p;
             [?p]
             "#,
@@ -140,7 +140,7 @@ fn test_pid_message_is_filtered_by_type_not_just_accepted() {
         .evaluate(
             r#"
             g = #'int { !#'int };
-            h = @#{ ![#'int] ~> =n; ![#(@'int ?'int)] ~> =q; [n, ?q] } [];
+            h = @#[] { ![#'int] ~> =n; ![#(@'int ?'int)] ~> =q; [n, ?q] } [];
             7 ~> @g ~ ~> h ~;
             5 ~> h ~;
             !h
@@ -158,7 +158,7 @@ fn test_message_received_pid_is_sampleable_with_clause() {
         .evaluate(
             r#"
             g = #'int { !#'int };
-            h = @#{ ![#(@'int ?'int)] ~> =q; ?q } [];
+            h = @#[] { ![#(@'int ?'int)] ~> =q; ?q } [];
             7 ~> @g ~ ~> h ~;
             !h
             "#,

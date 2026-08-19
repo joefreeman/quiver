@@ -1,10 +1,11 @@
 mod common;
 use common::*;
 
-// An un-annotated function literal (`#{ ... }`) infers its parameter type at the Apply site
-// only: it must be the argument (or a top-level field of the bracket argument) of a juxtaposed
-// call whose callee is known (`f [.., #{ ... }]`), with type variables pinned by sibling
-// arguments. A literal in any other position falls back to its nilary meaning.
+// An un-annotated function literal (`#{ ... }`) means "infer my parameter", and nothing else:
+// it must be the argument (or a top-level field of the bracket argument) of a juxtaposed call
+// whose callee is known (`f [.., #{ ... }]`), with type variables pinned by sibling arguments.
+// In any other position there is nothing to infer from, and it is a compile error — a function
+// that takes nil is written `#[] { ... }`.
 
 #[test]
 fn test_inferred_mapper_through_iter_map() {
@@ -63,9 +64,9 @@ fn test_inferred_param_via_local_higher_order_function() {
 fn test_inferred_param_pinned_to_enclosing_type_parameter() {
     // A sibling argument can pin the callee's variable to the *enclosing* generic's own type
     // parameter. That is a real (if opaque) type, so the literal takes it as its parameter
-    // instead of falling back to nil — a fallback would infer `#[] -> []` and, unifying that
-    // against `#'t -> ('t | [])`, silently widen the caller's `'t` to `'t | []`. The declared
-    // return type is what catches the widening.
+    // rather than being rejected as uninferable. The declared return type is what would catch
+    // a wrong answer here: inferring nil would give `#[] -> []` and, unified against
+    // `#'t -> ('t | [])`, silently widen the caller's `'t` to `'t | []`.
     quiver()
         .evaluate(
             r#"
@@ -79,7 +80,7 @@ fn test_inferred_param_pinned_to_enclosing_type_parameter() {
 #[test]
 fn test_inferred_mapper_keeps_the_enclosing_element_type() {
     // The same for `%list.map`, whose result variable is pinned by the literal's own result:
-    // a nil fallback would make the mapped list `'%list<[]>`.
+    // inferring nil would make the mapped list `'%list<[]>`.
     quiver()
         .evaluate(
             r#"
@@ -91,11 +92,19 @@ fn test_inferred_mapper_keeps_the_enclosing_element_type() {
 }
 
 #[test]
-fn test_unsolved_callee_variable_still_falls_back_to_nil() {
+fn test_unsolved_callee_variable_is_not_inferable() {
     // Only a *rigid* variable is usable. One the callee has yet to solve has nothing to pin
-    // it, so the literal keeps its nilary meaning.
+    // it, so there is no parameter type to infer and the literal is rejected.
     quiver()
         .evaluate("run = #<'t>[#'t -> 'int] { =[g]; g [] }; run [#{ 42 }]")
+        .expect_compile_error(quiver_compiler::compiler::Error::ParameterNotInferable);
+}
+
+#[test]
+fn test_unsolved_callee_variable_takes_an_explicit_nil_parameter() {
+    // Writing the parameter is what resolves it: `#[] { ... }` solves the callee's `'t` to nil.
+    quiver()
+        .evaluate("run = #<'t>[#'t -> 'int] { =[g]; g [] }; run [#[] { 42 }]")
         .expect("42");
 }
 
@@ -113,15 +122,25 @@ fn test_inferred_param_concrete_callee() {
 }
 
 #[test]
-fn test_unannotated_literal_without_context_stays_nilary() {
-    // With no expected type from context, `#{ ... }` keeps its nilary-function meaning.
-    quiver().evaluate("f = #{ 42 }; f []").expect("42");
+fn test_unannotated_literal_without_context_is_rejected() {
+    // With no expected type from context there is nothing to infer, and the old nilary
+    // reading of this spelling is gone.
+    quiver()
+        .evaluate("f = #{ 42 }; f []")
+        .expect_compile_error(quiver_compiler::compiler::Error::ParameterNotInferable);
 }
 
 #[test]
 fn test_explicit_nil_parameter_form() {
-    // `#[] { ... }` forces a nil parameter even where a context type is available.
+    // `#[] { ... }` is how a function that takes nil is written, in any position.
     quiver().evaluate("f = #[] { 7 }; f []").expect("7");
+}
+
+#[test]
+fn test_spawn_shorthand_requires_an_explicit_nil_parameter() {
+    // The spawn shorthand follows the same rule: `@{ ... }` has nothing to infer from, so a
+    // nilary root function is spawned as `@[] { ... }`.
+    quiver().evaluate("p = @[] { 42 } []; !p").expect("42");
 }
 
 #[test]

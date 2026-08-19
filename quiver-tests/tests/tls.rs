@@ -179,7 +179,7 @@ fn test_a_failed_handshake_closes_the_socket() {
     tls(
         &server,
         r#"
-        p = @{
+        p = @[] {
           %tcp.connect [<7f000001>, __PORT__] ~> =(\TcpSocket)s
           { %tls.attach [socket: s, hostname: "localhost", roots: __DECOY__] => [] | Ok }
           %tcp.read [s, 1]
@@ -256,7 +256,7 @@ fn test_tls_accept_serves_an_in_language_client() {
         .with_timeout(Duration::from_secs(10))
         .evaluate(&pki.splice(
             r#"
-            server = @{
+            server = @[] {
               %tcp.listen [4381, 8] ~> =(\TcpListener)l
               %tcp.accept l ~> =(\TcpSocket)c
               %tls.accept [socket: c, cert: __CERT__, key: __KEY__]
@@ -304,7 +304,7 @@ fn test_https_serves_via_http_server() {
               }
             }
             handler = #'%http { %http/server.text "secure hello" }
-            @{
+            @[] {
               [port: 4382, handler: handler, tls: [cert: __CERT__, key: __KEY__]]
               ~> %http/server.serve ~
             } []

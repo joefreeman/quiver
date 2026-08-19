@@ -227,7 +227,7 @@ pub enum Term {
     /// spelling `f ~` work); for ripple heads it is consumed by the head instead, and the
     /// argument is evaluated without it.
     Apply(Access, Box<Term>),
-    /// Spawn a process from a function (`@f x`, `@~ x`, `@{ … } x`). The init is written like
+    /// Spawn a process from a function (`@f x`, `@~ x`, `@[] { … } x`). The init is written like
     /// a call's argument, nil included (`@f []`) — the flowing value reaches it only through
     /// `~` (`x ~> @f ~`). `@~` spawns the flowing value itself, so its init is the argument.
     Spawn(Box<Term>, Option<Box<Term>>, Spanned),

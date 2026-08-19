@@ -100,10 +100,10 @@ fn test_pin_without_variable_single_occurrence() {
 fn test_pin_from_outer_scope() {
     // Pin pattern should be able to reference variables from outer scopes
     quiver()
-        .evaluate("x = 5; f = #{ A[5] ~> =A[&x] }; [] ~> f ~")
+        .evaluate("x = 5; f = #[] { A[5] ~> =A[&x] }; [] ~> f ~")
         .expect("Ok");
     quiver()
-        .evaluate("x = 5; f = #{ A[6] ~> =A[&x] }; [] ~> f ~")
+        .evaluate("x = 5; f = #[] { A[6] ~> =A[&x] }; [] ~> f ~")
         .expect("[]");
 }
 

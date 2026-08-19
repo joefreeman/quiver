@@ -884,7 +884,8 @@ fn function_doc(trivia: &Trivia, function: &Function) -> Doc {
     }
     match &function.body {
         None => pretty::text(signature),
-        // A bare `#` (nilary, no signature) abuts its block as `#{ … }`; a typed head takes a space.
+        // A bare `#` (no signature — the inferred-parameter form) abuts its block as `#{ … }`;
+        // a typed head takes a space.
         Some(body) if signature == "#" => {
             pretty::concat(vec![pretty::text(signature), block_doc(trivia, body)])
         }
@@ -924,10 +925,9 @@ fn sugar_type(type_def: &Type) -> Option<String> {
     }
 }
 
-/// Render a spawn (`@f`, `@~`, `@{ … }`, `@'int { … }`). An inline spawned function must use the
-/// `@`-sugar forms — the parser does not accept `@#…` — so a function head is emitted as `@{ body }`,
-/// the tight `@'type { body }` where the type allows it, or `@(type) { body }` (the parenthesised
-/// arm accepts any type).
+/// Render a spawn (`@f`, `@~`, `@[] { … }`, `@'int { … }`). An inline spawned function is
+/// normalised onto the `@`-sugar forms: the tight `@'type { body }` where the type allows it,
+/// or `@(type) { body }` (the parenthesised arm accepts any type).
 fn spawn_doc(trivia: &Trivia, func: &Term, argument: Option<&Term>) -> Doc {
     let head = match func {
         Term::Function(function) => {

@@ -47,12 +47,12 @@ fn juxtaposed_argument_to_nilary_is_a_type_error() {
     // A nilary function takes nil and nothing else. Every call is written, so there is no
     // spelling that quietly hands it something and no spelling that quietly drops one.
     quiver()
-        .evaluate("f = #{ 42 }; f [1, 2]")
+        .evaluate("f = #[] { 42 }; f [1, 2]")
         .expect_type_mismatch();
     quiver()
-        .evaluate("f = #{ 42 }; 5 ~> f ~")
+        .evaluate("f = #[] { 42 }; 5 ~> f ~")
         .expect_type_mismatch();
-    quiver().evaluate("f = #{ 42 }; f []").expect("42");
+    quiver().evaluate("f = #[] { 42 }; f []").expect("42");
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn juxtaposed_spawn_argument() {
         .expect("7");
     // An explicit init to a nilary process function is rejected.
     quiver()
-        .evaluate("c = #{ 5 }; @c 42")
+        .evaluate("c = #[] { 5 }; @c 42")
         .expect_type_mismatch();
 }
 
@@ -121,7 +121,7 @@ fn juxtaposed_spawn_argument() {
 fn non_callable_heads_are_not_applicable() {
     // A literal/tuple/function-literal head cannot take a juxtaposed argument.
     quiver().evaluate("5 six").expect_parse_failure();
-    quiver().evaluate("#{ 42 } 5").expect_parse_failure();
+    quiver().evaluate("#[] { 42 } 5").expect_parse_failure();
     quiver().evaluate("[1] [2]").expect_parse_failure();
 }
 
@@ -150,7 +150,7 @@ fn adjacent_call_is_a_parse_error() {
 
 #[test]
 fn nil_call_is_spaced() {
-    quiver().evaluate("f = #{ 42 }; [] ~> f ~").expect("42");
+    quiver().evaluate("f = #[] { 42 }; [] ~> f ~").expect("42");
 }
 
 #[test]

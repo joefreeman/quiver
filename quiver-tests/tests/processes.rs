@@ -8,20 +8,20 @@ fn test_self_reference() {
 
 #[test]
 fn test_spawn_simple_function() {
-    quiver().evaluate("f = #{ [] }; @f []").expect("@1");
+    quiver().evaluate("f = #[] { [] }; @f []").expect("@1");
 }
 
 #[test]
 fn test_send_to_process() {
     quiver()
-        .evaluate("p = @#{ !#'int } []; 42 ~> p ~")
+        .evaluate("p = @#[] { !#'int } []; 42 ~> p ~")
         .expect("@1");
 }
 
 #[test]
 fn test_process_without_receive_rejects_send() {
     quiver()
-        .evaluate("p = @#{ [] } []; 42 ~> p ~")
+        .evaluate("p = @#[] { [] } []; 42 ~> p ~")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "process with send type".to_string(),
             found: "process without send type (cannot send to it)".to_string(),
@@ -33,7 +33,7 @@ fn test_process_type_checking_send() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ !#'int } [];
+            p = @#[] { !#'int } [];
             <00> ~> p ~
         "#,
         )
@@ -182,12 +182,14 @@ fn test_spawn_without_argument_is_rejected() {
 
 #[test]
 fn test_spawn_postfix_syntax() {
-    quiver().evaluate("p = #{ 42 } ~> @~ []; !p").expect("42");
+    quiver()
+        .evaluate("p = #[] { 42 } ~> @~ []; !p")
+        .expect("42");
 }
 
 #[test]
 fn test_spawn_sugar_parameterless() {
-    quiver().evaluate("p = @{ 42 } []; !p").expect("42");
+    quiver().evaluate("p = @[] { 42 } []; !p").expect("42");
 }
 
 #[test]
@@ -225,7 +227,7 @@ fn test_spawn_sugar_tuple_type() {
 #[test]
 fn test_receive_simple() {
     quiver()
-        .evaluate("p = @#{ !#'int } []; 42 ~> p ~; !p")
+        .evaluate("p = @#[] { !#'int } []; 42 ~> p ~; !p")
         .expect("42");
 }
 
@@ -234,7 +236,7 @@ fn test_receive_waits_until_match() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ ![#'int { =42 => Ok }] } [];
+            p = @#[] { ![#'int { =42 => Ok }] } [];
             10 ~> p ~; 20 ~> p ~; 42 ~> p ~;
             !p
             "#,
@@ -250,7 +252,7 @@ fn test_receive_filter_accepts_on_any_non_nil() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ ![#'int { =x => 99 }] } [];
+            p = @#[] { ![#'int { =x => 99 }] } [];
             42 ~> p ~;
             !p
             "#,
@@ -263,7 +265,7 @@ fn test_receive_filter_returns_original_message() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ ![#'int { =x => Ok }] ~> =result => result } [];
+            p = @#[] { ![#'int { =x => Ok }] ~> =result => result } [];
             42 ~> p ~;
             !p
             "#,
@@ -277,7 +279,7 @@ fn test_receive_filter_type_is_parameter_not_result() {
     // not the filter's result type (Ok or []). The `!'int` clause is the function's own
     // receive type, rendered in the written clause syntax.
     quiver()
-        .evaluate("#{ ![#'int { Ok }] }")
+        .evaluate("#[] { ![#'int { Ok }] }")
         .expect_type("#[] -> 'int !'int");
 }
 
@@ -291,7 +293,7 @@ fn test_receive_function_cannot_spawn() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ ![#'int { @#{ 42 } []; Ok }] } [];
+            p = @#[] { ![#'int { @#[] { 42 } []; Ok }] } [];
             10 ~> p ~;
             r = !p;
             r:((message: Str['bin]))crash ~> =(message: m);
@@ -306,8 +308,8 @@ fn test_receive_function_cannot_send() {
     quiver()
         .evaluate(
             r#"
-            p1 = @#{ !#'int } [];
-            p2 = @#{ ![#'int { 42 ~> p1 ~; Ok }] } [];
+            p1 = @#[] { !#'int } [];
+            p2 = @#[] { ![#'int { 42 ~> p1 ~; Ok }] } [];
             10 ~> p2 ~;
             r = !p2;
             r:((message: Str['bin]))crash ~> =(message: m);
@@ -322,7 +324,7 @@ fn test_receive_function_cannot_select() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ ![#'int { !#'int; Ok }] } [];
+            p = @#[] { ![#'int { !#'int; Ok }] } [];
             10 ~> p ~;
             r = !p;
             r:((message: Str['bin]))crash ~> =(message: m);
@@ -339,8 +341,8 @@ fn test_receive_function_cannot_await() {
     quiver()
         .evaluate(
             r#"
-            q = @#{ 42 } [];
-            p = @#{ ![#'int { !q; Ok }] } [];
+            q = @#[] { 42 } [];
+            p = @#[] { ![#'int { !q; Ok }] } [];
             10 ~> p ~;
             r = !p;
             r:(Error(pid: (@)))crash ~> =Error(pid: &p)
@@ -355,7 +357,7 @@ fn test_receive_function_cannot_perform_effect() {
         .with_io()
         .evaluate(
             r#"
-            p = @#{ ![#'int { ["/dev/null" ~> .0, 0, 0] ~> __file_open__ ~; Ok }] } [];
+            p = @#[] { ![#'int { ["/dev/null" ~> .0, 0, 0] ~> __file_open__ ~; Ok }] } [];
             10 ~> p ~;
             r = !p;
             r:((message: Str['bin]))crash ~> =(message: m);
@@ -378,7 +380,7 @@ fn test_parent_termination_tears_down_children() {
     quiver()
         .evaluate(
             r#"
-            a = @#{ [@#{ !'int } [], @#{ !'int } []] } [];
+            a = @#[] { [@#[] { !'int } [], @#[] { !'int } []] } [];
             !a ~> =[b1, b2];
             r1 = !b1;
             r2 = !b2;
@@ -393,7 +395,7 @@ fn test_detached_child_survives_parent() {
     quiver()
         .evaluate(
             r#"
-            a = @#{ p = @#{ !'int } []; %proc.detach p; [p] } [];
+            a = @#[] { p = @#[] { !'int } []; %proc.detach p; [p] } [];
             !a ~> =[b];
             42 ~> b ~;
             !b ~> =('int)v;
@@ -410,7 +412,7 @@ fn test_detach_requires_ownership() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ !'int } [];
+            p = @#[] { !'int } [];
             %proc.detach p;
             %proc.detach p
             "#,
@@ -427,7 +429,7 @@ fn test_kill_terminates_a_running_process() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ !'int } [];
+            p = @#[] { !'int } [];
             %proc.kill p;
             r = !p;
             r:('%proc.crash)crash
@@ -441,7 +443,7 @@ fn test_kill_of_completed_process_is_noop() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ 42 } [];
+            p = @#[] { 42 } [];
             !p ~> =('int)v;
             %proc.kill p;
             v
@@ -456,8 +458,8 @@ fn test_link_fires_on_abnormal_termination() {
     quiver()
         .evaluate(
             r#"
-            v = @#{ !'int } [];
-            c = @#{ %proc.link v; "die" ~> __panic__ ~ } [];
+            v = @#[] { !'int } [];
+            c = @#[] { %proc.link v; "die" ~> __panic__ ~ } [];
             rc = !c;
             rv = !v;
             rv:(Killed)crash
@@ -472,8 +474,8 @@ fn test_link_is_silent_on_normal_completion() {
     quiver()
         .evaluate(
             r#"
-            v = @#{ !'int } [];
-            c = @#{ %proc.link v; 1 } [];
+            v = @#[] { !'int } [];
+            c = @#[] { %proc.link v; 1 } [];
             !c ~> =('int)one;
             42 ~> v ~;
             !v ~> =('int)out;
@@ -490,9 +492,9 @@ fn test_link_to_crashed_process_kills_immediately() {
     quiver()
         .evaluate(
             r#"
-            dead = @#{ "x" ~> __panic__ ~ } [];
+            dead = @#[] { "x" ~> __panic__ ~ } [];
             { ![50] | Ok };
-            c = @#{ %proc.link dead; !'int } [];
+            c = @#[] { %proc.link dead; !'int } [];
             r = !c;
             r:(Killed)crash
             "#,
@@ -508,7 +510,7 @@ fn test_panic_is_catchable_at_await() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ "boom" ~> __panic__ ~ } [];
+            p = @#[] { "boom" ~> __panic__ ~ } [];
             r = !p;
             r:(Panic(message: Str['bin]))crash ~> =(message: m);
             m
@@ -524,7 +526,7 @@ fn test_timeout_stamp_carries_the_ms() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ !'int } [];
+            p = @#[] { !'int } [];
             r = ![p, 30];
             r:('int)timeout
             "#,
@@ -539,7 +541,7 @@ fn test_late_await_of_crashed_process_yields_same_crash() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ "gone" ~> __panic__ ~ } [];
+            p = @#[] { "gone" ~> __panic__ ~ } [];
             { ![20] | Ok };
             r = !p;
             r:(Panic(pid: (@), message: Str['bin]))crash ~> =(pid: &p, message: m);
@@ -558,7 +560,7 @@ fn test_await_same_process_twice() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ "hello" } [];
+            p = @#[] { "hello" } [];
             !p;
             !p
             "#,
@@ -574,7 +576,7 @@ fn test_send_to_completed_process_is_dropped() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ !#Str['bin] } [];
+            p = @#[] { !#Str['bin] } [];
             "first" ~> p ~;
             !p;
             "second" ~> p ~;
@@ -586,7 +588,7 @@ fn test_send_to_completed_process_is_dropped() {
 
 #[test]
 fn test_multiple_receives_same_type() {
-    quiver().evaluate("@#{ !#'int; !#'int } []").expect("@1");
+    quiver().evaluate("@#[] { !#'int; !#'int } []").expect("@1");
 }
 
 #[test]
@@ -594,25 +596,25 @@ fn test_multiple_receives_different_types_widens() {
     // Multiple receives with different types should widen to a union
     // The function receives int | bin, and the receives return those types
     // Since we receive int first, then bin, the result is bin (last value)
-    quiver().evaluate("@#{ !#'int; !#'bin } []").expect("@1");
+    quiver().evaluate("@#[] { !#'int; !#'bin } []").expect("@1");
 }
 
 #[test]
 fn test_await_simple() {
-    quiver().evaluate("@#{ 42 } [] ~> !").expect("42");
+    quiver().evaluate("@#[] { 42 } [] ~> !").expect("42");
 }
 
 #[test]
 fn test_await_returns_process_result() {
     quiver()
-        .evaluate("@#{ [1, 2] ~> __integer_add__ ~ } [] ~> !")
+        .evaluate("@#[] { [1, 2] ~> __integer_add__ ~ } [] ~> !")
         .expect("3");
 }
 
 #[test]
 fn test_await_with_captures() {
     quiver()
-        .evaluate("x = 10; @#{ [x, 32] ~> __integer_add__ ~ } [] ~> !")
+        .evaluate("x = 10; @#[] { [x, 32] ~> __integer_add__ ~ } [] ~> !")
         .expect("42");
 }
 
@@ -622,7 +624,7 @@ fn test_await_process_type_checking() {
         .evaluate(
             r#"
             await_fn = #(@!'int) { =p => !p };
-            f = #{ 42 };
+            f = #[] { 42 };
             @f [] ~> await_fn ~
             "#,
         )
@@ -641,7 +643,7 @@ fn test_self_reference_cannot_be_awaited() {
 
 #[test]
 fn test_select_single_process() {
-    quiver().evaluate("@#{ 42 } [] ~> !").expect("42");
+    quiver().evaluate("@#[] { 42 } [] ~> !").expect("42");
 }
 
 #[test]
@@ -649,8 +651,8 @@ fn test_select_multiple_processes_first_ready() {
     quiver()
         .evaluate(
             r#"
-            fast = #{ 42 };
-            slow = #{ !#'int };
+            fast = #[] { 42 };
+            slow = #[] { !#'int };
             p1 = @fast [];
             p2 = @slow [];
             ![p1, p2]
@@ -664,8 +666,8 @@ fn test_select_priority_left_to_right() {
     quiver()
         .evaluate(
             r#"
-            f1 = #{ 42 };
-            f2 = #{ 100 };
+            f1 = #[] { 42 };
+            f2 = #[] { 100 };
             p1 = @f1 [];
             p2 = @f2 [];
             !p1; !p2;
@@ -680,7 +682,7 @@ fn test_select_single_receive() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ !#'int } [];
+            p = @#[] { !#'int } [];
             42 ~> p ~; !p
             "#,
         )
@@ -692,7 +694,7 @@ fn test_select_multiple_receive_patterns() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ ![#'int, #'bin] } [];
+            p = @#[] { ![#'int, #'bin] } [];
             42 ~> p ~; !p
             "#,
         )
@@ -704,7 +706,7 @@ fn test_select_receive_pattern_priority() {
     quiver()
         .evaluate(
             r#"
-            f = #{
+            f = #[] {
                 . ~> =self_pid;
                 42 ~> self_pid ~;
                 <00> ~> self_pid ~;
@@ -721,7 +723,7 @@ fn test_select_receive_waits_for_match() {
     quiver()
         .evaluate(
             r#"
-            f = #{
+            f = #[] {
                 . ~> =self_pid;
                 10 ~> self_pid ~;
                 42 ~> self_pid ~;
@@ -739,7 +741,7 @@ fn test_timeout_fires() {
     quiver()
         .evaluate(
             r#"
-            slow = #{ !#'int };
+            slow = #[] { !#'int };
             ![@slow [], 1000]
             "#,
         )
@@ -751,7 +753,7 @@ fn test_timeout_process_completes_first() {
     quiver()
         .evaluate(
             r#"
-            fast = #{ 42 };
+            fast = #[] { 42 };
             ![@fast [], 1000]
             "#,
         )
@@ -763,7 +765,7 @@ fn test_timeout_zero() {
     quiver()
         .evaluate(
             r#"
-            slow = #{ !#'int };
+            slow = #[] { !#'int };
             ![@slow [], 0]
             "#,
         )
@@ -793,8 +795,8 @@ fn test_mixed_process_and_receive() {
     quiver()
         .evaluate(
             r#"
-            make_receiver = #{
-                fast = @#{ 99 } [];
+            make_receiver = #[] {
+                fast = @#[] { 99 } [];
                 !fast;
                 ![#'int, fast]
             };
@@ -810,8 +812,8 @@ fn test_mixed_all_three_types_receive_wins() {
     quiver()
         .evaluate(
             r#"
-            receiver = @#{
-                slow = @#{ !#'bin } [];
+            receiver = @#[] {
+                slow = @#[] { !#'bin } [];
                 ![#'int, slow, 1000]
             } [];
             42 ~> receiver ~; !receiver
@@ -825,8 +827,8 @@ fn test_mixed_all_three_types_process_wins() {
     quiver()
         .evaluate(
             r#"
-            @#{
-                fast = @#{ 99 } [];
+            @#[] {
+                fast = @#[] { 99 } [];
                 ![#'int, fast, 1000]
             } [] ~> !
             "#,
@@ -839,8 +841,8 @@ fn test_mixed_all_three_types_timeout_wins() {
     quiver()
         .evaluate(
             r#"
-            @#{
-                slow = @#{ !#'bin } [];
+            @#[] {
+                slow = @#[] { !#'bin } [];
                 ![#'int, slow, 500]
             } [] ~> !
             "#,
@@ -853,7 +855,7 @@ fn test_select_with_ripple() {
     quiver()
         .evaluate(
             r#"
-            fast = #{ 42 };
+            fast = #[] { 42 };
             @fast [] ~> ![~, 1000]
             "#,
         )
@@ -865,7 +867,7 @@ fn test_select_ripple_timeout_wins() {
     quiver()
         .evaluate(
             r#"
-            slow = #{ !#'int };
+            slow = #[] { !#'int };
             @slow [] ~> ![~, 100]
             "#,
         )
@@ -877,7 +879,7 @@ fn test_select_nested_chain_outer_used() {
     quiver()
         .evaluate(
             r#"
-            fast = #{ 42 };
+            fast = #[] { 42 };
             @fast [] ~> ![~, 3 ~> ~]
             "#,
         )
@@ -887,7 +889,7 @@ fn test_select_nested_chain_outer_used() {
 #[test]
 fn test_select_receive_with_ripple() {
     quiver()
-        .evaluate("p1 = @#{ !#'int ~> [~] } []; 0 ~> p1 ~; !p1")
+        .evaluate("p1 = @#[] { !#'int ~> [~] } []; 0 ~> p1 ~; !p1")
         .expect("[0]");
 }
 
@@ -897,7 +899,7 @@ fn test_receive_type_from_variable() {
         .evaluate(
             r#"
             receiver_func = #'int;
-            p = @#{ ![receiver_func] ~> [~, 100] ~> __integer_add__ ~ } [];
+            p = @#[] { ![receiver_func] ~> [~, 100] ~> __integer_add__ ~ } [];
             42 ~> p ~; !p
             "#,
         )
@@ -910,7 +912,7 @@ fn test_receive_type_from_module_member() {
     // (like an identity function) it is NOT applied to the message — the message passes through
     // unchanged. The module member is used inline, with no intermediate binding.
     quiver()
-        .evaluate("p = @#{ !%int.and } []; [255, 240] ~> p ~; !p")
+        .evaluate("p = @#[] { !%int.and } []; [255, 240] ~> p ~; !p")
         .expect("[255, 240]");
 }
 
@@ -919,10 +921,10 @@ fn test_body_less_receiver_builtin_matches_identity_function() {
     // A builtin and the equivalent body-less (identity) function behave identically as
     // receivers: both name the message type and return the received message, neither applies.
     quiver()
-        .evaluate("p = @#{ !%int.and } []; [255, 240] ~> p ~; !p")
+        .evaluate("p = @#[] { !%int.and } []; [255, 240] ~> p ~; !p")
         .expect("[255, 240]");
     quiver()
-        .evaluate("p = @#{ !#['int, 'int] } []; [255, 240] ~> p ~; !p")
+        .evaluate("p = @#[] { !#['int, 'int] } []; [255, 240] ~> p ~; !p")
         .expect("[255, 240]");
 }
 
@@ -934,7 +936,7 @@ fn test_postfix_select_with_function() {
         .evaluate(
             r#"
             receiver = #'int;
-            p = @#{ . ~> =self_pid; 42 ~> self_pid ~; !receiver } [];
+            p = @#[] { . ~> =self_pid; 42 ~> self_pid ~; !receiver } [];
             !p
             "#,
         )
@@ -943,7 +945,7 @@ fn test_postfix_select_with_function() {
 
 #[test]
 fn test_postfix_select_with_timeout() {
-    quiver().evaluate("@#{ ![1] } [] ~> !").expect("[]");
+    quiver().evaluate("@#[] { ![1] } [] ~> !").expect("[]");
 }
 
 #[test]
@@ -952,7 +954,7 @@ fn test_postfix_select_equivalence_timeout() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ ![1] } [];
+            p = @#[] { ![1] } [];
             !p
             "#,
         )
@@ -964,7 +966,7 @@ fn test_nested_select() {
     quiver()
         .evaluate(
             r#"
-            inner = #{ ![#'int, 500] };
+            inner = #[] { ![#'int, 500] };
             p = @inner [];
             42 ~> p ~;
             ![p, 1000]
@@ -978,8 +980,8 @@ fn test_continuation_after_timeout() {
     quiver()
         .evaluate(
             r#"
-            @#{
-                slow = @#{ !#'int } [];
+            @#[] {
+                slow = @#[] { !#'int } [];
                 result = ![slow, 100] ~> =[];
                 [result, 42]
             } [] ~> !
@@ -993,8 +995,8 @@ fn test_process_spawns_and_receives_reply() {
     quiver()
         .evaluate(
             r#"
-            child = #{ ![#(@'int) { =parent => { 42 ~> parent ~; Ok } }] };
-            parent = #{ c = @child []; . ~> c ~; !#'int };
+            child = #[] { ![#(@'int) { =parent => { 42 ~> parent ~; Ok } }] };
+            parent = #[] { c = @child []; . ~> c ~; !#'int };
             @parent []
             "#,
         )
@@ -1004,14 +1006,14 @@ fn test_process_spawns_and_receives_reply() {
 #[test]
 fn test_send_to_self() {
     quiver()
-        .evaluate("@#{ me = .; 10 ~> me ~; !#'int } [] ~> !")
+        .evaluate("@#[] { me = .; 10 ~> me ~; !#'int } [] ~> !")
         .expect("10");
 }
 
 #[test]
 fn test_send_to_self_with_receive_type_check() {
     quiver()
-        .evaluate("#{ me = .; <00> ~> me ~; !#'int }")
+        .evaluate("#[] { me = .; <00> ~> me ~; !#'int }")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "'int".to_string(),
             found: "'bin".to_string(),
@@ -1077,7 +1079,7 @@ fn test_receive_type_in_tail_call_argument() {
 fn test_sugar_bare_primitive_type() {
     // Test !'int instead of !#'int
     quiver()
-        .evaluate("p = @#{ !'int } []; 42 ~> p ~; !p")
+        .evaluate("p = @#[] { !'int } []; 42 ~> p ~; !p")
         .expect("42");
 }
 
@@ -1090,7 +1092,7 @@ fn test_sugar_type_alias() {
         .evaluate(
             r#"
             'my_type = 'int;
-            p = @#{ !('my_type) } [];
+            p = @#[] { !('my_type) } [];
             42 ~> p ~; !p
             "#,
         )
@@ -1103,7 +1105,7 @@ fn test_sugar_union_type() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ !('int | 'bin) } [];
+            p = @#[] { !('int | 'bin) } [];
             42 ~> p ~; !p
             "#,
         )
@@ -1116,7 +1118,7 @@ fn test_sugar_receive_function_with_identifier_type() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ ![#'int { =42 => Ok }] } [];
+            p = @#[] { ![#'int { =42 => Ok }] } [];
             10 ~> p ~; 20 ~> p ~; 42 ~> p ~;
             !p
             "#,
@@ -1130,7 +1132,7 @@ fn test_sugar_receive_function_with_union_type() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ ![#('int | 'bin) { =42 => Ok }] } [];
+            p = @#[] { ![#('int | 'bin) { =42 => Ok }] } [];
             <00> ~> p ~; 42 ~> p ~;
             !p
             "#,
@@ -1145,7 +1147,7 @@ fn test_sugar_parenthesized_identifier() {
         .evaluate(
             r#"
             'receiver_type = 'int;
-            p = @#{ !('receiver_type) } [];
+            p = @#[] { !('receiver_type) } [];
             42 ~> p ~; !p
             "#,
         )
@@ -1158,8 +1160,8 @@ fn test_sugar_mixed_with_comma_separation() {
     quiver()
         .evaluate(
             r#"
-            make_receiver = #{
-                fast = @#{ 99 } [];
+            make_receiver = #[] {
+                fast = @#[] { 99 } [];
                 !fast;
                 ![#'int, fast]
             };
@@ -1177,7 +1179,7 @@ fn test_sugar_tuple_type() {
     quiver()
         .evaluate(
             r#"
-            p = @#{ !#['int, 'int] } [];
+            p = @#[] { !#['int, 'int] } [];
             [42, 100] ~> p ~; !p
             "#,
         )
@@ -1188,7 +1190,7 @@ fn test_sugar_tuple_type() {
 fn test_process_reference_after_completion() {
     // Test that @N syntax works even after the process has completed
     quiver()
-        .evaluate("p = @{ 42 } []")
+        .evaluate("p = @[] { 42 } []")
         .expect("Ok")
         .then_evaluate("!@1")
         .expect("42");
@@ -1200,7 +1202,7 @@ fn test_process_reference_after_completion() {
 
 #[test]
 fn test_nilary_spawn_takes_no_init() {
-    quiver().evaluate("p = @{ 99 } []; !p").expect("99");
+    quiver().evaluate("p = @[] { 99 } []; !p").expect("99");
 }
 
 #[test]
@@ -1211,7 +1213,7 @@ fn test_filter_shorthand_skips_messages() {
     quiver()
         .evaluate(
             r#"
-            p = @#{
+            p = @#[] {
                 me = .; 1 ~> me ~;
                 me = .; 2 ~> me ~;
                 !'int { =2 => Ok | [] };
@@ -1227,7 +1229,7 @@ fn test_filter_shorthand_skips_messages() {
 fn test_partial_type_receive_shorthand() {
     // `!(...)` accepts a partial type — the parens are part of the type syntax.
     quiver()
-        .evaluate("p = @#{ !(x: 'int) ~> .x } []; [x: 7, y: 8] ~> p ~; !p")
+        .evaluate("p = @#[] { !(x: 'int) ~> .x } []; [x: 7, y: 8] ~> p ~; !p")
         .expect("7");
 }
 
@@ -1235,11 +1237,11 @@ fn test_partial_type_receive_shorthand() {
 fn test_general_select_is_glued() {
     // The general form is glued like every other select form: `![sources]`.
     quiver()
-        .evaluate("p = @#{ 42 } []; ![p, 1000]")
+        .evaluate("p = @#[] { 42 } []; ![p, 1000]")
         .expect("42");
     // A space between `!` and the tuple is a parse error (bare `!` then a stray term).
     quiver()
-        .evaluate("p = @#{ 42 } []; ! [p, 1000]")
+        .evaluate("p = @#[] { 42 } []; ! [p, 1000]")
         .expect_parse_failure();
 }
 

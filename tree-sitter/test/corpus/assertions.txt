@@ -19,7 +19,7 @@ trailing assertion
 assertion inside a block
 ==================
 
-#{
+#[] {
   %list{ 1, 2, 3 } ~> sum [~] //=> 6
 }
 
@@ -29,6 +29,7 @@ assertion inside a block
   (sequence
     (chain
       (function
+        (tuple_type)
         (block
           (branch
             (sequence

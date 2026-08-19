@@ -32,9 +32,9 @@ fn nil_arg_callable_field_is_stored_not_called() {
     // A record of functions is the ordinary case: the field is the function, and `&` adds
     // nothing to it.
     quiver()
-        .evaluate("g = #{ 42 }; [g] ~> .0 ~> ~ []")
+        .evaluate("g = #[] { 42 }; [g] ~> .0 ~> ~ []")
         .expect("42");
-    quiver().evaluate("g = #{ 42 }; [g []]").expect("[42]");
+    quiver().evaluate("g = #[] { 42 }; [g []]").expect("[42]");
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn higher_order_argument_is_a_plain_name() {
 fn nil_arg_callable_passed_then_called() {
     // A nil-arg function passed by `&`, then explicitly called.
     quiver()
-        .evaluate("g = #{ 42 }; t = [g]; [] ~> t.0 ~")
+        .evaluate("g = #[] { 42 }; t = [g]; [] ~> t.0 ~")
         .expect("42");
 }
 

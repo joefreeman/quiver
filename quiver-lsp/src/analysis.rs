@@ -702,7 +702,7 @@ mod tests {
         .unwrap();
 
         // Two references to `%util.double` and one to `%util.triple`.
-        let text = "#{ [ 1 ~> %util.double ~, 2 ~> %util.double ~, 3 ~> %util.triple ~ ] }";
+        let text = "#[] { [ 1 ~> %util.double ~, 2 ~> %util.double ~, 3 ~> %util.triple ~ ] }";
         let resolver = PackageResolver::for_entry_file(&src.join("main.qv"));
         let analysis = analyze(text, &LineIndex::new(text), &resolver);
         let semantics = analysis.semantics.expect("semantics");
@@ -791,7 +791,7 @@ mod tests {
     #[test]
     fn hover_on_operators_shows_their_inferred_types() {
         use quiver_compiler::recorder::SymbolKind;
-        let text = "f = #'int { ~ };\nt = [a: 1, b: 2];\n5 ~> [~, 1];\np = @{ 42 } [];\n!p";
+        let text = "f = #'int { ~ };\nt = [a: 1, b: 2];\n5 ~> [~, 1];\np = @[] { 42 } [];\n!p";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let program = analysis.program.unwrap();
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(at("[~, 1]", 1).1, "'int");
         // `@` → the process type; `!` → the awaited result (fallible: `!` is never
         // lethal, so a crashed source answers a stamped nil).
-        assert!(at("@{", 0).1.contains('@'));
+        assert!(at("@[] {", 0).1.contains('@'));
         assert_eq!(at("!p", 0).1, "'int | []");
     }
 

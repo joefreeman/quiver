@@ -13,21 +13,21 @@ unfold = #<'s, 't>[(self): #^ -> 'thunk<'t>, (state): 's, (step): #'s -> (['t, '
   self = $self
   state = $state
   step = $step
-  #{ step state ~> =[value, next_state]; [value, self [self, next_state, step]] }
+  #[] { step state ~> =[value, next_state]; [value, self [self, next_state, step]] }
 }
 
 map = #<'t, 'u>[(self): #^ -> 'thunk<'u>, (it): 'thunk<'t>, (f): #'t -> 'u] {
   self = $self
   it = $it
   f = $f
-  #{ it [] ~> =[value, next]; f value ~> [~, self [self, next, f]] }
+  #[] { it [] ~> =[value, next]; f value ~> [~, self [self, next, f]] }
 }
 
 filter = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (pred): #'t -> ('t | [])] {
   self = $self
   it = $it
   pred = $pred
-  #{
+  #[] {
     it [] ~> =[value, next]
     {
       | pred value => self [self, next, pred] ~> [value, ~]
@@ -40,7 +40,7 @@ take = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (n): 'int] {
   self = $self
   it = $it
   n = $n
-  #{
+  #[] {
     | n ~> =0 => []
     | { it [] ~> =[value, next]; n ~> %num.sub [~, 1] ~> self [self, next, ~] ~> [value, ~] }
   }
@@ -50,7 +50,7 @@ drop = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (n): 'int] {
   self = $self
   it = $it
   n = $n
-  #{
+  #[] {
     | n ~> =0 => it []
     | {
       it [] ~> =[_, next]
@@ -65,14 +65,14 @@ take_while = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (pred): #'t -> ('
   self = $self
   it = $it
   pred = $pred
-  #{ it [] ~> =[value, next]; pred value; self [self, next, pred] ~> [value, ~] }
+  #[] { it [] ~> =[value, next]; pred value; self [self, next, pred] ~> [value, ~] }
 }
 
 drop_while = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (pred): #'t -> ('t | [])] {
   self = $self
   it = $it
   pred = $pred
-  #{
+  #[] {
     it [] ~> =[value, next]
     {
       | pred value => self [self, next, pred] ~> ^~ []
@@ -86,7 +86,7 @@ flat_map = #<'t, 'u>[(self): #^ -> 'thunk<'u>, (source): 'thunk<'t>, (f): #'t ->
   source = $source
   f = $f
   current = $current
-  #{
+  #[] {
     | { current [] ~> =[value, next]; [value, self [self, source, f, next]] }
     | { source [] ~> =[value, next]; f value ~> =Iter[fc]; self [self, next, f, fc] ~> ^~ [] }
   }
@@ -96,7 +96,7 @@ chain = #<'t>[(self): #^ -> 'thunk<'t>, (first): 'thunk<'t>, (second): 'thunk<'t
   self = $self
   first = $first
   second = $second
-  #{
+  #[] {
     first [] ~> {
       | =[value, next] => [value, self [self, next, second]]
       | =[] => second []
@@ -108,14 +108,14 @@ zip = #<'t, 'u>[(self): #^ -> 'thunk<['t, 'u]>, (it1): 'thunk<'t>, (it2): 'thunk
   self = $self
   it1 = $it1
   it2 = $it2
-  #{ it1 [] ~> =[v1, next1]; it2 [] ~> =[v2, next2]; [[v1, v2], self [self, next1, next2]] }
+  #[] { it1 [] ~> =[v1, next1]; it2 [] ~> =[v2, next2]; [[v1, v2], self [self, next1, next2]] }
 }
 
 enumerate = #<'t>[(self): #^ -> 'thunk<['int, 't]>, (it): 'thunk<'t>, (index): 'int] {
   self = $self
   it = $it
   index = $index
-  #{
+  #[] {
     it [] ~> =[value, next]; index ~> %num.add [~, 1] ~> self [self, next, ~] ~> [[index, value], ~]
   }
 }
@@ -124,7 +124,7 @@ cycle = #<'t>[(self): #^ -> 'thunk<'t>, (original): 'thunk<'t>, (current): 'thun
   self = $self
   original = $original
   current = $current
-  #{
+  #[] {
     current [] ~> {
       | =[value, next] => [value, self [self, original, next]]
       | self [self, original, original] ~> ^~ []
@@ -133,7 +133,7 @@ cycle = #<'t>[(self): #^ -> 'thunk<'t>, (original): 'thunk<'t>, (current): 'thun
 }
 
 repeat = #<'t>[(self): #^ -> 'thunk<'t>, (value): 't] {
-  self = $self; value = $value; #{ [value, self [self, value]] }
+  self = $self; value = $value; #[] { [value, self [self, value]] }
 }
 
 fold = #<'t, 'acc>[(it): 'thunk<'t>, (acc): 'acc, (f): #['acc, 't] -> 'acc] {
@@ -190,7 +190,7 @@ intersperse = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (sep): 't] {
   self = $self
   it = $it
   sep = $sep
-  #{ it [] ~> =[value, next]; [sep, #{ [value, self [self, next, sep]] }] }
+  #[] { it [] ~> =[value, next]; [sep, #[] { [value, self [self, next, sep]] }] }
 }
 
 [
@@ -305,6 +305,6 @@ intersperse = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (sep): 't] {
     // so bind the field locally.
     $iter ~> =Iter[r]
     sep = $sep
-    #{ r [] ~> =[first, rest]; [first, intersperse [intersperse, rest, sep]] } ~> Iter[~]
+    #[] { r [] ~> =[first, rest]; [first, intersperse [intersperse, rest, sep]] } ~> Iter[~]
   },
 ]

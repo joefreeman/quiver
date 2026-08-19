@@ -186,7 +186,7 @@ redirect = #'%str {
   Response[status: 303, headers: %list{ ["location", $] }, body: <>]
 }
 
-not_found = #{
+not_found = #[] {
   :doc "A plain 404 response."
   plain [404, "Not Found"]
 }
