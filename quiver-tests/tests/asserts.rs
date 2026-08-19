@@ -1,17 +1,34 @@
 mod common;
 use common::*;
 
-// Step-final `//=> P` assertions: in a debug build the step's value is matched against the
-// pattern and a mismatch aborts, like a violated contract; a release build skips the check
-// but still parses and type-checks the pattern, so types are identical across build modes.
-// The value flows on unchanged either way — a nil step still short-circuits — and the
-// pattern may not bind.
+// `//=> P` assertions observe the value flowing at the end of the line they terminate: in a
+// debug build that value is matched against the pattern and a mismatch aborts, like a violated
+// contract; a release build skips the check but still parses and type-checks the pattern, so
+// types are identical across build modes. The value flows on unchanged either way — an asserted
+// nil still short-circuits — and the pattern may not bind.
 
 #[test]
 fn test_assertion_passes_and_value_flows() {
     quiver().debug().evaluate("5 //=> 5").expect("5");
-    // A binding step's value is its match verdict.
-    quiver().debug().evaluate("x = 5 //=> Ok\nx").expect("5");
+}
+
+#[test]
+fn test_binding_chain_observes_its_value_not_the_verdict() {
+    // The binding matches the chain's result, and the assertion ends the chain — so it sees
+    // what is about to be bound, not the `Ok` the step goes on to evaluate to.
+    quiver().debug().evaluate("x = 5 //=> 5\nx").expect("5");
+    quiver()
+        .debug()
+        .evaluate("x = 5 //=> Ok\nx")
+        .expect_compile_error(quiver_compiler::compiler::Error::PatternNoMatchingTypes {
+            pattern: "Ok".to_string(),
+        });
+    // The verdict is what the match spelling's chain evaluates to, so that is where it is
+    // observable — including a failing one, which short-circuits as usual.
+    quiver()
+        .debug()
+        .evaluate("{ 5 ~> =6 //=> []\nUnreached | Reached }")
+        .expect("Reached");
 }
 
 #[test]
@@ -115,6 +132,73 @@ fn test_prose_note_after_three_spaces() {
         .expect("\"a   b\"");
 }
 
+// A chain spread over lines can assert on each of them: an assertion ends its line, so what
+// follows is necessarily a `~>` continuation, and the value it observes is the one flowing into
+// that continuation.
+
+#[test]
+fn test_mid_chain_assertions_observe_each_line() {
+    quiver()
+        .debug()
+        .evaluate("1 //=> 1\n~> %num.add [~, 2] //=> 3\n~> %num.mul [~, 3] //=> 9")
+        .expect("9");
+    quiver()
+        .debug()
+        .evaluate("1 //=> 1\n~> %num.add [~, 2] //=> 4")
+        .expect_runtime_error(quiver_core::error::Error::Panic(
+            "Assertion '4' failed at test:2:20".to_string(),
+        ));
+    // The head's value, before anything has consumed it.
+    quiver()
+        .debug()
+        .evaluate("1 //=> 2\n~> %num.add [~, 2]")
+        .expect_runtime_error(quiver_core::error::Error::Panic(
+            "Assertion '2' failed at test:1:3".to_string(),
+        ));
+    // A stale mid-chain expectation fails the build, in either mode, as a step-final one does.
+    quiver()
+        .evaluate("1 //=> Ok\n~> %num.add [~, 2]")
+        .expect_compile_error(quiver_compiler::compiler::Error::PatternNoMatchingTypes {
+            pattern: "Ok".to_string(),
+        });
+}
+
+#[test]
+fn test_mid_chain_assertion_forms() {
+    // Stacked, on their own lines, mid-chain.
+    quiver()
+        .debug()
+        .evaluate("1\n//=> 'int\n//=> 1\n~> %num.add [~, 2]")
+        .expect("3");
+    // In a value chain — a tuple field spread over lines — where there is no step to end.
+    quiver()
+        .debug()
+        .evaluate("[a: 1 //=> 1\n~> %num.add [~, 2]]")
+        .expect("[a: 3]");
+    // A binding's value chain is asserted the same way, line by line.
+    quiver()
+        .debug()
+        .evaluate("x = 1 //=> 1\n~> %num.add [~, 2] //=> 3\nx")
+        .expect("3");
+}
+
+#[test]
+fn test_comments_may_sit_in_a_continuation_gap() {
+    quiver()
+        .debug()
+        .evaluate("1 // the head\n// and a note above the continuation\n~> %num.add [~, 2]")
+        .expect("3");
+    // Alongside an assertion, in either order.
+    quiver()
+        .debug()
+        .evaluate("1 //=> 1\n// a note\n~> %num.add [~, 2]")
+        .expect("3");
+    quiver()
+        .debug()
+        .evaluate("1 // a note\n//=> 1\n~> %num.add [~, 2]")
+        .expect("3");
+}
+
 // A leading `//=>` continues the step above — the trailing form with a line break — so it
 // observes that step's value, and any run of newlines, blank lines, comments and `;`
 // separators may sit between. At the start of a sequence there is no step to continue: the
@@ -142,7 +226,7 @@ fn test_own_line_assertion_attaches_across_separators() {
     // Blank lines, comments, and `;` (a newline's synonym) all belong to the step.
     quiver()
         .debug()
-        .evaluate("x = 5;\n\n// carried\n//=> Ok\nx")
+        .evaluate("x = 5;\n\n// carried\n//=> 5\nx")
         .expect("5");
 }
 

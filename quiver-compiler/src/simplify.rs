@@ -49,8 +49,11 @@ pub fn normalize_blocks(sequence: Sequence, options: &Options) -> Sequence {
         // Lift a multi-step no-binding block that is a sequence step's sole term, splicing its
         // (already-simplified) steps into this sequence so the compiler emits no frame for it. A
         // single-step such block was already spliced into the chain by `strip_chain`.
+        // A chain carrying a `//=> P` observes its own value, which lifting would dissolve into
+        // the enclosing sequence — so the assertion keeps the block, as it does in `strip_chain`.
         if options.lift
             && chain.binding.is_none()
+            && chain.assertions.is_empty()
             && matches!(chain.terms.as_slice(), [term] if is_liftable_block(term))
         {
             let Some(Term::Block(mut block)) = chain.terms.into_iter().next() else {
@@ -70,10 +73,17 @@ fn strip_chain(chain: Chain, options: &Options) -> Chain {
         binding_span,
         span,
         terms,
-        assertions,
+        continuations,
+        mut assertions,
     } = chain;
     let last_index = terms.len().saturating_sub(1);
     let mut simplified = Vec::with_capacity(terms.len());
+    // Splicing a block's terms in place of one term moves every position after it, so the gaps
+    // and the assertions' positions are rebuilt alongside. `positions[k]` is where the value
+    // observed after the original chain's first `k` terms now sits.
+    let mut gaps = Vec::with_capacity(continuations.len());
+    let mut positions = Vec::with_capacity(terms.len() + 1);
+    positions.push(0);
     for (index, term) in terms.into_iter().enumerate() {
         // Simplify each term bottom-up first, so nested redundant blocks collapse before the parent
         // is tested; then splice a redundant block's body terms in place of the block.
@@ -95,6 +105,10 @@ fn strip_chain(chain: Chain, options: &Options) -> Chain {
                 && body.assertions.is_empty()
                 && (!ends_in_tail_call || index == last_index)
         };
+        if index > 0 {
+            // Absent for a chain the compiler synthesized, which has no source `~>` to record.
+            gaps.push(continuations.get(index - 1).cloned().unwrap_or_default());
+        }
         if strip {
             let Term::Block(mut block) = term else {
                 unreachable!("redundant implies a block")
@@ -103,16 +117,24 @@ fn strip_chain(chain: Chain, options: &Options) -> Chain {
             let Step::Chain(body) = condition.steps.remove(0) else {
                 unreachable!("redundant implies a single chain step")
             };
+            // The body's own gaps come with its terms, so a comment written inside the block
+            // keeps the anchor it was attached to.
+            gaps.extend(body.continuations);
             simplified.extend(body.terms);
         } else {
             simplified.push(term);
         }
+        positions.push(simplified.len());
+    }
+    for assertion in &mut assertions {
+        assertion.after = positions[assertion.after];
     }
     Chain {
         binding,
         binding_span,
         span,
         terms: simplified,
+        continuations: gaps,
         assertions,
     }
 }
@@ -214,6 +236,7 @@ fn group_consequence(consequence: Sequence) -> Sequence {
             binding: None,
             binding_span: Spanned::default(),
             span: Spanned::default(),
+            continuations: Vec::new(),
             terms: vec![block],
             assertions: Vec::new(),
         }])

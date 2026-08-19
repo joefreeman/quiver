@@ -503,7 +503,7 @@ destructure a named tuple without stating its name, use a partial or star patter
 Literals inside a pattern test rather than bind:
 
 ```quiver
-Point[x: 0, y: n] = Point[x: 0, y: 10]         //=> Ok
+{ Point[x: 0, y: n] = Point[x: 0, y: 10] }   //=> Ok
 { Point[x: 0, y: n] = Point[x: 1, y: 10] }   //=> []
 ```
 
@@ -1239,8 +1239,8 @@ members — but one shed at a declared boundary is no longer visible, and is not
 
 ### Assertions
 
-`//=> P` at the end of a step asserts that the step's value matches the pattern `P`. Like
-a contract, it is enforced in debug builds — a mismatch aborts, naming the site — and
+`//=> P` at the end of a line asserts that the value flowing there matches the pattern `P`.
+Like a contract, it is enforced in debug builds — a mismatch aborts, naming the site — and
 skipped in release builds. It reads as a comment, and that is deliberate: this guide's own
 result markers are assertions, so a document whose examples carry them is checked by
 running it.
@@ -1248,24 +1248,37 @@ running it.
 ```quiver
 double = #'int { %num.mul [$, 2] }
 5 ~> double ~ //=> 10
-x = double 3 //=> Ok   a binding step's value is its verdict
-x                      //=> 6
+x = double 3  //=> 6   the value, not the binding's verdict
+x             //=> 6
+```
+
+An assertion ends its line, so what follows one is either the next step or a `~>`
+continuation — which is what lets a chain spread over lines assert on each of them:
+
+```quiver
+1                         //=> 1
+~> %num.add [~, 2]        //=> 3
+~> %num.mul [~, 3]        //=> 9
 ```
 
 The value flows on unchanged — an asserted nil still ends its sequence — and a run of
 three or more spaces after the pattern starts a prose note, ignored to the end of the
-line. An assertion terminates its line, as the comment it resembles would: code may not
-follow it. The pattern may not bind, since an assertion only observes; pins and type tests
-cover most of what a binder would. A pattern that could never match the step's type is a
+line. The pattern may not bind, since an assertion only observes; pins and type tests
+cover most of what a binder would. A pattern that could never match the value's type is a
 compile error, so a stale expectation fails the build even in release mode, where the
 check itself costs nothing.
 
-A `//=>` may also open its own line. A leading `//=>` continues the step above — it is
-the trailing form with a line break, asserting that step's value — and several stack,
-each observing the same value. At the start of a block there is no step to continue: the
-assertion then observes the block's input — the function's parameter, the piped value —
-exactly as a bare `~` step would. And in the REPL, where each entry starts from the
-previous result, a `//=>` entry asserts the value just computed.
+Since it is a *chain* the assertion observes, a binding's is applied after: `x = e //=> P`
+tests `e`, not the `Ok` the step goes on to evaluate to. The verdict is what the match
+spelling's chain produces, so that is where it is observed — `e ~> =P //=> []` asserts a
+failure.
+
+A `//=>` may also open its own line. A leading `//=>` continues the line above — it is
+the trailing form with a line break — and several stack, each observing the same value. At
+the start of a block there is no line to continue: the assertion then observes the block's
+input — the function's parameter, the piped value — exactly as a bare `~` step would. And
+in the REPL, where each entry starts from the previous result, a `//=>` entry asserts the
+value just computed.
 
 ```quiver
 double = #'int {

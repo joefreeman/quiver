@@ -166,6 +166,7 @@ pub fn wrap_expansion(mut holes: Vec<Hole>, expansion: ast::Chain) -> ast::Term 
         binding: None,
         binding_span: ast::Spanned::default(),
         span: ast::Spanned::default(),
+        continuations: Vec::new(),
         terms: vec![ast::Term::Match(ast::Match::Identifier(
             RIPPLE_BINDING.to_string(),
             ast::Spanned::default(),
@@ -178,6 +179,7 @@ pub fn wrap_expansion(mut holes: Vec<Hole>, expansion: ast::Chain) -> ast::Term 
         binding: None,
         binding_span: ast::Spanned::default(),
         span: ast::Spanned::default(),
+        continuations: Vec::new(),
         assertions: Vec::new(),
         terms: hole.terms,
     }));
@@ -656,6 +658,7 @@ fn term_chain(term: ast::Term) -> ast::Chain {
         binding: None,
         binding_span: ast::Spanned::default(),
         span: ast::Spanned::default(),
+        continuations: Vec::new(),
         terms: vec![term],
         assertions: Vec::new(),
     }

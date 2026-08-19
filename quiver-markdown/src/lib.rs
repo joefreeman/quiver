@@ -180,8 +180,8 @@ fn term_assertions(term: &Term) -> usize {
     }
 }
 
-/// The source with its step-final `//=> P` assertions cut out, leaving line structure intact
-/// (an assertion runs to the end of its line, so nothing but the check is removed).
+/// The source with the `//=> P` assertions of its own chains cut out, leaving line structure
+/// intact (an assertion runs to the end of its line, so nothing but the check is removed).
 ///
 /// This is how a failed assertion's *actual* value is recovered: the check aborts the process
 /// before anything can format what it saw, so the step is re-run without it. Assertions nested

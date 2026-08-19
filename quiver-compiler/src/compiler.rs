@@ -2035,6 +2035,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 binding: None,
                 binding_span: ast::Spanned::default(),
                 span: ast::Spanned::default(),
+                continuations: Vec::new(),
                 terms: vec![ast::Term::Access(source)],
                 assertions: Vec::new(),
             }),
@@ -2520,6 +2521,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 binding: None,
                 binding_span: ast::Spanned::default(),
                 span: ast::Spanned::default(),
+                continuations: Vec::new(),
                 assertions: Vec::new(),
                 terms: vec![ast::Term::Tuple(ast::Tuple {
                     name: ast::TupleName::Anonymous,
@@ -4095,10 +4097,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(())
     }
 
-    /// Compile a step-final `//=> P` assertion. The step's value is on top of the stack and is
-    /// left there untouched: the assertion observes, so a nil step still short-circuits and the
-    /// value's flow is identical across build modes. The pattern is analyzed in both modes — it
-    /// may not bind, and one that can never match is a stale expectation, rejected — but checks
+    /// Compile a `//=> P` assertion. The observed value is on top of the stack and is left there
+    /// untouched: the assertion observes, so an asserted nil still short-circuits its sequence and
+    /// the value's flow is identical across build modes. The pattern is analyzed in both modes —
+    /// it may not bind, and one that can never match is a stale expectation, rejected — but checks
     /// are emitted only in debug builds, where a mismatch aborts like a violated contract.
     fn compile_assertion(
         &mut self,
@@ -4269,11 +4271,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.emit_stamp(chain.span.get(), kind);
             }
 
-            // Step-final `//=> P` assertions observe the step's value in place.
-            for assertion in &chain.assertions {
-                self.compile_assertion(assertion, chain_type, &chain_prov)?;
-            }
-
             // If a prior chain could short-circuit to nil, the sequence's result includes
             // that nil — the *same* value, so its typed nil members (annotation rows
             // preserved) carry over rather than a fresh bare nil.
@@ -4432,6 +4429,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             (None, Provenance::Unknown)
         };
 
+        // `//=> P` assertions observe the value flowing where they were written, in place: the
+        // one at position 0 sees what the chain starts from (all an assertion-only step has),
+        // and the one at position `k` sees the value after the chain's first `k` terms. The
+        // last of those is the chain's own result, which — for a chain with a binding — is what
+        // the pattern is about to be matched against, not the `Ok`/nil verdict of matching it.
+        let assertions = chain.assertions;
+        if let Some(input_type) = current_type {
+            for assertion in assertions.iter().filter(|a| a.after == 0) {
+                self.compile_assertion(assertion, input_type, &current_prov)?;
+            }
+        }
+
         let terms: Vec<_> = chain.terms.into_iter().collect();
         let last_index = terms.len().saturating_sub(1);
         for (i, term) in terms.iter().enumerate() {
@@ -4527,6 +4536,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // type error.
             current_type = Some(term_type);
             current_prov = term_prov;
+
+            for assertion in assertions.iter().filter(|a| a.after == i + 1) {
+                self.compile_assertion(assertion, term_type, &current_prov)?;
+            }
         }
 
         let result_type = current_type.ok_or_else(|| Error::InternalError {

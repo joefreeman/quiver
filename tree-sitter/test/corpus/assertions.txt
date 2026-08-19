@@ -74,7 +74,7 @@ double 5
 assertion on a binding with a prose note
 ==================
 
-x = double 3 //=> Ok   a binding step's value is its verdict
+x = double 3 //=> 6   the value, not the binding's verdict
 
 ---
 
@@ -87,9 +87,57 @@ x = double 3 //=> Ok   a binding step's value is its verdict
           source: (identifier))
         argument: (integer))
       (assertion
-        pattern: (pattern_tuple
-          name: (tuple_name))
+        pattern: (integer)
         (assertion_note)))))
+
+==================
+assertions along a chain's lines
+==================
+
+1 //=> 1
+~> %num.add [~, 2] //=> 3
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (integer)
+      (assertion
+        pattern: (integer))
+      (application
+        function: (access
+          source: (import
+            (identifier))
+          field: (identifier))
+        argument: (tuple
+          (chain
+            (access
+              source: (ripple)))
+          (chain
+            (integer))))
+      (assertion
+        pattern: (integer)))))
+
+==================
+comments and leading assertions in a continuation gap
+==================
+
+1 // the head
+//=> 1
+~> double
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (integer)
+      (comment)
+      (assertion
+        pattern: (integer))
+      (access
+        source: (identifier)))))
 
 ==================
 assertion at the start of a block

@@ -166,13 +166,19 @@ fn sequence_doc(
             Step::Chain(chain) => {
                 let body = chain_doc(trivia, chain);
                 let tall = is_tall_step(chain, &body);
-                // Step-final assertions ride after the chain, before any trailing comment;
-                // they do not make a step "tall". A trailing assertion is glued to the
-                // step's line; an own-line one (a leading `//=>`) starts a fresh line at the
-                // step's indent, keeping any comments written above it (it is an anchor —
-                // see `visit_steps`).
+                // The assertions ending the step's last line ride after the chain, before any
+                // trailing comment; they do not make a step "tall". A trailing assertion is
+                // glued to the step's line; an own-line one (a leading `//=>`) starts a fresh
+                // line at the step's indent, keeping any comments written above it (it is an
+                // anchor — see `visit_chain`). Assertions written above a `~>` continuation
+                // sit inside the chain, and `chain_terms_doc` has already placed them on the
+                // line whose value they observe.
                 let mut parts = vec![body];
-                for (index, assertion) in chain.assertions.iter().enumerate() {
+                let final_assertions = chain
+                    .assertions
+                    .iter()
+                    .filter(|assertion| assertion.after == chain.terms.len());
+                for (index, assertion) in final_assertions.enumerate() {
                     // The first assertion of an assertion-only step opens the step itself,
                     // so the step-level leading trivia above already covers it.
                     let opens_step = index == 0 && chain.terms.is_empty();
@@ -406,7 +412,10 @@ fn chain_doc(trivia: &Trivia, chain: &Chain) -> Doc {
         None => pretty::nil(),
     };
     let terms = &chain.terms;
-    if terms.len() > 1 && is_breakable_container(&terms[terms.len() - 1]) {
+    if terms.len() > 1
+        && is_breakable_container(&terms[terms.len() - 1])
+        && !has_interior_trivia(trivia, chain)
+    {
         // A chain ending in a container (`head { … }`, `head [ … ]`) keeps its head on one line and
         // lets the container break internally. The head is rendered fully flat so neither it nor its
         // inner groups break: a `fits` check on a grouped head would count the (large) trailing
@@ -429,7 +438,7 @@ fn chain_doc(trivia: &Trivia, chain: &Chain) -> Doc {
             ]);
         }
     }
-    let inner = break_if_wider_than(chain_terms_doc(trivia, terms), CHAIN_SOFT_WIDTH);
+    let inner = break_if_wider_than(chain_terms_doc(trivia, chain), CHAIN_SOFT_WIDTH);
     // A binding whose value is a multi-term `~>` pipeline breaks *after* the `=` and indents the
     // pipeline, so the continuations sit under the value rather than dangling at the binding's own
     // indent. A single-term value, or one ending in a self-breaking container (`x = head { … }`),
@@ -451,11 +460,42 @@ fn chain_doc(trivia: &Trivia, chain: &Chain) -> Doc {
 /// flowing value (an `[args] ~> callable` unit just completed), rendered as a leading-`~>`
 /// continuation line. The separator within a unit is a hard ` ~> ` (never breaks), so an argument
 /// tuple stays on the same line as its callable.
-fn chain_terms_doc(trivia: &Trivia, terms: &[Term]) -> Doc {
+///
+/// A gap also carries whatever the author wrote at the end of the line it continues — a comment,
+/// a `//=> P` assertion — and those run to the end of that line, so the gap must then break
+/// whatever the width says, or the `~>` would land inside the comment.
+fn chain_terms_doc(trivia: &Trivia, chain: &Chain) -> Doc {
+    let terms = &chain.terms;
     let mut parts = Vec::new();
     for (index, term) in terms.iter().enumerate() {
         if index > 0 {
-            if is_call_ender(&terms[index - 1]) {
+            let gap = chain
+                .continuations
+                .get(index - 1)
+                .cloned()
+                .unwrap_or_default();
+            let assertions: Vec<_> = chain
+                .assertions
+                .iter()
+                .filter(|assertion| assertion.after == index)
+                .collect();
+            // A comment written after the previous term trails the gap's start; one on its own
+            // line leads the `~>`. (Two anchors, because trivia attaches directionally.)
+            parts.push(trivia.trailing_doc(gap.end));
+            for assertion in &assertions {
+                if assertion.own_line {
+                    parts.push(pretty::hardline());
+                    parts.push(trivia.leading_doc(assertion.span));
+                }
+                parts.push(assertion_doc(assertion, assertion.own_line));
+            }
+            let breaks =
+                !assertions.is_empty() || trivia.has_trivia(gap.end) || trivia.has_trivia(gap.pipe);
+            if breaks {
+                parts.push(pretty::hardline());
+                parts.push(trivia.leading_doc(gap.pipe));
+                parts.push(pretty::text("~> "));
+            } else if is_call_ender(&terms[index - 1]) {
                 parts.push(pretty::line());
                 parts.push(pretty::text("~> "));
             } else {
@@ -465,6 +505,19 @@ fn chain_terms_doc(trivia: &Trivia, terms: &[Term]) -> Doc {
         parts.push(term_doc(trivia, term));
     }
     pretty::concat(parts)
+}
+
+/// Whether a chain carries anything *between* its terms — a `//=> P` assertion or a comment —
+/// which pins the layout to the lines the author wrote and rules out any flattened rendering.
+fn has_interior_trivia(trivia: &Trivia, chain: &Chain) -> bool {
+    chain
+        .assertions
+        .iter()
+        .any(|assertion| assertion.after < chain.terms.len())
+        || chain
+            .continuations
+            .iter()
+            .any(|gap| trivia.has_trivia(gap.end) || trivia.has_trivia(gap.pipe))
 }
 
 /// Whether a term completes a call unit: the flowing value is consumed here (a callable applied, a
@@ -1262,23 +1315,30 @@ fn visit_steps(steps: &[Step], out: &mut Collected) {
     for step in steps {
         push_anchor(step.span(), out);
         if let Step::Chain(chain) = step {
-            // An own-line assertion is its own anchor, so comments between a step and its
-            // `//=>` lines keep their place. The first assertion of an assertion-only step
-            // shares the step's offset and is covered by the step's anchor. Mirrors the
-            // emission in `sequence_doc`.
-            for (index, assertion) in chain.assertions.iter().enumerate() {
-                if assertion.own_line && !(index == 0 && chain.terms.is_empty()) {
-                    push_anchor(assertion.span, out);
-                }
-            }
             visit_chain(chain, out);
         }
     }
 }
 
 /// Recurse into a chain's terms without making the chain itself an anchor (used for select sources
-/// and tuple-field chains, which are not emitted by `sequence_doc`).
+/// and tuple-field chains, which are not emitted by `sequence_doc`), anchoring what sits *between*
+/// the terms: each `~>` separator, and each own-line assertion.
 fn visit_chain(chain: &Chain, out: &mut Collected) {
+    // A gap contributes two anchors because trivia attaches directionally: a comment ending the
+    // previous term's line needs one that *ends* before it, and an own-line comment one that
+    // *starts* after it. Mirrors the emission in `chain_terms_doc`.
+    for gap in &chain.continuations {
+        push_anchor(gap.end, out);
+        push_anchor(gap.pipe, out);
+    }
+    // An own-line assertion is its own anchor, so comments written above it keep their place.
+    // The first assertion of an assertion-only step shares the step's offset and is covered by
+    // the step's anchor.
+    for (index, assertion) in chain.assertions.iter().enumerate() {
+        if assertion.own_line && !(index == 0 && chain.terms.is_empty()) {
+            push_anchor(assertion.span, out);
+        }
+    }
     for term in &chain.terms {
         visit_term(term, out);
     }
@@ -1864,7 +1924,7 @@ mod tests {
     fn assertion_round_trips_and_canonicalizes() {
         // Marker spacing and the pattern normalize; the value side formats as usual.
         assert_formats("5  //=>  Ok\n", "5 //=> Ok\n");
-        assert_formats("x = 5 //=> Ok", "x = 5 //=> Ok\n");
+        assert_formats("x = 5 //=> 5", "x = 5 //=> 5\n");
         assert_formats(
             "Point[1,2] //=> Point[1, 2]",
             "Point[1, 2] //=> Point[1, 2]\n",
@@ -1903,13 +1963,37 @@ mod tests {
     #[test]
     fn assertion_note_and_trailing_comment_survive() {
         // The note is preserved three spaces off.
-        assert_idempotent("x = 5 //=> Ok\nx //=> 5   the note\n", "assertion note");
+        assert_idempotent("x = 5 //=> 5\nx //=> 5   the note\n", "assertion note");
         assert_idempotent(
             "f = #'int {\n  $ //=> 'int\n}\nf 3 //=> 3\n",
             "assertion in body",
         );
         // A redundant block whose body asserts is kept, not spliced.
         assert_idempotent("{\n  5 //=> 6\n}\n", "assertion keeps its block");
+    }
+
+    #[test]
+    fn chain_lines_keep_their_assertions_and_comments() {
+        // Each line of a spread chain may end in an assertion or a comment, and both pin the
+        // break: the `~>` must not be pulled up into what runs to the end of a line.
+        assert_idempotent(
+            "1 //=> 1\n~> %num.add [~, 2] //=> 3\n~> %num.mul [~, 3] //=> 9\n",
+            "assertion per chain line",
+        );
+        assert_idempotent(
+            "1 // the head\n// above the continuation\n~> double\n",
+            "comments in a continuation gap",
+        );
+        assert_idempotent(
+            "1\n//=> 'int\n//=> 1\n~> double\n",
+            "stacked own-line assertions mid-chain",
+        );
+        // The head of a chain ending in a container is normally flattened onto one line; an
+        // assertion in the gap rules that out.
+        assert_formats(
+            "1 //=> 1\n~> %list.map [~, double]\n",
+            "1 //=> 1\n~> %list.map [~, double]\n",
+        );
     }
 
     #[test]

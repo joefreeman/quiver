@@ -232,9 +232,11 @@ module.exports = grammar({
       // by `=`, prefer the binding reading via dynamic precedence.
       optional(prec.dynamic(1, seq(field('binding', $._binding_target), '=', optional($._nl)))),
       $._term,
-      repeat(seq($._pipe, $._term)),
-      // A trailing `//=> P` assertion on the same line (`5 ~> double //=> 10`). The
-      // leading form on its own line is a `_step`, so it is not repeated here.
+      // `//=> P` assertions may end any of the chain's lines, so they precede a continuation
+      // as well as ending the chain. (Comments are `extras`, so they need no mention.)
+      repeat(seq(repeat(seq(optional($._nl), $.assertion)), $._pipe, $._term)),
+      // A trailing assertion on the same line (`5 ~> double //=> 10`). The leading form on its
+      // own line is a `_step`, so it is not repeated here.
       repeat($.assertion),
     ),
 

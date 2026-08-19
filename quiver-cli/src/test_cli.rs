@@ -347,8 +347,8 @@ impl Runner {
             Err(message) => report.failures.push(Failure {
                 line: block.line,
                 step: String::new(),
-                cause: match assertion_pattern(&message) {
-                    Some(pattern) => Cause::Assertion {
+                cause: match assertion_site(&message) {
+                    Some((pattern, _)) => Cause::Assertion {
                         pattern,
                         actual: None,
                     },
@@ -361,17 +361,30 @@ impl Runner {
     /// Classify a runtime failure, and — when it is an assertion — recover the value the check
     /// saw by replaying the chapter and re-running the step without it.
     fn explain(&mut self, message: &str, history: &[String], source: &str, path: &Path) -> Cause {
-        let Some(pattern) = assertion_pattern(message) else {
+        let Some((pattern, line)) = assertion_site(message) else {
             return Cause::Error(message.to_string());
         };
         Cause::Assertion {
             pattern,
-            actual: self.replay(history, source, path),
+            actual: self.replay(history, source, path, line),
         }
     }
 
-    fn replay(&mut self, history: &[String], source: &str, path: &Path) -> Option<String> {
-        let stripped = quiver_markdown::without_assertions(source).ok()?;
+    fn replay(
+        &mut self,
+        history: &[String],
+        source: &str,
+        path: &Path,
+        line: Option<usize>,
+    ) -> Option<String> {
+        // A check observes the value at the end of *its* line, so a chain continuing below it is
+        // cut back to that line — every prefix of a multi-line chain is itself a chain. A cut
+        // that doesn't parse (an assertion nested inside a block, say) falls back to the whole
+        // step, whose value is the right one to report for a check that ends it.
+        let stripped = line
+            .and_then(|line| truncate_to_line(source, line))
+            .and_then(|cut| quiver_markdown::without_assertions(&cut).ok())
+            .or_else(|| quiver_markdown::without_assertions(source).ok())?;
         let mut session = self.session(path).ok()?;
         for step in history {
             self.evaluate(&mut session, step).ok()?;
@@ -474,13 +487,29 @@ impl From<ReplError> for Fault {
     }
 }
 
-/// The pattern from an assertion failure's message, or `None` if the panic was anything else
-/// (`__panic__`, a builtin's argument rejection). The message is built by the compiler when it
-/// emits the check.
-fn assertion_pattern(message: &str) -> Option<String> {
+/// The pattern and source line from an assertion failure's message, or `None` if the panic was
+/// anything else (`__panic__`, a builtin's argument rejection). The message is built by the
+/// compiler when it emits the check; the line is absent when the assertion carried no span.
+fn assertion_site(message: &str) -> Option<(String, Option<usize>)> {
     let rest = message.strip_prefix("Assertion '")?;
     let end = rest.rfind("' failed")?;
-    Some(rest[..end].to_string())
+    let line = rest[end..]
+        .strip_prefix("' failed at ")
+        .and_then(|location| {
+            // `<module>:<line>:<column>`, read from the right so a module name is left alone.
+            let mut fields = location.rsplitn(3, ':');
+            fields.next()?;
+            fields.next()?.parse().ok()
+        });
+    Some((rest[..end].to_string(), line))
+}
+
+/// The first `line` lines of `source`, or `None` when it has no more than that — nothing to cut.
+fn truncate_to_line(source: &str, line: usize) -> Option<String> {
+    let mut lines = source.lines();
+    let head: Vec<_> = lines.by_ref().take(line).collect();
+    lines.next()?;
+    Some(head.join("\n"))
 }
 
 fn resolver_for(path: &Path) -> PackageResolver {

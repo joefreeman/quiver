@@ -742,6 +742,7 @@ fn rational_field(value: BigInt) -> TupleField {
             binding: None,
             binding_span: Spanned::default(),
             span: Spanned::default(),
+            continuations: Vec::new(),
             terms: vec![Term::Literal(Literal::Integer(value))],
             assertions: Vec::new(),
         }),
@@ -1980,6 +1981,7 @@ fn make_source_chain(term: Term) -> Chain {
         binding: None,
         binding_span: Spanned::default(),
         span: Spanned::default(),
+        continuations: Vec::new(),
         terms: vec![term],
         assertions: Vec::new(),
     }
@@ -2858,22 +2860,14 @@ fn chain(input: Span) -> IResult<Span, Chain> {
                 terminated(spanned(match_pattern), tuple((ws1, char('='), ws1))),
                 chain_inner,
             ),
-            |((binding_span, binding), terms)| Chain {
+            |((binding_span, binding), chain)| Chain {
                 binding: Some(binding),
                 binding_span: Spanned(Some(binding_span)),
-                span: Spanned::default(),
-                terms,
-                assertions: Vec::new(),
+                ..chain
             },
         ),
         // Plain chain
-        map(chain_inner, |terms| Chain {
-            binding: None,
-            binding_span: Spanned::default(),
-            span: Spanned::default(),
-            terms,
-            assertions: Vec::new(),
-        }),
+        chain_inner,
     ))(input)?;
     // Record the chain's start offset, for attaching leading trivia during formatting.
     chain.span = Spanned(Some(span_between(start, rest)));
@@ -2913,17 +2907,108 @@ fn term(input: Span) -> IResult<Span, Term> {
     Ok((input, term))
 }
 
-fn chain_inner(input: Span) -> IResult<Span, Vec<Term>> {
-    // A chain is a sequence of `term`s joined by a mandatory `~>`; the value flows left→right
-    // through them, with nil passing through (no short-circuit — that is the sequence
-    // separator's job). Whitespace does NOT join chain terms (it binds a juxtaposed application
-    // argument to its head instead — see [`term`]). The separator's surrounding whitespace may
-    // include newlines, so `~>` doubles as a **line continuation**: a chain ends at a bare
-    // newline, but a newline followed by `~>` continues it, so a long chain can span lines:
-    //   foo
-    //   ~> bar
-    //   ~> baz
-    separated_list1(nom_value((), tuple((ws1, tag("~>"), ws1))), term)(input)
+/// A chain is a sequence of `term`s joined by a mandatory `~>`; the value flows left→right
+/// through them, with nil passing through (no short-circuit — that is the sequence separator's
+/// job). Whitespace does NOT join chain terms (it binds a juxtaposed application argument to its
+/// head instead — see [`term`]). The separator's surrounding whitespace may include newlines, so
+/// `~>` doubles as a **line continuation**: a chain ends at a bare newline, but a newline
+/// followed by `~>` continues it, so a long chain can span lines:
+///   foo          //=> 1
+///   ~> bar       // a comment sits in the gap, like the assertion above it
+///   ~> baz
+///
+/// Yields the chain the terms make — with the separators between them, and the `//=> P`
+/// assertions written in those gaps, each observing the value at the end of the line it
+/// terminates, so its position is the number of terms parsed before it. Any binding is the
+/// caller's to attach; a chain parsed here has none.
+fn chain_inner(input: Span) -> IResult<Span, Chain> {
+    let (mut rest, first) = term(input)?;
+    let mut terms = vec![first];
+    let mut continuations = Vec::new();
+    let mut assertions = Vec::new();
+    loop {
+        // A backtrackable failure ends the chain, leaving the input at the term before the
+        // separator — so a trailing `//=> P` with no continuation under it falls to [`step`],
+        // which takes it as the chain's own. A hard failure is a real syntax error and
+        // propagates (a malformed assertion pattern, say, which `assertion` cuts on).
+        let (next, (continuation, mut found)) = match chain_continuation(rest) {
+            Ok(ok) => ok,
+            Err(nom::Err::Error(_)) => break,
+            Err(err) => return Err(err),
+        };
+        let (next, next_term) = match term(next) {
+            Ok(ok) => ok,
+            Err(nom::Err::Error(_)) => break,
+            Err(err) => return Err(err),
+        };
+        for assertion in &mut found {
+            assertion.after = terms.len();
+        }
+        assertions.extend(found);
+        continuations.push(continuation);
+        terms.push(next_term);
+        rest = next;
+    }
+    Ok((
+        rest,
+        Chain {
+            binding: None,
+            binding_span: Spanned::default(),
+            span: Spanned::default(),
+            terms,
+            continuations,
+            assertions,
+        },
+    ))
+}
+
+/// The `~>` separator between two chain terms, together with the trivia an author may write in
+/// the gap before it: whitespace, line comments, and `//=> P` assertions. Both of the latter run
+/// to the end of their line, so whatever follows one is necessarily a continuation line — which
+/// is what lets them sit here at all.
+///
+/// Fails (consuming nothing) when no `~>` follows, so an assertion ending the chain's last line
+/// is left for [`step`]. The separator must still be set off from the term before it, as it was
+/// when this was a bare `ws1 "~>" ws1`.
+fn chain_continuation(input: Span) -> IResult<Span, (Continuation, Vec<Assertion>)> {
+    let mut rest = input;
+    let mut assertions = Vec::new();
+    let mut own_line = false;
+    loop {
+        let (next, gap) = recognize(many0(alt((
+            nom_value((), multispace1),
+            nom_value((), comment),
+        ))))(rest)?;
+        own_line |= gap.fragment().contains(['\n', '\r']);
+        rest = next;
+        if !rest.fragment().starts_with("//=>") {
+            break;
+        }
+        let (next, mut found) = assertion(rest)?;
+        found.own_line = own_line;
+        assertions.push(found);
+        own_line = false;
+        rest = next;
+    }
+    if rest.location_offset() == input.location_offset() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Space,
+        )));
+    }
+    let pipe = rest;
+    let (rest, _) = tag("~>")(rest)?;
+    let (rest, _) = ws1(rest)?;
+    Ok((
+        rest,
+        (
+            Continuation {
+                end: Spanned(Some(token_span(input, 0))),
+                pipe: Spanned(Some(token_span(pipe, 2))),
+            },
+            assertions,
+        ),
+    ))
 }
 
 /// Separator between the chains of a sequence: a semicolon or a newline (they are synonyms), with
@@ -3020,6 +3105,7 @@ fn assertion(input: Span) -> IResult<Span, Assertion> {
         input,
         Assertion {
             pattern,
+            after: 0,
             note,
             own_line: false,
             span: Spanned(Some(span_between(start, input))),
@@ -3053,15 +3139,18 @@ fn assertion_only_step(input: Span) -> IResult<Span, Step> {
             binding_span: Spanned(None),
             span: Spanned(Some(token_span(input, 4))),
             terms: Vec::new(),
+            continuations: Vec::new(),
             assertions: Vec::new(),
         }),
     ))
 }
 
 /// One step of a sequence: a type-alias declaration, a chain, or nothing but assertion lines,
-/// carrying any step-final `//=> P` assertions (chains only — an alias produces no value to
-/// assert on). One assertion may trail on the step's line; further `//=>` lines below continue
-/// the step, each asserting the same value.
+/// carrying any `//=> P` assertions that end the step's last line (chains only — an alias
+/// produces no value to assert on). One may trail on that line; further `//=>` lines below
+/// continue it, each observing the same value. Assertions written *above* the last line were
+/// already taken by [`chain_inner`], the continuation under them being what marks them as
+/// mid-chain.
 ///
 /// The alias alternative is tried first because an alias whose right-hand side is a function type
 /// also parses as a chain (`'q<'t> = #['int] -> ('t | [])` reads as a binding of an identity
@@ -3080,7 +3169,13 @@ fn step(input: Span) -> IResult<Span, Step> {
     match (step, assertions) {
         (step, assertions) if assertions.is_empty() => Ok((input, step)),
         (Step::Chain(mut chain), assertions) => {
-            chain.assertions = assertions;
+            // These end the chain, so they observe its result — every term having run.
+            let after = chain.terms.len();
+            chain.assertions.extend(
+                assertions
+                    .into_iter()
+                    .map(|assertion| Assertion { after, ..assertion }),
+            );
             Ok((input, Step::Chain(chain)))
         }
         // An alias produces no value to assert on. Positioned on the first `//=>`, and
