@@ -9,8 +9,6 @@
 //! saving is bounded by how many tests share a process. One binary is one process, and the
 //! standard library links into a pooled environment once for all of them rather than once per
 //! suite.
-//!
-//! The `zz*` benchmark suites stay separate: they are `#[ignore]`d and run by name.
 
 #[path = "common/mod.rs"]
 mod common;

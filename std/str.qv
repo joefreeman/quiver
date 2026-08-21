@@ -47,6 +47,25 @@ byte_pos_to_char_idx = #[(data): 'bin, (current_pos): 'int, (target_pos): 'int, 
   }
 }
 
+// The codepoint of a character from the integer its UTF-8 bytes spell big-endian. The lead
+// byte keeps the bits below its width marker; each continuation byte contributes its low six.
+// Straight-line per width rather than a fold: this runs once per character of every scan.
+decode_char = #[(enc): 'int, (width): 'int] {
+  | $width ~> =1 => $enc
+  | $width ~> =2 => %int.shift [$enc, -8] ~> %int.and [~, 31] ~> %num.mul [~, 64] ~> %num.add [
+    ~,
+    %int.and [$enc, 63],
+  ]
+  | $width ~> =3 => %int.shift [$enc, -16] ~> %int.and [~, 15] ~> %num.mul [~, 4096] ~> %num.add [~, %int.shift [$enc, -8] ~> %int.and [~, 63] ~> %num.mul [~, 64]] ~> %num.add [
+    ~,
+    %int.and [$enc, 63],
+  ]
+  | %int.shift [$enc, -24] ~> %int.and [~, 7] ~> %num.mul [~, 262144] ~> %num.add [~, %int.shift [$enc, -16] ~> %int.and [~, 63] ~> %num.mul [~, 4096]] ~> %num.add [~, %int.shift [$enc, -8] ~> %int.and [~, 63] ~> %num.mul [~, 64]] ~> %num.add [
+    ~,
+    %int.and [$enc, 63],
+  ]
+}
+
 // Iterator over the Unicode codepoints (as ints) of a binary. The state is the
 // byte position; each step skips any continuation bytes, then decodes the char.
 chars = #'bin {
@@ -62,17 +81,31 @@ chars = #'bin {
         | {
           char_end = byte_pos ~> %num.add [~, 1] ~> skip_continuation [data, ~, data_len]
 
-          char = char_end ~> %num.sub [~, byte_pos] ~> %num.mul [~, 8] ~> __binary_get__ [
-            data,
-            byte_pos,
-            0,
-            ~,
-          ]
+          width = %num.sub [char_end, byte_pos]
+          enc = %num.mul [width, 8] ~> __binary_get__ [data, byte_pos, 0, ~]
 
-          [char, char_end]
+          [decode_char [enc, width], char_end]
         }
       }
     },
+  ]
+}
+
+// The UTF-8 encoding of a codepoint, as the integer its bytes spell big-endian: `width`
+// leading ones then a zero in the lead byte, and `10` over each continuation byte's six bits.
+encode_char = #[(char): 'int, (width): 'int] {
+  | $width ~> =1 => $char
+  | $width ~> =2 => %int.shift [$char, -6] ~> %num.add [192, ~] ~> %num.mul [~, 256] ~> %num.add [
+    ~,
+    %int.and [$char, 63] ~> %num.add [128, ~],
+  ]
+  | $width ~> =3 => %int.shift [$char, -12] ~> %num.add [224, ~] ~> %num.mul [~, 65536] ~> %num.add [~, %int.shift [$char, -6] ~> %int.and [~, 63] ~> %num.add [128, ~] ~> %num.mul [~, 256]] ~> %num.add [
+    ~,
+    %int.and [$char, 63] ~> %num.add [128, ~],
+  ]
+  | %int.shift [$char, -18] ~> %num.add [240, ~] ~> %num.mul [~, 16777216] ~> %num.add [~, %int.shift [$char, -12] ~> %int.and [~, 63] ~> %num.add [128, ~] ~> %num.mul [~, 65536]] ~> %num.add [~, %int.shift [$char, -6] ~> %int.and [~, 63] ~> %num.add [128, ~] ~> %num.mul [~, 256]] ~> %num.add [
+    ~,
+    %int.and [$char, 63] ~> %num.add [128, ~],
   ]
 }
 
@@ -82,14 +115,14 @@ from_chars = #'%iter<'int> {
     ~,
     <>,
     #['bin, 'int] {
-      =[acc, char_int]
-      byte_count = char_int ~> {
+      =[acc, char]
+      byte_count = char ~> {
         | %num.le? [~, 127] => 1
-        | %num.le? [~, 57279] => 2
-        | %num.le? [~, 15712191] => 3
+        | %num.le? [~, 2047] => 2
+        | %num.le? [~, 65535] => 3
         | 4
       }
-      %bin.append [acc, char_int, byte_count]
+      %bin.append [acc, encode_char [char, byte_count], byte_count]
     },
   ] ~> Str[~]
 }

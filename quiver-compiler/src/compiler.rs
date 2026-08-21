@@ -223,7 +223,7 @@ pub enum Error {
     FallibleMatchBindingsInValueChain {
         bindings: Vec<String>,
     },
-    /// A binding pattern appears in a `//=>` assertion. Nothing gates on the assertion's
+    /// A binding pattern appears in a `//=` assertion. Nothing gates on the assertion's
     /// verdict — and a release build skips the check entirely — so the binding could never
     /// be relied on. Assertions observe: literals, types and pins only.
     AssertionBindings {
@@ -4143,7 +4143,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(())
     }
 
-    /// Compile a `//=> P` assertion. The observed value is on top of the stack and is left there
+    /// Compile a `//= P` assertion. The observed value is on top of the stack and is left there
     /// untouched: the assertion observes, so an asserted nil still short-circuits its sequence and
     /// the value's flow is identical across build modes. The pattern is analyzed in both modes —
     /// it may not bind, and one that can never match is a stale expectation, rejected — but checks
@@ -4475,7 +4475,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             (None, Provenance::Unknown)
         };
 
-        // `//=> P` assertions observe the value flowing where they were written, in place: the
+        // `//= P` assertions observe the value flowing where they were written, in place: the
         // one at position 0 sees what the chain starts from (all an assertion-only step has),
         // and the one at position `k` sees the value after the chain's first `k` terms. The
         // last of those is the chain's own result, which — for a chain with a binding — is what

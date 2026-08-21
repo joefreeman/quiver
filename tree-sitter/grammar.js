@@ -156,7 +156,7 @@ module.exports = grammar({
       )),
     ),
 
-    // One step of a sequence: a type-alias declaration, a chain, or a leading `//=>`
+    // One step of a sequence: a type-alias declaration, a chain, or a leading `//=`
     // assertion — the trailing form with a line break, observing the previous step's value
     // (or, at the start of a sequence, the block's input). An alias is scoped to the
     // sequence's enclosing scope, so one written in a block or function body is local to it.
@@ -170,20 +170,17 @@ module.exports = grammar({
     // One or more newlines: a continuation point inside an unfinished construct.
     _nl: _ => prec.right(repeat1('\n')),
 
-    // An ordinary `//` comment — any run except the `//=>` that opens a step assertion.
-    // (No lookahead in tree-sitter regexes, so the exclusion is spelled out: empty, a
-    // first character other than `=`, or `=` followed by anything but `>`.)
-    comment: _ => token(seq('//', optional(choice(
-      /[^=\n][^\n]*/,
-      seq('=', optional(/[^>\n][^\n]*/)),
-    )))),
+    // An ordinary `//` comment — any run except the `//=` that opens a step assertion.
+    // (No lookahead in tree-sitter regexes, so the exclusion is spelled out: the comment
+    // is empty, or its first character is something other than `=`.)
+    comment: _ => token(seq('//', optional(/[^=\n][^\n]*/))),
 
-    // A step assertion: `//=> P` matches the step's value against the pattern `P` in
+    // A step assertion: `//= P` matches the step's value against the pattern `P` in
     // debug builds. It reads as a comment but the pattern is real syntax; a run of three
     // or more spaces after the pattern starts a prose note running to the end of the line.
     // Like a comment, an assertion terminates its line — the real parser rejects code
     // after it; this grammar stays permissive there, as it does for binding patterns.
-    assertion: $ => seq('//=>', field('pattern', $._pattern), optional($.assertion_note)),
+    assertion: $ => seq('//=', field('pattern', $._pattern), optional($.assertion_note)),
 
     // Lexical precedence over the whitespace `extras`, which would otherwise skip the
     // note's leading spaces and lex its prose as code.
@@ -238,10 +235,10 @@ module.exports = grammar({
       // by `=`, prefer the binding reading via dynamic precedence.
       optional(prec.dynamic(1, seq(field('binding', $._binding_target), '=', optional($._nl)))),
       $._term,
-      // `//=> P` assertions may end any of the chain's lines, so they precede a continuation
+      // `//= P` assertions may end any of the chain's lines, so they precede a continuation
       // as well as ending the chain. (Comments are `extras`, so they need no mention.)
       repeat(seq(repeat(seq(optional($._nl), $.assertion)), $._pipe, $._term)),
-      // A trailing assertion on the same line (`5 ~> double //=> 10`). The leading form on its
+      // A trailing assertion on the same line (`5 ~> double //= 10`). The leading form on its
       // own line is a `_step`, so it is not repeated here.
       repeat($.assertion),
     ),

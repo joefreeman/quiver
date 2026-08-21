@@ -33,9 +33,11 @@ jobs:
             exit 1
           }
 
-      # Every runnable example in the guide is executed and its `//=>` assertions checked.
-      - name: Check the guide
-        run: cargo run --quiet --bin quiv -- test docs/guide.md
+      # Every runnable example in the guide and the module references is executed and its
+      # `//=` assertions checked. The references are the modules' test suites as well as
+      # their documentation, so a failure here is a failing test, not a stale doc.
+      - name: Check the guide and module references
+        run: cargo run --quiet --bin quiv -- test docs/guide.md std/docs/*.md
 
       - name: Run clippy
         run: cargo clippy --all --all-targets -- -D warnings

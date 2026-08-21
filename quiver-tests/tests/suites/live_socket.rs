@@ -505,15 +505,12 @@ fn test_stale_redirect_mark_is_not_resynced() {
               }
             }
 
-            count = #[Str['bin], Str['bin], 'int] {
-              =[h, n, acc]
-              %str.index_of [h, n] ~> {
-                | =('int)i => {
-                  h ~> =Str[hb]
-                  ^ [%str.slice [h, %num.add [i, 1], %bin.length hb], n, %num.add [acc, 1]]
-                }
-                | acc
-              }
+            // The stream is raw websocket bytes — frame headers and all — so counting must
+            // stay on the bytes. `split` works on them; `slice` counts characters, and
+            // decoding a frame header as UTF-8 does not round-trip.
+            count = #[Str['bin], Str['bin]] {
+              =[h, n]
+              %str.split [h, n] ~> %iter.count ~ ~> %num.sub [~, 1]
             }
 
             [<7f000001>, 4191] ~> __tcp_connect__ ~ ~> =(\TcpSocket)s1
@@ -541,7 +538,7 @@ fn test_stale_redirect_mark_is_not_resynced() {
             stream = read_to [s2, <>, "[1,\"0\",[[\"t\",[0],\"fin\"]]]"] ~> Str[~]
             s2 ~> __tcp_socket_close__ ~
 
-            Syncs[count [stream, "[2,\"/posts/7\"]", 0]]
+            Syncs[count [stream, "[2,\"/posts/7\"]"]]
             "#,
         )
         .expect(r#"Syncs[2]"#);

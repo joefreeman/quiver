@@ -79,7 +79,7 @@ enum Commands {
         check: bool,
     },
 
-    /// Run the Quiver code embedded in a Markdown document, checking its `//=>` assertions.
+    /// Run the Quiver code embedded in a Markdown document, checking its `//=` assertions.
     /// Each `##` chapter is one accumulating session, and exits non-zero if any check fails.
     Test {
         /// Markdown documents to run.

@@ -256,7 +256,7 @@ from_base64 = #Str['bin] {
   },
 
   or: __binary_or__ ~> {
-    :doc "The bytewise OR of two binaries, truncated to the shorter length."
+    :doc "The bytewise OR of two binaries, zero-padded to the longer length."
   },
 
   xor: __binary_xor__ ~> {

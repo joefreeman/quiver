@@ -109,34 +109,8 @@
             "type": "CHOICE",
             "members": [
               {
-                "type": "CHOICE",
-                "members": [
-                  {
-                    "type": "PATTERN",
-                    "value": "[^=\\n][^\\n]*"
-                  },
-                  {
-                    "type": "SEQ",
-                    "members": [
-                      {
-                        "type": "STRING",
-                        "value": "="
-                      },
-                      {
-                        "type": "CHOICE",
-                        "members": [
-                          {
-                            "type": "PATTERN",
-                            "value": "[^>\\n][^\\n]*"
-                          },
-                          {
-                            "type": "BLANK"
-                          }
-                        ]
-                      }
-                    ]
-                  }
-                ]
+                "type": "PATTERN",
+                "value": "[^=\\n][^\\n]*"
               },
               {
                 "type": "BLANK"
@@ -151,7 +125,7 @@
       "members": [
         {
           "type": "STRING",
-          "value": "//=>"
+          "value": "//="
         },
         {
           "type": "FIELD",

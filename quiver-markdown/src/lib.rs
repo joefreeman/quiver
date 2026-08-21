@@ -4,7 +4,7 @@
 //! it. A chapter is the unit of scope: its blocks are fragments of one accumulating session,
 //! in document order, the way a reader accumulates them. Splitting a block into steps is the
 //! only part that needs the language, and it uses the real parser — a line scan would be
-//! defeated by a `"""` string, and by the `//=>` line that continues the step above it.
+//! defeated by a `"""` string, and by the `//=` line that continues the step above it.
 //!
 //! Nothing here runs anything or touches the filesystem: a caller drives the steps, so the same
 //! document can be checked by the CLI and by the browser.
@@ -44,9 +44,48 @@ pub struct Step {
     pub line: usize,
     /// 1-based column of the step's first character.
     pub column: usize,
-    /// How many `//=> P` assertions the step carries. A step may carry several, since a leading
-    /// `//=>` continues the step above rather than opening a new one.
+    /// How many `//= P` assertions the step carries. A step may carry several, since a leading
+    /// `//=` continues the step above rather than opening a new one.
     pub assertions: usize,
+    /// A `//! text` failure expectation: the step must fail, and the rendered error must contain
+    /// `text`. An empty fragment accepts any failure.
+    pub expect_failure: Option<String>,
+}
+
+/// The `//! text` on a step's last line, if it carries one.
+///
+/// Read from the text rather than the AST, unlike a `//=` assertion. The language has no such
+/// construct — to the compiler `//!` is an ordinary comment — because the whole point of the
+/// marker is to sit on a step the compiler *rejects*, where there would be no tree to hang it
+/// on. Hence a scan: confined to the step's last line, and skipping a `//!` inside a string.
+///
+/// Being textual, it can in principle misread (a `//!` inside a multi-line string that ends on
+/// the step's last line). That direction is safe: a step wrongly marked as expected-to-fail
+/// *succeeds*, which the runner reports. It cannot turn a real failure into a pass.
+fn failure_expectation(source: &str) -> Option<String> {
+    let line = source.lines().next_back()?;
+    let mut quoted = false;
+    let mut chars = line.char_indices();
+    while let Some((index, c)) = chars.next() {
+        match c {
+            '\\' if quoted => {
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            '/' if !quoted && line[index..].starts_with("//!") => {
+                // As after a `//=` pattern, a run of three or more spaces starts a prose note
+                // that is not part of the expectation.
+                let rest = line[index + 3..].trim_start();
+                let message = match rest.find("   ") {
+                    Some(note) => &rest[..note],
+                    None => rest,
+                };
+                return Some(message.trim_end().to_string());
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 impl Step {
@@ -89,8 +128,10 @@ impl Block {
                 let end = starts
                     .get(index + 1)
                     .map_or(self.source.len(), |next| next.offset);
+                let source = self.source[span.offset..end].trim_end().to_string();
                 Step {
-                    source: self.source[span.offset..end].trim_end().to_string(),
+                    expect_failure: failure_expectation(&source),
+                    source,
                     line: self.line + span.line - 1,
                     column: span.column,
                     assertions: match &sequence.steps[index] {
@@ -107,7 +148,7 @@ impl Block {
     }
 }
 
-/// Every `//=> P` assertion the source makes, at any depth — one inside a function body or a
+/// Every `//= P` assertion the source makes, at any depth — one inside a function body or a
 /// branch is checked exactly as a step-final one is, so it counts.
 ///
 /// The traversal matches exhaustively rather than falling through on a wildcard: an AST node
@@ -180,7 +221,7 @@ fn term_assertions(term: &Term) -> usize {
     }
 }
 
-/// The source with the `//=> P` assertions of its own chains cut out, leaving line structure
+/// The source with the `//= P` assertions of its own chains cut out, leaving line structure
 /// intact (an assertion runs to the end of its line, so nothing but the check is removed).
 ///
 /// This is how a failed assertion's *actual* value is recovered: the check aborts the process
@@ -374,12 +415,32 @@ mod tests {
         let block = Block {
             mode: Mode::Session,
             line: 1,
-            source: "5 //=> 5\n//=> ('int)\n6".to_string(),
+            source: "5 //= 5\n//= ('int)\n6".to_string(),
         };
         let steps = block.steps().unwrap();
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].assertions, 2);
         assert_eq!(steps[1].source, "6");
+    }
+
+    #[test]
+    fn a_failure_expectation_is_read_from_the_last_line() {
+        let block = Block {
+            mode: Mode::Session,
+            line: 1,
+            source: "5 ~> 99   //! must use the value   a prose note\nx = \"//! not this\"\n1 //!"
+                .to_string(),
+        };
+        let steps = block.steps().unwrap();
+        // Three or more spaces end the expectation and start a note, as after a `//=` pattern.
+        assert_eq!(
+            steps[0].expect_failure.as_deref(),
+            Some("must use the value")
+        );
+        // Inside a string, on a line that is not the step's last: not an expectation.
+        assert_eq!(steps[1].expect_failure, None);
+        // Bare `//!` accepts any failure.
+        assert_eq!(steps[2].expect_failure.as_deref(), Some(""));
     }
 
     #[test]

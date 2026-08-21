@@ -325,3 +325,26 @@ fn test_https_serves_via_http_server() {
         ))
         .expect("[Ok, Ok]");
 }
+
+#[test]
+fn test_pem_roots_reach_a_tls_server() {
+    // The `%pem` → `%tls` seam: the other tests here splice roots in as DER hex, so this is
+    // the only one proving that `certificates` output — real armor, decoded at run time — is
+    // what `roots` takes. `std/docs/pem.md` checks the decoding itself over stand-in bodies;
+    // only a live server can check that the bytes it produces are usable.
+    let server = TlsServer::start(Behaviour::Echo);
+    quiver()
+        .with_io()
+        .with_real_time()
+        .with_timeout(Duration::from_secs(10))
+        .evaluate(&server.program(
+            r#"
+            %pem.certificates "__CA_PEM__" ~> =('bin)roots
+            %tcp.connect [<7f000001>, __PORT__] ~> =(\TcpSocket)s
+            %tls.attach [socket: s, hostname: "localhost", roots: roots]
+            %tcp.write [s, "ping" ~> .0]
+            %tcp.read [s, 4] ~> Str[~]
+            "#,
+        ))
+        .expect(r#""ping""#);
+}

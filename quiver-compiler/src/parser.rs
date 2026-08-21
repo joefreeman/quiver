@@ -105,10 +105,10 @@ impl std::fmt::Display for ErrorKind {
                 write!(f, "Expected '~>' between chain terms, or ';' between steps")
             }
             ErrorKind::AssertionOnAlias => {
-                write!(f, "A '//=>' assertion cannot attach to a type alias")
+                write!(f, "A '//=' assertion cannot attach to a type alias")
             }
             ErrorKind::AssertionNotLineFinal => {
-                write!(f, "A '//=>' assertion must end its line")
+                write!(f, "A '//=' assertion must end its line")
             }
 
             ErrorKind::ParseError(msg) => write!(f, "Parse error: {}", msg),
@@ -145,7 +145,7 @@ impl ErrorKind {
                 "Whitespace does not join chain terms: write 'a ~> b' to chain them, or 'a; b' for separate steps"
             }
             ErrorKind::AssertionOnAlias => {
-                "An assertion observes a step's value, and an alias declares only a type; attach the '//=>' to a value step"
+                "An assertion observes a step's value, and an alias declares only a type; attach the '//=' to a value step"
             }
             ErrorKind::AssertionNotLineFinal => {
                 "An assertion runs to the end of its line, like a comment; move code after it to the next line"
@@ -468,9 +468,9 @@ fn adjacent_spread_args(input: Span) -> IResult<Span, (SourceSpan, Vec<TupleFiel
 }
 
 fn comment(input: Span) -> IResult<Span, Span> {
-    // `//=>` opens a step assertion, not a comment — leave it for [`assertion`].
+    // `//=` opens a step assertion, not a comment — leave it for [`assertion`].
     let (rest, _) = tag("//")(input)?;
-    if rest.fragment().starts_with("=>") {
+    if rest.fragment().starts_with("=") {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Tag,
@@ -2974,11 +2974,11 @@ fn term(input: Span) -> IResult<Span, Term> {
 /// head instead — see [`term`]). The separator's surrounding whitespace may include newlines, so
 /// `~>` doubles as a **line continuation**: a chain ends at a bare newline, but a newline
 /// followed by `~>` continues it, so a long chain can span lines:
-///   foo          //=> 1
+///   foo          //= 1
 ///   ~> bar       // a comment sits in the gap, like the assertion above it
 ///   ~> baz
 ///
-/// Yields the chain the terms make — with the separators between them, and the `//=> P`
+/// Yields the chain the terms make — with the separators between them, and the `//= P`
 /// assertions written in those gaps, each observing the value at the end of the line it
 /// terminates, so its position is the number of terms parsed before it. Any binding is the
 /// caller's to attach; a chain parsed here has none.
@@ -2989,7 +2989,7 @@ fn chain_inner(input: Span) -> IResult<Span, Chain> {
     let mut assertions = Vec::new();
     loop {
         // A backtrackable failure ends the chain, leaving the input at the term before the
-        // separator — so a trailing `//=> P` with no continuation under it falls to [`step`],
+        // separator — so a trailing `//= P` with no continuation under it falls to [`step`],
         // which takes it as the chain's own. A hard failure is a real syntax error and
         // propagates (a malformed assertion pattern, say, which `assertion` cuts on).
         let (next, (continuation, mut found)) = match chain_continuation(rest) {
@@ -3024,7 +3024,7 @@ fn chain_inner(input: Span) -> IResult<Span, Chain> {
 }
 
 /// The `~>` separator between two chain terms, together with the trivia an author may write in
-/// the gap before it: whitespace, line comments, and `//=> P` assertions. Both of the latter run
+/// the gap before it: whitespace, line comments, and `//= P` assertions. Both of the latter run
 /// to the end of their line, so whatever follows one is necessarily a continuation line — which
 /// is what lets them sit here at all.
 ///
@@ -3042,7 +3042,7 @@ fn chain_continuation(input: Span) -> IResult<Span, (Continuation, Vec<Assertion
         ))))(rest)?;
         own_line |= gap.fragment().contains(['\n', '\r']);
         rest = next;
-        if !rest.fragment().starts_with("//=>") {
+        if !rest.fragment().starts_with("//=") {
             break;
         }
         let (next, mut found) = assertion(rest)?;
@@ -3127,7 +3127,7 @@ fn sequence_boundary_cut(input: Span) -> IResult<Span, ()> {
     let terminated = fragment.is_empty()
         || fragment.starts_with(['}', ']', ')', '|', ';', '\n', '\r', '~'])
         || fragment.starts_with("=>")
-        || (fragment.starts_with("//") && !fragment.starts_with("//=>"));
+        || (fragment.starts_with("//") && !fragment.starts_with("//="));
     if !terminated {
         return Err(nom::Err::Failure(nom::error::Error::new(
             after_ws,
@@ -3137,7 +3137,7 @@ fn sequence_boundary_cut(input: Span) -> IResult<Span, ()> {
     Ok((input, ()))
 }
 
-/// A step-final assertion: `//=> P`, with an optional prose note separated from the pattern by
+/// A step-final assertion: `//= P`, with an optional prose note separated from the pattern by
 /// three or more spaces (the note runs to the end of the line). The pattern is ordinary match
 /// grammar; once the marker is seen, a malformed pattern is a hard error rather than a
 /// backtrack, since the text can no longer be anything else. Like a comment, the assertion
@@ -3145,7 +3145,7 @@ fn sequence_boundary_cut(input: Span) -> IResult<Span, ()> {
 /// otherwise-unused `CrLf` code, which `parse` maps to `AssertionNotLineFinal`).
 fn assertion(input: Span) -> IResult<Span, Assertion> {
     let start = input;
-    let (input, _) = tag("//=>")(input)?;
+    let (input, _) = tag("//=")(input)?;
     let (input, _) = space0(input)?;
     let (input, pattern) = cut(match_pattern)(input)?;
     let (input, note) = opt(map(
@@ -3174,9 +3174,9 @@ fn assertion(input: Span) -> IResult<Span, Assertion> {
     ))
 }
 
-/// The gap before a step-final assertion: horizontal space for a trailing `//=> P`, or any run
+/// The gap before a step-final assertion: horizontal space for a trailing `//= P`, or any run
 /// of newlines, blank lines, comments and `;` separators for one on its own line — a leading
-/// `//=>` continues the step above, so the separators between belong to the step. Answers
+/// `//=` continues the step above, so the separators between belong to the step. Answers
 /// whether the gap crossed a line break, i.e. whether the assertion sits on its own line.
 fn assertion_gap(input: Span) -> IResult<Span, bool> {
     let (rest, gap) = recognize(many0(alt((
@@ -3187,12 +3187,12 @@ fn assertion_gap(input: Span) -> IResult<Span, bool> {
     Ok((rest, gap.fragment().contains(['\n', '\r'])))
 }
 
-/// A step consisting solely of `//=>` assertion lines — `//=>` opening a block, a branch, or a
+/// A step consisting solely of `//=` assertion lines — `//=` opening a block, a branch, or a
 /// REPL entry. The chain is empty, so the step's value is the block's input, exactly as a bare
 /// `~` step's would be; the assertions observe it. Consumes nothing: the shared assertion loop
 /// in [`step`] takes the lines themselves.
 fn assertion_only_step(input: Span) -> IResult<Span, Step> {
-    let (rest, _) = peek(tag("//=>"))(input)?;
+    let (rest, _) = peek(tag("//="))(input)?;
     Ok((
         rest,
         Step::Chain(Chain {
@@ -3207,8 +3207,8 @@ fn assertion_only_step(input: Span) -> IResult<Span, Step> {
 }
 
 /// One step of a sequence: a type-alias declaration, a chain, or nothing but assertion lines,
-/// carrying any `//=> P` assertions that end the step's last line (chains only — an alias
-/// produces no value to assert on). One may trail on that line; further `//=>` lines below
+/// carrying any `//= P` assertions that end the step's last line (chains only — an alias
+/// produces no value to assert on). One may trail on that line; further `//=` lines below
 /// continue it, each observing the same value. Assertions written *above* the last line were
 /// already taken by [`chain_inner`], the continuation under them being what marks them as
 /// mid-chain.
@@ -3239,7 +3239,7 @@ fn step(input: Span) -> IResult<Span, Step> {
             );
             Ok((input, Step::Chain(chain)))
         }
-        // An alias produces no value to assert on. Positioned on the first `//=>`, and
+        // An alias produces no value to assert on. Positioned on the first `//=`, and
         // smuggled out as a hard failure with the (otherwise unused) `Not` code, which
         // `parse` maps to `AssertionOnAlias`.
         (Step::TypeAlias { .. }, assertions) => {
@@ -3475,11 +3475,9 @@ mod tests {
     #[test]
     fn test_assertion_on_alias_is_a_pointed_error() {
         // An alias produces no value to assert on — trailing or on the following line; the
-        // error points at the `//=>`.
-        for (source, line, column) in [
-            ("'t = 'int //=> Ok", 1, 11),
-            ("'t = 'int\n//=> Ok\n5", 2, 1),
-        ] {
+        // error points at the `//=`.
+        for (source, line, column) in [("'t = 'int //= Ok", 1, 11), ("'t = 'int\n//= Ok\n5", 2, 1)]
+        {
             let err = parse(source).expect_err(source);
             assert!(
                 matches!(err.kind, ErrorKind::AssertionOnAlias),
@@ -3496,9 +3494,9 @@ mod tests {
         // An assertion terminates its line, like the comment it resembles: code after the
         // pattern (or note) is a pointed error at the offending character.
         for (source, line, column) in [
-            ("5 //=> 5; Ok", 1, 9),
-            ("{ 5 //=> 6 }", 1, 12),
-            ("5 //=> 5 ~> f", 1, 10),
+            ("5 //= 5; Ok", 1, 8),
+            ("{ 5 //= 6 }", 1, 11),
+            ("5 //= 5 ~> f", 1, 9),
         ] {
             let err = parse(source).expect_err(source);
             assert!(
@@ -3513,13 +3511,13 @@ mod tests {
 
     #[test]
     fn test_own_line_assertions_attach_to_the_step_above() {
-        // A leading `//=>` continues the step: blank lines, comments and `;` between belong
+        // A leading `//=` continues the step: blank lines, comments and `;` between belong
         // to it, and several stack. At the start of a sequence the chain is empty.
         for (source, terms, assertions) in [
-            ("5\n//=> 5", 1, 1),
-            ("5 //=> 'int\n//=> 5", 1, 2),
-            ("5;\n\n// why\n//=> 5", 1, 1),
-            ("//=> []\n5", 0, 1),
+            ("5\n//= 5", 1, 1),
+            ("5 //= 'int\n//= 5", 1, 2),
+            ("5;\n\n// why\n//= 5", 1, 1),
+            ("//= []\n5", 0, 1),
         ] {
             let program = parse(source).unwrap_or_else(|e| panic!("{source}: {e:?}"));
             let Step::Chain(chain) = &program.steps[0] else {

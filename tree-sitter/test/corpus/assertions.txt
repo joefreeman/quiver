@@ -2,7 +2,7 @@
 trailing assertion
 ==================
 
-5 ~> double //=> 10
+5 ~> double //= 10
 
 ---
 
@@ -20,7 +20,7 @@ assertion inside a block
 ==================
 
 #[] {
-  %list{ 1, 2, 3 } ~> sum [~] //=> 6
+  %list{ 1, 2, 3 } ~> sum [~] //= 6
 }
 
 ---
@@ -53,8 +53,8 @@ stacked leading assertions
 ==================
 
 double 5
-//=> 10
-//=> ('int)
+//= 10
+//= ('int)
 
 ---
 
@@ -75,7 +75,7 @@ double 5
 assertion on a binding with a prose note
 ==================
 
-x = double 3 //=> 6   the value, not the binding's verdict
+x = double 3 //= 6   the value, not the binding's verdict
 
 ---
 
@@ -95,8 +95,8 @@ x = double 3 //=> 6   the value, not the binding's verdict
 assertions along a chain's lines
 ==================
 
-1 //=> 1
-~> %num.add [~, 2] //=> 3
+1 //= 1
+~> %num.add [~, 2] //= 3
 
 ---
 
@@ -125,7 +125,7 @@ comments and leading assertions in a continuation gap
 ==================
 
 1 // the head
-//=> 1
+//= 1
 ~> double
 
 ---
@@ -145,7 +145,7 @@ assertion at the start of a block
 ==================
 
 double = #'int {
-  //=> ('int)
+  //= ('int)
   %num.mul [~, 2]
 }
 
@@ -181,9 +181,9 @@ double = #'int {
 comments that are not assertions
 ==================
 
-// => an arrow in a comment
-//=ribbon
-//=
+// = a match in a comment
+//!a failure expectation, which only `quiv test` reads
+//
 5
 
 ---

@@ -1,13 +1,13 @@
 //! `quiv test` — run the Quiver code embedded in a Markdown document.
 //!
 //! The document is executed, not rendered. Its expected values are already written into it as
-//! `//=> P` assertions, which the compiler checks itself, so running produces exactly one thing
+//! `//= P` assertions, which the compiler checks itself, so running produces exactly one thing
 //! the file does not already say: whether it still holds.
 //!
 //! A chapter is the unit of scope and of reporting. Its steps are fed to a [`Repl`] one at a
 //! time rather than compiled as one program, which is what a reader does and what the language
 //! requires: a step that evaluates to nil ends its *sequence*, so a concatenated chapter would
-//! stop at the first `//=> []` and silently skip every assertion below it.
+//! stop at the first `//= []` and silently skip every assertion below it.
 
 use colored::Colorize;
 use quiver_cli::spawn_worker;
@@ -27,10 +27,16 @@ use std::thread::{self, JoinHandle};
 /// assertion is the document disagreeing with the language, while anything else is the document
 /// being broken.
 enum Cause {
-    /// A `//=> P` assertion did not match. Carries the pattern, and the value the step actually
+    /// A `//= P` assertion did not match. Carries the pattern, and the value the step actually
     /// produced when re-run without the check (absent if that re-run failed too).
     Assertion {
         pattern: String,
+        actual: Option<String>,
+    },
+    /// A `//! text` step did not fail as promised: either it succeeded (`actual` absent), or it
+    /// failed with an error that does not mention `expected`.
+    Failure {
+        expected: String,
         actual: Option<String>,
     },
     Error(String),
@@ -251,8 +257,50 @@ impl Runner {
             };
 
             for step in &steps {
-                report.total += step.assertions;
                 let source = step.positioned();
+
+                // A `//!` step promises to fail, so its verdict is the opposite one and it
+                // contributes nothing to the session either way — it is not added to `history`.
+                if let Some(expected) = &step.expect_failure {
+                    report.total += 1;
+                    match self.evaluate(&mut session, &source) {
+                        Ok(()) => report.failures.push(Failure {
+                            line: step.line,
+                            step: step.source.clone(),
+                            cause: Cause::Failure {
+                                expected: expected.clone(),
+                                actual: None,
+                            },
+                        }),
+                        Err(fault) => {
+                            let message = fault.message();
+                            if message.contains(expected.as_str()) {
+                                report.passed += 1;
+                            } else {
+                                report.failures.push(Failure {
+                                    line: step.line,
+                                    step: step.source.clone(),
+                                    cause: Cause::Failure {
+                                        expected: expected.clone(),
+                                        actual: Some(message.clone()),
+                                    },
+                                });
+                            }
+                            // A runtime error killed the session's process, so an expected one
+                            // still has to be recovered from: rebuild the session and replay
+                            // what got us here, and the rest of the chapter carries on. A
+                            // static error left it intact and needs none of this.
+                            if matches!(fault, Fault::Runtime(_))
+                                && let Some(rebuilt) = self.restart(path, &history)
+                            {
+                                session = rebuilt;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                report.total += step.assertions;
                 match self.evaluate(&mut session, &source) {
                     Ok(()) => {
                         report.passed += step.assertions;
@@ -335,11 +383,15 @@ impl Runner {
                 .request_result(pid, None)
                 .map_err(|e| format!("{e:?}"))?;
             drop(env);
-            match self.wait(request) {
+            let outcome = match self.wait(request) {
                 RequestResult::Result(Ok(_)) => Ok(()),
                 RequestResult::Result(Err(error)) => Err(error.to_string()),
                 _ => Err("unexpected result".to_string()),
-            }
+            };
+            // Retire it for the same reason a session is retired: this process is persistent
+            // too, so completing is not enough to make it collectable.
+            let _ = self.environment.lock().unwrap().stop_process(pid);
+            outcome
         })();
 
         match result {
@@ -393,7 +445,18 @@ impl Runner {
         Some(self.environment.lock().unwrap().format_value(&value))
     }
 
-    fn session(&mut self, path: &Path) -> Result<Repl<NativeEffect>, ReplError> {
+    /// A fresh session with `history` replayed into it — what a chapter needs after a runtime
+    /// error has killed the process it was using. `None` if the rebuild itself fails, in which
+    /// case the caller keeps the dead session and the chapter's remaining steps report.
+    fn restart(&mut self, path: &Path, history: &[String]) -> Option<Session> {
+        let mut session = self.session(path).ok()?;
+        for step in history {
+            self.evaluate(&mut session, step).ok()?;
+        }
+        Some(session)
+    }
+
+    fn session(&mut self, path: &Path) -> Result<Session, ReplError> {
         let builtins = quiver_cli::build_builtin_registry();
         let mut env = self.environment.lock().unwrap();
         let mut repl = Repl::new(&mut env, Box::new(resolver_for(path)), builtins)?;
@@ -404,16 +467,19 @@ impl Runner {
             ..Default::default()
         });
         repl.set_artifact_store(self.artifact_store.clone());
-        Ok(repl)
+        Ok(Session {
+            repl: Some(repl),
+            environment: Arc::clone(&self.environment),
+        })
     }
 
-    fn evaluate(&mut self, session: &mut Repl<NativeEffect>, source: &str) -> Result<(), Fault> {
+    fn evaluate(&mut self, session: &mut Session, source: &str) -> Result<(), Fault> {
         self.evaluate_value(session, source).map(|_| ())
     }
 
     fn evaluate_value(
         &mut self,
-        session: &mut Repl<NativeEffect>,
+        session: &mut Session,
         source: &str,
     ) -> Result<Option<quiver_core::wire::WireValue>, Fault> {
         let types_request = self
@@ -428,6 +494,7 @@ impl Runner {
         };
 
         let request = session
+            .repl()
             .evaluate(&mut self.environment.lock().unwrap(), source, process_types)
             .map_err(Fault::from)?;
 
@@ -470,10 +537,51 @@ impl Drop for Runner {
     }
 }
 
+/// A REPL session, retired when it goes out of scope.
+///
+/// Retirement is not housekeeping. A host-started process is created `persistent`, and the
+/// reclamation sweep categorises a persistent process as a *root* — it is never collected, at
+/// any age, until something calls `stop_process` on it. The environment outlives every session
+/// in a run, so an unretired session stays in its process table for the rest of the run, where
+/// every later chapter's process-type fetch reads it and imports its type. The cost of a chapter
+/// then grows with the number of chapters already run.
+///
+/// Tying that to scope rather than to a convention between call sites is what makes it hold: a
+/// session is retired because it was dropped, not because the next one remembered to.
+struct Session {
+    /// `Some` until `Drop` takes it.
+    repl: Option<Repl<NativeEffect>>,
+    environment: Arc<Mutex<Environment<NativeEffect>>>,
+}
+
+impl Session {
+    fn repl(&mut self) -> &mut Repl<NativeEffect> {
+        self.repl.as_mut().expect("session dropped")
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(repl) = self.repl.take()
+            && let Ok(mut environment) = self.environment.lock()
+        {
+            let _ = environment.stop_process(repl.process_id());
+        }
+    }
+}
+
 /// A step that did not complete. The distinction is whether the session survived it.
 enum Fault {
     Static(String),
     Runtime(String),
+}
+
+impl Fault {
+    fn message(&self) -> &String {
+        match self {
+            Fault::Static(message) | Fault::Runtime(message) => message,
+        }
+    }
 }
 
 impl From<ReplError> for Fault {
@@ -591,6 +699,17 @@ fn print_failure(document: &str, chapter: &str, failure: &Failure) {
                     "    {}",
                     "actual    (could not be recovered)".bright_black()
                 ),
+            }
+        }
+        Cause::Failure { expected, actual } => {
+            if expected.is_empty() {
+                println!("    expected  any failure");
+            } else {
+                println!("    expected  a failure mentioning {expected}");
+            }
+            match actual {
+                Some(actual) => println!("    actual    {}", actual.red()),
+                None => println!("    actual    {}", "the step succeeded".red()),
             }
         }
         Cause::Error(message) => println!("    {}", message.red()),

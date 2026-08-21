@@ -482,3 +482,57 @@ fn test_explicit_instantiation_across_repl_entries() {
         .then_evaluate("f = id<'int>; f 7")
         .expect("7");
 }
+
+#[test]
+fn test_union_concrete_contributes_every_variant_to_a_type_parameter() {
+    // Unifying a type parameter against a union concrete must bind it to the WHOLE union.
+    // Unification used to stop at the first variant that fitted, binding `'t` to one arm and
+    // dropping the rest — so the inferred type excluded values the expression demonstrably
+    // produced, and a match against a dropped member compiled to the wrong answer instead of
+    // to an error.
+    let source = r#"
+        'p<'t> = #[] -> ['t, 'int]
+        apply = #<'t>['p<'t>] { $0 [] ~> =[v, s]; v }
+        mk = #[] { { Ok => [A[1], 9] | [B[2], 9] } }
+    "#;
+
+    quiver()
+        .evaluate(&format!("{source} apply [mk]"))
+        .expect_type("A['int] | B['int]");
+
+    // The value is the arm that used to be dropped, and it must match as itself.
+    quiver()
+        .evaluate(&format!(
+            "{source} apply [mk] ~> {{ =A[n] => Found[n] | Missed }}"
+        ))
+        .expect("Found[1]");
+}
+
+#[test]
+fn test_optional_parser_result_keeps_its_none() {
+    // The same defect reached through the standard library: `%parse.opt`'s parser yields
+    // `Some['t] | None`, and `run` instantiates its own parameter from it. The `None` was
+    // lost, leaving a value that printed as `None` yet matched neither `=None` nor `=[]`.
+    quiver()
+        .evaluate(r#"maybe = %parse.opt %parse.int; %parse.run ["", maybe]"#)
+        .expect("None");
+
+    quiver()
+        .evaluate(r#"maybe = %parse.opt %parse.int; %parse.run ["", maybe] ~> =None"#)
+        .expect("Ok");
+
+    quiver()
+        .evaluate(r#"maybe = %parse.opt %parse.int; %parse.run ["5", maybe]"#)
+        .expect("Some[5]");
+}
+
+#[test]
+fn test_type_consuming_builtin_answers_its_type_argument_or_nil() {
+    // `%data.decode<'t>` is type-consuming: the type argument is what it decodes *into*, so it
+    // is also what the call is typed as — plus the nil of a failed decode. This is a claim
+    // about the type the compiler infers rather than the value produced, which is why it is
+    // here and not in `std/docs/data.md` (a `//=` there matches the value, whatever the type).
+    quiver()
+        .evaluate(r#"%data.decode<'int> "5""#)
+        .expect_type("'int | []");
+}

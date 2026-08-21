@@ -49,7 +49,7 @@ pub fn normalize_blocks(sequence: Sequence, options: &Options) -> Sequence {
         // Lift a multi-step no-binding block that is a sequence step's sole term, splicing its
         // (already-simplified) steps into this sequence so the compiler emits no frame for it. A
         // single-step such block was already spliced into the chain by `strip_chain`.
-        // A chain carrying a `//=> P` observes its own value, which lifting would dissolve into
+        // A chain carrying a `//= P` observes its own value, which lifting would dissolve into
         // the enclosing sequence — so the assertion keeps the block, as it does in `strip_chain`.
         if options.lift
             && chain.binding.is_none()
@@ -98,7 +98,7 @@ fn strip_chain(chain: Chain, options: &Options) -> Chain {
                 .expect("redundant implies a single chain step");
             // A body ending in a tail call may only be spliced when the block is the chain's last
             // term, so the `^` stays final rather than gaining dead code after it. A body
-            // carrying a `//=>` assertion may not be spliced at all — the splice keeps only the
+            // carrying a `//=` assertion may not be spliced at all — the splice keeps only the
             // body's terms, and the assertion must keep firing.
             let ends_in_tail_call = body.terms.last().is_some_and(is_tail_call);
             !(options.keep)(body)

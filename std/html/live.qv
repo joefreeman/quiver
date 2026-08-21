@@ -1565,15 +1565,15 @@ classify_frame = #'%str -> 'fclass {
 
 // Insert a view's HTML between its empty boundary markers; a page without the
 // markers (a raced unroute) passes through unchanged.
+// `index_of` and `slice` both count characters, so every length paired with them must too:
+// a page with any character outside ASCII makes a byte length the wrong cut.
 splice = #[(page): '%str, (vid): '%str, (html): '%str] {
-  $page ~> =Str[pgb]
   open = %str.concat ["<!--v:", %str.concat [$vid, "-->"]]
-  open ~> =Str[ob]
   {
     | %str.index_of [$page, open] ~> =('int)i => {
-      cut = %num.add [i, %bin.length ob]
+      cut = %num.add [i, %str.length open]
       pre = %str.slice [$page, 0, cut]
-      post = %str.slice [$page, cut, %bin.length pgb]
+      post = %str.slice [$page, cut, %str.length $page]
       %str.concat [pre, %str.concat [$html, post]]
     }
     | $page
@@ -1584,8 +1584,7 @@ splice = #[(page): '%str, (vid): '%str, (html): '%str] {
 // immediately followed by `<!--/v:ID-->` — i.e. a placed view whose first frame
 // hasn't arrived. Walks every open marker.
 unfilled_from = #[(page): '%str, (from): 'int] {
-  $page ~> =Str[pgb]
-  plen = %bin.length pgb
+  plen = %str.length $page
   rest = %str.slice [$page, $from, plen]
   {
     | %str.index_of [rest, "<!--v:"] ~> =('int)i => {
@@ -1596,8 +1595,7 @@ unfilled_from = #[(page): '%str, (from): 'int] {
           id = %str.slice [$page, idstart, %num.add [idstart, j]]
           closepos = %num.add [idstart, %num.add [j, 3]]
           needle = %str.concat ["<!--/v:", %str.concat [id, "-->"]]
-          needle ~> =Str[nb]
-          nend = %num.add [closepos, %bin.length nb]
+          nend = %num.add [closepos, %str.length needle]
           {
             | %num.lt? [plen, nend] => ^ [$page, closepos]
             | {

@@ -1892,6 +1892,30 @@ fn tuple_signature(
 /// Unify a pattern type (containing Type::Variable) with a concrete type.
 /// Builds up a mapping from type variable names to concrete type IDs.
 /// Returns an error if there's a conflict (e.g., variable bound to two different types).
+/// Combine two sets of type-variable bindings drawn from different variants of the same
+/// concrete union. A variable the two disagree on is bound to the *union* of what each
+/// found: both variants really can arrive, so both belong in its type. Overwriting (or
+/// dropping one side) would narrow the variable to a single variant.
+fn merge_bindings(
+    left: HashMap<String, usize>,
+    right: HashMap<String, usize>,
+    program: &mut Program,
+) -> HashMap<String, usize> {
+    let mut merged = left;
+    for (name, id) in right {
+        match merged.get(&name).copied() {
+            Some(existing) if existing != id => {
+                let widened = union_type_ids(program, vec![existing, id]);
+                merged.insert(name, widened);
+            }
+            _ => {
+                merged.insert(name, id);
+            }
+        }
+    }
+    merged
+}
+
 pub fn unify(
     bindings: &mut HashMap<String, usize>,
     pattern_id: usize,
@@ -2231,15 +2255,8 @@ pub fn unify(
                     )
                     .is_ok()
                     {
-                        // Merge the bindings
-                        for (k, v) in temp_bindings {
-                            if let Some(&existing) = bindings.get(&k)
-                                && !quiver_core::types::is_compatible(v, existing, program)
-                            {
-                                continue; // Skip incompatible binding
-                            }
-                            bindings.insert(k, v);
-                        }
+                        *bindings =
+                            merge_bindings(std::mem::take(bindings), temp_bindings, program);
                         found_match = true;
                         break;
                     }
@@ -2325,14 +2342,31 @@ pub fn unify(
         }
 
         // Concrete union with pattern non-union - pattern must match one variant
+        // Every variant of the concrete union contributes to the pattern's type variables,
+        // not just the first that fits: `['t, 'int]` unified against
+        // `[A, 'int] | [B, 'int]` binds `'t` to `A | B`. Stopping at the first match bound
+        // `'t` to one arm and dropped the rest, leaving an inferred type that excludes
+        // values the expression demonstrably produces — and a match against one of the
+        // dropped members then compiles to the wrong answer rather than to an error.
+        //
+        // A variant that does not unify is not itself a failure: a pattern may legitimately
+        // describe only part of the union (`Some['t]` against `Some['int] | None`). Only a
+        // union no variant of which fits is unresolvable.
         (_, Type::Union(variants)) => {
             let variants = variants.clone();
+            let mut merged: Option<HashMap<String, usize>> = None;
             for &variant in &variants {
                 let mut temp_bindings = bindings.clone();
                 if unify(&mut temp_bindings, pattern_id, variant, program).is_ok() {
-                    *bindings = temp_bindings;
-                    return Ok(());
+                    merged = Some(match merged {
+                        None => temp_bindings,
+                        Some(accumulated) => merge_bindings(accumulated, temp_bindings, program),
+                    });
                 }
+            }
+            if let Some(merged) = merged {
+                *bindings = merged;
+                return Ok(());
             }
             Err(Error::TypeUnresolved(format!(
                 "Cannot unify pattern with concrete union ({} variants)",

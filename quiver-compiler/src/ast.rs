@@ -148,7 +148,7 @@ pub struct Chain {
     /// Span starting at the chain's first character, for attaching leading comments/blank lines
     /// (trivia) to the chain during formatting. `None` for synthetic chains built by the parser.
     pub span: Spanned,
-    /// Empty exactly for an assertion-only step (`//=>` opening a sequence): the chain then
+    /// Empty exactly for an assertion-only step (`//=` opening a sequence): the chain then
     /// evaluates to the block's input, as a bare `~` step would.
     pub terms: Vec<Term>,
     /// The `~>` separators between adjacent terms, one per gap, in order — so a parsed chain
@@ -156,12 +156,12 @@ pub struct Chain {
     /// them, but the formatter needs them to re-attach the comments an author wrote in a gap.
     /// A chain the compiler synthesizes has none, having no source text to attach to.
     pub continuations: Vec<Continuation>,
-    /// `//=> P` assertions, each observing the chain's value at the position it was written
+    /// `//= P` assertions, each observing the chain's value at the position it was written
     /// (see [`Assertion::after`]). In debug builds that value is matched against the pattern
     /// and a mismatch aborts; release builds skip the check but still type-check the patterns,
     /// so types are identical across build modes. The value flows on unchanged either way — an
     /// asserted nil still short-circuits its sequence — and a pattern may not bind. Several
-    /// share a position when `//=>` lines are stacked: a leading `//=>` continues the line
+    /// share a position when `//=` lines are stacked: a leading `//=` continues the line
     /// above rather than opening a new step.
     pub assertions: Vec<Assertion>,
 }
@@ -178,7 +178,7 @@ pub struct Continuation {
     pub pipe: Spanned,
 }
 
-/// The payload of a `//=> P` assertion (see [`Chain::assertions`]).
+/// The payload of a `//= P` assertion (see [`Chain::assertions`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assertion {
     pub pattern: Match,
@@ -187,17 +187,17 @@ pub struct Assertion {
     /// (the common case: an assertion trailing the last line of a step), and `0` the value the
     /// chain starts from, which is what an assertion-only step observes.
     ///
-    /// A binding is applied *after* the assertions at `terms.len()`, so `x = e //=> P` observes
+    /// A binding is applied *after* the assertions at `terms.len()`, so `x = e //= P` observes
     /// `e`, not the binding's `Ok`/nil verdict. The verdict is what the match spelling
-    /// (`e ~> =P //=> []`) observes, that being the chain's value there.
+    /// (`e ~> =P //= []`) observes, that being the chain's value there.
     pub after: usize,
     /// A prose note following the pattern, separated from it by three or more spaces and
     /// running to the end of the line; ignored by the compiler, preserved by the formatter.
     pub note: Option<String>,
-    /// Whether the assertion sits on its own line (a leading `//=>` continuing the line above)
+    /// Whether the assertion sits on its own line (a leading `//=` continuing the line above)
     /// rather than trailing at the end of it; preserved by the formatter.
     pub own_line: bool,
-    /// Span of the whole `//=> …`, for diagnostics.
+    /// Span of the whole `//= …`, for diagnostics.
     pub span: Spanned,
 }
 
