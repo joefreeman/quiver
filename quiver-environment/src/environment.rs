@@ -723,6 +723,13 @@ impl<E: Effect> Environment<E> {
         &mut self,
         function_index: Option<usize>,
     ) -> Result<ProcessId, EnvironmentError> {
+        // A host-started process is a future tombstone exactly as a spawned one is — it is
+        // persistent only until the host stops it — so it counts towards the auto-trigger too.
+        // Without this a host whose processes are all host-started (a session per REPL, per
+        // connection, per document chapter) accumulates tombstones that never trigger the
+        // round that would reclaim them.
+        self.spawns_since_collection += 1;
+
         let pid = self.allocate_process_id();
         let worker_id = pid % self.workers.len(); // Round-robin
 

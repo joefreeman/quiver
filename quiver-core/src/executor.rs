@@ -370,6 +370,12 @@ impl<E: Effect> Executor<E> {
             process.result.is_some() && !process.persistent,
             "reclaim of a live or persistent process {pid}",
         );
+        // The entry point outlives the process itself: a tombstone still answers awaits, and
+        // building a crash payload needs it. Reclamation is where it stops being reachable, so
+        // it is where the index goes — otherwise the map is the one part of a process that a
+        // sweep never frees, and a long-lived host accumulates one entry per process it has
+        // ever run.
+        self.process_function_indices.remove(&pid);
         self.reclaimed_processes += 1;
     }
 

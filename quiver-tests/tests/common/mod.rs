@@ -3,6 +3,7 @@ use quiver_compiler::{ArtifactStore, PackageResolver};
 use quiver_core::wire::WireValue;
 use quiver_environment::{Environment, Repl, ReplError, WorkerHandle};
 use quiver_io::NativeEffect;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -24,14 +25,176 @@ thread_local! {
     static ARTIFACTS: Rc<ArtifactStore> = Rc::new(ArtifactStore::cache());
 }
 
-/// Evaluate source and return a TestResult
-fn evaluate(
-    mut environment: Environment<NativeEffect>,
-    mut repl: Repl<NativeEffect>,
+thread_local! {
+    /// One environment per host shape, reused by every test on this thread that can share it.
+    /// Building an environment is cheap; *filling* one is not — linking the standard library
+    /// into a fresh environment costs tens of milliseconds per module closure, and a
+    /// per-test environment pays that on every test that imports anything. A pooled
+    /// environment already holds the modules, and `link_module_unit` skips a key it has, so
+    /// the second test to import `%json` does none of the work the first one did.
+    ///
+    /// Per-thread for the same reason `ARTIFACTS` is: cargo runs tests on several threads,
+    /// and an `Environment` is not `Sync`.
+    static ENVIRONMENTS: RefCell<HashMap<HostShape, Pooled>> = RefCell::new(HashMap::new());
+}
+
+/// A pooled environment, with the clock its workers were spawned against.
+struct Pooled {
+    environment: Environment<NativeEffect>,
     virtual_time: Arc<AtomicU64>,
-    source: &str,
-    timeout: std::time::Duration,
-) -> TestResult {
+}
+
+/// What a test needs from its host, and so which pooled environment can serve it. Only the
+/// two things baked into the workers at spawn — the capability set they carry and whether io
+/// is attached — separate one pool slot from another.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct HostShape {
+    capabilities: Capabilities,
+    with_io: bool,
+}
+
+/// The environment a test runs against, together with how it must be given back. Sharing is
+/// the default; `Drop` stops the test's session process, which is what keeps one test's
+/// leftovers — spawned processes, registry names, open resources — out of the next one.
+struct Session {
+    /// Taken only by `Drop`, handing the environment back to the pool.
+    environment: Option<Environment<NativeEffect>>,
+    repl: Repl<NativeEffect>,
+    virtual_time: Arc<AtomicU64>,
+    /// The pool slot to return to, or `None` for a private environment — which is simply
+    /// dropped, shutting its workers down with it.
+    shape: Option<HostShape>,
+}
+
+impl Session {
+    fn environment(&self) -> &Environment<NativeEffect> {
+        self.environment
+            .as_ref()
+            .expect("session environment taken")
+    }
+
+    fn environment_mut(&mut self) -> &mut Environment<NativeEffect> {
+        self.environment
+            .as_mut()
+            .expect("session environment taken")
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let (Some(mut environment), Some(shape)) = (self.environment.take(), self.shape) else {
+            return;
+        };
+        // Ownership teardown cascades from the session process to everything the test
+        // spawned, which is what frees its registry names and closes its resources. The stop
+        // is a worker command and is deliberately not awaited: the next test's process-type
+        // fetch travels the same channel behind it, so the worker has already done the
+        // teardown by the time anything can observe the environment again.
+        let _ = environment.stop_process(self.repl.process_id());
+        let virtual_time = Arc::clone(&self.virtual_time);
+        ENVIRONMENTS.with_borrow_mut(|pool| {
+            pool.insert(
+                shape,
+                Pooled {
+                    environment,
+                    virtual_time,
+                },
+            );
+        });
+    }
+}
+
+/// The builtin registry for a host shape. Every shape carries the same universal signatures —
+/// compilation is host-independent — and the shape decides only which implementations attach.
+fn build_builtins(shape: HostShape) -> quiver_core::builtins::BuiltinRegistry<NativeEffect> {
+    let mut builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
+        &quiver_core::builtins::universal_modules(),
+    );
+    match shape.capabilities {
+        // Full attaches via `with_io` below; None attaches nothing at all.
+        Capabilities::Full | Capabilities::None => {}
+        // The system builtins are synchronous host reads, so implementations alone make them
+        // runnable — no effect backend. This is a browser's shape.
+        Capabilities::SystemOnly | Capabilities::Web => {
+            quiver_io::attach_system_builtins(&mut builtins);
+        }
+    }
+    if shape.with_io {
+        quiver_io::attach_network_builtins(&mut builtins);
+        quiver_io::attach_file_builtins(&mut builtins);
+        quiver_io::attach_system_builtins(&mut builtins);
+        quiver_io::attach_tls_builtins(&mut builtins);
+        quiver_io::attach_http_builtins(&mut builtins);
+    }
+    builtins
+}
+
+/// Build a host of the given shape: its workers, its effect backend, and the environment
+/// binding them. `real_time` and `mock_io` are exactly the two things a pooled environment
+/// cannot vary, because a clock is fixed when the workers spawn and a backend when it
+/// attaches — which is why either one forces a private environment.
+fn build_environment(
+    shape: HostShape,
+    real_time: bool,
+    mock_io: Option<MockIo>,
+) -> (Environment<NativeEffect>, Arc<AtomicU64>) {
+    let virtual_time_ms = Arc::new(AtomicU64::new(0));
+    let builtins = build_builtins(shape);
+
+    // The harness drives the environment itself (advancing the stepped clock as it idles), so
+    // it never waits on the wake signal — the workers still poke it, and its capacity of 1
+    // keeps that harmless.
+    let (waker, _wake) = quiver::native_transport::wake_channel();
+    let num_workers = 2;
+    let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
+    for i in 0..num_workers {
+        let builtins_clone = builtins.clone();
+
+        if real_time {
+            workers.push(Box::new(spawn_worker(
+                quiver::native_transport::SystemClock,
+                builtins_clone,
+                i as u16,
+                waker.clone(),
+            )));
+        } else {
+            workers.push(Box::new(spawn_worker(
+                quiver::native_transport::SteppedClock::new(virtual_time_ms.clone()),
+                builtins_clone,
+                i as u16,
+                waker.clone(),
+            )));
+        }
+    }
+
+    let effect_backend: Option<Box<dyn quiver_core::effects::EffectBackend<E = NativeEffect>>> =
+        match (mock_io, shape.with_io) {
+            (Some(behaviour), _) => Some(Box::new(mock_io::MockBackend::new(behaviour))),
+            (None, true) => quiver_io::NativeEffectBackend::new(256)
+                .ok()
+                .map(|backend| Box::new(backend) as Box<_>),
+            (None, false) => None,
+        };
+
+    let mut environment = Environment::<NativeEffect>::new(workers);
+    environment.set_runtime_declarations(builtins.runtime_declarations().clone());
+    if let Some(backend) = effect_backend {
+        environment.set_effect_backend(backend);
+    }
+
+    (environment, virtual_time_ms)
+}
+
+/// Evaluate source and return a TestResult
+fn evaluate(mut session: Session, source: &str, timeout: std::time::Duration) -> TestResult {
+    let Session {
+        environment,
+        repl,
+        virtual_time,
+        ..
+    } = &mut session;
+    let environment = environment.as_mut().expect("session environment taken");
+
     // Fetch process types
     let types_request_id = environment
         .request_process_types()
@@ -48,7 +211,7 @@ fn evaluate(
     };
 
     // Evaluate and poll for result
-    let result = match repl.evaluate(&mut environment, source, process_types) {
+    let result = match repl.evaluate(environment, source, process_types) {
         Ok(Some(request_id)) => {
             let start = std::time::Instant::now();
 
@@ -90,9 +253,7 @@ fn evaluate(
     TestResult {
         result,
         source: source.to_string(),
-        environment,
-        repl,
-        virtual_time,
+        session,
         last_result_type,
     }
 }
@@ -114,7 +275,7 @@ pub mod tls_server;
 /// nothing. Signatures are universal either way: a call outside the attached set errors at
 /// runtime, never at compile time.
 #[allow(dead_code)]
-#[derive(Default, Clone, Copy, PartialEq)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capabilities {
     #[default]
     Full,
@@ -139,6 +300,7 @@ pub struct TestBuilder {
     code_collection_threshold: Option<usize>,
     timeout: Option<std::time::Duration>,
     real_time: bool,
+    isolated: bool,
 }
 
 #[allow(dead_code)]
@@ -253,77 +415,50 @@ impl TestBuilder {
         self
     }
 
+    /// Give this test an environment of its own rather than the pooled one. Needed by tests
+    /// that read environment-wide counters (reclaimed processes, code sweeps, the virtual
+    /// clock), which a neighbouring test sharing the environment would perturb.
+    pub fn isolated(mut self) -> Self {
+        self.isolated = true;
+        self
+    }
+
+    /// The pool slot this test can share, or `None` if it must have the environment to
+    /// itself. A clock is fixed when the workers spawn and an effect backend when it
+    /// attaches, so `real_time` and `mock_io` can never share; reclamation settings and the
+    /// counters that go with them are environment-wide state, so they must not.
+    fn shape(&self) -> Option<HostShape> {
+        let shareable = self.mock_io.is_none()
+            && !self.real_time
+            && !self.isolated
+            && self.collection_threshold.is_none()
+            && self.code_collection_threshold.is_none();
+        shareable.then_some(HostShape {
+            capabilities: self.capabilities,
+            with_io: self.with_io,
+        })
+    }
+
     pub fn evaluate(self, source: &str) -> TestResult {
-        // Initialize virtual time for testing
-        let virtual_time_ms = Arc::new(AtomicU64::new(0));
+        let shape = self.shape();
+        let (mut environment, virtual_time_ms) = match shape {
+            // A pooled environment arrives with the standard library already linked, which is
+            // the whole saving; an empty slot builds one and the next test inherits it.
+            Some(shape) => match ENVIRONMENTS.with_borrow_mut(|pool| pool.remove(&shape)) {
+                Some(pooled) => (pooled.environment, pooled.virtual_time),
+                None => build_environment(shape, false, None),
+            },
+            None => build_environment(
+                HostShape {
+                    capabilities: self.capabilities,
+                    with_io: self.with_io,
+                },
+                self.real_time,
+                self.mock_io.clone(),
+            ),
+        };
 
-        // Every registry carries the universal signature contract — compilation is
-        // host-independent — and the capability shape decides only which implementations
-        // attach, i.e. what this test host can actually run.
-        let mut builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
-            &quiver_core::builtins::universal_modules(),
-        );
-        match self.capabilities {
-            // Full attaches via `with_io` below; None attaches nothing at all.
-            Capabilities::Full | Capabilities::None => {}
-            // The system builtins are synchronous host reads, so implementations alone
-            // make them runnable — no effect backend. This is a browser's shape.
-            Capabilities::SystemOnly | Capabilities::Web => {
-                quiver_io::attach_system_builtins(&mut builtins);
-            }
-        }
-
-        // Add I/O builtins if I/O is enabled
-        if self.with_io {
-            quiver_io::attach_network_builtins(&mut builtins);
-            quiver_io::attach_file_builtins(&mut builtins);
-            quiver_io::attach_system_builtins(&mut builtins);
-            quiver_io::attach_tls_builtins(&mut builtins);
-            quiver_io::attach_http_builtins(&mut builtins);
-        }
-
-        // Create workers with virtual time function. The harness drives the environment itself
-        // (advancing the stepped clock as it idles), so it never waits on the wake signal — the
-        // workers still poke it, and its capacity of 1 keeps that harmless.
-        let (waker, _wake) = quiver::native_transport::wake_channel();
-        let num_workers = 2;
-        let mut workers: Vec<Box<dyn WorkerHandle<NativeEffect>>> = Vec::new();
-        for i in 0..num_workers {
-            let builtins_clone = builtins.clone();
-
-            if self.real_time {
-                workers.push(Box::new(spawn_worker(
-                    quiver::native_transport::SystemClock,
-                    builtins_clone,
-                    i as u16,
-                    waker.clone(),
-                )));
-            } else {
-                workers.push(Box::new(spawn_worker(
-                    quiver::native_transport::SteppedClock::new(virtual_time_ms.clone()),
-                    builtins_clone,
-                    i as u16,
-                    waker.clone(),
-                )));
-            }
-        }
-
-        // Create shared effect backend if enabled
-        let effect_backend: Option<Box<dyn quiver_core::effects::EffectBackend<E = NativeEffect>>> =
-            match (&self.mock_io, self.with_io) {
-                (Some(behaviour), _) => {
-                    Some(Box::new(mock_io::MockBackend::new(behaviour.clone())))
-                }
-                (None, true) => quiver_io::NativeEffectBackend::new(256)
-                    .ok()
-                    .map(|backend| Box::new(backend) as Box<_>),
-                (None, false) => None,
-            };
-
-        // Create environment and REPL
-        let mut environment = Environment::<NativeEffect>::new(workers);
-        environment.set_runtime_declarations(builtins.runtime_declarations().clone());
-
+        // Only ever a private environment: setting either forces `shape()` to `None`.
         if let Some(threshold) = self.collection_threshold {
             environment.set_collection_threshold(threshold);
         }
@@ -331,10 +466,10 @@ impl TestBuilder {
             environment.set_code_collection_threshold(threshold);
         }
 
-        // Set the effect backend
-        if let Some(backend) = effect_backend {
-            environment.set_effect_backend(backend);
-        }
+        let builtins = build_builtins(HostShape {
+            capabilities: self.capabilities,
+            with_io: self.with_io,
+        });
         let resolver = match self.files {
             Some(files) => {
                 PackageResolver::memory_files(files).expect("in-memory files must be valid")
@@ -363,7 +498,13 @@ impl TestBuilder {
         let timeout = self
             .timeout
             .unwrap_or_else(|| std::time::Duration::from_secs(5));
-        evaluate(environment, repl, virtual_time_ms, source, timeout)
+        let session = Session {
+            environment: Some(environment),
+            repl,
+            virtual_time: virtual_time_ms,
+            shape,
+        };
+        evaluate(session, source, timeout)
     }
 }
 
@@ -371,9 +512,7 @@ impl TestBuilder {
 pub struct TestResult {
     result: ReplResult,
     source: String,
-    environment: Environment<NativeEffect>,
-    repl: Repl<NativeEffect>,
-    virtual_time: Arc<AtomicU64>,
+    session: Session,
     last_result_type: quiver_core::types::Type,
 }
 
@@ -383,7 +522,7 @@ impl TestResult {
     /// against a literal — e.g. asserting two hosts agree.
     pub fn value_string(&self) -> String {
         match &self.result {
-            Ok(Some(value)) => self.environment.format_value(value),
+            Ok(Some(value)) => self.session.environment().format_value(value),
             Ok(None) => String::new(),
             Err(e) => panic!("expected a value, got {:?} for source: {}", e, self.source),
         }
@@ -393,7 +532,7 @@ impl TestResult {
     pub fn expect(self, expected: &str) -> Self {
         match self.result {
             Ok(Some(ref value)) => {
-                let actual = self.environment.format_value(value);
+                let actual = self.session.environment().format_value(value);
                 assert_eq!(
                     actual, expected,
                     "Expected '{}', got '{}' for source: {}",
@@ -423,7 +562,7 @@ impl TestResult {
     pub fn expect_origin(self, expected: &str) -> Self {
         match self.result {
             Ok(Some(ref value)) => {
-                let actual = self.environment.describe_origin(value);
+                let actual = self.session.environment().describe_origin(value);
                 assert_eq!(
                     actual.as_deref(),
                     Some(expected),
@@ -443,7 +582,7 @@ impl TestResult {
     /// in a non-result position).
     pub fn expect_no_origin(self) -> Self {
         if let Ok(Some(ref value)) = self.result {
-            let actual = self.environment.describe_origin(value);
+            let actual = self.session.environment().describe_origin(value);
             assert_eq!(actual, None, "for source: {}", self.source);
         }
         self
@@ -580,7 +719,7 @@ impl TestResult {
 
     pub fn expect_variable(self, variable_name: &str, expected: &str) -> Self {
         // Get variable type from the repl
-        let variables = self.repl.get_variables();
+        let variables = self.session.repl.get_variables();
         let variable_type = variables
             .iter()
             .find(|(name, _)| name == variable_name)
@@ -607,14 +746,15 @@ impl TestResult {
     }
 
     pub fn expect_alias(mut self, alias_name: &str, expected: &str) -> Self {
-        match self
-            .repl
-            .resolve_type_alias(&mut self.environment, alias_name)
-        {
+        let Session {
+            environment, repl, ..
+        } = &mut self.session;
+        let environment = environment.as_mut().expect("session environment taken");
+        match repl.resolve_type_alias(environment, alias_name) {
             Ok(type_id) => {
                 // Use REPL's format_type_by_id since type IDs from TypeAliasDef::Resolved
                 // are registered in the REPL's program, not the Environment's
-                let actual = self.repl.format_type_by_id(type_id);
+                let actual = self.session.repl.format_type_by_id(type_id);
                 assert_eq!(
                     actual, expected,
                     "Expected type alias '{}' to resolve to '{}', but got '{}' for source: {}",
@@ -641,7 +781,7 @@ impl TestResult {
                     );
                 } else {
                     // Check the inferred type (a compiler-side type — REPL id space)
-                    let actual = self.repl.format_type(&self.last_result_type);
+                    let actual = self.session.repl.format_type(&self.last_result_type);
                     assert_eq!(
                         actual, expected,
                         "Expected result type '{}', got '{}' for source: {}",
@@ -670,7 +810,7 @@ impl TestResult {
     }
 
     pub fn expect_duration(self, min_ms: u64, max_ms: u64) -> Self {
-        let time = self.virtual_time.load(Ordering::Relaxed);
+        let time = self.session.virtual_time.load(Ordering::Relaxed);
         assert!(
             time >= min_ms && time <= max_ms,
             "Expected virtual time between {}ms and {}ms, but got {}ms for source: {}",
@@ -684,23 +824,19 @@ impl TestResult {
 
     /// Evaluate another expression, chaining from the previous evaluation
     pub fn then_evaluate(self, source: &str) -> Self {
-        evaluate(
-            self.environment,
-            self.repl,
-            self.virtual_time,
-            source,
-            std::time::Duration::from_secs(5),
-        )
+        evaluate(self.session, source, std::time::Duration::from_secs(5))
     }
 
     /// Run a full process-reclamation round to completion. Drives
     /// the pause/snapshot/sweep handshake across `step()`s until it settles. If an
     /// auto-triggered round is already in flight, this simply pumps it to completion.
     pub fn force_collection(mut self) -> Self {
-        self.environment
+        let source = self.source.clone();
+        let environment = self.session.environment_mut();
+        environment
             .start_collection()
             .expect("failed to start collection");
-        pump_collection(&mut self.environment, &self.source);
+        pump_collection(environment, &source);
         self
     }
 
@@ -708,12 +844,13 @@ impl TestResult {
     /// already in flight it is pumped first (the code request then applies to a fresh
     /// round), so this always sweeps.
     pub fn force_code_collection(mut self) -> Self {
+        let source = self.source.clone();
+        let environment = self.session.environment_mut();
         loop {
-            let started = self
-                .environment
+            let started = environment
                 .start_code_collection()
                 .expect("failed to start code collection");
-            pump_collection(&mut self.environment, &self.source);
+            pump_collection(environment, &source);
             if started {
                 break;
             }
@@ -724,7 +861,7 @@ impl TestResult {
     /// Assert at least `functions` function slots have been reclaimed by code sweeps
     /// so far.
     pub fn expect_code_reclaimed_at_least(self, functions: usize) -> Self {
-        let (actual, _constants) = self.environment.code_reclaimed_totals();
+        let (actual, _constants) = self.session.environment().code_reclaimed_totals();
         assert!(
             actual >= functions,
             "expected at least {functions} reclaimed functions, got {actual} for source: {}",
@@ -735,7 +872,7 @@ impl TestResult {
 
     /// Assert no code has been reclaimed by any sweep so far.
     pub fn expect_no_code_reclaimed(self) -> Self {
-        let totals = self.environment.code_reclaimed_totals();
+        let totals = self.session.environment().code_reclaimed_totals();
         assert_eq!(
             totals,
             (0, 0),
@@ -747,7 +884,7 @@ impl TestResult {
 
     /// Assert exactly `n` tombstones have been reclaimed in total across all rounds so far.
     pub fn expect_reclaimed(self, n: usize) -> Self {
-        let actual = self.environment.reclaimed_total();
+        let actual = self.session.environment().reclaimed_total();
         assert_eq!(
             actual, n,
             "expected {n} reclaimed processes, got {actual} for source: {}",
@@ -758,7 +895,7 @@ impl TestResult {
 
     /// Assert at least `n` tombstones have been reclaimed in total across all rounds so far.
     pub fn expect_reclaimed_at_least(self, n: usize) -> Self {
-        let actual = self.environment.reclaimed_total();
+        let actual = self.session.environment().reclaimed_total();
         assert!(
             actual >= n,
             "expected at least {n} reclaimed processes, got {actual} for source: {}",
@@ -770,7 +907,7 @@ impl TestResult {
     /// Assert the environment tracks fewer than `n` processes (live plus unreclaimed
     /// tombstones) — i.e. reclamation kept the population bounded.
     pub fn expect_process_count_below(self, n: usize) -> Self {
-        let actual = self.environment.process_count();
+        let actual = self.session.environment().process_count();
         assert!(
             actual < n,
             "expected fewer than {n} tracked processes, got {actual} for source: {}",

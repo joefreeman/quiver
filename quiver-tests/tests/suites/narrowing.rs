@@ -1,0 +1,1339 @@
+use crate::common::*;
+
+// =============================================================================
+// Forward Narrowing
+// =============================================================================
+
+#[test]
+fn test_basic_variable_narrowing_in_chain() {
+    // After type check, x is narrowed to A, so x.a is valid
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            x = 0 ~> make_ab ~;
+            x ~> =A[a: 'int]; x.a
+            "#,
+        )
+        .expect("1");
+}
+
+#[test]
+fn test_field_narrowing_propagates_to_parent() {
+    // Narrowing y.a to int narrows y to A (which has field b)
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1, b: 2] | B[a: <00>, c: 3] };
+            y = 0 ~> make_ab ~;
+            y.a ~> ='int; y.b
+            "#,
+        )
+        .expect("2");
+}
+
+#[test]
+fn test_parameter_provenance_narrowing() {
+    // Narrowing the parameter also narrows the original variable x
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            x = 0 ~> make_ab ~;
+            x ~> { =A[a: 'int] => x.a }
+            "#,
+        )
+        .expect("1");
+}
+
+#[test]
+fn test_type_intersection_from_multiple_checks() {
+    // Two separate type assertions on the same value narrow it to their intersection (here, B —
+    // the only common variant that `x = B` can be). The dedicated `'t & 'u` syntax is tested below.
+    quiver()
+        .evaluate(
+            r#"
+            't = A | B | C;
+            'u = B | C | D;
+            x = B;
+            x ~> ='t; x ~> ='u; x
+            "#,
+        )
+        .expect_type("B");
+}
+
+#[test]
+fn test_inner_scope_inherits_narrowing() {
+    // Inner block sees the narrowed type of x
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            x = 0 ~> make_ab ~;
+            x ~> =A[a: 'int]; { x.a }
+            "#,
+        )
+        .expect("1");
+}
+
+#[test]
+fn test_truthiness_narrowing_in_branch_condition() {
+    // When a value of type [] | int is used as a condition, it should be
+    // narrowed to int in the consequence (since [] is falsy)
+    quiver()
+        .evaluate(
+            r#"
+            match0 = #'int { =0 => $ };
+            a = 0 ~> match0 ~;
+            { a => [a, 1] ~> %num.add ~ | 200 }
+            "#,
+        )
+        .expect("1");
+
+    // Test the nil case - should fall through to second branch
+    quiver()
+        .evaluate(
+            r#"
+            match0 = #'int { =0 => $ };
+            b = 1 ~> match0 ~;
+            { b => [b, 1] ~> %num.add ~ | 200 }
+            "#,
+        )
+        .expect("200");
+}
+
+#[test]
+fn test_truthiness_narrowing_with_binding() {
+    // When a value is bound via pattern match in a condition, the binding
+    // should also be narrowed when the condition succeeds
+    quiver()
+        .evaluate(
+            r#"
+            match0 = #'int { =0 => $ };
+            a = 0 ~> match0 ~;
+            { a ~> =x; x => [x, 1] ~> %num.add ~ | 200 }
+            "#,
+        )
+        .expect("1");
+
+    // Test the nil case
+    quiver()
+        .evaluate(
+            r#"
+            match0 = #'int { =0 => $ };
+            b = 1 ~> match0 ~;
+            { b ~> =x; x => [x, 1] ~> %num.add ~ | 200 }
+            "#,
+        )
+        .expect("200");
+}
+
+#[test]
+fn test_truthiness_narrowing_with_unknown_provenance() {
+    // When a binding is created from a function result (Unknown provenance),
+    // it should still be narrowed when the condition succeeds
+    quiver()
+        .evaluate(
+            r#"
+            f = #'int { =0 => $ };
+            { 0 ~> f ~ ~> =x; x => [x, 1] ~> %num.add ~ | 200 }
+            "#,
+        )
+        .expect("1");
+
+    // Test the nil case
+    quiver()
+        .evaluate(
+            r#"
+            f = #'int { =0 => $ };
+            { 1 ~> f ~ ~> =x; x => [x, 1] ~> %num.add ~ | 200 }
+            "#,
+        )
+        .expect("200");
+}
+
+#[test]
+fn test_inter_chain_narrowing() {
+    // When a binding is created in one chain and used in the next,
+    // it should be narrowed after the first chain succeeds
+    quiver()
+        .evaluate(
+            r#"
+            match0 = #'int { =0 => $ };
+            a = 0 ~> match0 ~;
+            { a ~> =x; [x, 1] ~> %num.add ~ }
+            "#,
+        )
+        .expect("1");
+
+    // Also test with function result
+    quiver()
+        .evaluate(
+            r#"
+            f = #'int { =0 => $ };
+            { 0 ~> f ~ ~> =x; [x, 1] ~> %num.add ~ }
+            "#,
+        )
+        .expect("1");
+}
+
+// =============================================================================
+// Complement Narrowing
+// =============================================================================
+
+#[test]
+fn test_basic_complement_narrowing() {
+    // First branch: y.a is int -> y is A (has b)
+    // Second branch: y.a is NOT int -> y is B (has c)
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1, b: 2] | B[a: <00>, c: 3] };
+            y = 0 ~> make_ab ~;
+            { y.a ~> ='int => y.b | y.c }
+            "#,
+        )
+        .expect("2");
+
+    // Test second branch explicitly
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1, b: 2] | B[a: <00>, c: 3] };
+            y = 1 ~> make_ab ~;
+            { y.a ~> ='int => y.b | y.c }
+            "#,
+        )
+        .expect("3");
+}
+
+#[test]
+fn test_complement_from_condition_failure() {
+    // Second branch: x is B (has b) because first branch checked for A
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            x = 1 ~> make_ab ~;
+            { x ~> =A[a: 'int] => 0 | x.b }
+            "#,
+        )
+        .expect("2");
+}
+
+#[test]
+fn test_multiple_type_checks_same_provenance_complement() {
+    // When x = A and we check against B|C, the branch is dead code since A ∉ B|C.
+    // Result type should exclude the dead branch's type (int).
+    quiver()
+        .evaluate(
+            r#"
+            't = A | B | C;
+            'u = B | C;
+            x = A;
+            { x ~> ='t; x ~> ='u => 1 | x }
+            "#,
+        )
+        .expect_type("A");
+}
+
+#[test]
+fn test_complement_propagates_across_multiple_branches() {
+    // Complement narrowing from branch 1 should propagate to branches 2 AND 3
+    // even if branch 2 doesn't record its own narrowing
+    quiver()
+        .evaluate(
+            r#"
+            value = 5;
+            to_option = #'int { =0 => None | ~ };
+            stop = 10 ~> to_option ~;
+            { stop ~> =None | [value, stop] ~> %num.lt? ~ | [value, stop] ~> %num.gt? ~ }
+            "#,
+        )
+        .expect("Ok");
+
+    // Test with None value - should match first branch
+    quiver()
+        .evaluate(
+            r#"
+            value = 5;
+            to_option = #'int { =0 => None | ~ };
+            stop = 0 ~> to_option ~;
+            { stop ~> =None => 999 | [value, stop] ~> %num.lt? ~ | [value, stop] ~> %num.gt? ~ }
+            "#,
+        )
+        .expect("999");
+}
+
+#[test]
+fn test_non_type_failable_disables_complement() {
+    // Function call after type check disables complement narrowing, so `x` is not narrowed to
+    // `A` in the fallback branch and `x.a` is a member error. (`some_func` accepts nil because a
+    // failed `=A[a: 'int]` flows nil into it — nil propagates through a chain rather than
+    // short-circuiting it.)
+    quiver()
+        .evaluate(
+            r#"
+            some_func = #(A[a: 'int] | []) { $ };
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            x = 0 ~> make_ab ~;
+            { x ~> =A[a: 'int]; x ~> some_func ~ => 1 | x.a }
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
+            field_name: "a".to_string(),
+            target: "x".to_string(),
+        });
+}
+
+#[test]
+fn test_multiple_provenances_disables_complement() {
+    // Multiple provenances narrowed disables complement
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            make_cd = #'int { =0 => C[c: 3] | D[d: 4] };
+            x = 0 ~> make_ab ~;
+            y = 0 ~> make_cd ~;
+            { x ~> =A[a: 'int]; y ~> =C[c: 'int] => 1 | x.b }
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
+            field_name: "b".to_string(),
+            target: "x".to_string(),
+        });
+}
+
+#[test]
+fn test_literal_match_disables_complement() {
+    // Literal match is non-type failable, disables complement narrowing
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[val: 1, a: 10] | B[val: 2, b: 20] };
+            x = 0 ~> make_ab ~;
+            { x.val ~> =1 => 2 | x.b }
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
+            field_name: "b".to_string(),
+            target: "x".to_string(),
+        });
+}
+
+// =============================================================================
+// Edge Cases
+// =============================================================================
+
+#[test]
+fn test_shadowing_does_not_affect_outer_narrowing() {
+    // Inner x shadows outer x, but outer narrowing is preserved
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            x = 0 ~> make_ab ~;
+            x ~> =A[a: 'int];
+            {
+                x = B[b: 99];
+                x.b
+            };
+            x.a
+            "#,
+        )
+        .expect("1");
+}
+
+#[test]
+fn test_complement_with_three_branches() {
+    // Each branch narrows the type further
+    quiver()
+        .evaluate(
+            r#"
+            make_abc = #'int { =0 => A[a: 1] | =1 => B[b: 2] | C[c: 3] };
+            x = 0 ~> make_abc ~;
+            { x ~> =A[a: 'int] => 10 | x ~> =B[b: 'int] => 20 | x.c }
+            "#,
+        )
+        .expect("10");
+}
+
+#[test]
+fn test_complement_union_with_common_field() {
+    // Narrowing on common field type
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[val: 1, a: 10] | B[val: <00>, b: 20] };
+            x = 0 ~> make_ab ~;
+            { x.val ~> ='int => x.a | x.b }
+            "#,
+        )
+        .expect("10");
+}
+
+// =============================================================================
+// Error Cases
+// =============================================================================
+
+#[test]
+fn test_field_access_on_union_without_narrowing_fails() {
+    // Accessing .a on A | B fails when B doesn't have field a
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            x = 0 ~> make_ab ~;
+            x.a
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
+            field_name: "a".to_string(),
+            target: "x".to_string(),
+        });
+}
+
+#[test]
+fn test_field_access_on_wrong_branch_fails() {
+    // After narrowing to A, accessing b (on B) fails
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            x = 0 ~> make_ab ~;
+            x ~> =A[a: 'int]; x.b
+            "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
+            field_name: "b".to_string(),
+            target: "x".to_string(),
+        });
+}
+
+#[test]
+fn test_fallback_branch_does_not_require_nil() {
+    // A fallback branch that doesn't examine the input should work as exhaustive.
+    // This ensures the return type is just int, not int | nil.
+    quiver()
+        .evaluate(
+            r#"
+            f = #(A['int] | B['int]) -> 'int {
+              | =A['int] => 1
+              | 2
+            };
+            A[1] ~> f ~
+            "#,
+        )
+        .expect("1");
+}
+
+// =============================================================================
+// Tuple Provenance Narrowing
+// =============================================================================
+
+#[test]
+fn test_tuple_field_narrowing() {
+    // After narrowing t.0 to A, x should be narrowed to A
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            x = 0 ~> make_ab ~;
+            y = C[c: 3];
+            t = [x, y];
+            t.0 ~> =A[a: 'int]; x.a
+            "#,
+        )
+        .expect("1");
+}
+
+#[test]
+fn test_tuple_ripple_preserves_provenance() {
+    // Ripple in tuple preserves provenance - narrowing through .0 narrows x
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            x = 0 ~> make_ab ~;
+            t = x ~> [~, 1];
+            t.0 ~> =A[a: 'int]; x.a
+            "#,
+        )
+        .expect("1");
+}
+
+#[test]
+fn test_nested_tuple_field_access() {
+    // Nested tuple field access preserves provenance chain
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            x = 0 ~> make_ab ~;
+            inner = [x];
+            outer = [inner];
+            outer.0.0 ~> =A[a: 'int]; x.a
+            "#,
+        )
+        .expect("1");
+}
+
+#[test]
+fn test_named_tuple_field_narrowing() {
+    // Named field access on tuple with provenance works
+    quiver()
+        .evaluate(
+            r#"
+            make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
+            x = 0 ~> make_ab ~;
+            t = [first: x, second: 0];
+            t.first ~> =A[a: 'int]; x.a
+            "#,
+        )
+        .expect("1");
+}
+
+// =============================================================================
+// Tuple Pattern Complement Narrowing
+// =============================================================================
+
+#[test]
+fn test_tuple_pattern_complement_first_field() {
+    // After matching =[Nil, ys], the first field is known to be Nil.
+    // In the second branch, the first field must be Cons[...].
+    quiver()
+        .evaluate(
+            r#"
+            'list<'t> = Nil | Cons['t, ^];
+            f = #<'t>['list<'t>, 'list<'t>] -> 'list<'t> {
+              | =[Nil, ys] => ys
+              | =[Cons[head, tail], ys] => ys
+            };
+            [Nil, Cons[1, Nil]] ~> f ~
+        "#,
+        )
+        .expect("Cons[1, Nil]");
+}
+
+#[test]
+fn test_tuple_pattern_complement_second_field() {
+    // Same as above but constraining on second field
+    quiver()
+        .evaluate(
+            r#"
+            'list<'t> = Nil | Cons['t, ^];
+            f = #<'t>['int, 'list<'t>] -> 'int {
+              | =[n, Nil] => n
+              | =[n, Cons[_, _]] => n
+            };
+            [42, Cons[1, Nil]] ~> f ~
+        "#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_tuple_pattern_complement_three_variants() {
+    // Test with three-variant union
+    quiver()
+        .evaluate(
+            r#"
+            'tri<'t> = A['t] | B['t] | C['t];
+            f = #<'t>['tri<'t>, 'int] -> 'int {
+              | =[A[_], n] => n
+              | =[B[_], n] => n
+              | =[C[_], n] => n
+            };
+            [B[1], 42] ~> f ~
+        "#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_tuple_pattern_complement_exhaustive() {
+    // The reverse' function from the spec should compile without error
+    quiver()
+        .evaluate(
+            r#"
+            'list<'t> = Nil | Cons['t, ^];
+            reverse_ = #<'t>['list<'t>, 'list<'t>] -> 'list<'t> {
+              | =[Nil, ys] => ys
+              | =[Cons[head, tail], ys] => Cons[head, ys] ~> [tail, ~] ~> ^ ~
+            };
+            [Cons[1, Cons[2, Nil]], Nil] ~> reverse_ ~
+        "#,
+        )
+        .expect("Cons[2, Cons[1, Nil]]");
+}
+
+#[test]
+fn test_tuple_pattern_multiple_constraining_fields_not_exhaustive() {
+    // Multiple constraining fields should NOT enable exhaustiveness
+    // This test verifies that [Nil, Nil] and [Cons, Cons] patterns don't
+    // incorrectly claim exhaustiveness (missing [Nil, Cons] and [Cons, Nil])
+    quiver()
+        .evaluate(
+            r#"
+            'list<'t> = Nil | Cons['t, ^];
+            f = #<'t>['list<'t>, 'list<'t>] {
+              | =[Nil, Nil] => 0
+              | =[Cons[_, _], Cons[_, _]] => 1
+            };
+            [Nil, Nil] ~> f ~
+        "#,
+        )
+        .expect_type("'int | []");
+}
+
+#[test]
+fn test_tuple_pattern_nested_pattern_not_complement() {
+    // Nested patterns (like Cons[Cons[x, _], _]) should disable complement
+    quiver()
+        .evaluate(
+            r#"
+            'list<'t> = Nil | Cons['t, ^];
+            f = #<'t>['list<'list<'t>>, 'int] {
+              | =[Nil, n] => n
+              | =[Cons[Nil, _], n] => n
+            };
+            [Nil, 42] ~> f ~
+        "#,
+        )
+        .expect_type("'int | []");
+}
+
+#[test]
+fn test_tuple_pattern_complement_via_binding() {
+    // Tuple created from bindings - field narrowing works through the block parameter.
+    // The tuple [xs, ys] is piped to a block, and inside we use (Parameter provenance).
+    quiver()
+        .evaluate(
+            r#"
+            'list<'t> = Nil | Cons['t, ^];
+            f = #<'t>['list<'t>, 'list<'t>] -> 'list<'t> {
+              =[xs, ys];
+              [xs, ys] ~> {
+                | =[Nil, zs] => zs
+                | =[Cons[head, tail], zs] => zs
+              }
+            };
+            [Nil, Cons[1, Nil]] ~> f ~
+        "#,
+        )
+        .expect("Cons[1, Nil]");
+}
+
+#[test]
+fn test_tuple_pattern_complement_via_variable() {
+    // Tuple stored in variable then piped to block.
+    // Tests that field narrowing works when tuple has Variable provenance as block param source.
+    quiver()
+        .evaluate(
+            r#"
+            'list<'t> = Nil | Cons['t, ^];
+            f = #<'t>['list<'t>, 'list<'t>] -> 'list<'t> {
+              =[xs, ys];
+              t = [xs, ys];
+              t ~> {
+                | =[Nil, zs] => zs
+                | =[Cons[head, tail], zs] => zs
+              }
+            };
+            [Cons[1, Nil], Cons[2, Nil]] ~> f ~
+        "#,
+        )
+        .expect("Cons[2, Nil]");
+}
+
+// =============================================================================
+// Cross-branch tuple-element narrowing
+// =============================================================================
+//
+// Reaching a later branch means every earlier branch's pattern failed. The negative
+// information from those failures accumulates per tuple element, so a final catch-all
+// `=[a, b]` branch narrows BOTH elements even when the constraints came from separate,
+// non-adjacent branches. Before this was supported, the int-only builtin in the final
+// branch failed to type-check because its operands stayed the full union.
+
+#[test]
+fn test_cross_branch_tuple_narrowing_both_elements_to_int() {
+    // Branch 1 peels Wrap off element 0, branch 2 peels Wrap off element 1; the final
+    // branch therefore sees both elements as 'int, so `__integer_add__` (which requires
+    // ['int, 'int]) type-checks.
+    quiver()
+        .evaluate(
+            r#"
+            'n = 'int | Wrap['int];
+            add = #['n, 'n] {
+              | =[Wrap[a], _] => a
+              | =[_, Wrap[b]] => b
+              | =[a, b] => [a, b] ~> __integer_add__ ~
+            };
+            [2, 3] ~> add ~
+            "#,
+        )
+        .expect("5");
+}
+
+#[test]
+fn test_cross_branch_tuple_narrowing_mixed_paths() {
+    // The earlier branches still fire for their respective shapes.
+    quiver()
+        .evaluate(
+            r#"
+            'n = 'int | Wrap['int];
+            add = #['n, 'n] {
+              | =[Wrap[a], _] => a
+              | =[_, Wrap[b]] => b
+              | =[a, b] => [a, b] ~> __integer_add__ ~
+            };
+            [Wrap[9], 3] ~> add ~
+            "#,
+        )
+        .expect("9");
+}
+
+#[test]
+fn test_cross_branch_narrowing_only_previous_branch_was_insufficient() {
+    // Regression: with only single-slot complement tracking, element 0's narrowing from
+    // branch 1 was overwritten by element 1's from branch 2, leaving element 0 a union in
+    // the final branch. Here the final branch uses element 0 as an integer, which only
+    // works if branch 1's narrowing survived branch 2.
+    quiver()
+        .evaluate(
+            r#"
+            'n = 'int | Wrap['int];
+            first = #['n, 'n] {
+              | =[Wrap[a], _] => a
+              | =[_, Wrap[b]] => b
+              | =[a, b] => [a, 100] ~> __integer_add__ ~
+            };
+            [2, 3] ~> first ~
+            "#,
+        )
+        .expect("102");
+}
+
+// =============================================================================
+// Structural complement: multi-field exhaustiveness & recursive soundness
+// =============================================================================
+
+#[test]
+fn test_multi_field_combination_exhaustive() {
+    // A match splitting on a *combination* of two fields is total; the structural complement
+    // proves it (no spurious `| []`), so the `-> 'int` return annotation is accepted.
+    quiver()
+        .evaluate(
+            r#"
+            'b = True | False;
+            f = #['b, 'b] -> 'int {
+              | =[True, True] => 1
+              | =[True, False] => 2
+              | =[False, x] => 3
+            };
+            [True, False] ~> f ~
+            "#,
+        )
+        .expect("2");
+}
+
+#[test]
+fn test_multi_field_non_exhaustive_keeps_nil() {
+    // Dropping a combination (`[True, False]`) leaves the match non-total. An argument that can
+    // reach that combination — here `['b, 'b]`, since `widen` erases the literal `True` types —
+    // must therefore carry nil, since it falls through to nil at runtime (the structural
+    // complement must not *over*-claim exhaustiveness). A fully-covered argument like the literal
+    // `[True, True]` would correctly infer `'int` with no nil.
+    quiver()
+        .evaluate(
+            r#"
+            'b = True | False;
+            widen = #'b { $ };
+            f = #['b, 'b] {
+              | =[True, True] => 1
+              | =[False, x] => 3
+            };
+            [True ~> widen ~, True ~> widen ~] ~> f ~
+            "#,
+        )
+        .expect_type("'int | []");
+}
+
+#[test]
+fn test_nested_recursive_pattern_does_not_oversubtract() {
+    // Regression (Phase 0 canary): a nested pattern over a recursive type must NOT let
+    // complement narrowing exclude valid values from later branches. Previously this dropped
+    // a runtime type check and mis-bound `x` to the whole subtree.
+    quiver()
+        .evaluate(
+            r#"
+            'tree = Leaf['int] | Node[^, ^];
+            left = #'tree {
+              | =Node[Node[Leaf[x], _], _] => x
+              | =Node[Leaf[x], _] => x
+              | =Leaf[x] => x
+            };
+            [Node[Node[Leaf[1], Leaf[9]], Leaf[7]] ~> left ~,
+             Node[Leaf[2], Leaf[8]] ~> left ~,
+             Leaf[3] ~> left ~]
+            "#,
+        )
+        .expect("[1, 2, 3]");
+}
+
+#[test]
+fn test_complement_narrowing_preserves_recursive_tail() {
+    // Regression: after a `=Nil` branch, complement narrowing refines the scrutinee to `Cons['t, ^]`.
+    // The kept tail `^` is a de-Bruijn cycle relative to the removed union boundary, so a naive
+    // resolution against the narrowed type would lose `Nil`, and a later `=Cons[h, Nil]` would never
+    // match a one-element list (falling through to `Many`). The fix resolves a recursive field's
+    // cycle against the scrutinee's *declared* type, so the tail keeps `Nil | Cons[…]`.
+    let f = r#"
+        'list<'t> = Nil | Cons['t, ^];
+        f = #<'t>'list<'t> {
+          | =Nil => Z
+          | =Cons[h, Nil] => One
+          | =Cons[_, _] => Many
+        };
+    "#;
+    quiver()
+        .evaluate(&format!("{f} Cons[1, Nil] ~> f ~"))
+        .expect("One");
+    quiver()
+        .evaluate(&format!("{f} Cons[1, Cons[2, Nil]] ~> f ~"))
+        .expect("Many");
+    quiver().evaluate(&format!("{f} Nil ~> f ~")).expect("Z");
+}
+
+#[test]
+fn test_complement_narrowing_preserves_recursive_tail_nested() {
+    // Same fix, but the literal `Nil` to match sits two levels deep in the recursive tail.
+    let f = r#"
+        'list<'t> = Nil | Cons['t, ^];
+        f = #<'t>'list<'t> {
+          | =Nil => Z
+          | =Cons[h, Cons[g, Nil]] => Two
+          | =Cons[h, Nil] => One
+          | =Cons[_, _] => Many
+        };
+    "#;
+    quiver()
+        .evaluate(&format!("{f} Cons[1, Cons[2, Nil]] ~> f ~"))
+        .expect("Two");
+    quiver()
+        .evaluate(&format!("{f} Cons[1, Nil] ~> f ~"))
+        .expect("One");
+    quiver()
+        .evaluate(&format!("{f} Cons[1, Cons[2, Cons[3, Nil]]] ~> f ~"))
+        .expect("Many");
+}
+
+#[test]
+fn test_complement_narrowing_preserves_recursive_tail_computed() {
+    // The scrutinee is produced by a recursive (tail-reversing) function, not a literal, so its
+    // static type flows through the generic machinery before reaching the match.
+    quiver()
+        .evaluate(
+            r#"
+            'list<'t> = Nil | Cons['t, ^];
+            rc = #<'t>['list<'t>, 'list<'t>] {
+              =[acc, rest]; acc ~> { | =Nil => rest | =Cons[h, t] => [t, Cons[h, rest]] ~> ^ ~ }
+            };
+            f = #<'t>'list<'t> {
+              | =Nil => Z
+              | =Cons[h, Nil] => One
+              | =Cons[_, _] => Many
+            };
+            [Cons[1, Nil], Nil] ~> rc ~ ~> f ~
+            "#,
+        )
+        .expect("One");
+}
+
+// --- Type intersection syntax (`'t & 'u`) ----------------------------------------------------
+// The separate-match form (`x ='t, x ='u`) above is still supported and tested; these check
+// the dedicated `&` syntax produces the same narrowing and matches member-by-member.
+
+#[test]
+fn test_type_intersection_syntax_matches() {
+    // `=('t & 'u)` succeeds for a value in both members, fails for a value in only one.
+    quiver()
+        .evaluate("'t = A | B | C;\n'u = B | C | D;\nB ~> =('t & 'u)")
+        .expect("Ok");
+    quiver()
+        .evaluate("'t = A | B | C;\n'u = B | C | D;\nA ~> =('t & 'u)")
+        .expect("[]");
+}
+
+#[test]
+fn test_type_intersection_syntax_narrows_like_separate_matches() {
+    // Same value, same narrowing as the separate-match form `x ='t, x ='u, x`.
+    quiver()
+        .evaluate(
+            r#"
+            't = A | B | C;
+            'u = B | C | D;
+            x = B;
+            x ~> =('t & 'u); x
+            "#,
+        )
+        .expect_type("B");
+}
+
+#[test]
+fn test_type_intersection_in_type_definition() {
+    // `'both = 't & 'u` resolves to the common variants and works as a parameter type.
+    quiver()
+        .evaluate(
+            r#"
+            't = A | B | C;
+            'u = B | C | D;
+            'both = 't & 'u;
+            f = #'both { $ };
+            B ~> f ~
+            "#,
+        )
+        .expect_type("B | C");
+}
+
+#[test]
+fn test_type_intersection_of_partials_checks_every_member() {
+    // Soundness: each member is checked separately, so a value satisfying only one partial fails.
+    quiver()
+        .evaluate("[x: 1, y: 2] ~> =((x: 'int) & (y: 'int))")
+        .expect("Ok");
+    quiver()
+        .evaluate("[x: 1] ~> =((x: 'int) & (y: 'int))")
+        .expect("[]");
+}
+
+#[test]
+fn test_type_intersection_of_partials_is_a_partial_over_both_field_sets() {
+    // Written as a type — a function parameter — two partials meet in a partial constraining
+    // the union of their fields, so a value with both satisfies it and the body reads either.
+    // (Intersecting them used to fold to `never`, which no value satisfies.)
+    quiver()
+        .evaluate(
+            r#"
+            'a = (x: 'int);
+            'b = (y: 'int);
+            f = #('a & 'b) { %num.add [$x, $y] };
+            [x: 1, y: 2] ~> f ~
+            "#,
+        )
+        .expect("3");
+    quiver()
+        .evaluate(
+            r#"
+            'a = (x: 'int);
+            'b = (y: 'int);
+            f = #('a & 'b) { $x };
+            [x: 1] ~> f ~
+            "#,
+        )
+        .expect_type_mismatch();
+}
+
+#[test]
+fn test_type_intersection_of_partials_intersects_shared_fields() {
+    // A field both members constrain takes the intersection of the two constraints, so a
+    // conflicting pair is uninhabited.
+    quiver()
+        .evaluate(
+            r#"
+            f = #((x: 'int | 'bin) & (x: 'int)) { %num.add [$x, 1] };
+            [x: 1] ~> f ~
+            "#,
+        )
+        .expect("2");
+    quiver()
+        .evaluate("f = #(('int & 'bin)) { $ };\n5 ~> f ~")
+        .expect_type_mismatch();
+}
+
+#[test]
+fn test_type_intersection_of_a_partial_and_a_tuple_keeps_the_tuple() {
+    // The concrete side is the more specific, so the meet is that tuple with the constrained
+    // field narrowed — and a tuple missing a constrained field satisfies neither member.
+    quiver()
+        .evaluate(
+            r#"
+            f = #((y: 'int) & [x: 'int, y: 'int]) { %num.add [$x, $y] };
+            [x: 1, y: 2] ~> f ~
+            "#,
+        )
+        .expect("3");
+    quiver()
+        .evaluate(
+            r#"
+            f = #((z: 'int) & [x: 'int, y: 'int]) { Ok };
+            [x: 1, y: 2] ~> f ~
+            "#,
+        )
+        .expect_type_mismatch();
+}
+
+#[test]
+fn test_type_intersection_of_named_partials_requires_one_name() {
+    // An unnamed partial adopts the other's name; two different stated names contradict.
+    quiver()
+        .evaluate(
+            r#"
+            f = #(A(x: 'int) & (y: 'int)) { %num.add [$x, $y] };
+            A[x: 1, y: 2] ~> f ~
+            "#,
+        )
+        .expect("3");
+    quiver()
+        .evaluate(
+            r#"
+            f = #(A(x: 'int) & B(y: 'int)) { Ok };
+            A[x: 1, y: 2] ~> f ~
+            "#,
+        )
+        .expect_type_mismatch();
+}
+
+#[test]
+fn test_type_intersection_disjoint_is_never() {
+    // Disjoint members intersect to `never`, so the match can never succeed.
+    quiver().evaluate("42 ~> =('int & 'bin)").expect("[]");
+}
+
+#[test]
+fn test_type_intersection_binds_tighter_than_union() {
+    // `'a & 'b | 'c` parses as `('a & 'b) | 'c`: A matches via the `| A` arm.
+    quiver().evaluate("A ~> =('int & 'int | A)").expect("Ok");
+}
+
+#[test]
+fn test_complement_keeps_nil_for_later_branches() {
+    // A failed `='int` branch covers exactly `'int` — not `'int | []`. The complement must
+    // keep nil, so a later name-checked branch still tests at runtime and a nil value falls
+    // through to its own arm. (Previously the fallibility nil widened the recorded coverage,
+    // nil was subtracted, and `=Ok` compiled uncheck­ed — matching nil.)
+    quiver()
+        .evaluate(
+            r#"
+            f = #('int | Ok | []) {
+              | ='int => Yep
+              | =Ok => Okay
+              | =[] => Nada
+            };
+            x = []; x ~> f ~
+            "#,
+        )
+        .expect("Nada");
+    // Same shape through a type-ascribed binding and a nested tuple pattern.
+    quiver()
+        .evaluate(
+            r#"
+            f = #('int | Ok | []) { | =('int)i => Yep | =Ok => Okay | =[] => Nada };
+            x = []; x ~> f ~
+            "#,
+        )
+        .expect("Nada");
+    quiver()
+        .evaluate(
+            r#"
+            f = #(Str['bin] | Ok | []) { | =Str[b] => Stri | =Ok => Okay | =[] => Nada };
+            x = []; x ~> f ~
+            "#,
+        )
+        .expect("Nada");
+}
+
+#[test]
+fn test_block_over_nilable_value_is_not_exhaustive_without_nil_arm() {
+    // Corollary of the coverage fix: branches matching only the non-nil variants of a
+    // nil-able value no longer type the block as exhaustive — its result keeps `| []`.
+    quiver()
+        .evaluate(
+            r#"
+            f = #('int | []) { ='int => Ok };
+            x = []; x ~> f ~
+            "#,
+        )
+        .expect("[]");
+}
+
+#[test]
+fn test_field_complement_only_for_single_tuple_scrutinees() {
+    // Field-specific complement narrowing asserts "the failed branch rules these field
+    // values out" — sound only when the scrutinee *is* that single tuple shape. On a
+    // multi-variant union, a branch may fail on the tuple's NAME, so narrowing a field
+    // from it would wrongly prune sibling variants' branches. (Previously `=B[Str[b]]`
+    // below was pruned at compile time after `=A[Str[b]]` failed, and C[_] — compiled
+    // as by-elimination — swallowed everything.)
+    quiver()
+        .evaluate(
+            r#"
+            'n = A[Str['bin]] | B[Str['bin]] | C[(X | Y)];
+            f = #'n {
+              | =A[Str[b]] => 1
+              | =B[Str[b]] => 2
+              | =C[_] => 3
+            };
+            [A["x"] ~> f ~, B["x"] ~> f ~, C[X] ~> f ~]
+            "#,
+        )
+        .expect("[1, 2, 3]");
+    // The recursive-list shape from std/html.qv's node type, where the bug surfaced.
+    quiver()
+        .evaluate(
+            r#"
+            'node = Raw[Str['bin]] | Text[Str['bin]] | Fragment[(Nil | Cons[^, ^1])];
+            f = #'node {
+              | =Raw[Str[b]] => 1
+              | =Text[Str[b]] => 2
+              | =Fragment[_] => 3
+            };
+            [Raw["x"] ~> f ~, Text["x"] ~> f ~, Fragment[Nil] ~> f ~]
+            "#,
+        )
+        .expect("[1, 2, 3]");
+    // The single-tuple case keeps field-specific complement narrowing: after `=[Nil, ys]`
+    // fails, the second branch knows field 0 is Cons.
+    quiver()
+        .evaluate(
+            r#"
+            'l = Nil | Cons['int, ^];
+            f = #['l, 'l] {
+              | =[Nil, ys] => ys
+              | =[Cons[h, _], _] => Cons[h, Nil]
+            };
+            [Cons[7, Nil], Nil] ~> f ~
+            "#,
+        )
+        .expect("Cons[7, Nil]");
+}
+
+#[test]
+fn test_guarded_branch_complement_not_applied_to_later_branches() {
+    // A `; guard` condition can fall through with its pattern MATCHED (the guard
+    // failed), so its pattern's complement must not narrow subsequent branches:
+    // a guard-failed T[5] must still take the `=T[x]` arm — not have it folded away
+    // as impossible and land on the M arm.
+    quiver()
+        .evaluate(
+            r#"
+            'g = T['int] | M['int];
+            f = #'g {
+              $ ~> {
+                | =T[x]; %num.gt? [x, 10] => Big[x]
+                | =T[x] => SmallT[x]
+                | =M[x] => IsM[x]
+              }
+            };
+            [f T[5], f T[20], f M[1]]
+            "#,
+        )
+        .expect("[SmallT[5], Big[20], IsM[1]]");
+}
+
+#[test]
+fn test_guarded_branch_does_not_count_as_coverage() {
+    // Nor may a guarded branch count as covering its variant: with T "covered" only
+    // by a guarded branch, a guard-failed T must fall through a still-checked `=M`
+    // arm to the fallback — not have the M test elided as "the only variant left".
+    quiver()
+        .evaluate(
+            r#"
+            'g = T['int] | M['int];
+            f = #'g {
+              $ ~> {
+                | =T[x]; %num.gt? [x, 10] => Big
+                | =M[_] => IsM
+                | Fallthrough
+              }
+            };
+            [f T[5], f M[1]]
+            "#,
+        )
+        .expect("[Fallthrough, IsM]");
+}
+
+#[test]
+fn test_nil_bearing_wrapped_union_sibling_dispatch() {
+    // A nil-bearing scrutinee wrapping a union — `(Ev['w] | [])`, the shape every
+    // `%data`-decoded event has — dispatched by sibling patterns on the wrapped field.
+    // The first branch's complement must not poison the later branches' runtime tests:
+    // a value whose tuple id carries the FULL union field type still holds any member,
+    // so every sibling must stay reachable.
+    quiver()
+        .evaluate(
+            r#"
+            'w = A | B['int] | C['int];
+            mk = #'w { Ev[$] };
+            f = #(Ev['w] | []) {
+              $ ~> {
+                | =Ev[A] => X
+                | =Ev[B[n]] => Y[n]
+                | =Ev[C[n]] => Z[n]
+                | Missed
+              }
+            };
+            [mk A ~> f ~, mk B[1] ~> f ~, mk C[2] ~> f ~, [] ~> f ~]
+            "#,
+        )
+        .expect("[X, Y[1], Z[2], Missed]");
+}
+
+#[test]
+fn test_nil_bearing_wrapped_union_dispatch_without_empty_member() {
+    // The same shape with no bare-named member and the matching value arriving at the
+    // SECOND branch — the minimal form of the miss (any non-first sibling missed).
+    quiver()
+        .evaluate(
+            r#"
+            'w = B['int] | C['int];
+            mk = #'w { Ev[$] };
+            f = #(Ev['w] | []) {
+              $ ~> {
+                | =Ev[B[n]] => Y[n]
+                | =Ev[C[n]] => Z[n]
+                | Missed
+              }
+            };
+            [mk C[2] ~> f ~]
+            "#,
+        )
+        .expect("[Z[2]]");
+}
+
+#[test]
+fn test_ascription_through_recursive_union_is_checked() {
+    // The checked ascription `=(T)s` on a binding typed by an inner recursive union
+    // (`^ | Lb['int]`) must keep its runtime test: `is_compatible` traverses a `Cycle`
+    // optimistically, and eliding on its verdict matched an `Lb` value against
+    // `I['int]` (and bound `s`, typed `I['int]`, to it — the recorded over-match).
+    quiver()
+        .evaluate(
+            r#"
+            'e = I['int] | T[(Nil | Cons[(^ | Lb['int]), ^1])]
+            f = #'e { $ ~> =T[fs]; fs ~> =Cons[h, _]; h ~> { =(I['int])s => Matched[s] | Failed } }
+            [f T[Cons[Lb[5], Nil]], f T[Cons[I[9], Nil]]]
+            "#,
+        )
+        .expect("[Failed, Matched[I[9]]]");
+    // The step-position form gates its sequence the same way.
+    quiver()
+        .evaluate(
+            r#"
+            'e = I['int] | T[(Nil | Cons[(^ | Lb['int]), ^1])]
+            g = #'e { $ ~> =T[fs]; fs ~> =Cons[h, _]; h ~> =(I['int])s; Reached[s] }
+            [g T[Cons[Lb[5], Nil]], g T[Cons[I[9], Nil]]]
+            "#,
+        )
+        .expect("[[], Reached[I[9]]]");
+}
+
+#[test]
+fn test_patterns_on_bindings_from_recursive_positions() {
+    // Values bound out of recursive positions (a list element typed by the inner
+    // recursive reference) must match — and NOT over-match — in later patterns,
+    // without the declared-parameter re-rooting idiom.
+    quiver()
+        .evaluate(
+            r#"
+            'j = N | S[Str['bin]] | A[(Nil | Cons[^, ^1])]
+            f = #'j {
+              $ ~> =A[es]
+              es ~> =Cons[el, _]
+              el ~> { =S[s] => Got[s] | Other }
+            }
+            [f A[Cons[S["x"], Nil]], f A[Cons[N, Nil]]]
+            "#,
+        )
+        .expect(r#"[Got["x"], Other]"#);
+    // The nested one-shot form of the same match.
+    quiver()
+        .evaluate(
+            r#"
+            'j = N | S[Str['bin]] | A[(Nil | Cons[^, ^1])]
+            f = #'j { $ ~> { =A[Cons[S[s], Nil]] => Got[s] | Other } }
+            [f A[Cons[S["x"], Nil]], f A[Cons[N, Nil]], f N]
+            "#,
+        )
+        .expect(r#"[Got["x"], Other, Other]"#);
+}
+
+#[test]
+fn test_checked_annotation_gate_on_recursive_entry() {
+    // A checked retrieval whose entry's type is recursive must keep its runtime gate:
+    // an optimistic `is_compatible` would have elided it and answered the entry as the
+    // asked shape.
+    quiver()
+        .evaluate(
+            r#"
+            x = P[v: 1] ~> { :k Cons[1, Nil] }
+            x:(Str['bin])k ~> { =Str[_] => WronglyStr | CorrectNil }
+            "#,
+        )
+        .expect("CorrectNil");
+}
+
+#[test]
+fn test_value_position_match_bindings_rejected_in_apply_argument() {
+    // A fallible match as an *application argument* is a value position: its verdict
+    // is data and gates nothing, so binding through it must be rejected — previously
+    // it compiled silently and the binding came out nil-filled.
+    quiver()
+        .evaluate(r#"v = Lb[5]; x = v =(I['int])s; Got[x, s]"#)
+        .expect_compile_error(
+            quiver_compiler::compiler::Error::FallibleMatchBindingsInValueChain {
+                bindings: vec!["s".to_string()],
+            },
+        );
+}
+
+// --- Block-parameter narrowing must not mis-resolve scope-relative provenance --------
+// A `$field` scrutinee piped into a matching block gives the block parameter a
+// `Field(Parameter, i)` source provenance minted in the enclosing scope. Propagating a
+// branch complement upward through that chain used to resolve `Parameter` against the
+// block scope itself — annihilating the scrutinee's type (internal error) or silently
+// corrupting its reconstructed type. The propagation is now skipped for
+// Parameter-rooted sources (precision-only loss).
+
+#[test]
+fn test_field_scrutinee_nested_tuple_pattern() {
+    quiver()
+        .evaluate(
+            r#"
+            'opt = Nil | Cons[['bin, 'int], Done]
+            bg = #[(entries): 'opt] { $entries ~> { | =Nil => [] | =Cons[[k, v], t] => v } }
+            bg [Cons[[<61>, 7], Done]]
+            "#,
+        )
+        .expect("7");
+}
+
+#[test]
+fn test_positional_field_scrutinee_recursive_union() {
+    quiver()
+        .evaluate(
+            r#"
+            'pairs = Nil | Cons[[Str['bin], Str['bin]], ^]
+            hf = #['pairs, 'int] { $0 ~> { | =Nil => [] | =Cons[[n, v], rest] => v } }
+            hf [Cons[["a", "b"], Nil], 0]
+            "#,
+        )
+        .expect("\"b\"");
+}
+
+#[test]
+fn test_field_scrutinee_two_step_destructure() {
+    // The binding extracted from the matched member must keep its type through the
+    // guard step (the silent-miscompile shape).
+    quiver()
+        .evaluate(
+            r#"
+            'opt = Nil | Cons[['bin, 'int], Done]
+            bg = #[(entries): 'opt] { $entries ~> { | =Nil => [] | =Cons[x, t]; x ~> =[k, v] => v } }
+            bg [Cons[[<61>, 7], Done]]
+            "#,
+        )
+        .expect("7");
+}
