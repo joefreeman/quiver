@@ -75,8 +75,11 @@ quiv run program.qv
   - `-d, --debug` - Include debug information in bytecode
   - `-e, --eval <CODE>` - Compile code directly from the command line
 - **`quiv inspect <FILE>`** - Inspect compiled bytecode structure
+- **`quiv format [PATH]...`** - Format files in place, walking any directory given (default: the current one)
+  - `--check` - Write nothing; list what would change and exit non-zero
+  - `-e, --eval <CODE>` - Format code directly from the command line
 
-All commands support reading from stdin when no file is specified.
+Commands read from stdin when no file is specified (`quiv format` spells that `-`).
 
 ## REPL commands
 

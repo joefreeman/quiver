@@ -23,13 +23,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # Build the formatter from this checkout and assert every committed .qv source is already
-      # canonically formatted. `format --check` writes nothing and exits non-zero (listing each
-      # offending file) if any would change.
+      # Build the formatter from this checkout and assert every .qv source in the tree is
+      # already canonically formatted. `format --check` writes nothing and exits 1 (listing
+      # each offending file) if any would change, or 2 if it could not read or parse one.
       - name: Check Quiver formatting
         run: |
-          cargo run --quiet --bin quiv -- format --check $(git ls-files '*.qv') || {
-            echo "::error::Quiver sources are not formatted. Run 'quiv format' on the listed files and commit the result."
+          cargo run --quiet --bin quiv -- format --check . || {
+            echo "::error::Quiver sources are not formatted. Run 'quiv format' and commit the result."
             exit 1
           }
 

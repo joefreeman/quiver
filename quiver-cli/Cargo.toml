@@ -27,3 +27,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time"]
 tower-http = { version = "0.6", features = ["cors"] }
 tokio-stream = "0.1"
 getrandom = "0.3"
+ignore = "0.4.33"
