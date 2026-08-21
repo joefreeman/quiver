@@ -17,12 +17,6 @@ pub trait TypeLookup {
     fn lookup_annotation_key_name(&self, _key: usize) -> Option<&str> {
         None
     }
-    /// Whether a tuple field's label was written omittable (`[(foo): 'int]`), letting a
-    /// positional literal checked against the tuple type adopt it. Spelling metadata,
-    /// never part of type identity.
-    fn label_omittable(&self, _tuple_id: usize, _field_index: usize) -> bool {
-        false
-    }
     /// Look up a type, seeing through an annotation row to its base shape. Most
     /// structural questions ("is this callable?", "which tuple?") want this — a bare
     /// `lookup_type` on an annotated id sees `Type::Annotated` and fails shape matches.
@@ -61,6 +55,15 @@ pub enum Type {
         /// unknown — a declared type without a `?` clause grants no sampling; inferred
         /// literals always carry `Some` unless poisoned by a `^~` on an unknown callee.
         states: Option<usize>,
+        /// Parameter field indices whose label the caller may omit, written `(name):` in
+        /// the parameter spelling. A calling convention, so it belongs to the *function
+        /// type* and travels into declared boundaries — unlike a default, which is a
+        /// value and rides the closure's `:defaults` row. Part of type identity, which is
+        /// what keeps a marked spelling from silently granting omission to every
+        /// structurally identical function; compatibility ignores it, so a marked and an
+        /// unmarked function remain interchangeable as values. Sorted, no duplicates.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        omittable: Vec<usize>,
     },
     #[serde(rename = "cycle")]
     Cycle(usize),
@@ -118,11 +121,14 @@ impl Type {
                 result,
                 receive,
                 states,
+                omittable,
             } => Type::Callable {
                 parameter: ty(parameter),
                 result: ty(result),
                 receive: ty(receive),
                 states: states.as_ref().map(ty),
+                // Field positions, not ids — nothing to remap.
+                omittable: omittable.clone(),
             },
             Type::Union(members) => Type::Union(members.iter().map(ty).collect()),
             Type::Annotated {
@@ -778,19 +784,24 @@ fn check_type_relation<T: TypeLookup>(
             send_ok && receive_ok && state_ok
         }
 
-        // Callable types
+        // Callable types. Omittable labels are deliberately not compared: they are a
+        // calling convention, so a marked and an unmarked function of the same shape are
+        // interchangeable as values — what the marks govern is how a *call written
+        // against this type* may spell its argument, which the declared type decides.
         (
             Type::Callable {
                 parameter: param1,
                 result: result1,
                 receive: receive1,
                 states: states1,
+                ..
             },
             Type::Callable {
                 parameter: param2,
                 result: result2,
                 receive: receive2,
                 states: states2,
+                ..
             },
         ) => {
             let already_on_stack = type_stack.contains(&pattern_id);

@@ -1,8 +1,9 @@
-// Optional field labels: a tuple type may mark a field's label omittable with
-// `[(foo): 'int]`. A tuple literal checked against such a type (a call argument)
-// may omit the marked labels; the constructed value adopts them positionally, so it
-// is fully labeled regardless of spelling — matching, equality, and partial access
-// see one shape. The marker is spelling metadata, never part of type identity.
+// Optional field labels: a function's parameter tuple may mark a field's label omittable
+// with `#[(foo): 'int]`. A call's argument literal may then omit the marked labels; the
+// constructed value adopts them positionally, so it is fully labeled regardless of
+// spelling — matching, equality, and partial access see one shape. The mark is a calling
+// convention, so it rides on the function type and is never part of the parameter tuple's
+// identity: it is legal only in a parameter position, and never reaches patterns.
 
 mod common;
 use common::*;
@@ -125,44 +126,10 @@ fn test_flowing_value_fills_positional_argument() {
 }
 
 #[test]
-fn test_generic_alias_keeps_markers() {
-    quiver()
-        .evaluate(
-            r#"
-            'pair<'t> = [(first): 't, (second): 't]
-            f = #'pair<'int> { $first }
-            f [42, 7]
-            "#,
-        )
-        .expect("42");
-}
-
-#[test]
 fn test_explicit_instantiation_keeps_markers() {
     quiver()
         .evaluate("f = #<'t>[(a): 't, (b): 't] { $a }; f<'int> [10, 20]")
         .expect("10");
-}
-
-#[test]
-fn test_nested_literal_adopts_labels() {
-    quiver()
-        .evaluate("f = #[(p): [(x): 'int, (y): 'int], (z): 'int] { $p.y }; f [[1, 2], 3]")
-        .expect("2");
-}
-
-#[test]
-fn test_type_spread_propagates_markers() {
-    quiver()
-        .evaluate(
-            r#"
-            'base = [(x): 'int]
-            'ext = [...'base, (y): 'int]
-            f = #'ext { %num.add [$x, $y] }
-            f [1, 2]
-            "#,
-        )
-        .expect("3");
 }
 
 #[test]
@@ -172,10 +139,8 @@ fn test_marked_and_unmarked_spellings_are_one_type() {
     quiver()
         .evaluate(
             r#"
-            'marked = [(foo): 'int]
-            'plain = [foo: 'int]
-            make = #'plain { $ }
-            take = #'marked { $foo }
+            make = #[foo: 'int] { $ }
+            take = #[(foo): 'int] { $foo }
             make [foo: 5] ~> take ~
             "#,
         )
@@ -189,13 +154,6 @@ fn test_adoption_composes_with_literal_inference() {
     quiver()
         .evaluate("f = #[(n): 'int, (g): #'int -> 'int] { $g $n }; f [5, #{ %num.add [$, 1] }]")
         .expect("6");
-}
-
-#[test]
-fn test_marker_rejected_in_partial_type() {
-    quiver()
-        .evaluate("f = #((foo): 'int) { $foo }; f [foo: 1]")
-        .expect_error_containing("not partial types");
 }
 
 #[test]
@@ -224,38 +182,230 @@ fn test_bare_tail_call_adopts_labels() {
         .expect("10");
 }
 
+// --- Spread decorators -----------------------------------------------------------
+// An entry in a parameter tuple that states no type *decorates* a field an earlier
+// spread brought in: it adjusts only that field's label and default, leaving its type
+// and its position alone. An entry that does state a type defines or replaces one, as
+// it always did.
+
 #[test]
-fn test_union_parameter_labeled_call() {
-    // Adoption is only ever a fallback for omitted labels; a labeled literal
-    // checks against a union parameter as usual.
+fn test_decorator_marks_label_omittable() {
+    quiver()
+        .evaluate("'base = [x: 'int]; f = #[...'base, (x)] { $x }; f [5]")
+        .expect("5");
+}
+
+#[test]
+fn test_decorator_gives_a_default() {
+    quiver()
+        .evaluate("'base = [x: 'int]; f = #[...'base, x = 7] { $x }; f []")
+        .expect("7");
+    // `name = value` adjusts only the default, so the label stays required.
+    quiver()
+        .evaluate("'base = [x: 'int]; f = #[...'base, x = 7] { $x }; f [7]")
+        .expect_type_mismatch();
+}
+
+#[test]
+fn test_decorator_marks_and_defaults() {
+    quiver()
+        .evaluate("'base = [x: 'int]; f = #[...'base, (x) = 7] { $x }; f []")
+        .expect("7");
+    quiver()
+        .evaluate("'base = [x: 'int]; f = #[...'base, (x) = 7] { $x }; f [3]")
+        .expect("3");
+}
+
+#[test]
+fn test_bare_decorator_is_a_checked_restatement() {
+    // A bare `x` changes nothing — it names the spread's field so `$x` in the body reads
+    // against something written locally.
+    quiver()
+        .evaluate("'base = [x: 'int]; f = #[...'base, x] { $x }; f [x: 5]")
+        .expect("5");
+}
+
+#[test]
+fn test_decorator_keeps_field_position() {
+    // Decorating out of order must not reorder the fields: positional calls are exactly
+    // what a mark enables, so a moved field would silently change what one means.
+    quiver()
+        .evaluate("'base = [x: 'int, y: 'int]; f = #[...'base, (y), (x)] { [$x, $y] }; f [10, 20]")
+        .expect("[10, 20]");
+}
+
+#[test]
+fn test_decorated_spread_takes_a_new_marked_field() {
+    // The spread's field is marked by a decorator; a fresh field states its type and is
+    // marked in place — what the old `'base`/`'ext` pair of marked aliases used to spell.
     quiver()
         .evaluate(
-            "f = #([(foo): 'int] | [(bar): 'int]) { | =(foo: x) => x | =(bar: y) => y }; f [foo: 7]",
+            r#"
+            'base = [x: 'int]
+            f = #[...'base, (x), (y): 'int] { %num.add [$x, $y] }
+            f [1, 2]
+            "#,
+        )
+        .expect("3");
+}
+
+#[test]
+fn test_decorated_generic_alias_instantiation() {
+    // A spread may instantiate a parameterized alias, and its fields decorate as usual.
+    quiver()
+        .evaluate(
+            r#"
+            'pair<'t> = [first: 't, second: 't]
+            f = #[...'pair<'int>, (first), (second)] { $first }
+            f [42, 7]
+            "#,
+        )
+        .expect("42");
+}
+
+#[test]
+fn test_decorator_does_not_mark_the_alias() {
+    // Decorating a spread of `'p` marks `marked`'s parameter only: a second function
+    // declared with the bare alias still requires the labels.
+    quiver()
+        .evaluate(
+            r#"
+            'p = [x: 'int, y: 'int]
+            marked = #[...'p, (x), (y)] { $x }
+            plain = #'p { $y }
+            plain [1, 2]
+            "#,
+        )
+        .expect_type_mismatch();
+}
+
+#[test]
+fn test_decorator_must_name_a_field_the_spread_has() {
+    quiver()
+        .evaluate("'base = [x: 'int]; f = #[...'base, (z)] { $x }; f [5]")
+        .expect_error_containing("nothing here has one by that name");
+}
+
+#[test]
+fn test_decorator_without_a_spread_rejected() {
+    quiver()
+        .evaluate("f = #[(x)] { $x }; f [5]")
+        .expect_error_containing("this tuple has no spread");
+}
+
+// --- Where a mark may appear -----------------------------------------------------
+// A mark is a calling convention, so it belongs to a function type's parameter tuple —
+// written at a literal or inside an alias — and nowhere else. Elsewhere it could never
+// grant anything, so it is rejected rather than quietly ignored.
+
+#[test]
+fn test_marker_rejected_in_partial_type() {
+    quiver()
+        .evaluate("f = #((foo): 'int) { $foo }; f [foo: 1]")
+        .expect_error_containing("not partial types");
+}
+
+#[test]
+fn test_marker_rejected_in_tuple_alias() {
+    // A bare tuple type has no callers to grant anything to — and a mark stored against
+    // an interned tuple would leak to every structurally identical spelling.
+    quiver()
+        .evaluate("'point = [(x): 'int, (y): 'int]; f = #'point { $x }; f [1, 2]")
+        .expect_error_containing("only allowed in a function's parameter type");
+}
+
+#[test]
+fn test_marker_rejected_in_nested_parameter_field() {
+    quiver()
+        .evaluate("f = #[(p): [(x): 'int, (y): 'int], (z): 'int] { $p.y }; f [[1, 2], 3]")
+        .expect_error_containing("only allowed in a function's parameter type");
+}
+
+#[test]
+fn test_adoption_is_top_level_only() {
+    // Marking the field that *holds* a tuple says nothing about that tuple's own labels,
+    // so the nested literal must still be spelled with them.
+    quiver()
+        .evaluate("f = #[(p): [x: 'int, y: 'int], (z): 'int] { $p.y }; f [[1, 2], 3]")
+        .expect_type_mismatch();
+    quiver()
+        .evaluate("f = #[(p): [x: 'int, y: 'int], (z): 'int] { $p.y }; f [[x: 1, y: 2], 3]")
+        .expect("2");
+}
+
+#[test]
+fn test_marker_in_function_type_inside_alias_is_honoured() {
+    // Modelled on `%html/live`'s `'component`: a record field declares
+    // `update: #[(state): 's, (event): 'e] -> 's`, and a caller holding only the declared
+    // type calls it positionally.
+    quiver()
+        .evaluate(
+            r#"
+            'component<'s, 'e> = [update: #[(state): 's, (event): 'e] -> 's]
+            counter = [update: #[(state): 'int, (event): 'int] { %num.add [$state, $event] }]
+            step = #<'s, 'e>[c: 'component<'s, 'e>, state: 's, event: 'e] {
+              $c.update [$state, $event]
+            }
+            step [c: counter, state: 1, event: 2]
+            "#,
+        )
+        .expect("3");
+}
+
+#[test]
+fn test_marker_does_not_leak_to_a_same_shaped_parameter() {
+    // The regression the move to function types fixes: an unmarked parameter stays
+    // unmarked even when a marked function of the same tuple shape is in scope.
+    quiver()
+        .evaluate(
+            r#"
+            marked = #[(x): 'int, (y): 'int] { $x }
+            plain = #[x: 'int, y: 'int] { $y }
+            plain [1, 2]
+            "#,
+        )
+        .expect_type_mismatch();
+    // Both spellings coexist: the marked one still adopts.
+    quiver()
+        .evaluate(
+            r#"
+            marked = #[(x): 'int, (y): 'int] { $x }
+            plain = #[x: 'int, y: 'int] { $y }
+            [marked [1, 2], plain [x: 1, y: 2]]
+            "#,
+        )
+        .expect("[1, 2]");
+}
+
+// --- Union parameters ------------------------------------------------------------
+// A mark names a field position, so it needs a single tuple: a union parameter has no
+// positions of its own, and a member of one is not the parameter tuple.
+
+#[test]
+fn test_union_parameter_labeled_call() {
+    quiver()
+        .evaluate(
+            "f = #([foo: 'int] | [bar: 'int]) { | =(foo: x) => x | =(bar: y) => y }; f [foo: 7]",
         )
         .expect("7");
 }
 
 #[test]
-fn test_union_parameter_never_adopts_when_ambiguous() {
-    // Both members could claim the positional spelling; a union never adopts, so
-    // the call is an ordinary mismatch asking for labels — no silent pick.
+fn test_union_parameter_never_adopts() {
+    // Nothing is marked and nothing could be, so a positional call is an ordinary
+    // mismatch asking for labels — no silent pick between the members.
     quiver()
-        .evaluate(
-            "f = #([(foo): 'int] | [(bar): 'int]) { | =(foo: x) => x | =(bar: y) => y }; f [7]",
-        )
+        .evaluate("f = #([foo: 'int] | [bar: 'int]) { | =(foo: x) => x | =(bar: y) => y }; f [7]")
         .expect_type_mismatch();
 }
 
 #[test]
-fn test_union_parameter_never_adopts_even_when_unique() {
-    // Only one member could fit the positional spelling, but the rule is
-    // "unions never adopt", not "unique fit" — adoption requires the expected
-    // type to be a single tuple.
+fn test_marker_rejected_in_union_member() {
     quiver()
         .evaluate(
-            "f = #([(foo): 'int] | Wrapped['int]) { | =(foo: x) => x | =Wrapped[y] => y }; f [7]",
+            "f = #([(foo): 'int] | [bar: 'int]) { | =(foo: x) => x | =(bar: y) => y }; f [foo: 7]",
         )
-        .expect_type_mismatch();
+        .expect_error_containing("only allowed in a function's parameter type");
 }
 
 #[test]
@@ -267,125 +417,30 @@ fn test_union_with_unnamed_member_accepts_positional() {
         .expect("1");
 }
 
-// --- Pattern-side adoption -------------------------------------------------------
-// The dual of literal adoption: an unlabeled tuple-pattern field adopts a marked
-// label from the scrutinee's type, positionally. Stated labels must always match;
-// unmarked labels are never adopted.
+// --- Patterns never adopt --------------------------------------------------------
+// A mark is spelling for the call site alone. An unlabeled tuple-pattern field never
+// matches a labeled value field, whatever the value's type was built against.
 
 #[test]
-fn test_pattern_adopts_labels() {
+fn test_unlabeled_pattern_does_not_match_labeled_value() {
     quiver()
-        .evaluate(
-            r#"
-            'point = [(x): 'int, (y): 'int]
-            f = #'point { $ }
-            p = f [1, 2]
-            p ~> =[a, b]
-            %num.add [a, b]
-            "#,
-        )
+        .evaluate("q = [foo: 1, bar: 2]; { q ~> =[a, b] => a | NoMatch }")
+        .expect("NoMatch");
+}
+
+#[test]
+fn test_pattern_does_not_adopt_a_marked_parameters_labels() {
+    // The value was written positionally against a marked parameter, but adoption
+    // happened at the call: what arrives is fully labeled, and the pattern is not.
+    quiver()
+        .evaluate("f = #[(x): 'int, (y): 'int] { { $ ~> =[a, b] => a | NoMatch } }; f [1, 2]")
+        .expect("NoMatch");
+}
+
+#[test]
+fn test_pattern_reads_the_adopted_labels() {
+    // Stating the labels is how the adopted value is destructured.
+    quiver()
+        .evaluate("f = #[(x): 'int, (y): 'int] { $ ~> =[x: a, y: b]; %num.add [a, b] }; f [1, 2]")
         .expect("3");
-}
-
-#[test]
-fn test_pattern_adopts_labels_in_binding_statement() {
-    quiver()
-        .evaluate(
-            r#"
-            'point = [(x): 'int, (y): 'int]
-            f = #'point { $ }
-            [a, b] = f [4, 5]
-            b
-            "#,
-        )
-        .expect("5");
-}
-
-#[test]
-fn test_pattern_positional_literal_test() {
-    // A literal in an adopted position tests the field, so `=[0, b]` guards on x.
-    quiver()
-        .evaluate(
-            r#"
-            'point = [(x): 'int, (y): 'int]
-            f = #'point { { =[0, b] => b | Other } }
-            [f [0, 6], f [5, 6]]
-            "#,
-        )
-        .expect("[6, Other]");
-}
-
-#[test]
-fn test_pattern_stated_label_must_match() {
-    quiver()
-        .evaluate(
-            r#"
-            'point = [(x): 'int, (y): 'int]
-            f = #'point { { =[oof: a, _] => a | NoMatch } }
-            f [1, 2]
-            "#,
-        )
-        .expect("NoMatch");
-}
-
-#[test]
-fn test_pattern_does_not_adopt_unmarked_labels() {
-    quiver()
-        .evaluate("q = [foo: 1]; { q ~> =[a] => a | NoMatch }")
-        .expect("NoMatch");
-}
-
-#[test]
-fn test_pattern_adopts_labels_for_named_tuple() {
-    quiver()
-        .evaluate(
-            r#"
-            g = #Point[(x): 'int, (y): 'int] { =Point[a, b]; %num.sub [a, b] }
-            g Point[10, 4]
-            "#,
-        )
-        .expect("6");
-}
-
-#[test]
-fn test_pattern_adopts_labels_in_nested_pattern() {
-    quiver()
-        .evaluate(
-            r#"
-            'line = [(from): [(x): 'int, (y): 'int], (to): [(x): 'int, (y): 'int]]
-            f = #'line { =[[a, _], [_, b]]; %num.add [a, b] }
-            f [[1, 2], [3, 4]]
-            "#,
-        )
-        .expect("5");
-}
-
-#[test]
-fn test_pattern_adopts_labels_in_or_pattern() {
-    // Each alternative adopts independently; both bind `b`, as or-patterns require.
-    quiver()
-        .evaluate(
-            r#"
-            'point = [(x): 'int, (y): 'int]
-            f = #'point { { =([0, b] | [b, 0]) => b | Neither } }
-            [f [0, 7], f [3, 0], f [1, 1]]
-            "#,
-        )
-        .expect("[7, 3, Neither]");
-}
-
-#[test]
-fn test_pattern_adopts_through_union_member() {
-    // A pattern matches whichever members it can — adoption applies per candidate
-    // member, so a union scrutinee is fine on the pattern side (nothing is picked;
-    // the value decides at runtime).
-    quiver()
-        .evaluate(
-            r#"
-            'msg = [(a): 'int] | Wrapped['int]
-            f = #'msg { | =Wrapped[y] => %num.mul [y, 10] | =[x] => x }
-            [f [a: 7], f Wrapped[3]]
-            "#,
-        )
-        .expect("[7, 30]");
 }

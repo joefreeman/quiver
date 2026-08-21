@@ -348,6 +348,7 @@ pub fn contract_type(program: &mut Program, name: &str, parameter: usize, result
         receive: never,
         // An expected (declared-shape) type: no states grant.
         states: None,
+        omittable: Vec::new(),
     })
 }
 

@@ -136,6 +136,7 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
             result,
             receive,
             states,
+            omittable,
         } => {
             let fmt = |id: usize| {
                 lookup
@@ -143,7 +144,11 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
                     .map(|t| format_type_impl(lookup, t, true))
                     .unwrap_or_else(|| format!("Type{}", id))
             };
-            let mut formatted = format!("#{} -> {}", fmt(*parameter), fmt(*result));
+            let mut formatted = format!(
+                "#{} -> {}",
+                format_parameter_type(lookup, *parameter, omittable),
+                fmt(*result)
+            );
             // The written clause forms: ` !'recv` when the function receives, ` ?'states`
             // when its states go beyond its parameter (the parameter alone is the implicit
             // seed and stays unwritten; an unknown-states callable also renders bare).
@@ -197,6 +202,51 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
 }
 
 /// Format a tuple type by its tuple_id
+/// A function type's parameter, with `(name):` on the labels it lets callers omit — the
+/// marks are part of the type, so a displayed signature should show the convention it
+/// grants. Renders ordinarily when nothing is marked.
+fn format_parameter_type(
+    lookup: &impl TypeLookup,
+    parameter: usize,
+    omittable: &[usize],
+) -> String {
+    let plain = || {
+        lookup
+            .lookup_type(parameter)
+            .map(|t| format_type_impl(lookup, t, true))
+            .unwrap_or_else(|| format!("Type{}", parameter))
+    };
+    if omittable.is_empty() {
+        return plain();
+    }
+    let Some(Type::Tuple(tuple_id)) = lookup.lookup_type(parameter) else {
+        return plain();
+    };
+    let Some(info) = lookup.lookup_tuple(*tuple_id) else {
+        return plain();
+    };
+    let fields: Vec<String> = info
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, (field_name, field_type_id))| {
+            let rendered = lookup
+                .lookup_type(*field_type_id)
+                .map(|t| format_type_impl(lookup, t, true))
+                .unwrap_or_else(|| format!("Type{}", field_type_id));
+            match field_name {
+                Some(name) if omittable.contains(&index) => format!("({name}): {rendered}"),
+                Some(name) => format!("{name}: {rendered}"),
+                None => rendered,
+            }
+        })
+        .collect();
+    match &info.name {
+        Some(name) => format!("{}[{}]", name, fields.join(", ")),
+        None => format!("[{}]", fields.join(", ")),
+    }
+}
+
 fn format_tuple_type(lookup: &impl TypeLookup, tuple_id: usize) -> String {
     if let Some(type_info) = lookup.lookup_tuple(tuple_id) {
         format_tuple_info(lookup, type_info)

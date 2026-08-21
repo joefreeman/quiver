@@ -213,6 +213,141 @@ omittable field labels
           name: (type_name))))))
 
 ==================
+spread decorator, omittable label
+==================
+
+open = #[...'base, (mode)] { $ }
+
+---
+
+(source_file
+  (sequence
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (tuple_type
+          (type_spread
+            (type_name))
+          name: (identifier))
+        (block
+          (branch
+            (sequence
+              (chain
+                (access
+                  source: (parameter))))))))))
+
+==================
+spread decorator, default
+==================
+
+open = #[...'base, mode = R] { $ }
+
+---
+
+(source_file
+  (sequence
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (tuple_type
+          (type_spread
+            (type_name))
+          name: (identifier)
+          (field_default
+            (chain
+              (tuple
+                name: (tuple_name)))))
+        (block
+          (branch
+            (sequence
+              (chain
+                (access
+                  source: (parameter))))))))))
+
+==================
+spread decorator, omittable label and default
+==================
+
+open = #[...'base, (mode) = R] { $ }
+
+---
+
+(source_file
+  (sequence
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (tuple_type
+          (type_spread
+            (type_name))
+          name: (identifier)
+          (field_default
+            (chain
+              (tuple
+                name: (tuple_name)))))
+        (block
+          (branch
+            (sequence
+              (chain
+                (access
+                  source: (parameter))))))))))
+
+==================
+spread decorator, checked restatement
+==================
+
+open = #[...'base, mode] { $ }
+
+---
+
+(source_file
+  (sequence
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (tuple_type
+          (type_spread
+            (type_name))
+          name: (identifier))
+        (block
+          (branch
+            (sequence
+              (chain
+                (access
+                  source: (parameter))))))))))
+
+==================
+decorators alongside typed fields
+==================
+
+open = #[...'base, (mode), buffer: 'int, size = 1024] { $ }
+
+---
+
+(source_file
+  (sequence
+    (chain
+      binding: (identifier)
+      (function
+        parameter: (tuple_type
+          (type_spread
+            (type_name))
+          name: (identifier)
+          name: (identifier)
+          (type_identifier
+            name: (type_name))
+          name: (identifier)
+          (field_default
+            (chain
+              (integer))))
+        (block
+          (branch
+            (sequence
+              (chain
+                (access
+                  source: (parameter))))))))))
+
+==================
 type intersection
 ==================
 

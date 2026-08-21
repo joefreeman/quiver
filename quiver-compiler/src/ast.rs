@@ -663,11 +663,18 @@ pub struct TupleType {
 pub enum FieldType {
     Field {
         name: Option<String>,
-        /// Written `(name): type` — the label may be omitted by a tuple literal checked
-        /// against this type (the literal's field adopts the label positionally). Purely
-        /// a property of the written spelling: it never distinguishes types.
+        /// Written `(name): type` — a caller may omit this label, and the argument's field
+        /// adopts it positionally. A calling convention, so it is legal only in a function
+        /// type's parameter tuple and is recorded on that `Callable`, never on the tuple
+        /// type: tuple types intern structurally, so a mark stored there would be shared
+        /// by every identically shaped tuple in the program.
         omittable: bool,
-        type_def: Type,
+        /// `None` when the entry gave no type — `name`, `(name)`, `name = v`, `(name) = v`.
+        /// Such an entry *decorates* a field a spread already brought in, adjusting only
+        /// its label and default and leaving its type and position alone; an entry that
+        /// states a type instead *defines* the field, replacing any inherited one. A
+        /// decorator with nothing to decorate is an error.
+        type_def: Option<Type>,
         /// Written `name: type = value` — the field may be omitted by a call argument,
         /// which fills it with this value. Legal only in a function literal's parameter
         /// spelling, where it lowers to a `:defaults` annotation on the closure; the

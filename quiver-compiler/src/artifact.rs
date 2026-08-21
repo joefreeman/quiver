@@ -141,8 +141,6 @@ pub struct CompiledUnit {
     pub constants: Vec<Constant>,
     pub annotation_keys: Vec<String>,
     pub field_names: Vec<String>,
-    /// `(unit tuple id, field index)` pairs marked label-omittable.
-    pub omittable_labels: Vec<(usize, usize)>,
     /// The functions this compile registered, in registration order — unit function ids
     /// `0..functions.len()`, the positions other modules' import entries reference.
     /// Identical in every session: the compiler's dedup floor keeps a module's functions
@@ -758,6 +756,7 @@ fn fingerprint_type(type_id: usize, program: &Program, memo: &mut HashMap<usize,
             result,
             receive,
             states,
+            omittable,
         } => {
             8u8.hash(&mut hasher);
             fingerprint_type(*parameter, program, memo).hash(&mut hasher);
@@ -766,6 +765,10 @@ fn fingerprint_type(type_id: usize, program: &Program, memo: &mut HashMap<usize,
             states
                 .map(|states| fingerprint_type(states, program, memo))
                 .hash(&mut hasher);
+            // Part of type identity, so it must be fingerprinted: two units differing only
+            // in which labels a parameter lets callers omit are different units, and
+            // sharing a cache entry between them would hand one the other's convention.
+            omittable.hash(&mut hasher);
         }
         Type::Union(members) => {
             9u8.hash(&mut hasher);
@@ -1040,19 +1043,6 @@ pub(crate) fn extract(
             .field_names
             .iter()
             .map(|&name_id| program.get_field_names()[name_id].clone())
-            .collect(),
-        omittable_labels: closure
-            .tuples
-            .iter()
-            .flat_map(|&tuple_id| {
-                let local = remaps.tuples[&tuple_id];
-                let field_count = program.get_tuples()[tuple_id].fields.len();
-                (0..field_count)
-                    .filter(move |&field| {
-                        quiver_core::types::TypeLookup::label_omittable(program, tuple_id, field)
-                    })
-                    .map(move |field| (local, field))
-            })
             .collect(),
         functions: own_ids
             .iter()
@@ -1467,19 +1457,6 @@ pub fn extract_unit(
             .iter()
             .map(|&id| program.get_field_names()[id].clone())
             .collect(),
-        omittable_labels: closure
-            .tuples
-            .iter()
-            .flat_map(|&tuple_id| {
-                let local = remaps.tuples[&tuple_id];
-                let field_count = program.get_tuples()[tuple_id].fields.len();
-                (0..field_count)
-                    .filter(move |&field| {
-                        quiver_core::types::TypeLookup::label_omittable(program, tuple_id, field)
-                    })
-                    .map(move |field| (local, field))
-            })
-            .collect(),
         functions: own_ids
             .iter()
             .map(|&id| program.get_functions()[id].clone().remap_ids(&remaps))
@@ -1567,6 +1544,7 @@ fn collect_type_children(ty: &Type, closure: &mut Closure, queue: &mut Vec<Item>
             result,
             receive,
             states,
+            ..
         } => {
             add_type(*parameter, closure, queue);
             add_type(*result, closure, queue);
@@ -1704,6 +1682,7 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
                 result,
                 receive,
                 states,
+                ..
             } => {
                 for type_id in [parameter, result, receive]
                     .into_iter()
@@ -1744,14 +1723,6 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
         for (_, type_id) in &info.fields {
             check("type", *type_id, unit.types.len())?;
         }
-    }
-    for (local_tuple, field) in &unit.omittable_labels {
-        check("tuple", *local_tuple, unit.tuples.len())?;
-        check(
-            "omittable field",
-            *field,
-            unit.tuples[*local_tuple].fields.len(),
-        )?;
     }
     for builtin in &unit.builtins {
         if let Some(type_argument) = builtin.type_argument {
@@ -1849,9 +1820,6 @@ pub fn link_unit<E: Effect>(
     // constructed yet never referenced as a type would otherwise arrive untestable.
     for local in 0..unit.tuples.len() {
         program.register_type(Type::Tuple(remaps.tuples[&local]));
-    }
-    for (local_tuple, field) in &unit.omittable_labels {
-        program.mark_label_omittable(remaps.tuples[local_tuple], *field);
     }
     for (local, site) in unit.sites.iter().enumerate() {
         let session = program.register_debug_site(Site {
@@ -2174,6 +2142,7 @@ fn intern_types_and_tuples(unit: &CompiledUnit, program: &mut Program, remaps: &
                 result,
                 receive,
                 states,
+                ..
             } => {
                 for &type_id in [parameter, result, receive]
                     .into_iter()

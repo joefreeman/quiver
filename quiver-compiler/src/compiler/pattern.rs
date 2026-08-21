@@ -972,16 +972,10 @@ fn check_match_tuple_match(
     let mut field_mappings = Vec::new();
     for (pattern_idx, field) in tuple.fields.iter().enumerate() {
         let tuple_field = &tuple_info.fields[pattern_idx];
+        // Labels must correspond exactly: an unlabeled pattern field matches only an
+        // unlabeled value field, and a stated label only the same label.
         if field.name.as_ref() != tuple_field.0.as_ref() {
-            // An unlabeled pattern field adopts a label the type marked omittable
-            // (`[(foo): 'int]`), positionally — the pattern-side dual of literal
-            // adoption. A stated label must always match.
-            let adopts = field.name.is_none()
-                && tuple_field.0.is_some()
-                && program.label_omittable(tuple_id, pattern_idx);
-            if !adopts {
-                return Ok(None);
-            }
+            return Ok(None);
         }
 
         field_mappings.push((pattern_idx, pattern_idx));

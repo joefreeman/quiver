@@ -1373,8 +1373,8 @@ fn field_type_base(input: Span) -> IResult<Span, FieldType> {
                 }
             },
         ),
-        // Optional-name field: (name): type — the label is adoptable by a positional
-        // literal checked against this type. The `):` is glued, like other glued forms.
+        // Optional-name field: (name): type — a caller may omit the label. The `):` is
+        // glued, like other glued forms.
         map(
             separated_pair(
                 delimited(char('('), identifier, char(')')),
@@ -1384,7 +1384,7 @@ fn field_type_base(input: Span) -> IResult<Span, FieldType> {
             |(name, type_def)| FieldType::Field {
                 name: Some(name),
                 omittable: true,
-                type_def,
+                type_def: Some(type_def),
                 default: None,
             },
         ),
@@ -1394,24 +1394,85 @@ fn field_type_base(input: Span) -> IResult<Span, FieldType> {
             |(name, type_def)| FieldType::Field {
                 name: Some(name),
                 omittable: false,
-                type_def,
+                type_def: Some(type_def),
                 default: None,
             },
         ),
+        // Decorators — an entry naming a field a spread already brought in, giving no type
+        // and so adjusting only its label and default. `(name)` makes the label omittable;
+        // a bare `name` changes nothing by itself and is either a checked restatement (it
+        // must name a field the spread has) or the carrier of a ` = value` default, which
+        // `field_type` picks up after this. Both must come after the `name:` forms above,
+        // so a typed entry is never mistaken for one, and before the unnamed-field form.
+        map(
+            terminated(
+                delimited(char('('), identifier, char(')')),
+                peek(field_entry_end),
+            ),
+            |name| FieldType::Field {
+                name: Some(name),
+                omittable: true,
+                type_def: None,
+                default: None,
+            },
+        ),
+        map(terminated(identifier, peek(field_entry_end)), |name| {
+            FieldType::Field {
+                name: Some(name),
+                omittable: false,
+                type_def: None,
+                default: None,
+            }
+        }),
         // Unnamed field: type
         map(type_definition, |type_def| FieldType::Field {
             name: None,
             omittable: false,
-            type_def,
+            type_def: Some(type_def),
             default: None,
         }),
     ))(input)
 }
 
+/// What may legally follow a typeless decorator entry: the `,` or closing bracket that
+/// ends it, or the `=` introducing its default. Peeking at this keeps a bare identifier
+/// from swallowing the head of something longer — a lowercase tuple-type name (`foo[…]`)
+/// or a type application (`foo<…>`) — which would otherwise be mis-read as a decorator.
+fn field_entry_end(input: Span) -> IResult<Span, ()> {
+    nom_value(
+        (),
+        pair(wsc, alt((char(','), char(']'), char(')'), char('=')))),
+    )(input)
+}
+
 fn field_type_list(input: Span) -> IResult<Span, Vec<FieldType>> {
-    terminated(
-        separated_list0(tuple((wsc, char(','), wsc)), field_type),
-        opt(pair(wsc, char(','))),
+    verify(
+        terminated(
+            separated_list0(tuple((wsc, char(','), wsc)), field_type),
+            opt(pair(wsc, char(','))),
+        ),
+        |fields: &Vec<FieldType>| {
+            // A bare `name` decorator — no parens, no default — is the one field form that
+            // is just an identifier, so allowing it anywhere would make `A[x]` a well-formed
+            // tuple *type* and a pattern alternation like `=(A[x] | B[x])` would be read as
+            // a type ascription instead. Requiring a spread alongside it restores the
+            // distinction, and costs nothing: a decorator with no spread has nothing to
+            // decorate anyway. The `(name)` and `name = value` forms carry their own marker,
+            // so they stay unambiguous and reach resolution, which reports them properly.
+            let bare = |field: &FieldType| {
+                matches!(
+                    field,
+                    FieldType::Field {
+                        name: Some(_),
+                        omittable: false,
+                        type_def: None,
+                        default: None,
+                    }
+                )
+            };
+            let spreads = |field: &FieldType| matches!(field, FieldType::Spread { .. });
+            !fields.iter().any(bare) || fields.iter().any(spreads)
+        },
     )(input)
 }
 

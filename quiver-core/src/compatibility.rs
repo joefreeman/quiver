@@ -122,6 +122,7 @@ fn extract_function_type_info(
             result,
             receive,
             states,
+            ..
         }) => (*parameter, type_id, Some(*receive), Some(*result), *states),
         _ => (0, type_id, None, None, None),
     }
@@ -721,8 +722,14 @@ impl TypeIndex {
                     result,
                     receive,
                     states: _,
+                    omittable,
                 } => {
-                    if lookup.lookup_type(*receive).map(|t| t.is_never()) == Some(true) {
+                    // Builtin signatures never mark labels, so a marked callable must not
+                    // claim this slot — it would hand a caller a calling convention the
+                    // builtin never declared.
+                    if omittable.is_empty()
+                        && lookup.lookup_type(*receive).map(|t| t.is_never()) == Some(true)
+                    {
                         index
                             .callable_to_type
                             .entry((*parameter, *result))

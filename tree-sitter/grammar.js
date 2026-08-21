@@ -115,9 +115,15 @@ module.exports = grammar({
     // (`(x: …)`, `(x, …)`) or the first alternative of an or-pattern (`(x | …)`); the `:`/`,`
     // versus `|` that follows decides, via GLR.
     [$._pattern, $._partial_field],
-    // In a tuple type, `(name` may open an omittable label (`(foo): 'int`) or a
-    // partial-type field type (`(foo: 'int)`); the `)` versus `:` decides, via GLR.
+    // In a tuple type, `(name` may open an omittable label (`(foo): 'int`, or the bare
+    // decorator `(foo)`) or a partial-type field type (`(foo: 'int)`); the `)` versus `:`
+    // decides, via GLR.
     [$._partial_field, $._field_type_base],
+    // A bare identifier inside `[ … ]` may be a tuple *pattern*'s field (`=[x, y]`) or a
+    // tuple *type*'s decorator entry (`#[...'base, x]`); the two bracket forms already
+    // overlap (see `pattern_tuple`/`tuple_type` below) and the field itself does not
+    // decide, so both readings are carried, via GLR.
+    [$._pattern, $._field_type_base],
     // A parenthesised group of `|`-separated atoms can be read as an or-pattern (of tuple/type
     // patterns) or as a parenthesised type union; both are accepted for editor purposes.
     [$.pattern_tuple, $.tuple_type],
@@ -780,10 +786,30 @@ module.exports = grammar({
     ),
 
     _field_type_base: $ => choice(
-      // Omittable label `(name): 'type` — a literal checked against the type may
-      // state the label or leave the field positional. Tuple types only.
+      // Omittable label `(name): 'type` — the mark is a calling convention, legal only in
+      // a function type's parameter tuple: a call argument may then omit the label and
+      // give the field positionally.
       seq('(', field('name', $.identifier), ')', ':', optional($._nl), $._type),
       seq(field('name', $.identifier), ':', optional($._nl), $._type),
+      // Decorators: a field entry with no type at all, adjusting a field an earlier spread
+      // brought in. It touches only the label and — via the `field_default` suffix that
+      // `_field_type` adds, so `(name) = v` and `name = v` fall out here for free — the
+      // default, leaving the field's type and position alone. `(name)` marks the label
+      // omittable; a bare `name` is a checked restatement that changes nothing.
+      //
+      // The real parser accepts the *bare* form only when the same tuple contains a
+      // spread; without that restriction `A[x]` would read as a tuple type and break
+      // pattern alternations like `=(A[x] | B[x])`. A context-free grammar cannot state
+      // that condition, so the bare form is accepted generally here — as with the
+      // field-default placement rule, the condition is left to the compiler, which
+      // reports it better than a positional grammar could.
+      seq('(', field('name', $.identifier), ')'),
+      // The bare form is the one reading that a tuple *pattern*'s field also has, so where
+      // both are live — `=(A[x] | B[x])`, an or-pattern the parenthesised-union reading
+      // would otherwise claim — a negative dynamic precedence hands the parse to the
+      // pattern. Nothing is lost: a type position (a function's parameter, an alias'
+      // definition) never offers the pattern reading for the penalty to tip.
+      prec.dynamic(-1, field('name', $.identifier)),
       $._type,
     ),
 

@@ -820,6 +820,11 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     /// `Callable` like `current_receive_type_id`.
     current_states: Option<usize>,
 
+    /// The parameter field indices this function lets callers omit the label of. Baked
+    /// into the registered `Callable` like `current_states`, and read by a bare `^`, whose
+    /// callee is the function being compiled and so has no value in scope to consult.
+    current_omittable: Vec<usize>,
+
     // While compiling a function body, collects per-branch (guard, result) types for the
     // call-site return-type dispatch. `None` outside a function body.
     collected_dispatch: Option<DispatchCollection>,
@@ -1008,6 +1013,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             process_types,
             current_receive_type_id: never_id,
             current_states: None,
+            current_omittable: Vec::new(),
             collected_dispatch: None,
             last_uncovered: None,
             fn_case_tables: tables.fn_case_tables,
@@ -1442,7 +1448,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                     .to_string(),
                             ));
                         }
-                        Self::validate_type_ast(type_def)?;
+                        // A decorator entry states no type to walk into. Whether it has a
+                        // spread to decorate is resolution's business, not the grammar's.
+                        if let Some(type_def) = type_def {
+                            Self::validate_type_ast(type_def)?;
+                        }
                     }
                 }
                 Ok(())
@@ -1719,23 +1729,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 );
             }
 
-            // An unnamed field adopts the expected field's label when the written type
-            // marked it omittable (`[(foo): 'int]`): the value is built fully labeled, so
-            // omission is purely a spelling convenience — matching, equality, and partial
-            // access see one shape however the literal was written.
-            let field_name = field.name.clone().or_else(|| {
-                let (expected_tuple_id, _) = expected_tuple.as_ref()?;
-                if !self
-                    .program
-                    .label_omittable(*expected_tuple_id, fields_compiled)
-                {
-                    return None;
-                }
-                self.program.lookup_tuple(*expected_tuple_id)?.fields[fields_compiled]
-                    .0
-                    .clone()
-            });
-            field_types.push((field_name, field_type));
+            // Label adoption happens before this, on the argument AST (`adopt_labels`), so
+            // a literal arriving here is already spelled exactly as it will be built.
+            field_types.push((field.name.clone(), field_type));
             field_provenances.push(field_prov);
         }
 
@@ -1895,6 +1891,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     result,
                     receive,
                     states: Some(parameter),
+                    omittable: Vec::new(),
                 });
                 self.record_builtin_type_params(name, callable, parameter, result);
                 callable
@@ -2075,6 +2072,108 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // AST is ever formatted, so dropping the flag here costs nothing.
             punned: false,
         }))
+    }
+
+    /// The parameter field indices an applied head lets callers omit the label of, read
+    /// from its function type. A calling convention belongs to the type, so — unlike
+    /// `:defaults`, which rides the closure's annotation row — it survives a declared
+    /// boundary: an interface member (`update: #[(state): 's, (event): 'e] -> 's`) grants
+    /// omission to everyone who calls through the declared type.
+    fn callee_omittable(&mut self, access: &ast::Access) -> Vec<usize> {
+        match &access.source {
+            // Bare `^` recurses into the function being compiled, which is not yet a value
+            // in scope, so its marks come from the compile state instead.
+            Some(ast::AccessSource::TailCall(None)) => self.current_omittable.clone(),
+            // A builtin signature never marks labels.
+            Some(ast::AccessSource::Builtin(_)) => Vec::new(),
+            _ => {
+                let Some(callable) = self.callee_value_type(access) else {
+                    return Vec::new();
+                };
+                let callable = Type::strip_annotations(callable, &*self.program);
+                match self.program.lookup_type(callable) {
+                    Some(Type::Callable { omittable, .. }) => omittable.clone(),
+                    _ => Vec::new(),
+                }
+            }
+        }
+    }
+
+    /// Give a call argument's positional entries the labels the callee's parameter marked
+    /// omittable (`#[(foo): 'int]`). The value is built fully labeled, so omission is
+    /// purely a spelling convenience — matching, equality and partial access see one shape
+    /// however the literal was written.
+    ///
+    /// `None` leaves the argument alone: a spread (whose fields have no fixed positions), a
+    /// callee that grants nothing, or a literal with nothing to adopt.
+    fn adopt_labels(&mut self, access: &ast::Access, tuple: &ast::Tuple) -> Option<ast::Tuple> {
+        if helpers::tuple_contains_spread(&tuple.fields) {
+            return None;
+        }
+        let omittable = self.callee_omittable(access);
+        if omittable.is_empty() {
+            return None;
+        }
+        let parameter = self.callee_parameter_type(access)?;
+        let labels: Vec<Option<String>> = annotations::single_tuple(&*self.program, parameter)
+            .and_then(|id| self.program.lookup_tuple(id))
+            .map(|info| info.fields.iter().map(|(label, _)| label.clone()).collect())?;
+        // Arity is the ordinary call check's business. A mismatch here only means the
+        // positions don't line up, so adopt nothing and let that check report it.
+        if labels.len() != tuple.fields.len() {
+            return None;
+        }
+        // Positional entries must form a prefix, exactly as `resolve_slots` requires: once
+        // labels have claimed slots out of order a trailing positional entry has no
+        // well-defined one. Adopting anyway would invent a duplicate label and report that
+        // instead of the call mismatch the literal actually has.
+        if tuple
+            .fields
+            .iter()
+            .skip_while(|field| field.name.is_none())
+            .any(|field| field.name.is_none())
+        {
+            return None;
+        }
+        let mut fields = tuple.fields.clone();
+        let mut adopted = false;
+        for (index, field) in fields.iter_mut().enumerate() {
+            // A written label always stands; a positional entry adopts, and only where the
+            // parameter marked that slot. Positional entries form a prefix (`resolve_slots`
+            // rejects one after a labeled entry), so the written index is the slot.
+            if field.name.is_some() || !omittable.contains(&index) {
+                continue;
+            }
+            let Some(label) = labels[index].clone() else {
+                continue;
+            };
+            field.name = Some(label);
+            adopted = true;
+        }
+        adopted.then(|| ast::Tuple {
+            name: tuple.name.clone(),
+            fields,
+            span: tuple.span,
+            punned: false,
+        })
+    }
+
+    /// Elaborate a call argument written as a tuple literal against its callee: fill the
+    /// fields the callee defaults, then adopt the labels its parameter marked omittable.
+    /// Both are spelling conveniences resolved from the callee, so what reaches
+    /// `compile_tuple` is complete and fully labeled.
+    fn elaborate_argument(
+        &mut self,
+        access: &ast::Access,
+        argument: &ast::Term,
+    ) -> Result<Option<ast::Tuple>, Error> {
+        let filled = self.fill_defaults(access, argument)?;
+        let tuple = match (&filled, argument) {
+            (Some(tuple), _) => tuple.clone(),
+            (None, ast::Term::Tuple(tuple)) => tuple.clone(),
+            (None, _) => return Ok(None),
+        };
+        Ok(self.adopt_labels(access, &tuple).or(filled))
     }
 
     /// Resolve the type after an accessor path, for type-only inspection (look-ahead
@@ -2564,6 +2663,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let inherited_suffix = self.type_param_suffix;
         let type_param_suffix = inherited_suffix.unwrap_or_else(|| self.mint_type_param_suffix());
         self.type_param_suffix = Some(type_param_suffix);
+        // Which parameter labels this literal lets its callers omit (`#[(x): 'int]`). A
+        // calling convention, so it rides the function type registered below rather than
+        // the parameter's tuple type; an inferred parameter has no written spelling and so
+        // grants nothing.
+        let mut parameter_omittable: Vec<usize> = Vec::new();
         let parameter_type = match &function.parameter_type {
             Some(t) => {
                 let mut env = typing::TypeEnv {
@@ -2571,14 +2675,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     module_cache: &mut *self.module_cache,
                     package: &self.current_package,
                 };
-                typing::resolve_function_parameter_type(
+                let (type_id, omittable) = typing::resolve_function_parameter_type(
                     &mut env,
                     &self.scopes,
                     t.clone(),
                     &function.type_parameters,
                     type_param_suffix,
                     self.program,
-                )?
+                )?;
+                parameter_omittable = omittable;
+                type_id
             }
             None => {
                 // No annotation: infer the parameter from the expected callable type at the use
@@ -2604,6 +2710,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let saved_local_count = self.local_count;
         let saved_receive_type = self.current_receive_type_id;
         let saved_states = self.current_states;
+        let saved_omittable = std::mem::take(&mut self.current_omittable);
 
         // Extract type aliases from parent scopes to preserve in function scope
         // (inner scopes' definitions win)
@@ -2640,6 +2747,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Seed the states union with the parameter (the spawn init / bare-`^` argument);
         // tail calls widen it during body compilation.
         self.current_states = Some(parameter_type);
+        self.current_omittable = parameter_omittable;
 
         // Define captures as first locals in function body scope
         for (capture, import_type) in unique_captures.iter().zip(&import_types) {
@@ -2799,9 +2907,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut parameter_fields = HashMap::new();
         if let Some(ast::Type::Tuple(tuple_type)) = &function.parameter_type {
             for (field_index, field) in tuple_type.fields.iter().enumerate() {
+                // A decorator entry states no type of its own (the spread supplies it), and
+                // a spread's own fields aren't enumerated here either, so this map covers
+                // the written, typed entries only.
                 if let ast::FieldType::Field {
                     name: Some(field_name),
-                    type_def,
+                    type_def: Some(type_def),
                     ..
                 } = field
                 {
@@ -2857,6 +2968,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 module_cache: &mut *self.module_cache,
                 package: &self.current_package,
             };
+            // A result position grants no calling convention, so any marks are discarded
+            // here; `validate_type_ast` rejects one written where it could never fire.
             let expected_return_type = typing::resolve_function_parameter_type(
                 &mut env,
                 &self.scopes,
@@ -2864,7 +2977,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 &function.type_parameters,
                 type_param_suffix,
                 self.program,
-            )?;
+            )?
+            .0;
 
             // For generic functions, we need strict type equality (not just compatibility)
             // because type variables should match exactly, not be compatible with concrete types
@@ -2942,6 +3056,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             result: body_type,
             receive: self.current_receive_type_id,
             states: self.current_states,
+            omittable: self.current_omittable.clone(),
         });
 
         // Record the declared type parameters (as their uniquified variable names, in
@@ -2991,6 +3106,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.local_count = saved_local_count;
         self.current_receive_type_id = saved_receive_type;
         self.current_states = saved_states;
+        self.current_omittable = saved_omittable;
 
         // Emit instructions to push capture values onto the stack
         // These will be popped by the Function instruction
@@ -4413,7 +4529,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             };
             // A piped literal fills omitted fields from the callee, as an argument does.
             let filled = match piped_callee {
-                Some(callee) => self.fill_defaults(callee, term)?,
+                Some(callee) => self.elaborate_argument(callee, term)?,
                 None => None,
             };
             let (term_type, term_prov) = self.compile_term(
@@ -4912,6 +5028,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             result: result_type_id,
             receive: never_id,
             states: Some(nil_type_id),
+            omittable: Vec::new(),
         });
 
         // Generate bytecode, then add the module function
@@ -5107,6 +5224,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             result: callback_result_type,
             receive: never_id,
             states: Some(callback_argument_type),
+            omittable: Vec::new(),
         });
         let context_tuple = self.program.register_tuple(
             None,
@@ -5143,6 +5261,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             result,
             receive: never_id,
             states: Some(nil_type_id),
+            omittable: Vec::new(),
         });
         let mut bytecode = self.program.to_bytecode(None);
         // The content constant goes into the *temporary* bytecode only: registering it on the
@@ -5503,6 +5622,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     receive: never_id,
                     // Builtins never tail-call: their states are their parameter.
                     states: Some(param_type),
+                    omittable: Vec::new(),
                 });
                 // A module-cached instantiated builtin resolves to this program's entry for
                 // that instantiation (the static type above stays the generic signature —
@@ -5764,6 +5884,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             result,
             receive,
             states,
+            ..
         }) = self.program.lookup_base(fn_type_id)
         else {
             return Err(Error::FeatureUnsupported(
@@ -5909,6 +6030,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     result,
                     receive,
                     states: Some(parameter),
+                    omittable: Vec::new(),
                 });
                 self.record_typed(
                     base_span,
@@ -6865,7 +6987,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let expected_arg = self.callee_parameter_type(&access);
                 // Omitted fields are filled from the callee's `:defaults` before the
                 // argument compiles, so the literal reaching `compile_tuple` is complete.
-                let argument = match self.fill_defaults(&access, &argument)? {
+                let argument = match self.elaborate_argument(&access, &argument)? {
                     Some(tuple) => Box::new(ast::Term::Tuple(tuple)),
                     None => argument,
                 };
@@ -7061,12 +7183,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 result,
                 receive,
                 states,
+                omittable,
             } => {
                 // Nested function is a boundary - increment depth
                 let param_id = *parameter;
                 let result_id = *result;
                 let receive_id = *receive;
                 let states_id = *states;
+                // Field positions, not ids — re-rooting doesn't touch them, but they are
+                // part of the rebuilt type's identity.
+                let omittable = omittable.clone();
                 let resolved_param = self.resolve_function_cycles(
                     param_id,
                     function_type_id,
@@ -7090,6 +7216,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     result: resolved_result,
                     receive: resolved_receive,
                     states: resolved_states,
+                    omittable,
                 })
             }
             Type::Tuple(tuple_id) => {
@@ -7584,6 +7711,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             result,
             receive,
             states: _,
+            omittable: _,
         } = target_type
         {
             // Function call (a normal call is not a state transition — only tail calls
@@ -7816,6 +7944,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             result,
             receive,
             states,
+            ..
         }) = self.program.lookup_base(callable_type_id)
         else {
             return Err(Error::TypeMismatch {
@@ -7956,6 +8085,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             result,
             receive,
             states,
+            ..
         }) = self.program.lookup_base(fn_type)
         else {
             return Err(Error::TypeMismatch {
@@ -8053,6 +8183,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             receive: never_id,
             // Builtins never tail-call: their states are their parameter.
             states: Some(param_type_id),
+            omittable: Vec::new(),
         });
 
         self.record_builtin_type_params(name, callable_type_id, param_type_id, result_type_id);

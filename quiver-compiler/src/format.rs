@@ -1814,29 +1814,25 @@ fn render_field_default(default: &Option<Box<Chain>>) -> String {
 fn render_field_type(field_type: &FieldType) -> String {
     match field_type {
         FieldType::Field {
-            name: Some(name),
+            name,
             omittable,
             type_def,
             default,
         } => {
-            let label = if *omittable {
-                format!("({})", name)
-            } else {
-                name.clone()
+            let label = match name {
+                Some(name) if *omittable => format!("({})", name),
+                Some(name) => name.clone(),
+                None => String::new(),
             };
-            format!(
-                "{}: {}{}",
-                label,
-                render_type(type_def),
-                render_field_default(default)
-            )
+            // A decorator states no type — it names a field the spread already brought in
+            // and adjusts only its label and default — so it renders as the label alone.
+            let body = match (type_def, name) {
+                (Some(type_def), Some(_)) => format!(": {}", render_type(type_def)),
+                (Some(type_def), None) => render_type(type_def),
+                (None, _) => String::new(),
+            };
+            format!("{}{}{}", label, body, render_field_default(default))
         }
-        FieldType::Field {
-            name: None,
-            type_def,
-            default,
-            ..
-        } => format!("{}{}", render_type(type_def), render_field_default(default)),
         FieldType::Spread {
             identifier: None, ..
         } => "...".to_string(),

@@ -576,7 +576,12 @@ impl Collector {
             ast::Type::Tuple(tuple) => {
                 for field in &tuple.fields {
                     match field {
-                        ast::FieldType::Field { type_def, .. } => self.type_def(type_def),
+                        // A decorator entry carries no type to walk.
+                        ast::FieldType::Field {
+                            type_def: Some(type_def),
+                            ..
+                        } => self.type_def(type_def),
+                        ast::FieldType::Field { type_def: None, .. } => {}
                         ast::FieldType::Spread { type_arguments, .. } => {
                             for argument in type_arguments {
                                 self.type_def(argument);
