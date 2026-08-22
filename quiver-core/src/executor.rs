@@ -1734,12 +1734,7 @@ impl<E: Effect> Executor<E> {
     fn is_cold(instruction: Instruction) -> bool {
         matches!(
             instruction.opcode(),
-            Opcode::Spawn
-                | Opcode::Send
-                | Opcode::Self_
-                | Opcode::Select
-                | Opcode::Process
-                | Opcode::State
+            Opcode::Spawn | Opcode::Self_ | Opcode::Select | Opcode::Process | Opcode::State
         )
     }
 
@@ -1795,12 +1790,9 @@ impl<E: Effect> Executor<E> {
             Opcode::Reclaimed => Err(Error::Panic(
                 "reclaimed code invoked (code-collection liveness bug)".to_string(),
             )),
-            Opcode::Spawn
-            | Opcode::Send
-            | Opcode::Self_
-            | Opcode::Select
-            | Opcode::Process
-            | Opcode::State => unreachable!("cold instruction routed to execute_hot"),
+            Opcode::Spawn | Opcode::Self_ | Opcode::Select | Opcode::Process | Opcode::State => {
+                unreachable!("cold instruction routed to execute_hot")
+            }
         }
     }
 
@@ -1814,7 +1806,6 @@ impl<E: Effect> Executor<E> {
     ) -> Result<Option<Action<E>>, Error> {
         match instruction.opcode() {
             Opcode::Spawn => self.handle_spawn(pid),
-            Opcode::Send => self.handle_send(pid),
             Opcode::Self_ => self.handle_self(pid),
             Opcode::Select => self.handle_select(pid, current_time_ms),
             Opcode::Process => self.handle_process_ref(pid, instruction.operand() as usize),
@@ -2761,54 +2752,6 @@ impl<E: Effect> Executor<E> {
             captures: captures.to_vec(),
             argument,
         }))
-    }
-
-    fn handle_send(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
-        self.check_not_restricted(pid, Operation::Send)?;
-
-        let (target_value, message) = {
-            let process = self
-                .get_process_mut(pid)
-                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-            let target_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-            let message = process.stack.pop().ok_or(Error::StackUnderflow)?;
-            (target_value, message)
-        };
-        // The message leaves this process's stack (carried by the Deliver action, or dropped on a
-        // type error); release it. `target_value` is a process/resource handle (no heap
-        // references) — it is pushed back or dropped, needing no accounting.
-
-        match target_value {
-            Value::Process(target_pid, _) => {
-                // Push process back onto stack
-                let process = self
-                    .get_process_mut(pid)
-                    .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-                process.stack.push(target_value);
-
-                if let Some(frame) = process.frames.last_mut() {
-                    frame.counter += 1;
-                }
-
-                // Return routing request for scheduler to handle
-                Ok(Some(Action::Deliver {
-                    target: target_pid,
-                    value: message,
-                }))
-            }
-            Value::Resource(_resource_id, _) => {
-                // Resources are opaque handles — writes go through their builtins,
-                // not sends.
-                Err(Error::TypeMismatch {
-                    expected: "process".to_string(),
-                    found: "resource".to_string(),
-                })
-            }
-            _ => Err(Error::TypeMismatch {
-                expected: "process".to_string(),
-                found: target_value.type_name().to_string(),
-            }),
-        }
     }
 
     fn handle_self(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {

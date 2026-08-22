@@ -683,7 +683,6 @@ pub enum Opcode {
     GetAnnotation,
     Stamp,
     Spawn,
-    Send,
     Self_,
     Select,
     Process,
@@ -719,7 +718,6 @@ impl Opcode {
             | Opcode::Equal
             | Opcode::Not
             | Opcode::Spawn
-            | Opcode::Send
             | Opcode::Self_
             | Opcode::Select
             | Opcode::State
@@ -730,7 +728,7 @@ impl Opcode {
 
     /// Every opcode, in discriminant order — `ALL[op as usize] == op` (asserted in tests),
     /// which is what makes the decode below a single indexed load.
-    pub const ALL: [Opcode; 33] = [
+    pub const ALL: [Opcode; 32] = [
         Opcode::Constant,
         Opcode::Pop,
         Opcode::Duplicate,
@@ -758,7 +756,6 @@ impl Opcode {
         Opcode::GetAnnotation,
         Opcode::Stamp,
         Opcode::Spawn,
-        Opcode::Send,
         Opcode::Self_,
         Opcode::Select,
         Opcode::Process,
@@ -1006,11 +1003,6 @@ impl Instruction {
     /// Pop a function value, then an argument; spawn a process and push its pid.
     pub fn spawn() -> Instruction {
         Instruction::bare(Opcode::Spawn)
-    }
-
-    /// Pop a process value, then a message; send it and push the process back.
-    pub fn send() -> Instruction {
-        Instruction::bare(Opcode::Send)
     }
 
     /// Push the running process's own pid.

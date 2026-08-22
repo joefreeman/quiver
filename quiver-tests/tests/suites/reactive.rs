@@ -38,7 +38,7 @@ fn wakeup_on_dependency_change() {
             r#"
             store = 5 ~> @'int { !'int ~> { =n => ^ n } } ~
             s1 = %proc.track #{ ?store }
-            10 ~> store ~
+%proc.send [store, 10]
             w = !'%proc.changed
             s2 = ?store
             [s1, s2]
@@ -54,7 +54,7 @@ fn tracked_render_rejects_effects() {
         .evaluate(
             r#"
             store = 5 ~> @'int { !'int ~> { =n => ^ n } } ~
-            %proc.track #{ 1 ~> store ~; ?store }
+            %proc.track #{%proc.send [store, 1]; ?store }
             "#,
         )
         .expect_runtime_error(Error::OperationNotAllowed {

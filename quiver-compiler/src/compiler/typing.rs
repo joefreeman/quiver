@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast;
 use crate::resolver::{ModuleResolver, PackageId};
@@ -1922,6 +1922,35 @@ pub fn unify(
     concrete_id: usize,
     program: &mut Program,
 ) -> Result<(), Error> {
+    let mut upper = HashSet::new();
+    unify_bounded(
+        bindings,
+        &mut upper,
+        false,
+        pattern_id,
+        concrete_id,
+        program,
+    )
+}
+
+/// Unify, carrying the set of variables whose binding is an **upper bound** rather than
+/// a lower one — those bound from a contravariant position, where the concrete type
+/// says what the value *accepts* rather than what it *is*.
+///
+/// Ordinary unification widens: two occurrences of `'t` meeting different types make
+/// `'t` their union, which is how an element type is inferred from several places. An
+/// upper-bound occurrence cannot widen, because widening would manufacture a capability
+/// the value does not have — `%proc.send`'s `[@'m, 'm]` binds `'m` to what the target
+/// accepts, so a message that is not already covered is a mismatch, not a reason to
+/// grow `'m`.
+fn unify_bounded(
+    bindings: &mut HashMap<String, usize>,
+    upper: &mut HashSet<String>,
+    contra: bool,
+    pattern_id: usize,
+    concrete_id: usize,
+    program: &mut Program,
+) -> Result<(), Error> {
     let pattern = program.lookup_type(pattern_id).cloned();
     let concrete = program.lookup_type(concrete_id).cloned();
 
@@ -1940,11 +1969,31 @@ pub fn unify(
             };
 
             if let Some(existing_id) = bindings.get(name).copied() {
-                // Variable already bound - widen to union if different
                 if existing_id != resolved_concrete_id {
-                    // Widen the type variable to a union
-                    let widened = union_type_ids(program, vec![existing_id, resolved_concrete_id]);
-                    bindings.insert(name.clone(), widened);
+                    if upper.contains(name) {
+                        // The binding is an upper bound (see `unify_bounded`): this
+                        // occurrence must fit inside it. Widening would hand the
+                        // caller a capability the value never had.
+                        if !quiver_core::types::is_compatible(
+                            resolved_concrete_id,
+                            existing_id,
+                            &*program,
+                        ) {
+                            return Err(Error::TypeUnresolved(format!(
+                                "{} does not fit {}",
+                                quiver_core::format::format_type_by_id(
+                                    &*program,
+                                    resolved_concrete_id
+                                ),
+                                quiver_core::format::format_type_by_id(&*program, existing_id),
+                            )));
+                        }
+                    } else {
+                        // Widen the type variable to a union
+                        let widened =
+                            union_type_ids(program, vec![existing_id, resolved_concrete_id]);
+                        bindings.insert(name.clone(), widened);
+                    }
                 }
             } else {
                 // New binding - but make sure we're not binding a variable to itself
@@ -1956,6 +2005,9 @@ pub fn unify(
                     return Ok(());
                 }
                 bindings.insert(name.clone(), resolved_concrete_id);
+                if contra {
+                    upper.insert(name.clone());
+                }
             }
             Ok(())
         }
@@ -1964,14 +2016,18 @@ pub fn unify(
         // the whole annotated type (the Variable arm above fires first), but a structural
         // pattern (tuple/callable/...) unifies against the row's base. A row in pattern
         // position is likewise peeled.
-        (_, Type::Annotated { base, .. }) => unify(bindings, pattern_id, *base, program),
-        (Type::Annotated { base, .. }, _) => unify(bindings, *base, concrete_id, program),
+        (_, Type::Annotated { base, .. }) => {
+            unify_bounded(bindings, upper, contra, pattern_id, *base, program)
+        }
+        (Type::Annotated { base, .. }, _) => {
+            unify_bounded(bindings, upper, contra, *base, concrete_id, program)
+        }
 
         // When concrete is a variable, resolve it and try unifying with the resolved type
         (_, Type::Variable(name)) => {
             if let Some(&resolved_id) = bindings.get(name) {
                 // Concrete variable is bound - unify with its binding
-                unify(bindings, pattern_id, resolved_id, program)
+                unify_bounded(bindings, upper, contra, pattern_id, resolved_id, program)
             } else {
                 // An unbound concrete-side variable is a *rigid* variable from an
                 // enclosing generic context (e.g. a captured value whose type mentions
@@ -1983,7 +2039,14 @@ pub fn unify(
                 if let Type::Union(members) = &pattern {
                     for member in members.clone() {
                         if let Some(Type::Variable(_)) = program.lookup_type(member) {
-                            return unify(bindings, member, concrete_id, program);
+                            return unify_bounded(
+                                bindings,
+                                upper,
+                                contra,
+                                member,
+                                concrete_id,
+                                program,
+                            );
                         }
                     }
                 }
@@ -2017,20 +2080,23 @@ pub fn unify(
             // Unify state types when both are stated; a missing side imposes no
             // constraint here (the strict direction is subtyping's job, not unification's)
             if let (Some(st1), Some(st2)) = (state1, state2) {
-                unify(bindings, *st1, *st2, program)?;
+                unify_bounded(bindings, upper, contra, *st1, *st2, program)?;
             }
             // Send and receive likewise: unify only when both are stated. A generic
             // param like `@!'r` accepts any pid whose receive pins 'r — the
             // send grant is simply dropped, exactly as the covariant subtype allows
             // (a declared clause grants a capability; omitting one never demands
-            // the value lack it). Send is contravariant (the message set the handle
-            // accepts may be wider than the declared promise), so it unifies swapped,
-            // as the callable arm does for parameters.
+            // the value lack it). Send unifies pattern-first like every other position
+            // — variance is `is_compatible`'s job and unification's is to bind, so a
+            // `@'m` parameter must see its variable in pattern position or it reads as
+            // rigid — but the binding it makes is an *upper* bound: `'m` becomes what
+            // this target accepts, and a later occurrence must fit inside it rather
+            // than widen it.
             if let (Some(s1), Some(s2)) = (send1, send2) {
-                unify(bindings, *s2, *s1, program)?;
+                unify_bounded(bindings, upper, true, *s1, *s2, program)?;
             }
             if let (Some(ret1), Some(ret2)) = (receive1, receive2) {
-                unify(bindings, *ret1, *ret2, program)?;
+                unify_bounded(bindings, upper, contra, *ret1, *ret2, program)?;
             }
             Ok(())
         }
@@ -2078,13 +2144,15 @@ pub fn unify(
                         "Tuple fields have different names".to_string(),
                     ));
                 }
-                unify(bindings, *ftype1_id, *ftype2_id, program).map_err(|e| match e {
-                    Error::TypeUnresolved(message) => {
-                        let field = fname1.clone().unwrap_or_else(|| index.to_string());
-                        Error::TypeUnresolved(format!("in `{field}`: {message}"))
-                    }
-                    other => other,
-                })?;
+                unify_bounded(bindings, upper, contra, *ftype1_id, *ftype2_id, program).map_err(
+                    |e| match e {
+                        Error::TypeUnresolved(message) => {
+                            let field = fname1.clone().unwrap_or_else(|| index.to_string());
+                            Error::TypeUnresolved(format!("in `{field}`: {message}"))
+                        }
+                        other => other,
+                    },
+                )?;
             }
 
             Ok(())
@@ -2128,7 +2196,14 @@ pub fn unify(
                     )));
                 };
 
-                unify(bindings, *pattern_ftype_id, *concrete_ftype_id, program)?;
+                unify_bounded(
+                    bindings,
+                    upper,
+                    contra,
+                    *pattern_ftype_id,
+                    *concrete_ftype_id,
+                    program,
+                )?;
             }
 
             Ok(())
@@ -2167,7 +2242,14 @@ pub fn unify(
                     )));
                 };
 
-                unify(bindings, *pattern_ftype_id, *concrete_ftype_id, program)?;
+                unify_bounded(
+                    bindings,
+                    upper,
+                    contra,
+                    *pattern_ftype_id,
+                    *concrete_ftype_id,
+                    program,
+                )?;
             }
 
             Ok(())
@@ -2191,15 +2273,15 @@ pub fn unify(
             },
         ) => {
             // Unify parameters (contravariant - swap order)
-            unify(bindings, *param1, *param2, program)?;
+            unify_bounded(bindings, upper, contra, *param1, *param2, program)?;
             // Unify results (covariant)
-            unify(bindings, *result1, *result2, program)?;
+            unify_bounded(bindings, upper, contra, *result1, *result2, program)?;
             // Unify receive types (contravariant - swap order)
-            unify(bindings, *receive1, *receive2, program)?;
+            unify_bounded(bindings, upper, contra, *receive1, *receive2, program)?;
             // States unify only when both are known: a `#'t -> 'u` parameter (states
             // unknown) accepts any literal without constraining its states.
             if let (Some(st1), Some(st2)) = (states1, states2) {
-                unify(bindings, *st1, *st2, program)?;
+                unify_bounded(bindings, upper, contra, *st1, *st2, program)?;
             }
             Ok(())
         }
@@ -2265,7 +2347,14 @@ pub fn unify(
                     // Re-run the lone variant against the whole pattern union: the
                     // single-variant arm below diagnoses the failure (near-miss detail,
                     // compact shapes) far better than a canned line.
-                    return unify(bindings, pattern_id, concrete_variant, program);
+                    return unify_bounded(
+                        bindings,
+                        upper,
+                        contra,
+                        pattern_id,
+                        concrete_variant,
+                        program,
+                    );
                 }
             }
             Ok(())
@@ -2355,9 +2444,36 @@ pub fn unify(
         (_, Type::Union(variants)) => {
             let variants = variants.clone();
             let mut merged: Option<HashMap<String, usize>> = None;
+            // A union unifies if *some* variant does: the pattern is being solved
+            // for, and the variants that fit say what it is — which is how a `Cons['t, ^]`
+            // parameter reads a `Nil | Cons['int, ^]` argument.
+            //
+            // A process pattern is the exception, because it is a *requirement* rather
+            // than a shape to solve for: the value may turn out to be any variant, so
+            // every one must meet it, and they are threaded through the same bindings
+            // so that each narrows what the next may grant. That is what checks a send
+            // to a union of pids against every member, and rejects one to a union that
+            // is not all pids.
+            if let Type::Process { .. } = pattern {
+                for &variant in &variants {
+                    unify_bounded(bindings, upper, contra, pattern_id, variant, program)?;
+                }
+                return Ok(());
+            }
             for &variant in &variants {
                 let mut temp_bindings = bindings.clone();
-                if unify(&mut temp_bindings, pattern_id, variant, program).is_ok() {
+                let mut temp_upper = upper.clone();
+                if unify_bounded(
+                    &mut temp_bindings,
+                    &mut temp_upper,
+                    contra,
+                    pattern_id,
+                    variant,
+                    program,
+                )
+                .is_ok()
+                {
+                    *upper = temp_upper;
                     merged = Some(match merged {
                         None => temp_bindings,
                         Some(accumulated) => merge_bindings(accumulated, temp_bindings, program),
@@ -2369,8 +2485,9 @@ pub fn unify(
                 return Ok(());
             }
             Err(Error::TypeUnresolved(format!(
-                "Cannot unify pattern with concrete union ({} variants)",
-                variants.len()
+                "{} is not {}",
+                quiver_core::format::format_type_by_id(&*program, concrete_id),
+                quiver_core::format::format_type_by_id(&*program, pattern_id),
             )))
         }
 

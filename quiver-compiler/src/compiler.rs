@@ -240,6 +240,10 @@ pub enum Error {
         all_functions: bool,
     },
 
+    ProcessApplication {
+        process: String,
+    },
+
     // Internal consistency errors
     InternalError {
         message: String,
@@ -540,14 +544,18 @@ impl std::fmt::Display for Error {
                 } else {
                     write!(
                         f,
-                        "Cannot pipe a value into {union}: the union mixes process or \
-                         function members with other values, so the pipe would be a \
-                         send for some members and a replace for others. Narrow the \
-                         union first, or reference the value with '&' (a union of only \
-                         process types is sendable)"
+                        "Cannot pipe a value into {union}: the union mixes function \
+                         members with other values, so the pipe would be a call for \
+                         some members and a replace for others. Narrow the union \
+                         first, or reference the value with '&'"
                     )
                 }
             }
+            Error::ProcessApplication { process } => write!(
+                f,
+                "Cannot apply a value to {process}: a process is not callable. \
+                 Send to it with '%proc.send [p, message]'"
+            ),
             Error::InternalError { message } => write!(f, "Internal compiler error: {message}"),
         }
     }
@@ -6219,12 +6227,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let ty = self.compile_ripple_tail_call(None, value_type)?;
                 Ok((ty, Provenance::Unknown))
             }
-            Some(ast::AccessSource::Self_) => {
-                // Self_ has its own term; it never reaches an Access source
-                Err(Error::InternalError {
-                    message: "Self_ source in Access (should use Term::Self_)".to_string(),
-                })
-            }
         }
     }
 
@@ -6827,7 +6829,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Ok((ty, Provenance::Unknown))
             }
             ast::Term::Self_ => {
-                // `.` names the current process; sending to it is written as a call (`. x`).
+                // `@` names the current process; sending to it is `%proc.send [@, x]`.
                 self.drop_flowing_value(value_type);
                 self.codegen.add_instruction(Instruction::self_());
                 // Return a process type with the current function's receive type.
@@ -7577,119 +7579,30 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.emit_call_with_contracts(target_type_id, param_id, result_id)?;
             }
             Ok(result_type)
-        } else if let Type::Process {
-            send: send_type, ..
-        } = target_type
-        {
-            // Send to process
-            // Type check: ensure it has a send type and value type matches
-            let send_id = *send_type;
-            if let Some(expected_send_type_id) = send_id {
-                // Check if it's the empty union (never accepts sends)
-                if self.is_never(expected_send_type_id) {
-                    return Err(Error::TypeMismatch {
-                        expected: "process with send type".to_string(),
-                        found: "process without send type (cannot send to it)".to_string(),
-                    });
-                }
-                if !quiver_core::types::is_compatible(
-                    value_type,
-                    expected_send_type_id,
-                    &*self.program,
-                ) {
-                    return Err(Error::TypeMismatch {
-                        expected: quiver_core::format::format_type_by_id(
-                            &*self.program,
-                            expected_send_type_id,
-                        ),
-                        found: quiver_core::format::format_type_by_id(&*self.program, value_type),
-                    });
-                }
-            } else {
-                // None means unknown send type
-                return Err(Error::TypeMismatch {
-                    expected: "process with known send type".to_string(),
-                    found: "process with unknown send type".to_string(),
-                });
-            }
-
-            // Emit send instruction (expects [value, process] on stack)
-            self.codegen.add_instruction(Instruction::send());
-
-            Ok(target_type_id)
+        } else if let Type::Process { .. } = target_type {
+            // A pid is not callable: sending is `%proc.send [p, message]`, so that
+            // applying a value means one thing everywhere.
+            Err(Error::ProcessApplication {
+                process: quiver_core::format::format_type_by_id(&*self.program, target_type_id),
+            })
         } else if let Type::Union(members) = target_type {
-            // A union of only process types compiles as a send, checked against every
-            // member's send type — whichever member the value turns out to be at
-            // runtime must accept the message. Any other function/process-bearing union
-            // is an error: applying to it would be a send or call for some members and
-            // a replace for others, and a silent replace discards the flowing value.
-            let members = members.clone();
-            let mut send_ids = Vec::with_capacity(members.len());
-            let mut all_processes = !members.is_empty();
-            let mut all_functions = !members.is_empty();
-            for &member in &members {
-                match self.program.lookup_base(member) {
-                    Some(Type::Process { send, .. }) => {
-                        all_functions = false;
-                        send_ids.push(*send);
-                    }
-                    Some(Type::Callable { .. }) => all_processes = false,
-                    _ => {
-                        all_processes = false;
-                        all_functions = false;
-                    }
-                }
-            }
-            if all_processes {
-                for send in send_ids {
-                    let Some(send_id) = send else {
-                        return Err(Error::TypeMismatch {
-                            expected: "process with known send type".to_string(),
-                            found: format!(
-                                "union member with unknown send type in {}",
-                                quiver_core::format::format_type_by_id(
-                                    &*self.program,
-                                    target_type_id
-                                )
-                            ),
-                        });
-                    };
-                    if self.is_never(send_id) {
-                        return Err(Error::TypeMismatch {
-                            expected: "process with send type".to_string(),
-                            found: format!(
-                                "union member without send type (cannot send to it) in {}",
-                                quiver_core::format::format_type_by_id(
-                                    &*self.program,
-                                    target_type_id
-                                )
-                            ),
-                        });
-                    }
-                    if !quiver_core::types::is_compatible(value_type, send_id, &*self.program) {
-                        return Err(Error::TypeMismatch {
-                            expected: quiver_core::format::format_type_by_id(
-                                &*self.program,
-                                send_id,
-                            ),
-                            found: quiver_core::format::format_type_by_id(
-                                &*self.program,
-                                value_type,
-                            ),
-                        });
-                    }
-                }
-                self.codegen.add_instruction(Instruction::send());
-                Ok(target_type_id)
-            } else {
-                Err(Error::UnionApplication {
-                    union: quiver_core::format::format_type_by_id(&*self.program, target_type_id),
-                    all_functions,
-                })
-            }
+            // A function-bearing union is not applicable either: the call would be a
+            // call for some members and a replace for others, and a silent replace
+            // discards the flowing value.
+            let all_functions = !members.is_empty()
+                && members.iter().all(|&member| {
+                    matches!(
+                        self.program.lookup_base(member),
+                        Some(Type::Callable { .. })
+                    )
+                });
+            Err(Error::UnionApplication {
+                union: quiver_core::format::format_type_by_id(&*self.program, target_type_id),
+                all_functions,
+            })
         } else {
             Err(Error::TypeMismatch {
-                expected: "function, process, or resource".to_string(),
+                expected: "function".to_string(),
                 found: quiver_core::format::format_type_by_id(&*self.program, target_type_id),
             })
         }

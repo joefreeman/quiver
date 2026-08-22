@@ -1098,7 +1098,9 @@ fn registry_rendezvous_across_sessions() {
     // service's termination frees the name for every session, deterministically
     // before B's await answers.
     assert_eq!(
-        b.evaluate_value("%registry.lookup<@'int !'int> Shared ~> =(@'int !'int)q; q 21; !q"),
+        b.evaluate_value(
+            "%registry.lookup<@'int !'int> Shared ~> =(@'int !'int)q; %proc.send [q, 21]; !q"
+        ),
         "42"
     );
     assert_eq!(

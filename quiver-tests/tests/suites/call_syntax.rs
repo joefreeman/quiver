@@ -1,5 +1,5 @@
 // Tests for the two call syntaxes: argument-first (`[args] ~> f`, `x ~> f`) and juxtaposed
-// application (`f [args]`, `f x`, and the `^f`/`^`/`~`/`~.f`/`^~`/`@f`/`@~` family), with
+// application (`f [args]`, `f x`, and the `^f`/`^`/`~`/`~.f`/`^~`/`.f`/`.~` family), with
 // adjacent brackets reserved for tuple construction / spread.
 use crate::common::*;
 
@@ -102,11 +102,11 @@ fn juxtaposed_ripple_tail_call() {
 
 #[test]
 fn juxtaposed_spawn_argument() {
-    // `@f x` supplies the spawned function's init argument.
+    // `.f x` supplies the spawned function's init argument.
     quiver()
         .evaluate("c = #'int { $ }; p = @c 42; !p")
         .expect("42");
-    // `@~ x` spawns the flowing function with an init argument.
+    // `.~ x` spawns the flowing function with an init argument.
     quiver()
         .evaluate("c = #'int { $ }; p = c ~> @~ 7; !p")
         .expect("7");

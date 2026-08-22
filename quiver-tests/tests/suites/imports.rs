@@ -410,19 +410,18 @@ fn module_spawn_rejected_at_compile_time() {
 #[test]
 fn module_send_rejected_statically() {
     // A module body can never obtain a sendable pid: spawning is rejected, and the
-    // module top level has no receive type, so `.` types as a process that cannot be
-    // sent to. The rejection is therefore static — the runtime `Operation::Send` arm
-    // remains only as a backstop for other compile-time execution (dialects).
+    // module top level has no receive type, so `@` types as a process whose send grant
+    // is `never` — nothing fits it. The rejection is therefore static.
     let mut modules = HashMap::new();
     modules.insert(
         vec!["sender".to_string()],
-        "me = .; 42 ~> me ~; !'int; [x: 1]".to_string(),
+        "me = @; %proc.send [me, 42]; !'int; [x: 1]".to_string(),
     );
 
     quiver()
         .with_modules(modules)
         .evaluate("%sender.x")
-        .expect_error_containing("found process without send type");
+        .expect_error_containing("does not fit never");
 }
 
 #[test]

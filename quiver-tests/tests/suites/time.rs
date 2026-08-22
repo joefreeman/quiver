@@ -84,7 +84,7 @@ fn test_clock_rejected_in_receive_filter() {
         .evaluate(
             r#"
             p = @#[] { !'int { %time.now []; Ok } } []
-            10 ~> p ~
+            %proc.send [p, 10]
             r = !p
             r:((message: Str['bin]))crash ~> =(message: m)
             m

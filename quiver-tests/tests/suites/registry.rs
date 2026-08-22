@@ -9,7 +9,7 @@ fn register_lookup_send_await() {
     quiver()
         .evaluate("p = @#[] { !'int ~> %num.mul [~, 2] } []; %registry.register [Doubler, p]")
         .expect("Ok")
-        .then_evaluate("%registry.lookup<@'int> Doubler ~> =(@'int)q; 21 ~> q ~; !p")
+        .then_evaluate("%registry.lookup<@'int> Doubler ~> =(@'int)q; %proc.send [q, 21]; !p")
         .expect("42");
 }
 
@@ -77,7 +77,7 @@ fn name_frees_at_normal_completion() {
     quiver()
         .evaluate(
             "p = @#[] { !'int ~> %num.mul [~, 2] } []; %registry.register [Fleet, p]; \
-             %registry.lookup<@'int> Fleet ~> =(@'int)q; 21 ~> q ~; !p",
+             %registry.lookup<@'int> Fleet ~> =(@'int)q; %proc.send [q, 21]; !p",
         )
         .expect("42")
         .then_evaluate("%registry.lookup<@'int> Fleet")
@@ -102,7 +102,7 @@ fn cascade_teardown_frees_the_name() {
     quiver()
         .evaluate(
             "parent = @#(@Ready) { c = @#[] { !'int } []; %registry.register [Child, c]; \
-             Ready ~> $ ~; !'bin } .; \
+             %proc.send [$, Ready]; !'bin } @; \
              !Ready; %registry.lookup<@'int !'int> Child ~> =(@'int !'int)c; \
              %proc.kill parent; !c ~> =[]; %registry.lookup<@'int> Child",
         )
@@ -157,7 +157,9 @@ fn registered_service_survives_its_spawner_and_collection() {
         )
         .expect("Ok")
         .force_collection()
-        .then_evaluate("%registry.lookup<@'int !'int> Svc ~> =(@'int !'int)q; 14 ~> q ~; !q")
+        .then_evaluate(
+            "%registry.lookup<@'int !'int> Svc ~> =(@'int !'int)q; %proc.send [q, 14]; !q",
+        )
         .expect("42");
 }
 
@@ -176,7 +178,7 @@ fn identity_bearing_key_is_a_runtime_error() {
 fn registry_read_is_rejected_in_a_receive_filter() {
     quiver()
         .evaluate(
-            "p = @#[] { !'int } []; %registry.register [Filtered, p]; me = .; 42 ~> me ~; \
+            "p = @#[] { !'int } []; %registry.register [Filtered, p]; me = @; %proc.send [me, 42]; \
              !'int { %registry.lookup<@'int> Filtered }",
         )
         .expect_runtime_error(quiver_core::error::Error::OperationNotAllowed {
@@ -210,7 +212,7 @@ fn session_root_registration_survives_line_completion() {
     // A persistent process's per-line completion is a sleep, not a termination: the
     // Registered watcher is exempt from its flush, so the binding holds across lines.
     quiver()
-        .evaluate("%registry.register [Root, .]")
+        .evaluate("%registry.register [Root, @]")
         .expect("Ok")
         .then_evaluate("%registry.lookup<@> Root ~> { =[] => Gone | Present }")
         .expect("Present");

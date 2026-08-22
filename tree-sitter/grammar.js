@@ -107,8 +107,8 @@ module.exports = grammar({
     // After a branch condition, a newline may precede `=>` (its consequence) or the next
     // branch / block close.
     [$.branch],
-    // `source.field` — greedily attach trailing `.field` accessors to the access rather
-    // than treating `.` as a self-send term. (Both split access forms carry the `repeat`.)
+    // `source.field` — greedily attach trailing `.field` accessors to the access.
+    // (Both split access forms carry the `repeat`.)
     [$._sourced_access],
     [$._leading_access],
     // A parenthesised pattern beginning with an identifier may be a partial pattern
@@ -444,9 +444,9 @@ module.exports = grammar({
       repeat($._accessor),
     )),
 
-    // `.` referring to the current process (not followed by an identifier/digit, which
-    // would make it a field accessor).
-    self: _ => prec(-1, '.'),
+    // A bare `@` referring to the current process. Lower precedence than `spawn`, which
+    // claims every `@` with a target glued to it.
+    self: _ => prec(-1, '@'),
 
     // -------------------------------------------------------------------- select / @
 
@@ -503,19 +503,20 @@ module.exports = grammar({
     // `@N` process reference.
     process_ref: $ => seq('@', $.index),
 
-    // `@f`/`@~` (spawn a function value), and the spawn shorthands `@{ ... }`,
+    // `@f`/`@~` (spawn a function value), and the spawn shorthands
     // `@'int { ... }` (module types too: `@'%mod.event { ... }`), `@(type) { ... }`,
     // `@[...] { ... }`, `@Name { ... }`. The spawn sugar keeps its body. The operand is
     // restricted (no value tuples/literals) so a `[`/`Name` after `@` is unambiguously a
-    // type parameter rather than a value.
+    // type parameter rather than a value. It is also mandatory and glued to the `@`,
+    // which is what leaves a bare `@` to mean the current process; there is no
+    // `@{ ... }`, since a root function's parameter is the process's state.
     spawn: $ => prec.right(seq(
       '@',
-      optional(choice(
+      choice(
         seq(field('parameter', choice($.module_type, $.type_identifier, $.tuple_type, $._paren_type)), $.block),
-        $.block,
         $.function,
         $.access,
-      )),
+      ),
     )),
 
     // -------------------------------------------------------------------- functions

@@ -822,7 +822,7 @@ fn test_sim_changed_rerenders_after_store_step() {
                st = 0 ~> @'int { !'int ~> { =n => ^ n } } ~
                req = Request[method: GET, target: "/", path: Nil, query: Nil, version: "HTTP/1.1", headers: Nil, body: <>]
                s = %html/live.sim [req, mkcomp st]
-               7 ~> st ~
+               %proc.send [st, 7]
                w = ![#'%proc.changed, 2000] ~> { ='%proc.changed => Woke | TimedOut }
                %html/live.sim_changed s ~> =[_, ps]
                [w, ps]"#,

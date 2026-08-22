@@ -49,8 +49,7 @@
 watch = #<'r>[(id): '%str, (child): @!'r, (sup): @'down] {
   :doc "Spawns a watcher for a child: awaits it, classifies the outcome (Done, or Crashed with the '%proc.crash payload), and reports Down[id, pid, outcome] to the supervisor — the pid identifies WHICH incarnation went down, so a late report for a reused id is harmless. Call from a start closure, passing the child and supervisor by reference."
   // The spawned watcher closes over these (an inner `$` would be its own
-  // parameter), so bind the fields locally — the pids by reference, as bare
-  // pid terms would send.
+  // parameter), so bind the fields locally.
   id = $id
   child = $child
   sup = $sup
@@ -60,7 +59,7 @@ watch = #<'r>[(id): '%str, (child): @!'r, (sup): @'down] {
       | r:('%proc.crash)crash ~> =('%proc.crash)e => Crashed[e]
       | Done
     }
-    Down[id: id, pid: child, outcome: o] ~> sup ~
+    %proc.send [sup, Down[id: id, pid: child, outcome: o]]
   } []
   Ok
 }
@@ -119,7 +118,7 @@ loop = #'state {
           now = %time.monotonic []
           allow? [stamps: r.restarts, now: now, max: m, window: w] ~> {
             | =Allowed[recent] => {
-              p = r.spec ~> ~.start [i, .]
+              p = r.spec ~> ~.start [i, @]
               ^ [
                 table: %dict.put [t, i, [id: i, pid: p, spec: r.spec, restarts: recent]],
                 max: m,
@@ -138,11 +137,11 @@ loop = #'state {
       | ^ [table: t, max: m, window: w]
     }
     | =Add[s, reply] => {
-      | %dict.has? [t, s.id] => { Duplicate ~> reply ~; ^ [table: t, max: m, window: w] }
+      | %dict.has? [t, s.id] => { %proc.send [reply, Duplicate]; ^ [table: t, max: m, window: w] }
       | {
-        row = start_row [s, .]
+        row = start_row [s, @]
         row ~> =(pid: p)
-        Started[p] ~> reply ~
+        %proc.send [reply, Started[p]]
         ^ [table: %dict.put [t, s.id, row], max: m, window: w]
       }
     }
@@ -157,7 +156,7 @@ loop = #'state {
 }
 
 run = #[specs: 'specs, max: 'int, window: 'int] {
-  =[specs: ss, max: m, window: w]; ^loop [table: seed [ss, .], max: m, window: w]
+  =[specs: ss, max: m, window: w]; ^loop [table: seed [ss, @], max: m, window: w]
 }
 
 start = #[children: 'specs, max_restarts: 'int = 3, window: 'int = 5000] {
@@ -167,12 +166,12 @@ start = #[children: 'specs, max_restarts: 'int = 3, window: 'int = 5000] {
 
 add = #[(sup): @'msg, (spec): 'spec] {
   :doc "Adds a child to a running supervisor and awaits the verdict: Started[pid] (widened to an inert `(@)`), or Duplicate for an id the table already holds. The child is spawned in the supervisor's process — owned by it, supervised like any startup spec."
-  Add[$spec, .] ~> $sup ~; !'started
+  %proc.send [$sup, Add[$spec, @]]; !'started
 }
 
 drop = #[(sup): @'msg, (id): '%str] {
   :doc "Drops a supervised child: kills it (tearing down its owned subtree) and forgets its row — its watcher's report is disregarded, and the id may be supervised again. Asynchronous: the supervisor applies it in mailbox order."
-  Drop[$id] ~> $sup ~; Ok
+  %proc.send [$sup, Drop[$id]]; Ok
 }
 
 (start, add, drop, watch)

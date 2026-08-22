@@ -14,10 +14,10 @@
 // message type: `!('event | '%proc.changed)`.
 'changed = Changed
 
-// Note the reference idiom throughout: a bare pid receiving a flowing value is a
-// send, so name the pid — `%proc.detach p`, `%proc.kill p`, `%proc.link p`.
-
 [
+  send: __process_send__ ~> {
+    :doc "Sends a message to a process. Asynchronous and fire-and-forget: the caller does not wait for delivery, and a send to a process that has already terminated is discarded. The message is checked against the target's send grant, so a pid a boundary handed out at a narrower type accepts only what that type spells."
+  },
   detach: __process_detach__ ~> {
     :doc "Detaches an owned child from the calling process, so it survives the caller's termination. Parent-only: errors unless the argument is a process the caller currently owns."
   },

@@ -69,6 +69,9 @@ pub enum ErrorKind {
     ExpectedPipe,
     InvalidFunctionBody,
 
+    // Spawn errors
+    SpawnBlock,
+
     // Sequence errors
     StepComma,
     MissingChainArrow,
@@ -99,6 +102,10 @@ impl std::fmt::Display for ErrorKind {
 
             ErrorKind::ExpectedPipe => write!(f, "Expected a term after '~>'"),
             ErrorKind::InvalidFunctionBody => write!(f, "Invalid function body"),
+
+            ErrorKind::SpawnBlock => {
+                write!(f, "A spawn needs the root function's parameter type")
+            }
 
             ErrorKind::StepComma => write!(f, "Unexpected ','; use ';' between steps"),
             ErrorKind::MissingChainArrow => {
@@ -138,6 +145,9 @@ impl ErrorKind {
                 "'~>' continues a chain and must be followed by a term, e.g. '[1, 2] ~> __integer_add__'"
             }
             ErrorKind::InvalidFunctionBody => "A function body should be a valid expression",
+            ErrorKind::SpawnBlock => {
+                "A root function's parameter is the process's state, so it is written rather than inferred: '@'t { ... }', or '@[] { ... }' for a root that takes nil"
+            }
             ErrorKind::StepComma => {
                 "',' separates tuple fields and type arguments; sequence steps are separated by ';' or a newline"
             }
@@ -293,6 +303,11 @@ pub fn parse(source: &str) -> Result<Sequence, Error> {
                     // failure with the (otherwise unused) `Not` code.
                     if is_failure && e.code == nom::error::ErrorKind::Not {
                         return Err(Error::new(ErrorKind::AssertionOnAlias, span));
+                    }
+                    // `spawn_term` smuggles a `@{ … }` spawn out as a hard failure with
+                    // the (otherwise unused) `Permutation` code.
+                    if is_failure && e.code == nom::error::ErrorKind::Permutation {
+                        return Err(Error::new(ErrorKind::SpawnBlock, span));
                     }
                     // `assertion` smuggles code following an assertion on its line out as a
                     // hard failure with the (otherwise unused) `CrLf` code.
@@ -2597,13 +2612,13 @@ fn builtin_name(input: Span) -> IResult<Span, String> {
     Ok((input, trimmed.to_string()))
 }
 
-// Build a spawn of an inline function (the `@{ … }` / `@'type { … }` sugar forms). The init
-// argument, if any, comes from the chained value (`x ~> @{ … }`).
-fn spawn_of_function(parameter_type: Option<Type>, body: Block) -> Term {
+// Build a spawn of an inline function (the `#`-elided `@'type { … }` / `@[…] { … }` /
+// `@(type) { … }` forms). The init argument, if any, comes from the chained value.
+fn spawn_of_function(parameter_type: Type, body: Block) -> Term {
     Term::Spawn(
         Box::new(Term::Function(Function {
             type_parameters: vec![],
-            parameter_type,
+            parameter_type: Some(parameter_type),
             return_type: None,
             body: Some(body),
             span: Spanned::default(),
@@ -2615,11 +2630,16 @@ fn spawn_of_function(parameter_type: Option<Type>, body: Block) -> Term {
 
 fn spawn_term(input: Span) -> IResult<Span, Term> {
     let start = input;
+    // `@{ … }` is the retired inferred-parameter sugar; reject it by name rather than
+    // letting it fall through to a bare `@` (the current process) followed by a block,
+    // which reads as a missing chain arrow.
+    if peek(pair(char::<Span, nom::error::Error<Span>>('@'), char('{')))(input).is_ok() {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Permutation,
+        )));
+    }
     let (rest, term) = alt((
-        // @{ ... } - Spawn parameterless function (sugar for @#{ ... })
-        map(preceded(pair(char('@'), opt(ws1)), block), |body| {
-            spawn_of_function(None, body)
-        }),
         // @(type) { ... } - Spawn with parenthesized type (sugar for @#(type) { ... })
         map(
             tuple((
@@ -2629,7 +2649,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 ),
                 preceded(opt(ws1), block),
             )),
-            |(param_type, body)| spawn_of_function(Some(param_type), body),
+            |(param_type, body)| spawn_of_function(param_type, body),
         ),
         // @'type { ... } - Spawn with named type (sugar for @#'type { ... }); module types
         // first, so `@'%mod.event { ... }` isn't rejected as an identifier.
@@ -2638,28 +2658,23 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 preceded(char('@'), alt((module_type, type_identifier))),
                 preceded(opt(ws1), block),
             )),
-            |(param_type, body)| spawn_of_function(Some(param_type), body),
+            |(param_type, body)| spawn_of_function(param_type, body),
         ),
         // @[...] { ... } - Spawn with tuple type (sugar for @#[...] { ... })
         map(
             tuple((preceded(char('@'), tuple_type), preceded(opt(ws1), block))),
-            |(tuple_ty, body)| spawn_of_function(Some(tuple_ty), body),
+            |(tuple_ty, body)| spawn_of_function(tuple_ty, body),
         ),
-        // @<primary> - Match @ followed by optional primary (bare @ becomes @~)
-        map(preceded(char('@'), opt(primary)), |opt_t| {
-            Term::Spawn(
-                Box::new(opt_t.unwrap_or(Term::Access(Access {
-                    source: Some(AccessSource::Ripple),
-                    accessors: vec![],
-                    accessor_spans: vec![],
-                    type_arguments: vec![],
-                    base_span: Spanned::default(),
-                    span: Spanned::default(),
-                }))),
-                None,
-                Spanned::default(),
-            )
-        }),
+        // @<primary> - the spawned function, glued to the `@`: `@f`, `@$handler`, `@~`,
+        // `@#'t { … }`. The glue is what leaves a bare `@` to mean the current process,
+        // so the target is mandatory — `@~` is written out rather than implied. A block
+        // is not a target: `@{ … }` would have to infer the root function's parameter,
+        // which is the process's state and so is always written (`@'t { … }`, or
+        // `@[] { … }` for a nilary root).
+        map(
+            preceded(char('@'), verify(primary, |t| !matches!(t, Term::Block(_)))),
+            |target| Term::Spawn(Box::new(target), None, Spanned::default()),
+        ),
     ))(input)?;
     // Attach the `@` span to the spawn, for hover (shows the process type).
     let term = match term {
@@ -2670,19 +2685,11 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
     Ok((rest, term))
 }
 
+/// The current process, `@`. Tried after `spawn_term`, which claims every `@` with a
+/// glued target, so a bare `@` is what is left: `@` is to a process what `~` is to the
+/// flowing value and `$` to the parameter.
 fn self_term(input: Span) -> IResult<Span, Term> {
-    // Match '.' NOT followed by a lowercase letter or digit
-    // This avoids conflicting with member access (.field or .0)
-    map(
-        terminated(
-            char('.'),
-            peek(not(alt((
-                recognize(satisfy(|c: char| c.is_ascii_lowercase())),
-                recognize(satisfy(|c: char| c.is_ascii_digit())),
-            )))),
-        ),
-        |_| Term::Self_,
-    )(input)
+    map(char('@'), |_| Term::Self_)(input)
 }
 
 fn bind_match(input: Span) -> IResult<Span, Term> {

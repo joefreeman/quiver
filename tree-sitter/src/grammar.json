@@ -1716,7 +1716,7 @@
       "value": -1,
       "content": {
         "type": "STRING",
-        "value": "."
+        "value": "@"
       }
     },
     "select": {
@@ -2206,58 +2206,46 @@
             "type": "CHOICE",
             "members": [
               {
-                "type": "CHOICE",
+                "type": "SEQ",
                 "members": [
                   {
-                    "type": "SEQ",
-                    "members": [
-                      {
-                        "type": "FIELD",
-                        "name": "parameter",
-                        "content": {
-                          "type": "CHOICE",
-                          "members": [
-                            {
-                              "type": "SYMBOL",
-                              "name": "module_type"
-                            },
-                            {
-                              "type": "SYMBOL",
-                              "name": "type_identifier"
-                            },
-                            {
-                              "type": "SYMBOL",
-                              "name": "tuple_type"
-                            },
-                            {
-                              "type": "SYMBOL",
-                              "name": "_paren_type"
-                            }
-                          ]
+                    "type": "FIELD",
+                    "name": "parameter",
+                    "content": {
+                      "type": "CHOICE",
+                      "members": [
+                        {
+                          "type": "SYMBOL",
+                          "name": "module_type"
+                        },
+                        {
+                          "type": "SYMBOL",
+                          "name": "type_identifier"
+                        },
+                        {
+                          "type": "SYMBOL",
+                          "name": "tuple_type"
+                        },
+                        {
+                          "type": "SYMBOL",
+                          "name": "_paren_type"
                         }
-                      },
-                      {
-                        "type": "SYMBOL",
-                        "name": "block"
-                      }
-                    ]
+                      ]
+                    }
                   },
                   {
                     "type": "SYMBOL",
                     "name": "block"
-                  },
-                  {
-                    "type": "SYMBOL",
-                    "name": "function"
-                  },
-                  {
-                    "type": "SYMBOL",
-                    "name": "access"
                   }
                 ]
               },
               {
-                "type": "BLANK"
+                "type": "SYMBOL",
+                "name": "function"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "access"
               }
             ]
           }

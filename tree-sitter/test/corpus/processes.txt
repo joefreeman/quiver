@@ -93,19 +93,24 @@ p1 ~> ![~, 1000]
 send and self
 ==================
 
-42 ~> pid ~; . ~> =self_pid
+%proc.send [pid, 42]; @ ~> =self_pid
 
 ---
 
 (source_file
   (sequence
     (chain
-      (integer)
       (application
         function: (access
-          source: (identifier))
-        argument: (access
-          source: (ripple))))
+          source: (import
+            (identifier))
+          field: (identifier))
+        argument: (tuple
+          (chain
+            (access
+              source: (identifier)))
+          (chain
+            (integer)))))
     (chain
       (self)
       (bind_match

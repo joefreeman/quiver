@@ -907,7 +907,7 @@ sync_redirect = #<'s>[(state): 's, (synced): ('%str | []), (app): @'app_msg] {
   m = $state:('%str)redirect
   {
     | m ~> =&synced => synced
-    | m ~> =Str[p] => { Frame[url_sync Str[p]] ~> app ~; Str[p] }
+    | m ~> =Str[p] => { %proc.send [app, Frame[url_sync Str[p]]]; Str[p] }
     | []
   }
 }
@@ -1086,7 +1086,7 @@ exec_bounds = #[(assigns): 'assigns, (drops): 'kids, (app): @'app_msg, (me): @'v
     | =Cons[kd, t] => {
       kd ~> =(vid: v, pid: p)
       %proc.kill p
-      Unroute[Str[v ~> .0]] ~> app ~
+      %proc.send [app, Unroute[Str[v ~> .0]]]
       ^ [$assigns, t, app, me, $acc]
     }
     | $assigns ~> {
@@ -1103,7 +1103,7 @@ exec_bounds = #[(assigns): 'assigns, (drops): 'kids, (app): @'app_msg, (me): @'v
           =[id, supref]
           p = st [v, app, Replace]
           %sup.watch [id, p, supref]
-          Route[Str[v ~> .0], p] ~> app ~
+          %proc.send [app, Route[Str[v ~> .0], p]]
           p
         }
 
@@ -1130,7 +1130,7 @@ as_frame = #'frame
 // the client holds, send the delta (an empty diff sends nothing), then execute the
 // reconcile. Answers [the new frame, the new kids, the next child ordinal].
 step_view = #<'i, 's, 'e>[(state): 's, (prev): 'frame, (comp): 'component<'i, 's, 'e>, (vid): '%str, (app): @'app_msg, (me): @'view_msg, (kids): 'kids, (n): 'int] {
-  // The pids are taken by reference (a bare access would send), so bind them locally.
+  // The loop closes over these, so bind them locally.
   app = $app
   me = $me
   f2 = render_view [$state, $comp]
@@ -1138,7 +1138,7 @@ step_view = #<'i, 's, 'e>[(state): 's, (prev): 'frame, (comp): 'component<'i, 's
   rf = resolve_of [resolve_of, f2, ar.0] ~> as_frame ~
   diff [$prev, rf] ~> {
     | =Nil => Ok
-    | =ps => { Frame[encode [$vid, ps]] ~> app ~; Ok }
+    | =ps => { %proc.send [app, Frame[encode [$vid, ps]]]; Ok }
   }
   kids2 = exec_bounds [ar.0, dropped_kids [$kids, ar.0], app, me, Nil]
   [rf, kids2, ar.1]
@@ -1155,9 +1155,9 @@ step_view = #<'i, 's, 'e>[(state): 's, (prev): 'frame, (comp): 'component<'i, 's
 // kill's Down finds no tracked vid — the entry is removed before the kill — and
 // is dropped.)
 vlife = #<'i, 's, 'e>[(mode): 'vmode, (state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e>, (vid): '%str, (app): @'app_msg, (kids): 'kids, (n): 'int, (synced): ('%str | [])] {
-  // The pid is taken by reference (a bare access would send), so bind it locally.
+  // The spawned view closes over these, so bind them locally.
   app = $app
-  me = .
+  me = @
   !'view_msg ~> {
     | =Event[payload, ev] => {
       s2 = fold_event [$state, $comp, payload, ev]
@@ -1184,10 +1184,13 @@ vlife = #<'i, 's, 'e>[(mode): 'vmode, (state): 's, (f): 'frame, (comp): 'compone
     }
     | =Down(id: dv) => kid_by_vid [$kids, dv] ~> {
       | =KFound[_] => {
-        Frame[
-          encode [dv, Cons[SetHtml[path: Nil, html: crash_html], Nil]],
-        ] ~> app ~
-        Unroute[dv] ~> app ~
+        %proc.send [
+          app,
+          Frame[
+            encode [dv, Cons[SetHtml[path: Nil, html: crash_html], Nil]],
+          ],
+        ]
+        %proc.send [app, Unroute[dv]]
         ^ [$mode, $state, $f, $comp, $vid, app, $kids, $n, $synced]
       }
       | ^ [$mode, $state, $f, $comp, $vid, app, $kids, $n, $synced]
@@ -1231,17 +1234,20 @@ view_run = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>, '%str, @'app_msg, 'vboot] {
   // partially-widened receive (just the settle drain's `Changed`), which no longer
   // narrows into `@'view_msg` params. Taken here it is still the unknown-send
   // handle, which does.
-  me = .
+  me = @
   state = comp.mount init
   f = settle [state, render_view [state, comp], comp, settle_deadline]
   ar = assign_bounds [collect_of [collect_of, f, Nil], Nil, vid, 1, Nil]
   rf = resolve_of [resolve_of, f, ar.0] ~> as_frame ~
   boot ~> {
-    | =Reply[reply] => { Region[render rf] ~> reply ~; Ok }
+    | =Reply[reply] => { %proc.send [reply, Region[render rf]]; Ok }
     | =Replace => {
-      Frame[
-        encode [vid, Cons[SetHtml[path: Nil, html: render rf], Nil]],
-      ] ~> app ~
+      %proc.send [
+        app,
+        Frame[
+          encode [vid, Cons[SetHtml[path: Nil, html: render rf], Nil]],
+        ],
+      ]
       Ok
     }
   }
@@ -1334,7 +1340,9 @@ registry_loop = #'reg_entries {
   live = __integer_subtract__ [now, prune_ms] ~> prune_entries [$, ~]
   msg ~> {
     | =Register[t, p] => ^ Cons[[token: t, pid: p, at: now], live]
-    | =Claim[t, reply] => { (found, rest) = take_entry [live, t, Nil]; found ~> reply ~; ^ rest }
+    | =Claim[t, reply] => {
+      (found, rest) = take_entry [live, t, Nil]; %proc.send [reply, found]; ^ rest
+    }
   }
 }
 
@@ -1415,7 +1423,7 @@ del_route = #[(rs): 'routes, (v): '%str] {
 tell_views = #[(routes): 'routes, (m): (Park | Wake)] {
   $routes ~> {
     | =Nil => Ok
-    | =Cons[r, t] => { r ~> =(pid: p); $m ~> p ~; ^ [t, $m] }
+    | =Cons[r, t] => { r ~> =(pid: p); %proc.send [p, $m]; ^ [t, $m] }
   }
 }
 
@@ -1432,16 +1440,19 @@ route_events = #[(req): '%http, (messages): '%http/websocket.messages, (routes):
         // The three-element event envelope first — events dominate, so the common path
         // parses once (a two-element nav message can't match it).
         | env_of t ~> =[v, payload, ev]; route_of [$routes, v] ~> =RFound[p] => {
-          Event[payload, ev] ~> p ~; Ok
+          %proc.send [p, Event[payload, ev]]; Ok
         }
         // A live-navigation message re-derives the root: build the request for the new
         // target (keeping the initial request's method/headers/cookies) and hand it to
         // the root view, which folds it through `nav`.
         | nav_of t ~> =Str[tb]; route_of [$routes, "0"] ~> =RFound[p] => {
           %http.split_target Str[tb] ~> =[path, query]
-          Nav[
-            req[..., target: Str[tb], path: path, query: query],
-          ] ~> p ~
+          %proc.send [
+            p,
+            Nav[
+              req[..., target: Str[tb], path: path, query: query],
+            ],
+          ]
           Ok
         }
         | Ok
@@ -1517,7 +1528,7 @@ alife = #[(req): '%http, (mode): 'amode, (buffer): 'strs, (token): ('%str | []),
       | $token ~> {
         | =Str[tb] => {
           tell_views [$routes, Park]
-          Register[Str[tb], .] ~> reg ~
+          %proc.send [reg, Register[Str[tb], @]]
           ^ [$req, Parked, Nil, Str[tb], reg, $routes]
         }
         | Ok
@@ -1640,13 +1651,13 @@ reprocess = #[(page): '%str, (pending): 'strs, (keep): 'strs] -> ['%str, 'strs] 
 // (splicing as they arrive), buffer everything else, and answer the handler the
 // complete page — or whatever assembled by the deadline. Then park.
 compose = #[(handler): @'%str, (page): ('%str | []), (buffer): 'strs, (token): ('%str | []), (registry): @'reg_msg, (routes): 'routes, (end): 'int, (req): '%http] {
-  // The pids are taken by reference (a bare access would send), so bind them locally.
+  // The loop closes over these, so bind them locally.
   handler = $handler
   reg = $registry
   {
     | composed? $page => {
       $page ~> =Str[pb]
-      Str[pb] ~> handler ~
+      %proc.send [handler, Str[pb]]
       alife [$req, Parked, $buffer, $token, reg, $routes]
     }
     | %num.lt? [%time.monotonic [], $end] => ![#'app_msg, settle_quiet] ~> {
@@ -1688,7 +1699,10 @@ compose = #[(handler): @'%str, (page): ('%str | []), (buffer): 'strs, (token): (
     }
     // Deadline: answer with what assembled (a stuck view's boundary stays empty).
     | {
-      $page ~> { =Str[pb] => Str[pb] ~> handler ~ | Ok }
+      $page ~> {
+        | =Str[pb] => %proc.send [handler, Str[pb]]
+        | Ok
+      }
       alife [$req, Parked, $buffer, $token, reg, $routes]
     }
   }
@@ -1704,10 +1718,10 @@ compose = #[(handler): @'%str, (page): ('%str | []), (buffer): 'strs, (token): (
 app_run = #['%http, 'root_view, @'reg_msg, ('%str | []), 'aboot] {
   =[req, root, reg, token, boot]
   {
-    | token ~> =Str[tb] => { Register[Str[tb], .] ~> reg ~; Ok }
+    | token ~> =Str[tb] => { %proc.send [reg, Register[Str[tb], @]]; Ok }
     | Ok
   }
-  me = .
+  me = @
   // The root is consumed through the boundary door: place it against the request,
   // take the spawn thunk off the node, and run it as vid "0" with the app's boot.
   // (A root that didn't come from `view` carries no :boundary — the retrieval
@@ -1734,7 +1748,10 @@ app_run = #['%http, 'root_view, @'reg_msg, ('%str | []), 'aboot] {
 // so it terminates on disconnect instead of parking, and detached, so it survives
 // this connection process ending.
 run_cold = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (registry): @'reg_msg] {
-  a = [$req, $root, $registry, [], Cold] ~> @app_run ~; %proc.detach a; Attach[$conn] ~> a ~; Ok
+  a = [$req, $root, $registry, [], Cold] ~> @app_run ~
+  %proc.detach a
+  %proc.send [a, Attach[$conn]]
+  Ok
 }
 
 // The upgrade side: the client's first frame is its token. A claimed app is sent
@@ -1746,9 +1763,9 @@ join = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (registry)
   %http/websocket.recv $conn ~> =[first, c2]
   first ~> {
     | =Text[tok] => {
-      Claim[tok, .] ~> reg ~
+      %proc.send [reg, Claim[tok, @]]
       !'claim ~> {
-        | =Found[p] => { Attach[c2] ~> p ~; Ok }
+        | =Found[p] => { %proc.send [p, Attach[c2]]; Ok }
         | run_cold [c2, $req, $root, reg]
       }
     }
@@ -2184,7 +2201,7 @@ handle = #[(req): '%http, (app): 'app] {
     ]
     | {
       token = %random.hex 16
-      me = .
+      me = @
       ap = [req, rt, rg, token, Dead[me]] ~> @app_run ~
       %proc.detach ap
       ![#'%str, 5000] ~> {

@@ -90,7 +90,9 @@ fn test_literal_field_check_through_partial() {
 #[test]
 fn test_partial_typed_message_receive() {
     quiver()
-        .evaluate("p = @[] { !#(n: 'int) ~> { =(n: v) => v } } []; [z: 0, n: 8] ~> p ~; !p")
+        .evaluate(
+            "p = @[] { !#(n: 'int) ~> { =(n: v) => v } } []; %proc.send [p, [z: 0, n: 8]]; !p",
+        )
         .expect("8");
 }
 

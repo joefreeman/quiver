@@ -54,6 +54,8 @@ fn hint(kind: &ErrorKind) -> String {
         ErrorKind::ExpectedPipe => "expected '~>' here".to_string(),
         ErrorKind::InvalidFunctionBody => "function body is incomplete or invalid".to_string(),
 
+        ErrorKind::SpawnBlock => "'@{ ... }' does not state a parameter type".to_string(),
+
         ErrorKind::StepComma => "',' is not a step separator".to_string(),
         ErrorKind::MissingChainArrow => "expected '~>' or ';' here".to_string(),
         ErrorKind::AssertionOnAlias => "a type alias produces no value to assert on".to_string(),

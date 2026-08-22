@@ -598,7 +598,7 @@ fn render_term_atom(term: &Term) -> String {
         Term::Literal(literal) => render_literal(literal),
         Term::Match(pattern) => format!("={}", render_match(pattern)),
         Term::Access(access) => render_access(access),
-        Term::Self_ => ".".to_string(),
+        Term::Self_ => "@".to_string(),
         Term::Process(index) => format!("@{}", index),
         Term::State(access, _) => format!("?{}", render_access(access)),
         // Dialect content is opaque raw text and is preserved verbatim (including newlines):
@@ -1464,7 +1464,6 @@ fn render_access(access: &Access) -> String {
             out.push('%');
             out.push_str(&parts.join("/"));
         }
-        Some(AccessSource::Self_) => out.push('.'),
         Some(AccessSource::Builtin(name)) => {
             out.push_str("__");
             out.push_str(name);
@@ -2427,7 +2426,8 @@ mod tests {
             "[x] ~> ^foo ~",
             // --- spawn (the block is part of the spawn, so it stays a single term) ---
             "@f []",
-            "@{ 5 } []",
+            "@",
+            "%proc.send [@, 5]",
             "@'int { $ }",
             "@('int | 'bin) { $ }",
             "x ~> @counter ~",
@@ -2453,7 +2453,6 @@ mod tests {
             "!p",
             "![]",
             "f",
-            ".",
             "__integer_add__",
             // --- binary literals: the author's digit grouping is preserved as written ---
             "<0a1b>",
@@ -2474,7 +2473,7 @@ mod tests {
             "point.x ~> .name",
             "$ ~> $.x ~> $.0",
             "[] ~> =[]",
-            "42 ~> .",
+            "42 ~> %proc.send [@, ~]",
             // --- match forms ---
             "=Point[x, y]",
             "=(x: 'int)",
