@@ -43,8 +43,7 @@ try_each = #[(addrs): '%list<'%dns.ip>, (port): 'int, (last): []] {
   $addrs ~> {
     | =Nil => $last
     | =Cons[addr, rest] => {
-      addr
-      ~> { =IPv4[b] => b | =IPv6[b] => b } ~> =('bin)ip
+      addr ~> { =IPv4[b] => b | =IPv6[b] => b } ~> =('bin)ip
 
       outcome = __tcp_connect__ [ip, $port]
       outcome ~> {
@@ -64,9 +63,7 @@ try_each = #[(addrs): '%list<'%dns.ip>, (port): 'int, (last): []] {
         %dns.resolve host ~> %list.try_collect ~ ~> =('%list<'%dns.ip>)addrs
 
         addrs ~> {
-          | =Nil => [] ~> {
-            :error IoError[kind: NotFound, message: "no addresses for {host}"]
-          }
+          | =Nil => [] ~> { :error IoError[kind: NotFound, message: "no addresses for {host}"] }
           | try_each [addrs, $port, []]
         }
       }

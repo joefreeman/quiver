@@ -24,12 +24,21 @@ use std::collections::HashMap;
 const WIDTH: usize = 100;
 
 /// A chain whose single-line form exceeds this many columns is split onto `~>` continuation lines
-/// even when it would fit within [`WIDTH`] — long pipelines read better broken. (Group B, tunable.)
-const CHAIN_SOFT_WIDTH: usize = 50;
+/// even when it would fit within [`WIDTH`] — a long pipeline reads better as one step per line. Well
+/// below [`WIDTH`], since the point is to stack a pipeline that has become hard to scan rather than
+/// to avoid an overflow; but not so low that an everyday two- or three-call chain is taken apart,
+/// which costs more than the stacking gains. (Group B, tunable.)
+const CHAIN_SOFT_WIDTH: usize = 70;
 
 /// A multi-branch block whose single-line form exceeds this many columns is split one branch per
 /// line; shorter blocks stay inline. (Group B, tunable.)
 const SHORT_BLOCK_WIDTH: usize = 40;
+
+/// A `cond => …` guard whose single-line form exceeds this many columns is laid out one step per
+/// line. Measured on the guard alone: what follows it on that line — the ` => `, and however much of
+/// the consequence lands before the consequence's own first break — is not known here, so this is
+/// the budget left for it rather than a column the guard may reach. (Group B, tunable.)
+const GUARD_SOFT_WIDTH: usize = 60;
 
 /// Render a program to canonical source. `source` is the program's original text, from which
 /// comments and blank lines (trivia) are recovered and re-attached, since the parser discards them.
@@ -58,6 +67,7 @@ pub fn format_program(program: &Sequence, source: &str) -> String {
         },
         false,
         0,
+        true,
     )];
     // Comments after the last step have nowhere to attach, so emit them at the end.
     if !trivia.dangling.is_empty() {
@@ -70,6 +80,7 @@ pub fn format_program(program: &Sequence, source: &str) -> String {
 /// A type-alias declaration step. `break_parent` keeps a sequence that declares a type broken —
 /// an alias reads as its own line, never run together with the steps around it.
 fn type_alias_doc(
+    trivia: &Trivia,
     name: &Option<String>,
     type_parameters: &[String],
     type_definition: &Type,
@@ -84,21 +95,26 @@ fn type_alias_doc(
     // inline (its `=` already carries the trailing space the union form omits).
     let body = match type_definition {
         Type::Union(union_type) => {
-            pretty::concat(vec![pretty::text(lhs), union_alias_doc(union_type)])
+            pretty::concat(vec![pretty::text(lhs), union_alias_doc(trivia, union_type)])
         }
-        other => pretty::text(format!("{} {}", lhs, render_type(other))),
+        other => pretty::concat(vec![
+            pretty::text(format!("{} ", lhs)),
+            type_doc(trivia, other),
+        ]),
     };
     pretty::concat(vec![body, pretty::break_parent()])
 }
 
 /// The right-hand side of a union type alias: `= A | B | C` flat, or each member on its own line
 /// led by `|` when broken, indented under the alias name.
-fn union_alias_doc(union_type: &UnionType) -> Doc {
+fn union_alias_doc(trivia: &Trivia, union_type: &UnionType) -> Doc {
     let mut parts = Vec::new();
     for (index, member) in union_type.types.iter().enumerate() {
         parts.push(pretty::line());
         parts.push(leading_bar(index == 0));
-        parts.push(pretty::text(render_union_member(member)));
+        // Indent the member itself, so a member that breaks puts its fields under its own name
+        // and its closing delimiter in line with it, rather than back in the `|` gutter.
+        parts.push(pretty::nest(2, union_member_doc(trivia, member)));
     }
     pretty::group(pretty::nest(2, pretty::concat(parts)))
 }
@@ -140,11 +156,36 @@ fn render_type_parameters(params: &[String]) -> String {
 /// the first chain stays at the sequence's indent. A branch body uses 2 so its wrapped steps align
 /// under the content past the `| `, while a body that is a single chain ending in a block keeps that
 /// block at the bar indent — so the block's `}` lines up with the branch's `|`.
+///
+/// `set_off_tall` allows blank lines around a step that breaks across lines
+/// ([`breaks_into_pipeline`]). A branch *condition* clears it: its steps are one gating unit — a
+/// match and the guards that qualify it — and a blank line between them would read as a break in the
+/// program's flow that isn't there.
 fn sequence_doc(
     trivia: &Trivia,
     sequence: &Sequence,
     skip_first_leading: bool,
     continuation_nest: usize,
+    set_off_tall: bool,
+) -> Doc {
+    pretty::group(sequence_parts(
+        trivia,
+        sequence,
+        skip_first_leading,
+        continuation_nest,
+        set_off_tall,
+    ))
+}
+
+/// [`sequence_doc`]'s content without the enclosing group, for a caller that must compose its own
+/// break decision with the steps' — a branch condition, which leans on [`break_if_wider_than`] and
+/// then has to know the verdict in order to indent to match.
+fn sequence_parts(
+    trivia: &Trivia,
+    sequence: &Sequence,
+    skip_first_leading: bool,
+    continuation_nest: usize,
+    set_off_tall: bool,
 ) -> Doc {
     // Semicolon and newline are synonymous step separators, so a broken sequence uses a bare
     // newline (the lighter form) and only the inline form needs the semicolon.
@@ -165,7 +206,9 @@ fn sequence_doc(
         let (body, tall) = match step {
             Step::Chain(chain) => {
                 let body = chain_doc(trivia, chain);
-                let tall = is_tall_step(chain, &body);
+                // A step laid out as `~>` continuation lines has nothing delimiting it, so it is
+                // set off from its neighbours with a blank line.
+                let tall = set_off_tall && breaks_into_pipeline(trivia, chain);
                 // The assertions ending the step's last line ride after the chain, before any
                 // trailing comment; they do not make a step "tall". A trailing assertion is
                 // glued to the step's line; an own-line one (a leading `//=`) starts a fresh
@@ -197,7 +240,7 @@ fn sequence_doc(
                 type_definition,
                 ..
             } => (
-                type_alias_doc(name, type_parameters, type_definition),
+                type_alias_doc(trivia, name, type_parameters, type_definition),
                 false,
             ),
         };
@@ -217,25 +260,10 @@ fn sequence_doc(
         }
         prev_tall = tall;
     }
-    pretty::group(pretty::concat(vec![
+    pretty::concat(vec![
         first,
         pretty::nest(continuation_nest, pretty::concat(rest)),
-    ]))
-}
-
-/// Whether a sequence step renders across several lines as an *undelimited* pipeline, so it is set
-/// off from its neighbours with a blank line. That happens when the chain actually breaks at this
-/// width (`forces_break`) and either has a `~>` call-unit boundary to break at, or is a binding whose
-/// multi-term value breaks after the `=`. A step delimited by its own container/block absorbs its
-/// own overflow and is not set off; nor is a single-line step that merely carries a comment (whose
-/// forced break lives in the trivia, not in `body`).
-fn is_tall_step(chain: &Chain, body: &Doc) -> bool {
-    let terms = &chain.terms;
-    if terms.len() < 2 || terms.last().is_some_and(is_breakable_container) {
-        return false;
-    }
-    let pipeline = terms[..terms.len() - 1].iter().any(is_call_ender);
-    (pipeline || chain.binding.is_some()) && pretty::forces_break(body)
+    ])
 }
 
 /// A braced expression `{ … }`. A single branch lays its body out directly; multiple branches each
@@ -326,52 +354,70 @@ fn branch_doc(trivia: &Trivia, branch: &Branch, multi_branch: bool) -> Doc {
     let nest = if multi_branch { 2 } else { 0 };
     match &branch.consequence {
         None => {
-            let body = sequence_doc(trivia, &branch.condition, multi_branch, nest);
-            wrap_breaking_body(&branch.condition, body, multi_branch)
+            let body = sequence_doc(trivia, &branch.condition, multi_branch, nest, true);
+            wrap_breaking_body(trivia, &branch.condition, body, multi_branch)
         }
         Some(consequence) => {
-            let condition = sequence_doc(trivia, &branch.condition, multi_branch, nest);
-            let body = sequence_doc(trivia, consequence, false, nest);
-            let body = wrap_breaking_body(consequence, body, multi_branch);
-            // A guard is normally flattened onto one line so a long consequence does not push it onto
-            // `~>` lines — but not when it carries a comment or is itself a breaking pipeline (which
-            // forces a break; flattening would comment out / collapse the rest of the line).
+            // The guard's own wrapped lines are indented by the `nest` below rather than by
+            // `continuation_nest`, so a broken chain's `~>` lines and a later step land at the same
+            // column — one is the continuation of the other's line, and staggering them would read
+            // as structure the guard does not have.
+            // A guard past [`GUARD_SOFT_WIDTH`] is laid out one step per line. Below it the guard is
+            // flattened onto one line instead, so that a consequence too wide for what is left of
+            // the line breaks *itself* rather than dragging the guard apart with it — a guard reads
+            // as one thing, and splitting it to make room for a tuple would be the wrong trade.
+            let condition = break_if_wider_than(
+                sequence_parts(trivia, &branch.condition, multi_branch, 0, false),
+                GUARD_SOFT_WIDTH,
+            );
+            let body = sequence_doc(trivia, consequence, false, nest, true);
+            let body = wrap_breaking_body(trivia, consequence, body, multi_branch);
+            // The threshold decides by width, but a guard carrying a comment or a breaking pipeline
+            // forces a break of its own, and flattening that would comment out / collapse the rest of
+            // the line. Either way the verdict is `forces_break`, so the two agree.
             if pretty::forces_break(&condition) {
-                let content = pretty::concat(vec![condition, pretty::text(" => "), body]);
-                // A single-chain `~>` guard indents its continuations under the head (past the `| `),
-                // *and* the consequence that follows the last one on the same line — so the whole
+                let content =
+                    pretty::concat(vec![pretty::group(condition), pretty::text(" => "), body]);
+                // A broken guard indents its wrapped lines under the head (past the `| `), *and* the
+                // consequence that follows the last one on the same line — so the whole
                 // `cond => consequence` is nested together, keeping the consequence aligned with the
-                // line it opens on. A multi-chain guard already indents its steps via
-                // `continuation_nest`, so it is left as-is.
-                if branch.condition.single_chain().is_some() {
-                    pretty::nest(2, content)
-                } else {
-                    content
-                }
+                // line it opens on.
+                pretty::nest(nest, content)
             } else {
-                pretty::concat(vec![
+                let content = pretty::concat(vec![
                     pretty::text(pretty::flatten(&condition)),
                     pretty::text(" => "),
                     body,
-                ])
+                ]);
+                // A consequence that is already delimited carries the arm's own shape — its `}`
+                // closes at the bar, in line with the `|`. That is a body it opens itself, or the
+                // braces `wrap_breaking_body` just put around a pipeline. Anything else that breaks
+                // is data, and indents under the arm's content so its closing delimiter lines up
+                // with the term that opened it instead of landing in the bar's gutter.
+                let delimited = consequence.single_chain().is_some_and(|chain| {
+                    chain.terms.last().is_some_and(opens_a_body)
+                        || (multi_branch && breaks_into_pipeline(trivia, chain))
+                });
+                if delimited {
+                    content
+                } else {
+                    pretty::nest(nest, content)
+                }
             }
         }
     }
 }
 
 /// Wrap a branch body under a `| ` bar in grouping braces when it is a single chain that will break
-/// across lines as a `~>` pipeline (rather than one ending in a block, which delimits itself): its
-/// continuation would otherwise dangle at the bar indent, reading like a new step. The brace block is
-/// a frame-free single chain, which both the compiler and the formatter's own strip pass remove —
-/// so this render-time wrap is bytecode-neutral and idempotent. `body` is the already-rendered doc.
-fn wrap_breaking_body(sequence: &Sequence, body: Doc, multi_branch: bool) -> Doc {
-    let breaking_pipeline = sequence.single_chain().is_some_and(|chain| {
-        chain
-            .terms
-            .last()
-            .is_some_and(|term| !is_breakable_container(term))
-    });
-    if multi_branch && breaking_pipeline && pretty::forces_break(&body) {
+/// across lines as a `~>` pipeline: its continuation would otherwise dangle at the bar indent,
+/// reading like a new step. The brace block is a frame-free single chain, which both the compiler
+/// and the formatter's own strip pass remove — so this render-time wrap is bytecode-neutral and
+/// idempotent. `body` is the already-rendered doc.
+fn wrap_breaking_body(trivia: &Trivia, sequence: &Sequence, body: Doc, multi_branch: bool) -> Doc {
+    let pipeline = sequence
+        .single_chain()
+        .is_some_and(|chain| breaks_into_pipeline(trivia, chain));
+    if multi_branch && pipeline {
         pretty::concat(vec![
             pretty::text("{"),
             pretty::nest(2, pretty::concat(vec![pretty::hardline(), body])),
@@ -383,10 +429,30 @@ fn wrap_breaking_body(sequence: &Sequence, body: Doc, multi_branch: bool) -> Doc
     }
 }
 
-/// A chain: an optional `pattern = ` binding followed by `~>`-joined terms. When the terms do not
-/// fit, they break with a leading `~>` per continuation line. A trailing breakable container (a
-/// block, tuple, or function) is kept attached to the preceding terms and allowed to break
-/// internally, rather than forcing the whole chain onto `~>` lines.
+/// Whether a chain lays out as `~>` continuation lines — a run of terms one per line, with nothing
+/// delimiting it. This is the shape every caller here reacts to: a branch body wraps it in braces, a
+/// binding breaks after its `=` and indents it, and a sequence sets it off with blank lines.
+///
+/// It asks of exactly the part [`chain_doc`] lets break at its gaps what [`break_if_wider_than`]
+/// asks: a chain ending in a container breaks only in the head that precedes it (the container
+/// delimits its own contents), so the head is what is measured; any other chain is measured whole.
+/// Like that threshold it cannot see the column the chain will start at, so a chain that fits the
+/// soft width but overflows where it lands still reads as one that does not break.
+fn breaks_into_pipeline(trivia: &Trivia, chain: &Chain) -> bool {
+    let terms = &chain.terms;
+    if terms.len() < 2 {
+        return false;
+    }
+    let breakable =
+        if is_breakable_container(&terms[terms.len() - 1]) && !has_interior_trivia(trivia, chain) {
+            terms.len() - 1
+        } else {
+            terms.len()
+        };
+    let doc = chain_terms_doc(trivia, chain, breakable);
+    pretty::flat_width(&doc, CHAIN_SOFT_WIDTH).is_none()
+}
+
 /// Render a step-final `//= P` assertion: the canonical pattern, plus any prose note three
 /// spaces off. An assertion terminates its line like a comment, so every form forces the
 /// enclosing construct to break — a closing `}` must never land after one. A trailing
@@ -406,68 +472,75 @@ fn assertion_doc(assertion: &Assertion, bare: bool) -> Doc {
     pretty::concat(vec![doc, pretty::break_parent()])
 }
 
+/// A chain: an optional `pattern = ` binding followed by `~>`-joined terms. When the terms do not
+/// fit, they break with a leading `~>` per continuation line. A trailing breakable container (a
+/// block, tuple, or function) is kept attached to the preceding terms and allowed to break
+/// internally, rather than forcing the whole chain onto `~>` lines.
 fn chain_doc(trivia: &Trivia, chain: &Chain) -> Doc {
-    let prefix = match &chain.binding {
-        Some(pattern) => pretty::text(format!("{} = ", render_match(pattern))),
-        None => pretty::nil(),
-    };
     let terms = &chain.terms;
-    if terms.len() > 1
+    let value = if terms.len() > 1
         && is_breakable_container(&terms[terms.len() - 1])
         && !has_interior_trivia(trivia, chain)
     {
-        // A chain ending in a container (`head { … }`, `head [ … ]`) keeps its head on one line and
-        // lets the container break internally. The head is rendered fully flat so neither it nor its
-        // inner groups break: a `fits` check on a grouped head would count the (large) trailing
-        // container against the head's line and break it spuriously onto `~>` lines.
-        let (head, tail) = terms.split_at(terms.len() - 1);
-        let head_docs: Vec<Doc> = head.iter().map(|term| term_doc(trivia, term)).collect();
-        // …unless a head term carries a comment (it forces a break): flattening it would comment out
-        // the rest of the line, so fall back to the ordinary grouped layout, which breaks safely.
-        if !head_docs.iter().any(pretty::forces_break) {
-            let head_flat = head_docs
-                .iter()
-                .map(pretty::flatten)
-                .collect::<Vec<_>>()
-                .join(" ~> ");
-            return pretty::concat(vec![
-                prefix,
-                pretty::text(head_flat),
-                pretty::text(" ~> "),
-                term_doc(trivia, &tail[0]),
-            ]);
-        }
-    }
-    let inner = break_if_wider_than(chain_terms_doc(trivia, chain), CHAIN_SOFT_WIDTH);
-    // A binding whose value is a multi-term `~>` pipeline breaks *after* the `=` and indents the
-    // pipeline, so the continuations sit under the value rather than dangling at the binding's own
-    // indent. A single-term value, or one ending in a self-breaking container (`x = head { … }`),
-    // stays on the `=` line.
-    if let Some(pattern) = &chain.binding
-        && terms.len() > 1
-        && !is_breakable_container(&terms[terms.len() - 1])
-    {
+        // A chain ending in a container (`head { … }`, `head [ … ]`) lets the container break
+        // internally rather than pushing the whole chain onto `~>` lines. The head is its own group,
+        // measured against the line the container *opens* on — `fits` reaches the container in break
+        // mode and stops at its first break opportunity — so the head stays flat while it fits there
+        // and breaks at its own `~>` gaps once it does not.
+        let head = pretty::group(break_if_wider_than(
+            chain_terms_doc(trivia, chain, terms.len() - 1),
+            CHAIN_SOFT_WIDTH,
+        ));
+        pretty::concat(vec![head, term_doc(trivia, &terms[terms.len() - 1])])
+    } else {
+        pretty::group(break_if_wider_than(
+            chain_terms_doc(trivia, chain, terms.len()),
+            CHAIN_SOFT_WIDTH,
+        ))
+    };
+    let Some(pattern) = &chain.binding else {
+        return value;
+    };
+    // A binding whose value lays out as a `~>` pipeline breaks *after* the `=` and indents the whole
+    // value, so the continuations sit under it rather than dangling at the binding's own indent —
+    // where they read as steps of the enclosing sequence rather than as part of this one. The break
+    // and the pipeline are the same decision, so a value that stays on the `=` line is one that also
+    // stays on a single line, and a value that leaves it puts every term on its own line. A value
+    // that only breaks *inside* a trailing container (`xs = [ … ]`, `y = head [ … ]`) is not a
+    // pipeline: the container opens on the `=` line and delimits itself.
+    if breaks_into_pipeline(trivia, chain) {
         return pretty::group(pretty::concat(vec![
-            pretty::text(format!("{} =", render_match(pattern))),
-            pretty::nest(2, pretty::concat(vec![pretty::line(), inner])),
+            match_doc(pattern),
+            pretty::text(" ="),
+            pretty::nest(2, pretty::concat(vec![pretty::line(), value])),
         ]));
     }
-    pretty::concat(vec![prefix, pretty::group(inner)])
+    pretty::concat(vec![match_doc(pattern), pretty::text(" = "), value])
 }
 
-/// Lay out a chain's terms, joined by an explicit `~>` between every pair of adjacent terms, and
-/// breaking only at *call-unit* boundaries: a break point sits after a term that consumes the
-/// flowing value (an `[args] ~> callable` unit just completed), rendered as a leading-`~>`
-/// continuation line. The separator within a unit is a hard ` ~> ` (never breaks), so an argument
-/// tuple stays on the same line as its callable.
+/// Lay out the first `count` terms of a chain, joined by an explicit `~>` between every pair of
+/// adjacent terms. Every gap is a break point, rendered as a leading-`~>` continuation line, and
+/// they all share one group — so a chain that does not fit puts *every* term on its own line rather
+/// than breaking at some gaps and running several terms together at others.
+///
+/// Stopping short of the last term (`count < terms.len()`, the trailing-container layout) still
+/// emits the gap that follows, so the container joins the break: the caller's group holds the whole
+/// `head ~> ` run, and the container either sits after it on one line or starts a line of its own.
 ///
 /// A gap also carries whatever the author wrote at the end of the line it continues — a comment,
 /// a `//= P` assertion — and those run to the end of that line, so the gap must then break
 /// whatever the width says, or the `~>` would land inside the comment.
-fn chain_terms_doc(trivia: &Trivia, chain: &Chain) -> Doc {
-    let terms = &chain.terms;
+fn chain_terms_doc(trivia: &Trivia, chain: &Chain, count: usize) -> Doc {
+    let terms = &chain.terms[..count];
     let mut parts = Vec::new();
     for (index, term) in terms.iter().enumerate() {
+        let doc = term_doc(trivia, term);
+        // A term that opens a *body* and will lay it out vertically — a block, a function literal —
+        // provides its own structure below the line it is written on. Giving it a line of its own
+        // would leave the term before it stranded on one, so the gap ahead of it does not break. A
+        // call's argument list is data, not a body: it may break too, but there the break is the
+        // chain's, and every term takes a line together.
+        let glued = opens_a_body(term) && pretty::forces_break(&doc);
         if index > 0 {
             let gap = chain
                 .continuations
@@ -495,14 +568,18 @@ fn chain_terms_doc(trivia: &Trivia, chain: &Chain) -> Doc {
                 parts.push(pretty::hardline());
                 parts.push(trivia.leading_doc(gap.pipe));
                 parts.push(pretty::text("~> "));
-            } else if is_call_ender(&terms[index - 1]) {
+            } else if glued {
+                parts.push(pretty::text(" ~> "));
+            } else {
                 parts.push(pretty::line());
                 parts.push(pretty::text("~> "));
-            } else {
-                parts.push(pretty::text(" ~> "));
             }
         }
-        parts.push(term_doc(trivia, term));
+        parts.push(doc);
+    }
+    if count < chain.terms.len() {
+        parts.push(pretty::line());
+        parts.push(pretty::text("~> "));
     }
     pretty::concat(parts)
 }
@@ -520,12 +597,6 @@ fn has_interior_trivia(trivia: &Trivia, chain: &Chain) -> bool {
             .any(|gap| trivia.has_trivia(gap.end) || trivia.has_trivia(gap.pipe))
 }
 
-/// Whether a term completes a call unit: the flowing value is consumed here (a callable applied, a
-/// field access, or an operator), so a breaking chain breaks *after* it.
-fn is_call_ender(term: &Term) -> bool {
-    matches!(term, Term::Access(_) | Term::Self_)
-}
-
 /// Force `inner` to break when its single-line form exceeds `threshold` columns (or already contains
 /// a break) — a softer split target than [`WIDTH`], used to lean chains and multi-branch blocks
 /// toward breaking. Measures the flat width directly, with early exit, rather than rendering it.
@@ -534,6 +605,21 @@ fn break_if_wider_than(inner: Doc, threshold: usize) -> Doc {
         inner
     } else {
         pretty::concat(vec![inner, pretty::break_parent()])
+    }
+}
+
+/// Whether a term opens a braced body — a block, a function literal, a spawned one, or a call whose
+/// argument is one. [`is_breakable_container`] minus the tuple case: a tuple breaks into fields,
+/// which is data laid out vertically, not a body written below the line that opens it.
+fn opens_a_body(term: &Term) -> bool {
+    match term {
+        Term::Block(_) => true,
+        Term::Function(function) => function.body.is_some(),
+        Term::Spawn(inner, argument, _) => {
+            argument.is_none() && matches!(inner.as_ref(), Term::Function(_))
+        }
+        Term::Apply(_, argument) => opens_a_body(argument),
+        _ => false,
     }
 }
 
@@ -567,6 +653,7 @@ fn term_doc(trivia: &Trivia, term: &Term) -> Doc {
         Term::Spawn(inner, argument, _) => spawn_doc(trivia, inner, argument.as_deref()),
         Term::Select(sources, _) => select_doc(trivia, sources),
         Term::Dialect(dialect) => dialect_doc(dialect),
+        Term::Match(pattern) => pretty::concat(vec![pretty::text("="), match_doc(pattern)]),
         // A juxtaposed application `head arg`: the head is always atomic (an access), the
         // argument may be a container.
         Term::Apply(access, argument) => pretty::concat(vec![
@@ -871,29 +958,41 @@ fn bracketed(open: String, close: &str, items: Vec<Doc>, trailing: bool) -> Doc 
 }
 
 fn function_doc(trivia: &Trivia, function: &Function) -> Doc {
-    let mut signature = String::from("#");
-    signature.push_str(&render_type_parameters(&function.type_parameters));
+    let mut parts = vec![pretty::text(format!(
+        "#{}",
+        render_type_parameters(&function.type_parameters)
+    ))];
+    let bare = function.parameter_type.is_none() && function.return_type.is_none();
     if let Some(parameter_type) = &function.parameter_type {
         // The parameter type sits in a `function_input_type` position, which does not accept a bare
         // union/intersection/function — wrap those in parentheses.
-        signature.push_str(&render_type_atom(parameter_type));
+        parts.push(type_atom_doc(trivia, parameter_type));
     }
     if let Some(return_type) = &function.return_type {
-        signature.push_str(" -> ");
-        signature.push_str(&render_type_atom(return_type));
+        parts.push(pretty::text(" -> "));
+        parts.push(type_atom_doc(trivia, return_type));
     }
+    let signature = pretty::concat(parts);
     match &function.body {
-        None => pretty::text(signature),
+        None => signature,
         // A bare `#` (no signature — the inferred-parameter form) abuts its block as `#{ … }`;
         // a typed head takes a space.
-        Some(body) if signature == "#" => {
-            pretty::concat(vec![pretty::text(signature), block_doc(trivia, body)])
+        Some(body) if bare && function.type_parameters.is_empty() => {
+            pretty::concat(vec![signature, block_doc(trivia, body)])
         }
-        Some(body) => pretty::concat(vec![
-            pretty::text(signature),
-            pretty::text(" "),
-            block_doc(trivia, body),
-        ]),
+        Some(body) => pretty::concat(vec![signature, pretty::text(" "), block_doc(trivia, body)]),
+    }
+}
+
+/// [`type_doc`]'s counterpart to [`render_type_atom`]: the same parenthesising, over a type that
+/// may break. Only a tuple type does, and a tuple never needs the parentheses, so the wrapped
+/// cases stay text.
+fn type_atom_doc(trivia: &Trivia, type_def: &Type) -> Doc {
+    match type_def {
+        Type::Tuple(tuple_type) if !tuple_type.fields.is_empty() => {
+            tuple_type_doc(trivia, tuple_type)
+        }
+        _ => pretty::text(render_type_atom(type_def)),
     }
 }
 
@@ -1314,9 +1413,54 @@ fn visit_sequence(sequence: &Sequence, out: &mut Collected) {
 fn visit_steps(steps: &[Step], out: &mut Collected) {
     for step in steps {
         push_anchor(step.span(), out);
-        if let Step::Chain(chain) = step {
-            visit_chain(chain, out);
+        match step {
+            Step::Chain(chain) => visit_chain(chain, out),
+            Step::TypeAlias {
+                type_definition, ..
+            } => visit_alias_type(type_definition, out),
         }
+    }
+}
+
+/// Anchor the field entries of a type that [`type_alias_doc`] lays out as a document: the alias's
+/// own tuple, or the members of a union it distributes over.
+fn visit_alias_type(type_def: &Type, out: &mut Collected) {
+    match type_def {
+        Type::Union(union_type) => {
+            for member in &union_type.types {
+                visit_type_fields(member, out);
+            }
+        }
+        other => visit_type_fields(other, out),
+    }
+}
+
+/// Anchor a tuple type's field entries — and only a tuple type's, mirroring the one case
+/// [`type_doc`] and its variants render as a document. A type reached anywhere else is rendered
+/// flat, onto a line that has no room for a comment, so its fields are deliberately left
+/// unanchored: an item inside one keeps attaching outward, to the nearest node that *can* emit it.
+fn visit_type_fields(type_def: &Type, out: &mut Collected) {
+    if let Type::Tuple(tuple_type) = type_def {
+        for field in &tuple_type.fields {
+            push_anchor(field_type_span(field), out);
+        }
+    }
+}
+
+/// A function literal's own anchors. `signature` is set where [`function_doc`] renders the
+/// parameter and return types as documents, and cleared where a caller renders them flat — a
+/// spawn head, which spells its parameter type into its own `@…` text.
+fn visit_function(function: &Function, signature: bool, out: &mut Collected) {
+    if signature {
+        for type_def in [&function.parameter_type, &function.return_type]
+            .into_iter()
+            .flatten()
+        {
+            visit_type_fields(type_def, out);
+        }
+    }
+    if let Some(body) = &function.body {
+        visit_block(body, out);
     }
 }
 
@@ -1355,13 +1499,12 @@ fn visit_term(term: &Term, out: &mut Collected) {
             }
         }
         Term::Block(block) => visit_block(block, out),
-        Term::Function(function) => {
-            if let Some(body) = &function.body {
-                visit_block(body, out);
-            }
-        }
+        Term::Function(function) => visit_function(function, true, out),
         Term::Spawn(inner, argument, _) => {
-            visit_term(inner, out);
+            match inner.as_ref() {
+                Term::Function(function) => visit_function(function, false, out),
+                other => visit_term(other, out),
+            }
             if let Some(argument) = argument {
                 visit_term(argument, out);
             }
@@ -1526,7 +1669,24 @@ fn render_access(access: &Access) -> String {
 // Patterns
 // ---------------------------------------------------------------------------
 
+/// The flat, single-line rendering of a pattern, for a position with no vertical form — an
+/// assertion's comment text, a nested pattern inside one. Patterns carry no trivia, so they never
+/// force a break and this is always legal.
 pub(crate) fn render_match(pattern: &Match) -> String {
+    pretty::flatten(&match_doc(pattern))
+}
+
+/// A pattern as a document. As with [`type_doc`], only a tuple's field list breaks — a
+/// destructuring wide enough to matter is a wide field list — and everything else is text.
+fn match_doc(pattern: &Match) -> Doc {
+    match pattern {
+        Match::Tuple(tuple) if !tuple.fields.is_empty() => match_tuple_doc(tuple),
+        Match::Partial(partial) if !partial.fields.is_empty() => partial_pattern_doc(partial),
+        other => pretty::text(render_match_flat(other)),
+    }
+}
+
+fn render_match_flat(pattern: &Match) -> String {
     match pattern {
         Match::Identifier(name, _) => name.clone(),
         Match::Literal(literal) => render_literal(literal),
@@ -1590,37 +1750,55 @@ pub(crate) fn render_match(pattern: &Match) -> String {
 }
 
 fn render_match_tuple(tuple: &MatchTuple) -> String {
+    pretty::flatten(&match_tuple_doc(tuple))
+}
+
+/// A tuple pattern, breaking one field per line when the list does not fit. Pattern field lists
+/// take a trailing comma, as tuple values and tuple types do.
+fn match_tuple_doc(tuple: &MatchTuple) -> Doc {
+    let name = tuple.name.clone().unwrap_or_default();
+    if tuple.fields.is_empty() {
+        return pretty::text(if tuple.name.is_some() {
+            name
+        } else {
+            "[]".to_string()
+        });
+    }
     let fields = tuple
         .fields
         .iter()
-        .map(render_match_field)
-        .collect::<Vec<_>>()
-        .join(", ");
-    match &tuple.name {
-        Some(name) if tuple.fields.is_empty() => name.clone(),
-        Some(name) => format!("{}[{}]", name, fields),
-        None => format!("[{}]", fields),
-    }
-}
-
-fn render_match_field(field: &MatchField) -> String {
-    match &field.name {
-        Some(name) => format!("{}: {}", name, render_match(&field.pattern)),
-        None => render_match(&field.pattern),
-    }
+        .map(|field| match &field.name {
+            Some(label) => pretty::concat(vec![
+                pretty::text(format!("{}: ", label)),
+                match_doc(&field.pattern),
+            ]),
+            None => match_doc(&field.pattern),
+        })
+        .collect();
+    bracketed(format!("{}[", name), "]", fields, true)
 }
 
 fn render_partial_pattern(partial: &PartialPattern) -> String {
+    pretty::flatten(&partial_pattern_doc(partial))
+}
+
+fn partial_pattern_doc(partial: &PartialPattern) -> Doc {
+    let name = partial.name.clone().unwrap_or_default();
+    if partial.fields.is_empty() {
+        return pretty::text(format!("{}()", name));
+    }
     let fields = partial
         .fields
         .iter()
         .map(|field| match &field.pattern {
-            None => field.name.clone(),
-            Some(pattern) => format!("{}: {}", field.name, render_match(pattern)),
+            None => pretty::text(field.name.clone()),
+            Some(pattern) => pretty::concat(vec![
+                pretty::text(format!("{}: ", field.name)),
+                match_doc(pattern),
+            ]),
         })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{}({})", partial.name.clone().unwrap_or_default(), fields)
+        .collect();
+    bracketed(format!("{}(", name), ")", fields, true)
 }
 
 /// Render a type used as a pattern. A pattern's type position only accepts the bare forms recognised
@@ -1649,7 +1827,27 @@ fn render_match_type(type_def: &Type) -> String {
 // Types
 // ---------------------------------------------------------------------------
 
+/// The flat, single-line rendering of a type, for a position with no vertical form to fall back on
+/// — inside an assertion's comment text, a select or spawn sugar head, a field's default value.
+/// Types carry no trivia, so they never force a break and this is always legal.
 fn render_type(type_def: &Type) -> String {
+    pretty::flatten(&type_doc(&Trivia::default(), type_def))
+}
+
+/// A type as a document. Only a tuple type's field list breaks — one field per line, closing
+/// delimiter on its own — which is where the width goes in practice: a function's parameter list,
+/// an alias's right-hand side. Everything else renders to text, since a type has no interior the
+/// reader gains from seeing spread over lines.
+fn type_doc(trivia: &Trivia, type_def: &Type) -> Doc {
+    if let Type::Tuple(tuple_type) = type_def
+        && !tuple_type.fields.is_empty()
+    {
+        return tuple_type_doc(trivia, tuple_type);
+    }
+    pretty::text(render_type_flat(type_def))
+}
+
+fn render_type_flat(type_def: &Type) -> String {
     match type_def {
         Type::Primitive(PrimitiveType::Int) => "'int".to_string(),
         Type::Primitive(PrimitiveType::Bin) => "'bin".to_string(),
@@ -1730,6 +1928,18 @@ fn render_type_atom(type_def: &Type) -> String {
     }
 }
 
+/// [`render_union_member`]'s document form, so that a member wide enough to overflow — a tuple type
+/// with a long field list — breaks its fields rather than the line. A function member keeps its
+/// parentheses and stays text.
+fn union_member_doc(trivia: &Trivia, type_def: &Type) -> Doc {
+    match type_def {
+        Type::Tuple(tuple_type) if !tuple_type.fields.is_empty() => {
+            tuple_type_doc(trivia, tuple_type)
+        }
+        _ => pretty::text(render_union_member(type_def)),
+    }
+}
+
 /// A union member is an intersection-level type, so it never needs wrapping except for a function
 /// type (which only appears as a member when originally parenthesised).
 fn render_union_member(type_def: &Type) -> String {
@@ -1753,7 +1963,15 @@ fn render_type_arguments(arguments: &[Type]) -> String {
     )
 }
 
+/// The flat rendering of a tuple type. Reached for a tuple nested inside a type that renders as
+/// text (a function's input, a process head), where there is no line to break onto anyway.
 fn render_tuple_type(tuple_type: &TupleType) -> String {
+    pretty::flatten(&tuple_type_doc(&Trivia::default(), tuple_type))
+}
+
+/// A tuple type, breaking one field per line when the list does not fit. Field lists take a
+/// trailing comma, so the broken form gets one, exactly as a value tuple's does.
+fn tuple_type_doc(trivia: &Trivia, tuple_type: &TupleType) -> Doc {
     // A lowercase name is the alias-applied spread form (`'v1[..., id: 'bin]`): the parser
     // stores the alias as the name and rewrites its bare spreads to `...v1`. Render it back
     // in source form — the name takes its `'` prefix, and a spread of the alias itself
@@ -1767,35 +1985,49 @@ fn render_tuple_type(tuple_type: &TupleType) -> String {
         None => tuple_type.name.clone().unwrap_or_default(),
     };
     if tuple_type.fields.is_empty() {
-        return if tuple_type.is_partial {
+        return pretty::text(if tuple_type.is_partial {
             format!("{}()", name)
         } else if tuple_type.name.is_some() {
             name
         } else {
             "[]".to_string()
-        };
+        });
     }
     let fields = tuple_type
         .fields
         .iter()
-        .map(|field| match (alias, field) {
-            (
-                Some(alias),
-                FieldType::Spread {
-                    identifier: Some(identifier),
-                    type_arguments,
-                },
-            ) if identifier == alias && type_arguments.is_empty() => "...".to_string(),
-            _ => render_field_type(field),
+        .map(|field| {
+            let rendered = match (alias, field) {
+                (
+                    Some(alias),
+                    FieldType::Spread {
+                        identifier: Some(identifier),
+                        type_arguments,
+                        ..
+                    },
+                ) if identifier == alias && type_arguments.is_empty() => "...".to_string(),
+                _ => render_field_type(field),
+            };
+            pretty::concat(vec![
+                trivia.leading_doc(field_type_span(field)),
+                pretty::text(rendered),
+                trivia.trailing_doc(field_type_span(field)),
+            ])
         })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect();
     let (open, close) = if tuple_type.is_partial {
         ("(", ")")
     } else {
         ("[", "]")
     };
-    format!("{}{}{}{}", name, open, fields, close)
+    bracketed(format!("{}{}", name, open), close, fields, true)
+}
+
+/// Where a type's field entry starts, for trivia attachment.
+fn field_type_span(field: &FieldType) -> Spanned {
+    match field {
+        FieldType::Field { span, .. } | FieldType::Spread { span, .. } => *span,
+    }
 }
 
 /// A field's ` = <value>` default. Types render flat, and a default is a short value
@@ -1817,6 +2049,7 @@ fn render_field_type(field_type: &FieldType) -> String {
             omittable,
             type_def,
             default,
+            ..
         } => {
             let label = match name {
                 Some(name) if *omittable => format!("({})", name),
@@ -1838,6 +2071,7 @@ fn render_field_type(field_type: &FieldType) -> String {
         FieldType::Spread {
             identifier: Some(identifier),
             type_arguments,
+            ..
         } => format!(
             "...'{}{}",
             identifier,
@@ -1873,7 +2107,7 @@ fn render_process_type(process_type: &ProcessType) -> String {
 mod tests {
     use super::*;
     use crate::parse;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     /// Reduce a program to the compiler's canonical, block-free form: every no-op block stripped or
     /// lifted (`Compiler::compile` does the same before codegen). Two programs equal here compile
@@ -2084,10 +2318,27 @@ mod tests {
         // A `~>` pipeline step is set off from its short neighbours with a blank line on each side…
         assert_formats(
             "#{ first_step; target_len ~> [~, suffix_len] ~> %num.sub ~> [target, ~, target_len] ~> %bin.slice ~> =&suffix; last_step }",
-            "#{\n  first_step\n\n  target_len\n  ~> [~, suffix_len] ~> %num.sub\n  ~> [target, ~, target_len] ~> %bin.slice\n  ~> =&suffix\n\n  last_step\n}\n",
+            "#{\n  first_step\n\n  target_len\n  ~> [~, suffix_len]\n  ~> %num.sub\n  ~> [target, ~, target_len]\n  ~> %bin.slice\n  ~> =&suffix\n\n  last_step\n}\n",
         );
         // …but a body of only short steps stays packed (no imposed blanks).
         assert_formats("#{ aa; bb; cc }", "#{ aa; bb; cc }\n");
+    }
+
+    #[test]
+    fn a_chain_ending_in_a_container_breaks_at_its_gaps_before_opening_it() {
+        // The trailing container absorbs the overflow while the head still fits on the line it
+        // opens on — the head is measured against that line, not against the container's full width.
+        assert_formats(
+            "#{ value ~> %mod.call [aaaaaaaaaa, bbbbbbbbbb, cccccccccc, dddddddddd, eeeeeeeeee, ffffffffff, gggggggggg, hhhhhhhhhh, iiiiiiiiii] }",
+            "#{\n  value ~> %mod.call [\n    aaaaaaaaaa,\n    bbbbbbbbbb,\n    cccccccccc,\n    dddddddddd,\n    eeeeeeeeee,\n    ffffffffff,\n    gggggggggg,\n    hhhhhhhhhh,\n    iiiiiiiiii,\n  ]\n}\n",
+        );
+        // Once the head no longer fits there, the chain breaks at its own `~>` gaps — every term on
+        // its own line, the container back on one. Taking the container apart instead would leave
+        // the head running past the width with an argument list dangling under it.
+        assert_formats(
+            "#{ %aa.one [~, 1] ~> %bb.two [~, 2] ~> %cc.three [~, 3] ~> %dd.four [~, 4] ~> %ee.five [~, 5] }",
+            "#{\n  %aa.one [~, 1]\n  ~> %bb.two [~, 2]\n  ~> %cc.three [~, 3]\n  ~> %dd.four [~, 4]\n  ~> %ee.five [~, 5]\n}\n",
+        );
     }
 
     #[test]
@@ -2096,7 +2347,19 @@ mod tests {
         // pipeline, rather than leaving the head on the `=` line and dangling the continuations.
         assert_formats(
             "#{ char_end = byte_pos ~> [~, 1] ~> %num.add ~> [data, ~, data_len] ~> skip_continuation }",
-            "#{\n  char_end =\n    byte_pos\n    ~> [~, 1] ~> %num.add\n    ~> [data, ~, data_len] ~> skip_continuation\n}\n",
+            "#{\n  char_end =\n    byte_pos\n    ~> [~, 1]\n    ~> %num.add\n    ~> [data, ~, data_len]\n    ~> skip_continuation\n}\n",
+        );
+        // A value ending in a call is a pipeline too: the `=` break tracks whether the chain breaks
+        // at a `~>` gap, not what its last term happens to be.
+        assert_formats(
+            "#{ char_end = byte_pos ~> %num.add [~, 1] ~> skip_continuation [data, ~, data_len] ~> %num.mul [~, 2] }",
+            "#{\n  char_end =\n    byte_pos\n    ~> %num.add [~, 1]\n    ~> skip_continuation [data, ~, data_len]\n    ~> %num.mul [~, 2]\n}\n",
+        );
+        // …but a value that only breaks *inside* a trailing container is not: the container opens on
+        // the `=` line and delimits itself, so moving the value down would gain nothing.
+        assert_formats(
+            "#{ y = value ~> %mod.call [aaaaaaaaaa, bbbbbbbbbb, cccccccccc, dddddddddd, eeeeeeeeee, ffffffffff, gg] }",
+            "#{\n  y = value ~> %mod.call [\n    aaaaaaaaaa,\n    bbbbbbbbbb,\n    cccccccccc,\n    dddddddddd,\n    eeeeeeeeee,\n    ffffffffff,\n    gg,\n  ]\n}\n",
         );
         // A short binding stays inline…
         assert_formats(
@@ -2117,13 +2380,90 @@ mod tests {
         // head (past the `| `), so they read as part of the condition rather than dangling at the bar.
         assert_formats(
             "#{ x ~> { haystack_len ~> [~, needle_len] ~> %num.sub ~> [haystack, needle, 0, ~] ~> find_index => Ok | other } }",
-            "#{\n  x ~> {\n    | haystack_len\n      ~> [~, needle_len] ~> %num.sub\n      ~> [haystack, needle, 0, ~] ~> find_index => Ok\n    | other\n  }\n}\n",
+            "#{\n  x ~> {\n    | haystack_len\n      ~> [~, needle_len]\n      ~> %num.sub\n      ~> [haystack, needle, 0, ~]\n      ~> find_index => Ok\n    | other\n  }\n}\n",
         );
         // A consequence that follows the last continuation on the same line lays out relative to
         // that deeper indent too — a breaking tuple's fields indent under its `[`, `]` aligned.
         assert_formats(
-            "#{ x ~> { [haystack, delim, start, end] ~> find_index ~> =('int)index => [haystack ~> [~, start, index] ~> %bin.slice ~> Str[~], [index, delim_len] ~> %num.add, another_field, one_more_field] | other } }",
-            "#{\n  x ~> {\n    | [haystack, delim, start, end] ~> find_index\n      ~> =('int)index => [\n        haystack ~> [~, start, index] ~> %bin.slice ~> Str[~],\n        [index, delim_len] ~> %num.add,\n        another_field,\n        one_more_field,\n      ]\n    | other\n  }\n}\n",
+            "#{ x ~> { [haystack, delimiter, start_offset, end_offset] ~> find_index_from ~> =('int)index => [haystack ~> [~, start_offset, index] ~> %bin.slice ~> Str[~], [index, delim_len] ~> %num.add, another_field, one_more_field] | other } }",
+            "#{\n  x ~> {\n    | [haystack, delimiter, start_offset, end_offset]\n      ~> find_index_from\n      ~> =('int)index => [\n        haystack ~> [~, start_offset, index] ~> %bin.slice ~> Str[~],\n        [index, delim_len] ~> %num.add,\n        another_field,\n        one_more_field,\n      ]\n    | other\n  }\n}\n",
+        );
+    }
+
+    #[test]
+    fn a_body_opening_term_keeps_the_term_before_it_on_its_line() {
+        // The block writes itself out below the line it opens on, so it stays attached to what
+        // feeds it; the rest of the chain still takes a line per term.
+        assert_formats(
+            "#{ %bin.get_byte [$data, p1] ~> { =40 => OpenParenthesis | =41 => CloseParenthesis | Other } ~> =('token)t }",
+            "#{\n  %bin.get_byte [$data, p1] ~> {\n    | =40 => OpenParenthesis\n    | =41 => CloseParenthesis\n    | Other\n  }\n  ~> =('token)t\n}\n",
+        );
+        // A call's argument list is not a body: it may break, but the chain breaks with it rather
+        // than gluing the call to what precedes it.
+        assert_formats(
+            "#{ $acc ~> %bin.append [~, %int.divide [b0, 4] ~> b64_digit ~, 1] ~> %bin.append [~, %int.modulo [b0, 4] ~> b64_digit ~, 1] ~> =('bin)out }",
+            "#{\n  $acc\n  ~> %bin.append [~, %int.divide [b0, 4] ~> b64_digit ~, 1]\n  ~> %bin.append [~, %int.modulo [b0, 4] ~> b64_digit ~, 1]\n  ~> =('bin)out\n}\n",
+        );
+    }
+
+    #[test]
+    fn comments_inside_a_type_stay_in_it() {
+        // A parameter list is laid out as a document, so its entries anchor trivia like a value
+        // tuple's fields do — before this the comment had no anchor inside the type and drifted
+        // down to the first step of the body.
+        assert_formats(
+            "f = #[\n  // the mode we run in\n  (mode): 'vmode,\n  (state): 's, // carried through\n  (frame): 'frame,\n] { $mode }",
+            "f = #[\n  // the mode we run in\n  (mode): 'vmode,\n  (state): 's, // carried through\n  (frame): 'frame,\n] { $mode }\n",
+        );
+        // A type reached in a flat-rendered position has no line to carry a comment, so an item
+        // there still attaches outward — to the next entry of the list that *is* laid out.
+        assert_formats(
+            "'wrap = [outer: #[\n  // inner note\n  a: 'int,\n] -> 'int, other: 'bin]",
+            "'wrap = [\n  outer: #[a: 'int] -> 'int,\n  // inner note\n  other: 'bin,\n]\n",
+        );
+    }
+
+    #[test]
+    fn a_wide_type_breaks_its_field_list() {
+        // A parameter list too wide for the line breaks one field per line, with the trailing comma
+        // its grammar accepts — the head is the only place a type has room to give.
+        assert_formats(
+            "f = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (h1): 'int, (k1): 'k, (v1): 'v, (h2): 'int, (k2): 'k, (shift): 'int] { $h1 }",
+            "f = #<'k, 'v>[\n  (self): #^ -> '<'k, 'v>,\n  (h1): 'int,\n  (k1): 'k,\n  (v1): 'v,\n  (h2): 'int,\n  (k2): 'k,\n  (shift): 'int,\n] { $h1 }\n",
+        );
+        // A union member breaks the same way, indented under its own name so the closing bracket
+        // lines up with it rather than landing in the `|` gutter.
+        assert_formats(
+            "'shape = Circle[radius: 'int] | Rectangle[width_in_pixels: 'int, height_in_pixels: 'int, origin_x: 'int, origin_y: 'int, fill: 'bin]",
+            "'shape =\n  | Circle[radius: 'int]\n  | Rectangle[\n      width_in_pixels: 'int,\n      height_in_pixels: 'int,\n      origin_x: 'int,\n      origin_y: 'int,\n      fill: 'bin,\n    ]\n",
+        );
+    }
+
+    #[test]
+    fn a_wide_pattern_breaks_its_field_list() {
+        // Breaking the pattern is the last resort — a chain gap goes first — so this one has no
+        // gap to give.
+        assert_formats(
+            "#{ Something[alpha: aaaaaaaaaa, beta: bbbbbbbbbb, gamma: gggggggggg, delta: dddddddddd, epsilon: eeeeeeeeee] = source }",
+            "#{\n  Something[\n    alpha: aaaaaaaaaa,\n    beta: bbbbbbbbbb,\n    gamma: gggggggggg,\n    delta: dddddddddd,\n    epsilon: eeeeeeeeee,\n  ] = source\n}\n",
+        );
+    }
+
+    #[test]
+    fn a_wide_guard_lays_out_one_step_per_line() {
+        // Past the threshold the guard's steps each take a line, and the consequence follows the
+        // last of them — so the arm fits without the consequence having to blow its argument list
+        // apart to make room, which is all it could do while the guard was flattened.
+        assert_formats(
+            "#{ x ~> { __integer_compare__ [$, 48] ~> =(0 | 1); __integer_compare__ [$, 57] ~> =(-1 | 0) => __integer_subtract__ [$, 48] | other } }",
+            "#{\n  x ~> {\n    | __integer_compare__ [$, 48] ~> =(0 | 1)\n      __integer_compare__ [$, 57] ~> =(-1 | 0) => __integer_subtract__ [$, 48]\n    | other\n  }\n}\n",
+        );
+        // A guard that fits stays on one line even when the consequence does not: the consequence
+        // breaks itself rather than dragging the guard apart, indenting under the arm's content so
+        // its `]` lines up with the term that opened it.
+        assert_formats(
+            "#{ x ~> { =Cons[k, t] => [alpha_value, beta_value, gamma_value, delta_value, epsilon_value, zeta_value, eta_value] | other } }",
+            "#{\n  x ~> {\n    | =Cons[k, t] => [\n        alpha_value,\n        beta_value,\n        gamma_value,\n        delta_value,\n        epsilon_value,\n        zeta_value,\n        eta_value,\n      ]\n    | other\n  }\n}\n",
         );
     }
 
@@ -2133,7 +2473,7 @@ mod tests {
         // braces, so the continuation reads as a delimited body instead of dangling at the bar.
         assert_formats(
             "f = #'t { =Cons[k, t] => dict ~> put_entry ~ ~> normalise ~ ~> rebalance ~ ~> recount ~ ~> settle ~ ~> finish ~ | =Nil => dict }",
-            "f = #'t {\n  | =Cons[k, t] => {\n    dict\n    ~> put_entry ~ ~> normalise ~ ~> rebalance ~ ~> recount ~ ~> settle ~ ~> finish ~\n  }\n  | =Nil => dict\n}\n",
+            "f = #'t {\n  | =Cons[k, t] => {\n    dict\n    ~> put_entry ~\n    ~> normalise ~\n    ~> rebalance ~\n    ~> recount ~\n    ~> settle ~\n    ~> finish ~\n  }\n  | =Nil => dict\n}\n",
         );
         // A short consequence stays bare (it does not break).
         assert_formats(
@@ -2384,19 +2724,35 @@ mod tests {
             .join("std")
     }
 
+    /// Every `.qv` under `dir`, recursively — the standard library's largest modules live in
+    /// subdirectories (`html/live.qv`, `http/server.qv`), and they exercise the printer hardest.
+    fn source_files(dir: &Path, files: &mut Vec<PathBuf>) {
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read std dir {dir:?}: {e:?}"));
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                source_files(&path, files);
+            } else if path.extension().is_some_and(|ext| ext == "qv") {
+                files.push(path);
+            }
+        }
+    }
+
     #[test]
     fn idempotent_over_std() {
         let dir = std_dir();
-        let mut files: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("read std dir {dir:?}: {e:?}"))
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "qv"))
-            .collect();
+        let mut files = Vec::new();
+        source_files(&dir, &mut files);
         files.sort();
         assert!(!files.is_empty(), "expected std/*.qv files in {dir:?}");
         for path in files {
             let source = std::fs::read_to_string(&path).unwrap();
-            let label = path.file_name().unwrap().to_string_lossy().to_string();
+            let label = path
+                .strip_prefix(&dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
             assert_idempotent(&source, &label);
         }
     }

@@ -45,26 +45,24 @@ line_step = #['state, '%str] {
       | State[blocks: bs, cur: Nil]
     }
     | =State[blocks: bs, cur: Cur[label: label, body: body]] => {
-        | end_label line ~> =('%str)end => {
-          | end ~> =&label; Str[body] ~> %bin.from_base64 ~ ~> =('bin)der => State[
+      | end_label line ~> =('%str)end => {
+        | end ~> =&label
+          Str[body] ~> %bin.from_base64 ~ ~> =('bin)der => State[
             blocks: Cons[[label: label, der: der], bs],
             cur: Nil,
           ]
-          | Bad
-        }
-        | State[
-          blocks: bs,
-          cur: Cur[label: label, body: %bin.concat [body, line.0]],
-        ]
+        | Bad
       }
+      | State[blocks: bs, cur: Cur[label: label, body: %bin.concat [body, line.0]]]
+    }
   }
 }
 
 parse = #'%str {
-  %str.split [
-    $,
-    "\n",
-  ] ~> %iter.fold [~, State[blocks: Nil, cur: Nil], line_step] ~> =State[blocks: bs, cur: Nil]
+  %str.split [$, "\n"]
+  ~> %iter.fold [~, State[blocks: Nil, cur: Nil], line_step]
+  ~> =State[blocks: bs, cur: Nil]
+
   %list.reverse bs
 }
 

@@ -36,9 +36,7 @@ open = #'%url {
   $scheme ~> {
     | ="http" => sock
     | ="https" => %tls.attach [socket: sock, hostname: $host]
-    | [] ~> {
-      :error IoError[kind: Other, message: "unsupported scheme: {$scheme}"]
-    }
+    | [] ~> { :error IoError[kind: Other, message: "unsupported scheme: {$scheme}"] }
   }
 }
 

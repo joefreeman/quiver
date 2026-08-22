@@ -22,10 +22,8 @@ lower_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
     | {
       b = %bin.get_byte [$data, $pos]
       b2 = {
-        | __integer_compare__ [b, 65] ~> =(0 | 1); __integer_compare__ [b, 90] ~> =(-1 | 0) => __integer_add__ [
-          b,
-          32,
-        ]
+        | __integer_compare__ [b, 65] ~> =(0 | 1)
+          __integer_compare__ [b, 90] ~> =(-1 | 0) => __integer_add__ [b, 32]
         | b
       }
       ^ [$data, __integer_add__ [$pos, 1], $len, %bin.append [$acc, b2, 1]]
@@ -80,7 +78,10 @@ split_authority = #[(data): 'bin, (start): 'int, (end): 'int] {
   {
     | __integer_compare__ [ci, $end] ~> =(0 | 1) => [host, 0]
     | {
-      %bin.slice [$data, __integer_add__ [ci, 1], $end] ~> Str[~] ~> %str.parse_int ~ ~> =('int)p
+      %bin.slice [$data, __integer_add__ [ci, 1], $end]
+      ~> Str[~]
+      ~> %str.parse_int ~
+      ~> =('int)p
 
       __integer_compare__ [p, 0] ~> =(0 | 1)
       [host, p]
@@ -117,15 +118,17 @@ parse = #'%str {
   // query (after `?`, up to `#`) and fragment (after `#`)
   qend = scan_to [u, pend, len, <23>]
   query = {
-    | __integer_compare__ [pend, len] ~> =-1; [u, pend] ~> %bin.get_byte ~ ~> =63 => %bin.slice [u, __integer_add__ [pend, 1], qend] ~> Str[
-      ~,
-    ]
+    | __integer_compare__ [pend, len] ~> =-1
+      [u, pend] ~> %bin.get_byte ~ ~> =63 => %bin.slice [u, __integer_add__ [pend, 1], qend] ~> Str[
+        ~,
+      ]
     | ""
   }
   fragment = {
-    | __integer_compare__ [qend, len] ~> =-1; [u, qend] ~> %bin.get_byte ~ ~> =35 => %bin.slice [u, __integer_add__ [qend, 1], len] ~> Str[
-      ~,
-    ]
+    | __integer_compare__ [qend, len] ~> =-1
+      [u, qend] ~> %bin.get_byte ~ ~> =35 => %bin.slice [u, __integer_add__ [qend, 1], len] ~> Str[
+        ~,
+      ]
     | ""
   }
 
@@ -146,11 +149,8 @@ authority = #' {
 directory = #'%str {
   =Str[p]
   {
-    | last_index [
-        p,
-        47,
-        __integer_subtract__ [%bin.length p, 1],
-      ] ~> =('int)i => %bin.slice [p, 0, __integer_add__ [i, 1]] ~> Str[~]
+    | last_index [p, 47, __integer_subtract__ [%bin.length p, 1]]
+      ~> =('int)i => %bin.slice [p, 0, __integer_add__ [i, 1]] ~> Str[~]
     | "/"
   }
 }
@@ -191,9 +191,7 @@ directory = #'%str {
       | starts_with? [r, <23>] => $base[..., fragment: %bin.slice [r, 1, %bin.length r] ~> Str[~]]
       | %bin.length r ~> =0 => $base
       // Anything else is relative to the base path's directory.
-      | {
-        parse "{$base.scheme}://{authority $base}{directory $base.path}{$ref}"
-      }
+      | parse "{$base.scheme}://{authority $base}{directory $base.path}{$ref}"
     }
   },
 ]

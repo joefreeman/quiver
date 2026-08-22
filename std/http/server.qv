@@ -42,7 +42,8 @@ plain = #[(status): 'int, (body): '%str] {
 
 // Whether the connection should be kept open after answering the request.
 keep_alive? = #'request {
-  | %http.header [$headers, "connection"] ~> =Str[cb]; %http.lower Str[cb] ~> ="close" => []
+  | %http.header [$headers, "connection"] ~> =Str[cb]
+    %http.lower Str[cb] ~> ="close" => []
   | $version ~> ="HTTP/1.1" => Ok
   | []
 }
@@ -78,12 +79,11 @@ conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
           // with the upgrade handler, auto-closing a socket it leaves open. Any
           // bytes already read past the request seed the connection's buffer.
           | %http.header [req.headers, "sec-websocket-key"] ~> =Str[k] => {
-              __tcp_socket_write__ [$sock, %http/websocket.handshake_response Str[k]]
-              %http/websocket.conn [$sock, rest] ~> wh ~
-            }
+            __tcp_socket_write__ [$sock, %http/websocket.handshake_response Str[k]]
+            %http/websocket.conn [$sock, rest] ~> wh ~
+          }
           | {
-            out =
-              plain [400, "Bad Request"] ~> %http.serialize_response ~
+            out = plain [400, "Bad Request"] ~> %http.serialize_response ~
 
             __tcp_socket_write__ [$sock, out]
             __tcp_socket_close__ $sock
@@ -96,13 +96,13 @@ conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
           }
           resp2 = {
             | req.method ~> =HEAD => resp[
-              ...,
-              headers: %list.prepend [
-                resp.headers,
-                ["content-length", %bin.length resp.body ~> %str.from_int ~],
-              ],
-              body: <>,
-            ]
+                ...,
+                headers: %list.prepend [
+                  resp.headers,
+                  ["content-length", %bin.length resp.body ~> %str.from_int ~],
+                ],
+                body: <>,
+              ]
             | resp
           }
           __tcp_socket_write__ [$sock, %http.serialize_response resp2]
@@ -144,8 +144,7 @@ serve = #[port: 'int, handler: 'handler, tls: ('tls | []) = []] {
   :doc "Serves HTTP on the port, one process per connection, each request answered by the handler (a nil result becomes a 500). With `tls:` ([cert, key] as %tls.accept takes them) each connection is upgraded first, serving HTTPS. Blocks forever; nil (with :error) if the listen or an accept failed."
   =[port: p, handler: h, tls: t]
 
-  p
-  ~> __tcp_listen__ [~, 128] ~> =(\TcpListener)listener
+  p ~> __tcp_listen__ [~, 128] ~> =(\TcpListener)listener
 
   accept_loop [listener, h, t]
 }
@@ -153,21 +152,13 @@ serve = #[port: 'int, handler: 'handler, tls: ('tls | []) = []] {
 html = #<'e>'%html<'e> {
   :doc "A 200 text/html response of the rendered tree (no doctype — see `page`)."
   %html.render $ ~> =Str[b]
-  Response[
-    status: 200,
-    headers: %list{ ["content-type", "text/html; charset=utf-8"] },
-    body: b,
-  ]
+  Response[status: 200, headers: %list{ ["content-type", "text/html; charset=utf-8"] }, body: b]
 }
 
 page = #<'e>'%html<'e> {
   :doc "A 200 text/html response of the doctype-prefixed rendered tree — a whole page."
   %html.page $ ~> =Str[b]
-  Response[
-    status: 200,
-    headers: %list{ ["content-type", "text/html; charset=utf-8"] },
-    body: b,
-  ]
+  Response[status: 200, headers: %list{ ["content-type", "text/html; charset=utf-8"] }, body: b]
 }
 
 text = #'%str {

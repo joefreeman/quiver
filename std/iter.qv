@@ -55,8 +55,7 @@ drop = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (n): 'int] {
     | {
       it [] ~> =[_, next]
 
-      n
-      ~> %num.sub [~, 1] ~> self [self, next, ~] ~> ^~ []
+      n ~> %num.sub [~, 1] ~> self [self, next, ~] ~> ^~ []
     }
   }
 }
@@ -81,7 +80,12 @@ drop_while = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (pred): #'t -> ('
   }
 }
 
-flat_map = #<'t, 'u>[(self): #^ -> 'thunk<'u>, (source): 'thunk<'t>, (f): #'t -> '<'u>, (current): 'thunk<'u>] {
+flat_map = #<'t, 'u>[
+  (self): #^ -> 'thunk<'u>,
+  (source): 'thunk<'t>,
+  (f): #'t -> '<'u>,
+  (current): 'thunk<'u>,
+] {
   self = $self
   source = $source
   f = $f
@@ -305,6 +309,8 @@ intersperse = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (sep): 't] {
     // so bind the field locally.
     $iter ~> =Iter[r]
     sep = $sep
-    #[] { r [] ~> =[first, rest]; [first, intersperse [intersperse, rest, sep]] } ~> Iter[~]
+
+    #[] { r [] ~> =[first, rest]; [first, intersperse [intersperse, rest, sep]] }
+    ~> Iter[~]
   },
 ]

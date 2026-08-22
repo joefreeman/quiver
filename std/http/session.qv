@@ -36,7 +36,9 @@ get = #[(req): '%http, (key): 'bin] {
 
   %bin.slice [raw, 0, dot] ~> %bin.from_hex Str[~] ~> =('bin)payload
 
-  %bin.slice [raw, __integer_add__ [dot, 1], %bin.length raw] ~> %bin.from_hex Str[~] ~> =('bin)mac
+  %bin.slice [raw, __integer_add__ [dot, 1], %bin.length raw]
+  ~> %bin.from_hex Str[~]
+  ~> =('bin)mac
 
   const_eq? [%hash.hmac_sha256 [$key, payload], mac]
   %http.form_decode payload

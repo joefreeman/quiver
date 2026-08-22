@@ -54,7 +54,9 @@ between = #[(min): 'int, (max): 'int] {
   :doc "A uniform random integer from lo to hi inclusive; nil when lo > hi."
   __integer_compare__ [$min, $max] ~> =(-1 | 0)
 
-  __integer_add__ [__integer_subtract__ [$max, $min], 1] ~> below ~ ~> =('int)r
+  __integer_add__ [__integer_subtract__ [$max, $min], 1]
+  ~> below ~
+  ~> =('int)r
 
   __integer_add__ [$min, r]
 }

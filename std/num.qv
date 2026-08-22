@@ -44,13 +44,10 @@ reduce = #'rational {
   =Rational[n, d]
   {
     | __integer_compare__ [d, 0] ~> =-1 => ^ Rational[
-      __integer_multiply__ [n, -1],
-      __integer_multiply__ [d, -1],
-    ]
-    | {
-      g = __integer_gcd__ [n, d]
-      Rational[__integer_divide__ [n, g], __integer_divide__ [d, g]]
-    }
+        __integer_multiply__ [n, -1],
+        __integer_multiply__ [d, -1],
+      ]
+    | { g = __integer_gcd__ [n, d]; Rational[__integer_divide__ [n, g], __integer_divide__ [d, g]] }
   }
 }
 
@@ -202,10 +199,7 @@ surd_div = #[(x): ', (y): '] {
   {
     | rsign dd ~> =0 => []
     | build [
-      rquot [
-        rsub [rmul [a1, a2], rmul [rmul [b1, b2], Rational[n, 1]]],
-        dd,
-      ],
+      rquot [rsub [rmul [a1, a2], rmul [rmul [b1, b2], Rational[n, 1]]], dd],
       rquot [rsub [rmul [b1, a2], rmul [a1, b2]], dd],
       n,
     ]
@@ -241,16 +235,20 @@ to_int = #'opt {
     ar = to_rational a
     br = to_rational b
     ssign [ar, br, n] ~> =sgn
+
     {
       | __integer_compare__ [sgn, 0] ~> =-1 => [rneg ar, rneg br]
       | [ar, br]
-    } ~> =[Rational[pa, qa], Rational[pb, qb]]
+    }
+    ~> =[Rational[pa, qa], Rational[pb, qb]]
+
     p = __integer_multiply__ [pa, qb]
     q = __integer_multiply__ [pb, qa]
     d = __integer_multiply__ [qa, qb]
 
     s =
-      __integer_multiply__ [__integer_multiply__ [q, q], n] ~> __integer_sqrt__ ~
+      __integer_multiply__ [__integer_multiply__ [q, q], n]
+      ~> __integer_sqrt__ ~
 
     nlo = {
       | __integer_compare__ [q, 0] ~> =1 => __integer_add__ [p, s]
@@ -382,9 +380,9 @@ d_term = #'%meta.cb {
     =st
     cb [st.data, st.pos] ~> {
       | =('int)end => [
-        Unquote[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
-        st[..., pos: end],
-      ]
+          Unquote[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
+          st[..., pos: end],
+        ]
       | %parse.fail [st.pos, "an expression"]
     }
   }
@@ -398,7 +396,11 @@ d_expr_of = #'%parse.p<'dexpr> {
 // The factor grammar, self-passed (together with the host-term operand parser) to tie
 // the factor↔parenthesized-expression recursion. Alternative order matters: the
 // dialect's own parens and number literals first, the host term last.
-d_factor_step = #[(self): #^ -> (['dexpr, '%parse] | []), (term): '%parse.p<'dexpr>, (st): '%parse] {
+d_factor_step = #[
+  (self): #^ -> (['dexpr, '%parse] | []),
+  (term): '%parse.p<'dexpr>,
+  (st): '%parse,
+] {
   // The nested factor literal closes over `self` and `term` (an inner `$` would be its
   // own parameter), so bind the fields locally — by reference, as callables.
   self = $self
@@ -576,4 +578,5 @@ num_dialect = #(content: Str['bin], term: '%meta.cb) {
     :doc "Whether the first number is at least the second."
     compare ~ ~> { =0 | =1 }; Ok
   },
-] ~> { :dialect num_dialect }
+]
+~> { :dialect num_dialect }

@@ -201,8 +201,9 @@ pub fn print(doc: &Doc, width: usize) -> String {
 /// Lay out `doc` entirely flat onto one line: every `Line` is a space, every `SoftLine`/flat
 /// `IfBreak` collapses. **Callers must first check [`forces_break`] is false** — a doc that forces a
 /// break carries a comment or hard line that cannot legally sit on one line, and flattening it would
-/// silently comment out the following code. Used to keep a chain's head (or a guard condition) on a
-/// single line so a large trailing container does not push it onto `~>` lines.
+/// silently comment out the following code. Used where a construct has no vertical form to fall
+/// back on — an interpolation hole inside a string, a guard condition that a long consequence must
+/// not push onto `~>` lines.
 pub fn flatten(doc: &Doc) -> String {
     let mut out = String::new();
     let mut stack: Vec<&Doc> = vec![doc];
@@ -256,6 +257,13 @@ fn newline(out: &mut String, indent: usize) -> usize {
 /// Whether `group_inner` (laid out flat) plus the continuation `rest` fits in `remaining` columns
 /// before the next line break. Reaching a break (a `Line`/`SoftLine` already in break mode, or a
 /// `HardLine`) ends the measured line, so it fits.
+///
+/// A group nested in the *continuation* inherits the broken mode of the frame it was stacked under,
+/// so measuring stops at its first break opportunity rather than counting its whole flat width. That
+/// is what lets a term keep its own line when what follows it is a container that will open
+/// vertically: only the container's opening delimiter lands on the measured line. Groups inside
+/// `group_inner` itself start from `Flat` and stay flat, so the group being tested is still measured
+/// as one line.
 fn fits(remaining: usize, indent: usize, group_inner: &Doc, rest: &[Frame]) -> bool {
     let mut remaining = remaining as isize;
     // The group's own contents, processed flat; once exhausted we continue into `rest` (the
@@ -297,11 +305,7 @@ fn fits(remaining: usize, indent: usize, group_inner: &Doc, rest: &[Frame]) -> b
                 ));
             }
             Doc::Group(inner, should_break) => {
-                let mode = if *should_break {
-                    Mode::Break
-                } else {
-                    Mode::Flat
-                };
+                let mode = if *should_break { Mode::Break } else { mode };
                 local.push((indent, mode, inner));
             }
         }

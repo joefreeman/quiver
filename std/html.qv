@@ -57,7 +57,11 @@
 'node<'d> =
   | Raw['%str]
   | Text['%str]
-  | Element[tag: '%str, attrs: (Nil | Cons[['%str, 'attr_val<'d>], ^1]), children: (Nil | Cons[^, ^1])]
+  | Element[
+      tag: '%str,
+      attrs: (Nil | Cons[['%str, 'attr_val<'d>], ^1]),
+      children: (Nil | Cons[^, ^1]),
+    ]
   | Fragment[(Nil | Cons[^, ^1])]
 
 '<'d> = 'node<'d>
@@ -153,7 +157,8 @@ digit? = #'int {
 }
 
 letter? = #'int {
-  | __integer_compare__ [$, 65] ~> =(0 | 1); __integer_compare__ [$, 90] ~> =(-1 | 0) => $
+  | __integer_compare__ [$, 65] ~> =(0 | 1)
+    __integer_compare__ [$, 90] ~> =(-1 | 0) => $
   | lower? $
 }
 
@@ -227,10 +232,12 @@ tag_name = #'%parse {
   =st
   {
     | peek_at st ~> =('int)b; lower? b => { tag_rest st ~> =[bytes, st2]; [Str[bytes], st2] }
-    | peek_at st ~> =('int)b; __integer_compare__ [b, 65] ~> =(0 | 1); __integer_compare__ [b, 90] ~> =(-1 | 0) => %parse.fail_in [
-      st,
-      "a lowercase tag name (capitalized tags are reserved for components)",
-    ]
+    | peek_at st ~> =('int)b
+      __integer_compare__ [b, 65] ~> =(0 | 1)
+      __integer_compare__ [b, 90] ~> =(-1 | 0) => %parse.fail_in [
+        st,
+        "a lowercase tag name (capitalized tags are reserved for components)",
+      ]
     | %parse.fail_in [st, "a tag name"]
   }
 }
@@ -258,19 +265,17 @@ attr_value_p = #[(cb): '%meta.cb, (state): '%parse] {
       qstart = __integer_add__ [st.pos, 1]
       {
         | lit_end [st.data, qstart, st.len] ~> =('int)endq => [
-          Lit[Str[%bin.slice [st.data, qstart, endq]]],
-          st[..., pos: __integer_add__ [endq, 1]],
-        ]
+            Lit[Str[%bin.slice [st.data, qstart, endq]]],
+            st[..., pos: __integer_add__ [endq, 1]],
+          ]
         | %parse.fail_in [st, "'\"' (unterminated attribute value)"]
       }
     }
     | peek_at st ~> =123 => $cb [st.data, st.pos] ~> {
       | =('int)end => [
-        AHole[
-          [offset: st.pos, length: __integer_subtract__ [end, st.pos]],
-        ],
-        st[..., pos: end],
-      ]
+          AHole[[offset: st.pos, length: __integer_subtract__ [end, st.pos]]],
+          st[..., pos: end],
+        ]
       | %parse.fail [st.pos, "an expression"]
     }
     | %parse.fail_in [st, "'\"' or '\{' after '='"]
@@ -283,9 +288,9 @@ attr_value_p = #[(cb): '%meta.cb, (state): '%parse] {
 attr_mods_p = #[(cb): '%meta.cb, (state): '%parse] {
   | peek_at $state ~> =91 => $cb [$state.data, $state.pos] ~> {
     | =('int)end => [
-      [offset: $state.pos, length: __integer_subtract__ [end, $state.pos]],
-      $state[..., pos: end],
-    ]
+        [offset: $state.pos, length: __integer_subtract__ [end, $state.pos]],
+        $state[..., pos: end],
+      ]
     | %parse.fail [$state.pos, "an attribute modifier tuple"]
   }
   | [[], $state]
@@ -303,27 +308,21 @@ attrs_loop = #[(cb): '%meta.cb, (state): '%parse, (acc): 'pattrs] {
       {
         | seen? [$acc, name] => %parse.fail [st.pos, "a unique attribute name"]
         | reserved? name => %parse.fail [
-          st.pos,
-          "an attribute name ('data-q' is reserved for template instrumentation)",
-        ]
+            st.pos,
+            "an attribute name ('data-q' is reserved for template instrumentation)",
+          ]
         | Ok
       }
       attr_mods_p [$cb, st2] ~> =[mods, st3]
       %parse.ws st3 ~> =[_, st4]
       {
         | peek_at st4 ~> =61 => {
-          attr_value_p [$cb, st4[..., pos: __integer_add__ [st4.pos, 1]]] ~> =[v, st5]
-          ^ [
-            $cb,
-            st5,
-            Cons[[name: name, pos: st.pos, mods: mods, value: v], $acc],
-          ]
+          attr_value_p [$cb, st4[..., pos: __integer_add__ [st4.pos, 1]]]
+          ~> =[v, st5]
+
+          ^ [$cb, st5, Cons[[name: name, pos: st.pos, mods: mods, value: v], $acc]]
         }
-        | ^ [
-          $cb,
-          st4,
-          Cons[[name: name, pos: st.pos, mods: mods, value: Flag], $acc],
-        ]
+        | ^ [$cb, st4, Cons[[name: name, pos: st.pos, mods: mods, value: Flag], $acc]]
       }
     }
     | [%list.reverse $acc, st]
@@ -350,29 +349,32 @@ void? = #'%str {
 drop_ws = #'pfxs { %list.drop_while [~, #{ =[_, Ok]; $ }] }
 
 // Trim whitespace-only text nodes from both ends of the root node list.
-trim_root = #'pfxs {
-  drop_ws ~ ~> %list.reverse ~ ~> drop_ws ~ ~> %list.reverse ~
-}
+trim_root = #'pfxs { drop_ws ~ ~> %list.reverse ~ ~> drop_ws ~ ~> %list.reverse ~ }
 
 // The nodes of a flagged node list, in order.
 strip = #'pfxs { %list.map [~, #{ $0 }] }
 
 // The node-list loop: elements, holes, and text runs, in source order, stopping before a
 // close tag (`</`) or end of input. Self-passed to tie the element↔children recursion.
-nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): '%parse, (acc): 'pfxs] {
+nodes_loop = #[
+  (self): #^ -> (['pfxs, '%parse] | []),
+  (cb): '%meta.cb,
+  (state): '%parse,
+  (acc): 'pfxs,
+] {
   {
     | peek_at $state ~> =('int)b => {
       | b ~> =60 => {
         | peek_at2 $state ~> =47 => [%list.reverse $acc, $state]
         | peek_at2 $state ~> =33 => {
-          | at_comment? $state => comment_end [$state.data, __integer_add__ [$state.pos, 4], $state.len] ~> {
-            | =('int)after => ^ [$self, $cb, $state[..., pos: after], $acc]
-            | %parse.fail [$state.pos, "'-->'"]
+          | at_comment? $state => {
+            comment_end [$state.data, __integer_add__ [$state.pos, 4], $state.len]
+            ~> {
+              | =('int)after => ^ [$self, $cb, $state[..., pos: after], $acc]
+              | %parse.fail [$state.pos, "'-->'"]
+            }
           }
-          | %parse.fail [
-            $state.pos,
-            "a comment ('<!--'; the doctype comes from html.page)",
-          ]
+          | %parse.fail [$state.pos, "a comment ('<!--'; the doctype comes from html.page)"]
         }
         | {
           // An element: `<` tag attrs (`/>` | `>` children `</` tag `>`).
@@ -380,18 +382,19 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
           tag_name st1 ~> =[tag, st2]
           {
             | tag ~> =("script" | "style") => %parse.fail [
-              st1.pos,
-              "a supported tag (inline script/style is not supported)",
-            ]
+                st1.pos,
+                "a supported tag (inline script/style is not supported)",
+              ]
             | Ok
           }
           attrs_loop [$cb, st2, Nil] ~> =[alist, st3]
+
           {
             | peek_at st3 ~> =47 => {
               | peek_at2 st3 ~> =62 => [
-                PElem[tag: tag, attrs: alist, children: Nil],
-                st3[..., pos: __integer_add__ [st3.pos, 2]],
-              ]
+                  PElem[tag: tag, attrs: alist, children: Nil],
+                  st3[..., pos: __integer_add__ [st3.pos, 2]],
+                ]
               | %parse.fail_in [st3, "'/>'"]
             }
             | peek_at st3 ~> =62 => {
@@ -416,9 +419,9 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
                       %parse.ws st7 ~> =[_, st8]
                       {
                         | peek_at st8 ~> =62 => [
-                          PElem[tag: tag, attrs: alist, children: kids],
-                          st8[..., pos: __integer_add__ [st8.pos, 1]],
-                        ]
+                            PElem[tag: tag, attrs: alist, children: kids],
+                            st8[..., pos: __integer_add__ [st8.pos, 1]],
+                          ]
                         | %parse.fail_in [st8, "'>'"]
                       }
                     }
@@ -432,7 +435,9 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
               }
             }
             | %parse.fail_in [st3, "'>'"]
-          } ~> =[node, stn]
+          }
+          ~> =[node, stn]
+
           ^ [$self, $cb, stn, Cons[[node, []], $acc]]
         }
       }
@@ -459,11 +464,7 @@ nodes_loop = #[(self): #^ -> (['pfxs, '%parse] | []), (cb): '%meta.cb, (state): 
 // A hole's span applied to one of this module's normalizers. Emitted `Call`s name their
 // module explicitly, so the IR stays valid when a dialect in *another* module returns it.
 emit_hole = #[(member): Str['bin], (span): 'span] {
-  Call[
-    module: "html",
-    member: $member,
-    arg: Unquote[offset: $span.offset, length: $span.length],
-  ]
+  Call[module: "html", member: $member, arg: Unquote[offset: $span.offset, length: $span.length]]
 }
 
 // An attribute value's construction expression.
@@ -476,10 +477,7 @@ emit_attr_val = #'pattr_val {
 
 // Attribute pairs as a list of `[name, value]` tuple expressions.
 emit_attrs = #'pattrs {
-  %list.map [
-    ~,
-    #{ =(name: n, value: v); %meta.pair2 [n, emit_attr_val v] },
-  ]
+  %list.map [~, #{ =(name: n, value: v); %meta.pair2 [n, emit_attr_val v] }]
 }
 
 // Node-list expressions, in order; self-passed to recurse into element children.
@@ -491,18 +489,18 @@ emit_list = #[(self): #^ -> 'xs, (items): 'pnodes, (acc): 'xs] {
         | =PText[b] => Tuple[name: "Raw", fields: Cons[Str[b], Nil]]
         | =PHole[offset: o, length: l] => emit_hole ["child", [offset: o, length: l]]
         | =PElem[tag: t, attrs: alist, children: kids] => Tuple[
-          name: "Element",
-          fields: Cons[
-            Labeled[label: "tag", value: t],
-            Cons[
-              Labeled[label: "attrs", value: emit_attrs alist ~> %meta.list_expr ~],
+            name: "Element",
+            fields: Cons[
+              Labeled[label: "tag", value: t],
               Cons[
-                Labeled[label: "children", value: $self [$self, kids, Nil] ~> %meta.list_expr ~],
-                Nil,
+                Labeled[label: "attrs", value: emit_attrs alist ~> %meta.list_expr ~],
+                Cons[
+                  Labeled[label: "children", value: $self [$self, kids, Nil] ~> %meta.list_expr ~],
+                  Nil,
+                ],
               ],
             ],
-          ],
-        ]
+          ]
         // Unreachable: the arms above cover every variant, but exhaustiveness can't see
         // through the inner recursive union (see render_list).
         | Tuple[name: Nil, fields: Nil]
@@ -545,13 +543,12 @@ instrument_attrs = #[(items): 'pattrs, (ist): 'ist, (elem): 'int] {
     | =Cons[(name: Str[n], value: v), rest] => {
       ist2 = v ~> {
         | =Lit[Str[lv]] => $ist[
-          ...,
-          cur: %bin.concat [%bin.append [$ist.cur, 32, 1], n] ~> %bin.concat [~, <3d22>] ~> esc_attr [lv, 0, %bin.length lv, ~] ~> %bin.append [
-            ~,
-            34,
-            1,
-          ],
-        ]
+            ...,
+            cur: %bin.concat [%bin.append [$ist.cur, 32, 1], n]
+            ~> %bin.concat [~, <3d22>]
+            ~> esc_attr [lv, 0, %bin.length lv, ~]
+            ~> %bin.append [~, 34, 1],
+          ]
         | =Flag => $ist[..., cur: %bin.concat [%bin.append [$ist.cur, 32, 1], n]]
         // A hole's rendered form — ` name="v"`, bare ` name`, or nothing — is its own to
         // produce, so its cut excludes the whole attribute. The entry reuses the tree's
@@ -610,11 +607,11 @@ instrument_list = #[(self): #^ -> 'ist, (items): 'pnodes, (ist): 'ist] {
           e_ix = $ist.ei
           open0 = %bin.concat [%bin.append [$ist.cur, 60, 1], t]
           opened = {
-            | has_hole? alist => %bin.concat [open0, " data-q=\"" ~> .0] ~> %bin.concat [~, %str.from_int e_ix ~> .0] ~> %bin.append [
-              ~,
-              34,
-              1,
-            ]
+            | has_hole? alist => {
+              %bin.concat [open0, " data-q=\"" ~> .0]
+              ~> %bin.concat [~, %str.from_int e_ix ~> .0]
+              ~> %bin.append [~, 34, 1]
+            }
             | open0
           }
           ist1 = instrument_attrs [
@@ -658,8 +655,7 @@ rewrite_attr_list = #[(items): 'pattrs, (f): 'apolicy, (acc): 'pattrs] {
   $items ~> {
     | =Nil => %list.reverse $acc
     | =Cons[attr, rest] => {
-      $f attr ~> =('pattrs)as
-      ^ [rest, $f, %list.fold [as, $acc, #{ Cons[$1, $0] }]]
+      $f attr ~> =('pattrs)as; ^ [rest, $f, %list.fold [as, $acc, #{ Cons[$1, $0] }]]
     }
   }
 }
@@ -670,15 +666,15 @@ rewrite_list = #[(self): #^ -> ('pnodes | []), (items): 'pnodes, (f): 'apolicy, 
   $items ~> {
     | =Nil => %list.reverse $acc
     | =Cons[node, rest] => {
-      node
-      ~> {
+      node ~> {
         | =PElem[tag: t, attrs: alist, children: kids] => {
           rewrite_attr_list [alist, $f, Nil] ~> =('pattrs)alist2
           $self [$self, kids, $f, Nil] ~> =('pnodes)kids2
           PElem[tag: t, attrs: alist2, children: kids2]
         }
         | node
-      } ~> =('pnode)node2
+      }
+      ~> =('pnode)node2
 
       ^ [$self, rest, $f, Cons[node2, $acc]]
     }
@@ -753,18 +749,19 @@ render_attrs = #<'d>[(items): 'attrs<'d>, (acc): 'bin] {
       acc2 = v ~> {
         | =[] => $acc
         | =Ok => %bin.concat [%bin.append [$acc, 32, 1], n]
-        | =Str[vb] => %bin.concat [%bin.append [$acc, 32, 1], n] ~> %bin.concat [~, <3d22>] ~> esc_attr [vb, 0, %bin.length vb, ~] ~> %bin.append [
-          ~,
-          34,
-          1,
-        ]
+        | =Str[vb] => {
+          %bin.concat [%bin.append [$acc, 32, 1], n]
+          ~> %bin.concat [~, <3d22>]
+          ~> esc_attr [vb, 0, %bin.length vb, ~]
+          ~> %bin.append [~, 34, 1]
+        }
         | =Data[payload] => {
           %data.encode payload ~> =Str[eb]
-          %bin.concat [%bin.append [$acc, 32, 1], n] ~> %bin.concat [~, <3d22>] ~> esc_attr [eb, 0, %bin.length eb, ~] ~> %bin.append [
-            ~,
-            34,
-            1,
-          ]
+
+          %bin.concat [%bin.append [$acc, 32, 1], n]
+          ~> %bin.concat [~, <3d22>]
+          ~> esc_attr [eb, 0, %bin.length eb, ~]
+          ~> %bin.append [~, 34, 1]
         }
       }
       ^ [rest, acc2]
@@ -782,17 +779,17 @@ render_list = #<'e>[(self): #^ -> 'bin, (items): 'nodes<'e>, (acc): 'bin] {
         | =Text[Str[b]] => esc_text [b, 0, %bin.length b, $acc]
         | =Fragment[kids] => $self [$self, kids, $acc]
         | =Element[tag: Str[t], attrs: attrs, children: kids] => {
-            opened = %bin.concat [%bin.append [$acc, 60, 1], t] ~> render_attrs [attrs, ~]
+          opened = %bin.concat [%bin.append [$acc, 60, 1], t] ~> render_attrs [attrs, ~]
 
-            {
-              | void? Str[t] => %bin.append [opened, 62, 1]
-              | {
-                inner = $self [$self, kids, %bin.append [opened, 62, 1]]
+          {
+            | void? Str[t] => %bin.append [opened, 62, 1]
+            | {
+              inner = $self [$self, kids, %bin.append [opened, 62, 1]]
 
-                %bin.concat [inner, <3c2f>] ~> %bin.concat [~, t] ~> %bin.append [~, 62, 1]
-              }
+              %bin.concat [inner, <3c2f>] ~> %bin.concat [~, t] ~> %bin.append [~, 62, 1]
             }
           }
+        }
         // Unreachable: the arms above cover every node variant, but exhaustiveness
         // can't see through the inner recursive union, so a catch-all keeps the
         // dispatch infallible (and the accumulator typed 'bin).

@@ -38,9 +38,9 @@ d_elem = #'%meta.cb {
     =st
     cb [st.data, st.pos] ~> {
       | =('int)end => [
-        Unquote[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
-        st[..., pos: end],
-      ]
+          Unquote[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
+          st[..., pos: end],
+        ]
       | %parse.fail [st.pos, "an expression"]
     }
   }
@@ -109,7 +109,9 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
   // failure. Over a pure source it is `collect` with a wider result type.
   try_collect: #<'t>'%iter<'t> {
     :doc "Collects an iterator that may fail into a list, or nil (carrying :error) if the source broke part-way."
-    %iter.try_fold [$, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }] ~> =('<'t>)xs
+    %iter.try_fold [$, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }]
+    ~> =('<'t>)xs
+
     reverse [xs, Nil]
   },
 
@@ -148,7 +150,10 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
     // The nested literal closes over `f` (an inner `$` would be its own parameter), so
     // bind the field locally — by reference, as a bare `$f` term would call it.
     f = $f
-    to_iter $list ~> %iter.flat_map [~, #{ f $ ~> to_iter ~ }] ~> from_iter ~
+
+    to_iter $list
+    ~> %iter.flat_map [~, #{ f $ ~> to_iter ~ }]
+    ~> from_iter ~
   },
 
   chain: #<'t>[(list): '<'t>, (with): '<'t>] {
@@ -205,4 +210,5 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
     :doc "Whether every element satisfies the predicate."
     to_iter $list ~> %iter.all? [~, $pred]
   },
-] ~> { :dialect list_dialect }
+]
+~> { :dialect list_dialect }

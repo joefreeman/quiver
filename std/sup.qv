@@ -86,10 +86,7 @@ seed = #[(specs): 'specs, (sup): @'down] {
 allow? = #[stamps: 'stamps, now: 'int, max: 'int, window: 'int] -> 'verdict {
   =[stamps: ts, now: now, max: m, window: w]
   cutoff = __integer_subtract__ [now, w]
-  recent = Cons[
-    now,
-    %list.filter [ts, #{ __integer_compare__ [~, cutoff] ~> =1; $ }],
-  ]
+  recent = Cons[now, %list.filter [ts, #{ __integer_compare__ [~, cutoff] ~> =1; $ }]]
   {
     | __integer_compare__ [%list.count recent, m] ~> =1 => Exceeded
     | Allowed[recent]

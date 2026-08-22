@@ -43,7 +43,10 @@
   | Unquote[offset: 'int, length: 'int]
   | Call[member: Str['bin], arg: ^]
   | Call[module: Str['bin], member: Str['bin], arg: ^]
-  | Tuple[name: (Nil | Str['bin]), fields: (Nil | Cons[(^ | Labeled[label: Str['bin], value: ^]), ^1])]
+  | Tuple[
+      name: (Nil | Str['bin]),
+      fields: (Nil | Cons[(^ | Labeled[label: Str['bin], value: ^]), ^1]),
+    ]
 
 // The context record a dialect function receives: the unescaped brace content, and the
 // host prefix-parsers — each takes the content bytes and a byte offset positioned
@@ -65,10 +68,7 @@ rev = #[(items): 'elist, (acc): 'elist] {
 build_rev = #[(items): 'elist, (acc): 'expr] {
   $items ~> {
     | =Nil => $acc
-    | =Cons[h, t] => ^ [
-      t,
-      Tuple[name: "Cons", fields: Cons[h, Cons[$acc, Nil]]],
-    ]
+    | =Cons[h, t] => ^ [t, Tuple[name: "Cons", fields: Cons[h, Cons[$acc, Nil]]]]
   }
 }
 

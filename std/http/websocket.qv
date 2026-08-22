@@ -23,12 +23,15 @@ accept_key = #'%str {
   :doc "The Sec-WebSocket-Accept value for a Sec-WebSocket-Key: base64(sha1(key ++ GUID))."
   =Str[k]
 
-  %bin.concat [k, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" ~> .0] ~> %hash.sha1 ~ ~> %bin.to_base64 ~
+  %bin.concat [k, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" ~> .0]
+  ~> %hash.sha1 ~
+  ~> %bin.to_base64 ~
 }
 
 handshake_response = #'%str {
   :doc "The 101 Switching Protocols bytes answering a handshake with the given Sec-WebSocket-Key."
-  "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept_key $}\r\n\r\n" ~> .0
+  "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept_key $}\r\n\r\n"
+  ~> .0
 }
 
 // XOR a payload with the repeating 4-byte mask (its own inverse). The repeated key
@@ -50,15 +53,16 @@ frame_head = #[(opcode): 'int, (n): 'int, (mask_bit): 'int] {
   b0 = __binary_append__ [<>, __integer_add__ [128, $opcode], 1]
   {
     | __integer_compare__ [$n, 126] ~> =-1 => __binary_append__ [
-      b0,
-      __integer_add__ [$mask_bit, $n],
-      1,
-    ]
-    | __integer_compare__ [$n, 65536] ~> =-1 => __binary_append__ [b0, __integer_add__ [$mask_bit, 126], 1] ~> __binary_append__ [
-      ~,
-      $n,
-      2,
-    ]
+        b0,
+        __integer_add__ [$mask_bit, $n],
+        1,
+      ]
+    | __integer_compare__ [$n, 65536] ~> =-1 => __binary_append__ [
+        b0,
+        __integer_add__ [$mask_bit, 126],
+        1,
+      ]
+      ~> __binary_append__ [~, $n, 2]
     | __binary_append__ [b0, __integer_add__ [$mask_bit, 127], 1] ~> __binary_append__ [~, $n, 8]
   }
 }
@@ -70,10 +74,9 @@ encode_frame = #[(opcode): 'int, (payload): 'bin] {
 
 encode_masked_frame = #[(opcode): 'int, (payload): 'bin, (key): 'bin] {
   :doc "One unfragmented client-to-server frame, masked with the 4-byte key — the client half of the codec."
-  frame_head [$opcode, %bin.length $payload, 128] ~> %bin.concat [~, $key] ~> %bin.concat [
-    ~,
-    apply_mask [$payload, $key],
-  ]
+  frame_head [$opcode, %bin.length $payload, 128]
+  ~> %bin.concat [~, $key]
+  ~> %bin.concat [~, apply_mask [$payload, $key]]
 }
 
 // The frame proper, once the payload length and mask offset are known.
@@ -111,15 +114,11 @@ parse_frame = #'bin {
       b0 = %bin.get_byte [$, 0]
       b1 = %bin.get_byte [$, 1]
       {
-        | __integer_modulo__ [
-            __integer_divide__ [b0, 16],
-            8,
-          ] ~> =(1 | 2 | 3 | 4 | 5 | 6 | 7) => Bad["nonzero RSV bits"]
+        | __integer_modulo__ [__integer_divide__ [b0, 16], 8]
+          ~> =(1 | 2 | 3 | 4 | 5 | 6 | 7) => Bad["nonzero RSV bits"]
         | __integer_compare__ [b1, 128] ~> =-1 => Bad["unmasked client frame"]
-        | __integer_modulo__ [
-            b0,
-            16,
-          ] ~> =(3 | 4 | 5 | 6 | 7 | 11 | 12 | 13 | 14 | 15) => Bad["reserved opcode"]
+        | __integer_modulo__ [b0, 16]
+          ~> =(3 | 4 | 5 | 6 | 7 | 11 | 12 | 13 | 14 | 15) => Bad["reserved opcode"]
         | {
           fin = __integer_divide__ [b0, 128]
           opcode = __integer_modulo__ [b0, 16]
@@ -183,10 +182,7 @@ recv = #' {
           __tcp_socket_close__ $sock
           [Close[code: 1006, reason: ""], $[..., buf: <>, part: Nil]]
         }
-        | {
-          $
-          ~> Conn[..., buf: %bin.concat [$buf, chunk]] ~> ^ ~
-        }
+        | $ ~> Conn[..., buf: %bin.concat [$buf, chunk]] ~> ^ ~
       }
     }
     | =Bad[r] => fail [$ ~> Conn[..., buf: <>, part: Nil], 1002, r]
@@ -203,10 +199,12 @@ recv = #' {
         | =Part[opcode: o, data: d] => {
           joined = %bin.concat [d, p]
           {
-            | __integer_compare__ [
-                %bin.length joined,
-                max_payload,
-              ] ~> =1 => $[..., buf: <>, part: Nil] ~> fail [~, 1009, "message too big"]
+            | __integer_compare__ [%bin.length joined, max_payload] ~> =1 => $[
+                ...,
+                buf: <>,
+                part: Nil,
+              ]
+              ~> fail [~, 1009, "message too big"]
             | fin ~> =0 => ^ $[..., buf: rest, part: Part[opcode: o, data: joined]]
             | [wrap_message [o, joined], $[..., buf: rest, part: Nil]]
           }
@@ -215,10 +213,10 @@ recv = #' {
       }
       | $part ~> {
         | =Part[opcode: _, data: _] => fail [
-          $[..., buf: <>, part: Nil],
-          1002,
-          "interleaved data frame",
-        ]
+            $[..., buf: <>, part: Nil],
+            1002,
+            "interleaved data frame",
+          ]
         | fin ~> =0 => ^ $[..., buf: rest, part: Part[opcode: op, data: p]]
         | [wrap_message [op, p], $[..., buf: rest, part: Nil]]
       }
@@ -254,38 +252,30 @@ drain = #[', 'messages] {
           joined = %bin.concat [d, p]
           {
             | __integer_compare__ [%bin.length joined, max_payload] ~> =1 => {
-                fail [Conn[sock: sock, buf: <>, part: Nil], 1009, "message too big"] ~> =[close, c2]
-                [%list.reverse Cons[close, acc], c2]
-              }
-            | fin ~> =0 => ^ [
-              Conn[sock: sock, buf: rest, part: Part[opcode: o, data: joined]],
-              acc,
-            ]
+              fail [Conn[sock: sock, buf: <>, part: Nil], 1009, "message too big"]
+              ~> =[close, c2]
+
+              [%list.reverse Cons[close, acc], c2]
+            }
+            | fin ~> =0 => ^ [Conn[sock: sock, buf: rest, part: Part[opcode: o, data: joined]], acc]
             | ^ [Conn[sock: sock, buf: rest, part: Nil], Cons[wrap_message [o, joined], acc]]
           }
         }
         | {
-          fail [
-            Conn[sock: sock, buf: <>, part: Nil],
-            1002,
-            "unexpected continuation",
-          ] ~> =[close, c2]
+          fail [Conn[sock: sock, buf: <>, part: Nil], 1002, "unexpected continuation"]
+          ~> =[close, c2]
+
           [%list.reverse Cons[close, acc], c2]
         }
       }
       | part ~> {
         | =Part[opcode: _, data: _] => {
-          fail [
-            Conn[sock: sock, buf: <>, part: Nil],
-            1002,
-            "interleaved data frame",
-          ] ~> =[close, c2]
+          fail [Conn[sock: sock, buf: <>, part: Nil], 1002, "interleaved data frame"]
+          ~> =[close, c2]
+
           [%list.reverse Cons[close, acc], c2]
         }
-        | fin ~> =0 => ^ [
-          Conn[sock: sock, buf: rest, part: Part[opcode: op, data: p]],
-          acc,
-        ]
+        | fin ~> =0 => ^ [Conn[sock: sock, buf: rest, part: Part[opcode: op, data: p]], acc]
         | ^ [Conn[sock: sock, buf: rest, part: Nil], Cons[wrap_message [op, p], acc]]
       }
     }
@@ -295,10 +285,7 @@ drain = #[', 'messages] {
 on_data = #[', 'bin] {
   :doc "Select-mode: feed bytes from a `Data` event, yielding [messages, conn] — whole messages only (oldest first; pings answered, pongs skipped, fragments assembled; a Close — received or a protocol failure — is echoed, the socket dropped, and final). For a socket that is a select source, this replaces `recv`."
   =[Conn[sock: sock, buf: buf, part: part], bytes]
-  drain [
-    Conn[sock: sock, buf: %bin.concat [buf, bytes], part: part],
-    Nil,
-  ]
+  drain [Conn[sock: sock, buf: %bin.concat [buf, bytes], part: part], Nil]
 }
 
 send_text = #[', '%str] {

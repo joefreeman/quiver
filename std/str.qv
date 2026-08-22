@@ -1,9 +1,6 @@
 ' = Str['bin]
 
-is_continuation = #['bin, 'int] {
-  $0
-  ~> %bin.get_byte [~, $1] ~> %int.and [~, 192] ~> =128
-}
+is_continuation = #['bin, 'int] { $0 ~> %bin.get_byte [~, $1] ~> %int.and [~, 192] ~> =128 }
 
 skip_continuation = #[(data): 'bin, (byte_pos): 'int, (data_len): 'int] {
   | $byte_pos ~> %num.ge? [~, $data_len] => $byte_pos
@@ -21,11 +18,15 @@ find_index = #[(haystack): 'bin, (needle): 'bin, (offset): 'int, (end): 'int] {
   needle = $needle
   {
     | %bin.length needle ~> =0 => $offset
-    | %bin.index [$haystack, %bin.get_byte [needle, 0], $offset] ~> =('int)pos
+    | %bin.index [$haystack, %bin.get_byte [needle, 0], $offset]
+      ~> =('int)pos
       %num.le? [pos, $end] => {
-      | %bin.length needle ~> %num.add [pos, ~] ~> %bin.slice [$haystack, pos, ~] ~> =&needle => pos
-      | %num.add [pos, 1] ~> ^ [$haystack, needle, ~, $end]
-    }
+        | %bin.length needle
+          ~> %num.add [pos, ~]
+          ~> %bin.slice [$haystack, pos, ~]
+          ~> =&needle => pos
+        | %num.add [pos, 1] ~> ^ [$haystack, needle, ~, $end]
+      }
     | []
   }
 }
@@ -34,11 +35,11 @@ find_index = #[(haystack): 'bin, (needle): 'bin, (offset): 'int, (end): 'int] {
 byte_pos_to_char_idx = #[(data): 'bin, (current_pos): 'int, (target_pos): 'int, (char_idx): 'int] {
   | %num.ge? [$current_pos, $target_pos] => $char_idx
   | is_continuation [$data, $current_pos] => $current_pos ~> %num.add [~, 1] ~> ^ [
-    $data,
-    ~,
-    $target_pos,
-    $char_idx,
-  ]
+      $data,
+      ~,
+      $target_pos,
+      $char_idx,
+    ]
   | {
     // Start of character - count it
     new_char_idx = %num.add [$char_idx, 1]
@@ -53,17 +54,24 @@ byte_pos_to_char_idx = #[(data): 'bin, (current_pos): 'int, (target_pos): 'int, 
 decode_char = #[(enc): 'int, (width): 'int] {
   | $width ~> =1 => $enc
   | $width ~> =2 => %int.shift [$enc, -8] ~> %int.and [~, 31] ~> %num.mul [~, 64] ~> %num.add [
-    ~,
-    %int.and [$enc, 63],
-  ]
-  | $width ~> =3 => %int.shift [$enc, -16] ~> %int.and [~, 15] ~> %num.mul [~, 4096] ~> %num.add [~, %int.shift [$enc, -8] ~> %int.and [~, 63] ~> %num.mul [~, 64]] ~> %num.add [
-    ~,
-    %int.and [$enc, 63],
-  ]
-  | %int.shift [$enc, -24] ~> %int.and [~, 7] ~> %num.mul [~, 262144] ~> %num.add [~, %int.shift [$enc, -16] ~> %int.and [~, 63] ~> %num.mul [~, 4096]] ~> %num.add [~, %int.shift [$enc, -8] ~> %int.and [~, 63] ~> %num.mul [~, 64]] ~> %num.add [
-    ~,
-    %int.and [$enc, 63],
-  ]
+      ~,
+      %int.and [$enc, 63],
+    ]
+  | $width ~> =3 => {
+    %int.shift [$enc, -16]
+    ~> %int.and [~, 15]
+    ~> %num.mul [~, 4096]
+    ~> %num.add [~, %int.shift [$enc, -8] ~> %int.and [~, 63] ~> %num.mul [~, 64]]
+    ~> %num.add [~, %int.and [$enc, 63]]
+  }
+  | {
+    %int.shift [$enc, -24]
+    ~> %int.and [~, 7]
+    ~> %num.mul [~, 262144]
+    ~> %num.add [~, %int.shift [$enc, -16] ~> %int.and [~, 63] ~> %num.mul [~, 4096]]
+    ~> %num.add [~, %int.shift [$enc, -8] ~> %int.and [~, 63] ~> %num.mul [~, 64]]
+    ~> %num.add [~, %int.and [$enc, 63]]
+  }
 }
 
 // Iterator over the Unicode codepoints (as ints) of a binary. The state is the
@@ -96,17 +104,33 @@ chars = #'bin {
 encode_char = #[(char): 'int, (width): 'int] {
   | $width ~> =1 => $char
   | $width ~> =2 => %int.shift [$char, -6] ~> %num.add [192, ~] ~> %num.mul [~, 256] ~> %num.add [
-    ~,
-    %int.and [$char, 63] ~> %num.add [128, ~],
-  ]
-  | $width ~> =3 => %int.shift [$char, -12] ~> %num.add [224, ~] ~> %num.mul [~, 65536] ~> %num.add [~, %int.shift [$char, -6] ~> %int.and [~, 63] ~> %num.add [128, ~] ~> %num.mul [~, 256]] ~> %num.add [
-    ~,
-    %int.and [$char, 63] ~> %num.add [128, ~],
-  ]
-  | %int.shift [$char, -18] ~> %num.add [240, ~] ~> %num.mul [~, 16777216] ~> %num.add [~, %int.shift [$char, -12] ~> %int.and [~, 63] ~> %num.add [128, ~] ~> %num.mul [~, 65536]] ~> %num.add [~, %int.shift [$char, -6] ~> %int.and [~, 63] ~> %num.add [128, ~] ~> %num.mul [~, 256]] ~> %num.add [
-    ~,
-    %int.and [$char, 63] ~> %num.add [128, ~],
-  ]
+      ~,
+      %int.and [$char, 63] ~> %num.add [128, ~],
+    ]
+  | $width ~> =3 => {
+    %int.shift [$char, -12]
+    ~> %num.add [224, ~]
+    ~> %num.mul [~, 65536]
+    ~> %num.add [
+      ~,
+      %int.shift [$char, -6] ~> %int.and [~, 63] ~> %num.add [128, ~] ~> %num.mul [~, 256],
+    ]
+    ~> %num.add [~, %int.and [$char, 63] ~> %num.add [128, ~]]
+  }
+  | {
+    %int.shift [$char, -18]
+    ~> %num.add [240, ~]
+    ~> %num.mul [~, 16777216]
+    ~> %num.add [
+      ~,
+      %int.shift [$char, -12] ~> %int.and [~, 63] ~> %num.add [128, ~] ~> %num.mul [~, 65536],
+    ]
+    ~> %num.add [
+      ~,
+      %int.shift [$char, -6] ~> %int.and [~, 63] ~> %num.add [128, ~] ~> %num.mul [~, 256],
+    ]
+    ~> %num.add [~, %int.and [$char, 63] ~> %num.add [128, ~]]
+  }
 }
 
 // Reassemble a Str from an iterator of codepoints, encoding each as UTF-8.
@@ -124,17 +148,21 @@ from_chars = #'%iter<'int> {
       }
       %bin.append [acc, encode_char [char, byte_count], byte_count]
     },
-  ] ~> Str[~]
+  ]
+  ~> Str[~]
 }
 
 // Decimal digits from byte pos, accumulating onto acc: [n: value, end: pos]. Zero or more.
 int_digits = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'int] {
-  | %num.lt? [$pos, $len]; %bin.get_byte [$data, $pos] ~> =('int)b; %num.ge? [b, 48]; %num.le? [b, 57] => %num.add [%num.mul [$acc, 10], %num.sub [b, 48]] ~> ^ [
-    $data,
-    %num.add [$pos, 1],
-    $len,
-    ~,
-  ]
+  | %num.lt? [$pos, $len]
+    %bin.get_byte [$data, $pos] ~> =('int)b
+    %num.ge? [b, 48]
+    %num.le? [b, 57] => %num.add [%num.mul [$acc, 10], %num.sub [b, 48]] ~> ^ [
+      $data,
+      %num.add [$pos, 1],
+      $len,
+      ~,
+    ]
   | [n: $acc, end: $pos]
 }
 
@@ -198,8 +226,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
     target_len = %bin.length target
     %num.le? [prefix_len, target_len]
 
-    target
-    ~> %bin.slice [~, 0, prefix_len] ~> =&prefix
+    target ~> %bin.slice [~, 0, prefix_len] ~> =&prefix
 
     Ok
   },
@@ -213,7 +240,9 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
     %num.le? [suffix_len, target_len]
 
     target_len
-    ~> %num.sub [~, suffix_len] ~> %bin.slice [target, ~, target_len] ~> =&suffix
+    ~> %num.sub [~, suffix_len]
+    ~> %bin.slice [target, ~, target_len]
+    ~> =&suffix
 
     Ok
   },
@@ -244,12 +273,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
         =start
         {
           | start ~> %num.gt? [~, haystack_len] => []
-          | find_index [
-              haystack,
-              delim,
-              start,
-              end,
-            ] ~> =('int)index => [
+          | find_index [haystack, delim, start, end] ~> =('int)index => [
               haystack ~> %bin.slice [~, start, index] ~> Str[~],
               %num.add [index, delim_len],
             ]
@@ -268,7 +292,10 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
     :doc "The substring from start (inclusive) to end (exclusive), in character indices."
     Str[data] = $str
 
-    chars data ~> %iter.drop [~, $start] ~> %iter.take [~, %num.sub [$end, $start]] ~> from_chars ~
+    chars data
+    ~> %iter.drop [~, $start]
+    ~> %iter.take [~, %num.sub [$end, $start]]
+    ~> from_chars ~
   },
 
   index_of: #[(str): ', (needle): '] {
@@ -286,7 +313,9 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
       }
       | {
         haystack_len
-        ~> %num.sub [~, needle_len] ~> find_index [haystack, needle, 0, ~] ~> =('int)byte_pos
+        ~> %num.sub [~, needle_len]
+        ~> find_index [haystack, needle, 0, ~]
+        ~> =('int)byte_pos
 
         byte_pos_to_char_idx [haystack, 0, byte_pos, 0]
       }
@@ -306,8 +335,11 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
   join: #[(strs): '%iter<'>, (sep): '] {
     :doc "Joins an iterator of strings with a separator between each."
     Str[sep] = $sep
-    $strs ~> %iter.map [~, #' { .0 }] ~> %iter.intersperse [~, sep] ~> %iter.fold [~, <>, %bin.concat] ~> Str[
-      ~,
-    ]
+
+    $strs
+    ~> %iter.map [~, #' { .0 }]
+    ~> %iter.intersperse [~, sep]
+    ~> %iter.fold [~, <>, %bin.concat]
+    ~> Str[~]
   },
 ]

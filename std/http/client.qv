@@ -60,60 +60,78 @@ exchange = #[(url): '%url, (method): '%http.method, (headers): '%http.pairs, (bo
     url: %url.format $url ~> .0,
     headers: %http.headers_to_bytes $headers,
     body: $body,
-  ] ~> =(status: status, headers: headers, body: body)
+  ]
+  ~> =(status: status, headers: headers, body: body)
 
   // `%http` parses the header block, exactly as it would off a socket. The narrowing step
   // is load-bearing: without it a malformed block would put a nil *into* the response's
   // headers rather than failing the exchange.
   %http.headers_of headers ~> {
     | =('%http.pairs)pairs => pairs
-    | [] ~> {
-      :error IoError[kind: Other, message: "malformed response headers"]
-    }
-  } ~> =('%http.pairs)hs
+    | [] ~> { :error IoError[kind: Other, message: "malformed response headers"] }
+  }
+  ~> =('%http.pairs)hs
 
   drain [body, <>] ~> =('bin)content
   Response[status: status, headers: hs, body: content]
 }
 
 // One request/response exchange, in its own process, bounded by `timeout`.
-attempt = #[(url): '%url, (method): '%http.method, (headers): '%http.pairs, (body): 'bin, (timeout): 'int] {
+attempt = #[
+  (url): '%url,
+  (method): '%http.method,
+  (headers): '%http.pairs,
+  (body): 'bin,
+  (timeout): 'int,
+] {
   u = $url
   m = $method
   hs = $headers
   b = $body
-  ![
-    @[] { exchange [url: u, method: m, headers: hs, body: b] } [],
-    $timeout
-  ]
+  ![@[] { exchange [url: u, method: m, headers: hs, body: b] } [], $timeout]
 }
 
 // The redirect loop — which only turns where the mediator surfaces redirects (native); a
 // browser has already followed them by the time it answers, so this simply never fires
 // there. `left` bounds it; exhausting it answers the redirect itself rather than failing,
 // so a caller can see what it was pointed at.
-follow_loop = #[(url): '%url, (method): '%http.method, (headers): '%http.pairs, (body): 'bin, (timeout): 'int, (left): 'int] {
-  attempt [$url, $method, $headers, $body, $timeout] ~> =('%http.response)resp
+follow_loop = #[
+  (url): '%url,
+  (method): '%http.method,
+  (headers): '%http.pairs,
+  (body): 'bin,
+  (timeout): 'int,
+  (left): 'int,
+] {
+  attempt [$url, $method, $headers, $body, $timeout]
+  ~> =('%http.response)resp
+
   {
     | __integer_compare__ [$left, 0] ~> =1
       redirect_of [resp.status, $method] ~> =('follow)kind
       %http.header [resp.headers, "location"] ~> =('%str)location
       %url.resolve [$url, location] ~> =('%url)next => {
-      // A method-changing redirect drops the body with the method: a GET with a payload is
-      // meaningless, and forwarding it would resend a POST's data to a new target.
-      method = { kind ~> =ToGet => GET | $method }
-      body = { kind ~> =ToGet => <> | $body }
-      ^ [next, method, $headers, body, $timeout, __integer_subtract__ [$left, 1]]
-    }
+        // A method-changing redirect drops the body with the method: a GET with a payload is
+        // meaningless, and forwarding it would resend a POST's data to a new target.
+        method = { kind ~> =ToGet => GET | $method }
+        body = { kind ~> =ToGet => <> | $body }
+        ^ [next, method, $headers, body, $timeout, __integer_subtract__ [$left, 1]]
+      }
     | resp
   }
 }
 
 [
-  request: #[(url): '%str, method: '%http.method = GET, headers: '%http.pairs = Nil, body: 'bin = <>, timeout: 'int = 30000, redirects: 'int = 5] {
+  request: #[
+    (url): '%str,
+    method: '%http.method = GET,
+    headers: '%http.pairs = Nil,
+    body: 'bin = <>,
+    timeout: 'int = 30000,
+    redirects: 'int = 5,
+  ] {
     :doc "Performs a request, following redirects. Nil on failure, carrying :error (exchange), :timeout (deadline) or :crash (the exchange died)."
-    %url.parse $url ~> =('%url)u
-    follow_loop [u, $method, $headers, $body, $timeout, $redirects]
+    %url.parse $url ~> =('%url)u; follow_loop [u, $method, $headers, $body, $timeout, $redirects]
   },
 
   get: #'%str {

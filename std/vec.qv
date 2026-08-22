@@ -100,7 +100,8 @@ reconcile = #[(sa): '%num, (sb): '%num] {
   %num.denom $sb ~> =('int)t
   __integer_gcd__ [p, r] ~> =g
 
-  __integer_divide__ [__integer_multiply__ [q, t], __integer_gcd__ [q, t]] ~> =l
+  __integer_divide__ [__integer_multiply__ [q, t], __integer_gcd__ [q, t]]
+  ~> =l
 
   norm Rational[g, l] ~> =s
   %num.div [$sa, s] ~> %num.numer ~ ~> =('int)fa
@@ -113,8 +114,7 @@ reconcile = #[(sa): '%num, (sb): '%num] {
 // `['vec, 'vec] -> [dtype, width, scale, data_a, data_b] | []` (nil on dtype mismatch / overflow).
 align = #['vec, 'vec] {
   | =[Vec[dtype: d, scale: s, data: da], Vec[dtype: d, scale: s, data: db]] => {
-      width d ~> =w
-      [dtype: d, width: w, scale: s, data_a: da, data_b: db]
+      width d ~> =w; [dtype: d, width: w, scale: s, data_a: da, data_b: db]
     }
   | =[Vec[dtype: d, scale: sa, data: da], Vec[dtype: d, scale: sb, data: db]] => {
       width d ~> =w
@@ -181,8 +181,7 @@ align = #['vec, 'vec] {
   // Number of lanes.
   len: #'opt {
     :doc "The number of lanes in a vector; a nil vector propagates."
-    =Vec[dtype: d, scale: _, data: data]
-    __integer_divide__ [__binary_length__ data, width d]
+    =Vec[dtype: d, scale: _, data: data]; __integer_divide__ [__binary_length__ data, width d]
   },
 
   // The vector's scale.
@@ -313,7 +312,9 @@ align = #['vec, 'vec] {
     $count ~> =('int)count
     norm scale ~> =s
 
-    Vec[dtype: $dtype, scale: s, data: <>] ~> push [~, value] ~> =('vec)unit
+    Vec[dtype: $dtype, scale: s, data: <>]
+    ~> push [~, value]
+    ~> =('vec)unit
 
     __binary_repeat__ [unit.data, count] ~> =tiled
     Vec[dtype: $dtype, scale: s, data: tiled]

@@ -662,6 +662,10 @@ pub struct TupleType {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldType {
     Field {
+        /// Span starting at the field's first character, for attaching leading comments/blank
+        /// lines (trivia) to the field during formatting, exactly as [`TupleField::span`] does for
+        /// a value tuple's fields. `None` for fields the parser synthesises.
+        span: Spanned,
         name: Option<String>,
         /// Written `(name): type` — a caller may omit this label, and the argument's field
         /// adopts it positionally. A calling convention, so it is legal only in a function
@@ -684,6 +688,8 @@ pub enum FieldType {
         default: Option<Box<Chain>>,
     },
     Spread {
+        /// As on [`FieldType::Field`]: where the entry starts, for trivia attachment.
+        span: Spanned,
         identifier: Option<String>,
         type_arguments: Vec<Type>,
     },

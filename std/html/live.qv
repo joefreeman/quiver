@@ -102,37 +102,39 @@ event_name? = #'%str {
 // event's option function, so its labels, defaults and types are checked there.
 binding = #[(attr): '%html.pattr, (event): '%str] {
   $attr ~> =(pos: pos, mods: mods, value: value)
+
   {
     | opts_member? $event ~> =Str[m] => Str[m]
-    | %parse.fail [
-      pos,
-      "a supported event name (click, submit, input, change, keydown)",
-    ]
-  } ~> =('%str)member
+    | %parse.fail [pos, "a supported event name (click, submit, input, change, keydown)"]
+  }
+  ~> =('%str)member
+
   {
     | value ~> =AHole[sp] => Expr[
-      Call[module: "html/live", member: "event_value", arg: Unquote(sp.offset, sp.length)],
-    ]
+        Call[module: "html/live", member: "event_value", arg: Unquote(sp.offset, sp.length)],
+      ]
     | %parse.fail [pos, "'\{ … }' (a binding's payload is a hole)"]
-  } ~> =('%html.pattr_val)payload
+  }
+  ~> =('%html.pattr_val)payload
+
   name = %str.concat ["data-q-", $event]
   bound = [name: name, pos: pos, mods: [], value: payload]
   mods ~> {
     | =[] => Cons[bound, Nil]
     | =(offset: o, length: l) => Cons[
-      bound,
-      Cons[
-        [
-          name: %str.concat [name, "-opts"],
-          pos: pos,
-          mods: [],
-          value: Expr[
-            Call[module: "html/live", member: member, arg: Unquote[offset: o, length: l]],
+        bound,
+        Cons[
+          [
+            name: %str.concat [name, "-opts"],
+            pos: pos,
+            mods: [],
+            value: Expr[
+              Call[module: "html/live", member: member, arg: Unquote[offset: o, length: l]],
+            ],
           ],
+          Nil,
         ],
-        Nil,
-      ],
-    ]
+      ]
   }
 }
 
@@ -142,10 +144,7 @@ live_policy = #'%html.pattr {
   | event_name? $name ~> =Str[eb] => binding [$, Str[eb]]
   | $name ~> ="nav" => {
     | $mods ~> =[]; $value ~> =Flag => Cons[$[..., name: "data-q-nav"], Nil]
-    | %parse.fail [
-      $pos,
-      "a bare 'nav' (it takes no value and no modifiers)",
-    ]
+    | %parse.fail [$pos, "a bare 'nav' (it takes no value and no modifiers)"]
   }
   | $mods ~> =[] => Cons[$, Nil]
   | %parse.fail [
@@ -216,7 +215,11 @@ rate_opts = #[(debounce): ('int | []) = [], (throttle): ('int | []) = []] {
   opts_text [debounce: $debounce, throttle: $throttle, keys: []]
 }
 
-key_opts = #[(keys): ('keys | []) = [], (debounce): ('int | []) = [], (throttle): ('int | []) = []] {
+key_opts = #[
+  (keys): ('keys | []) = [],
+  (debounce): ('int | []) = [],
+  (throttle): ('int | []) = [],
+] {
   :doc "The options a key binding takes, as `on:keydown[…]`'s bracket: `keys` (one key, or a list — only these reach the server, matched against the browser's key name) plus `rate_opts`' `debounce` and `throttle`. Positional-first, so `on:keydown[\"Enter\"]` sends only Enter, and `on:keydown[%list\{ \"Enter\", \"Escape\" }]` those two."
   opts_text ($debounce, $throttle, $keys)
 }
@@ -305,27 +308,23 @@ enc_attr = #<'e>'%html.attr_val<'e> {
 // A node's frame; self-passed to recurse into template slots.
 frame_of = #<'e>[(self): #^ -> 'frame, (node): '%html<'e>] {
   | $node:('bnd)boundary ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: st]
-  | $node:('%html.tmpl<'e>)template
-    ~> =(statics: s, holes: h) => {
-      slots = %list.map [
-        h,
-        #{
-          | =Child[n] => $$self [$$self, n]
-          | =Attr[elem: e, name: nm, value: v] => ALeaf[elem: e, name: nm, value: enc_attr v]
-        },
-      ]
-      Tmpl[statics: s, slots: slots]
-    }
+  | $node:('%html.tmpl<'e>)template ~> =(statics: s, holes: h) => {
+    slots = %list.map [
+      h,
+      #{
+        | =Child[n] => $$self [$$self, n]
+        | =Attr[elem: e, name: nm, value: v] => ALeaf[elem: e, name: nm, value: enc_attr v]
+      },
+    ]
+    Tmpl[statics: s, slots: slots]
+  }
   | $node ~> =Text[str] => Leaf[str]
   | $node ~> =Fragment[items] => {
     // An un-annotated Fragment in a child slot is a node list: a Many of per-item
     // frames (chat items being their own templates diff granularly), each carrying
     // its optional `:key`.
     Many[
-      %list.map [
-        items,
-        #{ k = $:('%str)key; [key: k, row: $$self [$$self, $]] },
-      ],
+      %list.map [items, #{ k = $:('%str)key; [key: k, row: $$self [$$self, $]] }],
     ]
   }
   | Opaque[%html.render $node]
@@ -345,11 +344,11 @@ render_of = #[(self): #^ -> 'bin, (f): 'frame, (acc): 'bin] {
       | =Ok => %bin.concat [%bin.append [$acc, 32, 1], n]
       | =Str[vb] => {
         ev = %html.escape_attr Str[vb] ~> .0
-        %bin.concat [%bin.append [$acc, 32, 1], n] ~> %bin.concat [~, <3d22>] ~> %bin.concat [~, ev] ~> %bin.append [
-          ~,
-          34,
-          1,
-        ]
+
+        %bin.concat [%bin.append [$acc, 32, 1], n]
+        ~> %bin.concat [~, <3d22>]
+        ~> %bin.concat [~, ev]
+        ~> %bin.append [~, 34, 1]
       }
     }
     | =Opaque[Str[h]] => %bin.concat [$acc, h]
@@ -388,10 +387,13 @@ render_of = #[(self): #^ -> 'bin, (f): 'frame, (acc): 'bin] {
     // message fills the interior. An unresolved boundary (nil vid — a frame that
     // never went through reconcile, e.g. under the sim) renders nothing.
     | =Boundary[key: _, vid: v, start: _] => v ~> {
-      | =Str[vb] => %bin.concat [$acc, "<!--v:" ~> .0] ~> %bin.concat [~, vb] ~> %bin.concat [~, "--><!--/v:" ~> .0] ~> %bin.concat [~, vb] ~> %bin.concat [
-        ~,
-        "-->" ~> .0,
-      ]
+      | =Str[vb] => {
+        %bin.concat [$acc, "<!--v:" ~> .0]
+        ~> %bin.concat [~, vb]
+        ~> %bin.concat [~, "--><!--/v:" ~> .0]
+        ~> %bin.concat [~, vb]
+        ~> %bin.concat [~, "-->" ~> .0]
+      }
       | $acc
     }
     // Unreachable: the arms above cover every variant, but exhaustiveness can't see
@@ -451,20 +453,27 @@ take_row = #[(rs): 'rows, (k): '%str, (acc): 'rows, (j): 'int] -> ['taken, 'rows
 // survivor-relative index (the count of kept rows before it — each applied removal
 // shifts the rest down, so the indices are sequential-apply-correct). Answers
 // [the survivors in order, the patch accumulator].
-prune_rows = #[(old): 'rows, (new): 'rows, (index): 'int, (keep): 'rows, (acc): 'patches, (rpath): 'path] -> ['rows, 'patches] {
+prune_rows = #[
+  (old): 'rows,
+  (new): 'rows,
+  (index): 'int,
+  (keep): 'rows,
+  (acc): 'patches,
+  (rpath): 'path,
+] -> ['rows, 'patches] {
   $old ~> {
     | =Nil => [%list.reverse $keep, $acc]
     | =Cons[r, t] => {
       r ~> =(key: rk)
       {
         | rk ~> =Str[kb]; key_in? [$new, Str[kb]] => ^ [
-          t,
-          $new,
-          __integer_add__ [$index, 1],
-          Cons[r, $keep],
-          $acc,
-          $rpath,
-        ]
+            t,
+            $new,
+            __integer_add__ [$index, 1],
+            Cons[r, $keep],
+            $acc,
+            $rpath,
+          ]
         | ^ [
           t,
           $new,
@@ -480,7 +489,13 @@ prune_rows = #[(old): 'rows, (new): 'rows, (index): 'int, (keep): 'rows, (acc): 
 
 // The patches turning `prev` into `next` at one slot, prepended (reversed) onto `acc`.
 // `rpath` is the reversed path to the slot. Self-passed to recurse into template slots.
-diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'path, (acc): 'patches] {
+diff_of = #[
+  (self): #^ -> 'patches,
+  (prev): 'frame,
+  (next): 'frame,
+  (rpath): 'path,
+  (acc): 'patches,
+] {
   // The nested literals close over `self` and `rpath` (an inner `$` would be their
   // own parameter), so bind the fields locally — `self` by reference, as a bare
   // `$self` term would call it.
@@ -491,10 +506,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
     }
     | =[ALeaf[elem: e, name: n, value: a], ALeaf[elem: _, name: _, value: b]] => {
         | a ~> =&b => $acc
-        | Cons[
-          SetAttr[path: %list.reverse $rpath, elem: e, name: n, value: b],
-          $acc,
-        ]
+        | Cons[SetAttr[path: %list.reverse $rpath, elem: e, name: n, value: b], $acc]
       }
     | =[Opaque[a], Opaque[b]] => {
       | a ~> =&b => $acc
@@ -506,19 +518,19 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
     // unconditionally, reading nil-filled bindings.
     | =[Tmpl[statics: s1, slots: sl1], Tmpl[statics: s2, slots: sl2]]
       s2 ~> =&s1 => {
-      walk = #[(prev): 'frames, (next): 'frames, (i): 'int, (a): 'patches] {
-        [$prev, $next] ~> {
-          | =[Cons[p, pt], Cons[nx, nt]] => ^ [
-            pt,
-            nt,
-            __integer_add__ [$i, 1],
-            $$self [$$self, p, nx, Cons[$i, $$rpath], $a],
-          ]
-          | $a
+        walk = #[(prev): 'frames, (next): 'frames, (i): 'int, (a): 'patches] {
+          [$prev, $next] ~> {
+            | =[Cons[p, pt], Cons[nx, nt]] => ^ [
+                pt,
+                nt,
+                __integer_add__ [$i, 1],
+                $$self [$$self, p, nx, Cons[$i, $$rpath], $a],
+              ]
+            | $a
+          }
         }
+        walk [sl1, sl2, 0, $acc]
       }
-      walk [sl1, sl2, 0, $acc]
-    }
     | =[Many[pr], Many[nr]] => {
       // Positional row diff: pairwise recursion over the shared prefix, then the tail
       // is pure structure. Inserts advance the index (each lands after the previous);
@@ -534,20 +546,17 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
               $$self [$$self, p, nx, Cons[$i, $$rpath], $a],
             ]
           | =[Nil, Cons[[key: _, row: nx], nt]] => ^ [
-            Nil,
-            nt,
-            __integer_add__ [$i, 1],
-            Cons[
-              InsRow[path: %list.reverse $$rpath, at: $i, html: render_row nx],
-              $a,
-            ],
-          ]
+              Nil,
+              nt,
+              __integer_add__ [$i, 1],
+              Cons[InsRow[path: %list.reverse $$rpath, at: $i, html: render_row nx], $a],
+            ]
           | =[Cons[_, pt], Nil] => ^ [
-            pt,
-            Nil,
-            $i,
-            Cons[DelRow[path: %list.reverse $$rpath, at: $i], $a],
-          ]
+              pt,
+              Nil,
+              $i,
+              Cons[DelRow[path: %list.reverse $$rpath, at: $i], $a],
+            ]
           | $a
         }
       }
@@ -560,12 +569,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
         $new ~> {
           | =Nil => $working ~> {
             | =Nil => $a
-            | =Cons[_, wt] => ^ [
-              wt,
-              Nil,
-              $i,
-              Cons[DelRow[path: %list.reverse $$rpath, at: $i], $a],
-            ]
+            | =Cons[_, wt] => ^ [wt, Nil, $i, Cons[DelRow[path: %list.reverse $$rpath, at: $i], $a]]
           }
           | =Cons[nr, nt] => {
             nr ~> =(key: nk, row: nf)
@@ -584,10 +588,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
                     tw.0 ~> {
                       | =RHit[mr, j] => {
                         mr ~> =(row: mf)
-                        a2 = Cons[
-                          MovRow[path: %list.reverse $$rpath, from: j, to: $i],
-                          $a,
-                        ]
+                        a2 = Cons[MovRow[path: %list.reverse $$rpath, from: j, to: $i], $a]
                         a3 = $$self [$$self, mf, nf, Cons[$i, $$rpath], a2]
                         ^ [Cons[wr, wrest], nt, __integer_add__ [$i, 1], a3]
                       }
@@ -603,10 +604,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
                 }
               }
               | =Nil => {
-                a2 = Cons[
-                  InsRow[path: %list.reverse $$rpath, at: $i, html: render_row nf],
-                  $a,
-                ]
+                a2 = Cons[InsRow[path: %list.reverse $$rpath, at: $i, html: render_row nf], $a]
                 ^ [Nil, nt, __integer_add__ [$i, 1], a2]
               }
             }
@@ -630,10 +628,7 @@ diff_of = #[(self): #^ -> 'patches, (prev): 'frame, (next): 'frame, (rpath): 'pa
     | =[Boundary(key: k1), Boundary(key: k2)]; k2 ~> =&k1 => $acc
     // A differing kind, a switched template (statics mismatch), or an Opaque next to
     // anything else: one replacement patch, subsuming the slot's descendants.
-    | Cons[
-      SetHtml[path: %list.reverse $rpath, html: render $next],
-      $acc,
-    ]
+    | Cons[SetHtml[path: %list.reverse $rpath, html: render $next], $acc]
   }
 }
 
@@ -672,27 +667,19 @@ enc_patch = #'patch {
   | =SetText[path: p, value: v] => Array[Cons["t", Cons[enc_path p, Cons[v, Nil]]]]
   | =SetHtml[path: p, html: h] => Array[Cons["h", Cons[enc_path p, Cons[h, Nil]]]]
   | =SetAttr[path: p, elem: e, name: n, value: v] => Array[
-    Cons[
-      "a",
-      Cons[enc_path p, Cons[e, Cons[n, Cons[enc_attr_val v, Nil]]]],
-    ],
-  ]
-  | =InsRow[path: p, at: i, html: h] => Array[
-    Cons["r+", Cons[enc_path p, Cons[i, Cons[h, Nil]]]],
-  ]
+      Cons["a", Cons[enc_path p, Cons[e, Cons[n, Cons[enc_attr_val v, Nil]]]]],
+    ]
+  | =InsRow[path: p, at: i, html: h] => Array[Cons["r+", Cons[enc_path p, Cons[i, Cons[h, Nil]]]]]
   | =DelRow[path: p, at: i] => Array[Cons["r-", Cons[enc_path p, Cons[i, Nil]]]]
-  | =MovRow[path: p, from: f, to: t] => Array[
-    Cons["r>", Cons[enc_path p, Cons[f, Cons[t, Nil]]]],
-  ]
+  | =MovRow[path: p, from: f, to: t] => Array[Cons["r>", Cons[enc_path p, Cons[f, Cons[t, Nil]]]]]
 }
 
 enc_patches = #'patches { %list.map [~, enc_patch] }
 
 encode = #[(vid): '%str, (ps): 'patches] {
   :doc "A frame message: one view's patches for one render as JSON text, `[1, vid, [patch, …]]`. Vids are hierarchical strings — the root view is \"0\", its children \"0.1\", \"0.2\", … — minted locally by each view, so no allocation is coordinated."
-  Array[
-    Cons[1, Cons[$vid, Cons[Array[enc_patches $ps], Nil]]],
-  ] ~> %json.stringify ~
+  Array[Cons[1, Cons[$vid, Cons[Array[enc_patches $ps], Nil]]]]
+  ~> %json.stringify ~
 }
 
 // === The session ========================================================================
@@ -721,8 +708,19 @@ encode = #[(vid): '%str, (ps): 'patches] {
 // re-derives state from a new URL without remounting — the root view's live-navigation
 // hook, receiving the raw request the app synthesized for the target; a component that
 // doesn't navigate omits it (the `_base` record) and gets an identity `nav`.
-'component<'i, 's, 'e> = [mount: #'i -> 's, update: #[(state): 's, (event): 'e] -> 's, view: #'s -> '<'e>, decode: #'%str -> (Ev['e] | []), nav: #[(state): 's, (request): '%http] -> 's]
-'component_base<'i, 's, 'e> = [mount: #'i -> 's, update: #[(state): 's, (event): 'e] -> 's, view: #'s -> '<'e>, decode: #'%str -> (Ev['e] | [])]
+'component<'i, 's, 'e> = [
+  mount: #'i -> 's,
+  update: #[(state): 's, (event): 'e] -> 's,
+  view: #'s -> '<'e>,
+  decode: #'%str -> (Ev['e] | []),
+  nav: #[(state): 's, (request): '%http] -> 's,
+]
+'component_base<'i, 's, 'e> = [
+  mount: #'i -> 's,
+  update: #[(state): 's, (event): 'e] -> 's,
+  view: #'s -> '<'e>,
+  decode: #'%str -> (Ev['e] | []),
+]
 
 // Fill in a default (identity) `nav` when the record omits it, so most components —
 // which never navigate — stay four fields. Both the `component` constructor and the
@@ -731,8 +729,7 @@ encode = #[(vid): '%str, (ps): 'patches] {
 with_nav = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
   c = $
   {
-    | c
-      ~> =(mount: m, update: u, view: v, decode: d, nav: n) => [
+    | c ~> =(mount: m, update: u, view: v, decode: d, nav: n) => [
         mount: m,
         update: u,
         view: v,
@@ -774,7 +771,8 @@ pairs_of = #'jsons {
       | pair_of $1 ~> =[n, v] => Cons[[n, v], $0]
       | $0
     },
-  ] ~> %list.reverse ~
+  ]
+  ~> %list.reverse ~
 }
 
 // A JSON boolean as Quiver's truthiness convention; anything else reads false.
@@ -784,11 +782,11 @@ flag_of = #'%json { =True => Ok | [] }
 // one reads as no modifiers held rather than failing the whole event.
 mods_of = #'%json {
   | =Array[Cons[a, Cons[c, Cons[s, Cons[m, Nil]]]]] => [
-    alt?: a ~> jval ~ ~> flag_of ~,
-    ctrl?: c ~> jval ~ ~> flag_of ~,
-    shift?: s ~> jval ~ ~> flag_of ~,
-    meta?: m ~> jval ~ ~> flag_of ~,
-  ]
+      alt?: a ~> jval ~ ~> flag_of ~,
+      ctrl?: c ~> jval ~ ~> flag_of ~,
+      shift?: s ~> jval ~ ~> flag_of ~,
+      meta?: m ~> jval ~ ~> flag_of ~,
+    ]
   | [alt?: [], ctrl?: [], shift?: [], meta?: []]
 }
 
@@ -876,7 +874,12 @@ nav_of = #'%str {
 // unchanged. The browser metadata joins the decoded event here, as the `:event`
 // annotation — the last point where both halves are in hand, and the only one that
 // works for every component, since the event's type is a variable to this code.
-fold_event = #<'i, 's, 'e>[(state): 's, (comp): 'component<'i, 's, 'e>, (payload): '%str, (event): 'event] {
+fold_event = #<'i, 's, 'e>[
+  (state): 's,
+  (comp): 'component<'i, 's, 'e>,
+  (payload): '%str,
+  (event): 'event,
+] {
   | $comp.decode $payload ~> =Ev[ev] => $comp.update [state: $state, event: ev ~> { :event $event }]
   | $state
 }
@@ -1005,7 +1008,10 @@ kid_by_vid = #[(items): 'kids, (v): '%str] -> 'kid_hit {
 }
 
 // Assign a vid to every distinct boundary key. Answers [assigns, next-ordinal].
-assign_bounds = #[(bs): 'bounds, (kids): 'kids, (vid): '%str, (n): 'int, (acc): 'assigns] -> ['assigns, 'int] {
+assign_bounds = #[(bs): 'bounds, (kids): 'kids, (vid): '%str, (n): 'int, (acc): 'assigns] -> [
+  'assigns,
+  'int,
+] {
   $bs ~> {
     | =Nil => [$acc, $n]
     | =Cons[b, t] => {
@@ -1013,8 +1019,7 @@ assign_bounds = #[(bs): 'bounds, (kids): 'kids, (vid): '%str, (n): 'int, (acc): 
       {
         | key_assigned? [$acc, k] => ^ [t, $kids, $vid, $n, $acc]
         | kid_of [$kids, k] ~> =KFound[kd] => {
-          kd ~> =(vid: v, pid: p)
-          ^ [t, $kids, $vid, $n, Cons[AOld[key: k, vid: v, pid: p], $acc]]
+          kd ~> =(vid: v, pid: p); ^ [t, $kids, $vid, $n, Cons[AOld[key: k, vid: v, pid: p], $acc]]
         }
         | {
           v = %str.concat [$vid, %str.concat [".", %str.from_int $n]]
@@ -1042,20 +1047,17 @@ resolve_of = #[(self): #^ -> 'frame, (f): 'frame, (assigns): 'assigns] {
   assigns = $assigns
   $f ~> {
     | =Boundary[key: k, vid: _, start: st] => Boundary[
-      key: k,
-      vid: assigned_vid [assigns, k],
-      start: st,
-    ]
+        key: k,
+        vid: assigned_vid [assigns, k],
+        start: st,
+      ]
     | =Tmpl[statics: ss, slots: sl] => Tmpl[
-      statics: ss,
-      slots: %list.map [sl, #{ self [self, $, assigns] }],
-    ]
+        statics: ss,
+        slots: %list.map [sl, #{ self [self, $, assigns] }],
+      ]
     | =Many[rows] => Many[
-      %list.map [
-        rows,
-        #{ =(key: rk, row: r); [key: rk, row: self [self, r, assigns]] },
-      ],
-    ]
+        %list.map [rows, #{ =(key: rk, row: r); [key: rk, row: self [self, r, assigns]] }],
+      ]
     | $f
   }
 }
@@ -1063,10 +1065,7 @@ resolve_of = #[(self): #^ -> 'frame, (f): 'frame, (assigns): 'assigns] {
 // The previous kids whose keys the new render dropped.
 dropped_kids = #[(kids): 'kids, (assigns): 'assigns] {
   assigns = $assigns
-  %list.filter [
-    $kids,
-    #{ =(key: k); { key_assigned? [assigns, k] => [] | $ } },
-  ]
+  %list.filter [$kids, #{ =(key: k); { key_assigned? [assigns, k] => [] | $ } }]
 }
 
 // Execute a reconcile: kill dropped children's supervisors (ownership tears down
@@ -1077,7 +1076,13 @@ dropped_kids = #[(kids): 'kids, (assigns): 'assigns] {
 // this view's involvement. The view watches the SUPERVISOR: its death is the
 // budget giving up (or a bug), and the only crash signal the view handles.
 // Answers the new kids list (each pid the child's supervisor).
-exec_bounds = #[(assigns): 'assigns, (drops): 'kids, (app): @'app_msg, (me): @'view_msg, (acc): 'kids] -> 'kids {
+exec_bounds = #[
+  (assigns): 'assigns,
+  (drops): 'kids,
+  (app): @'app_msg,
+  (me): @'view_msg,
+  (acc): 'kids,
+] -> 'kids {
   // The start closure closes over `app`, and the pids are taken by reference (a
   // bare access would send), so bind them locally.
   app = $app
@@ -1092,12 +1097,12 @@ exec_bounds = #[(assigns): 'assigns, (drops): 'kids, (app): @'app_msg, (me): @'v
     | $assigns ~> {
       | =Nil => $acc
       | =Cons[AOld[key: k, vid: v, pid: p], t] => ^ [
-        t,
-        Nil,
-        app,
-        me,
-        Cons[[key: k, vid: v, pid: p], $acc],
-      ]
+          t,
+          Nil,
+          app,
+          me,
+          Cons[[key: k, vid: v, pid: p], $acc],
+        ]
       | =Cons[ANew[key: k, vid: v, start: st], t] => {
         cs = #['%str, @'%sup.down] {
           =[id, supref]
@@ -1112,7 +1117,8 @@ exec_bounds = #[(assigns): 'assigns, (drops): 'kids, (app): @'app_msg, (me): @'v
             children: Cons[[id: Str[v ~> .0], restart: Permanent, start: cs], Nil],
             max_restarts: restart_budget,
             window: restart_window,
-          ] ~> %sup.start ~
+          ]
+          ~> %sup.start ~
 
         %sup.watch [Str[v ~> .0], csup, me]
         ^ [t, Nil, app, me, Cons[[key: k, vid: v, pid: csup], $acc]]
@@ -1129,7 +1135,16 @@ as_frame = #'frame
 // One render step of a view: render, assign boundary vids, diff against the frame
 // the client holds, send the delta (an empty diff sends nothing), then execute the
 // reconcile. Answers [the new frame, the new kids, the next child ordinal].
-step_view = #<'i, 's, 'e>[(state): 's, (prev): 'frame, (comp): 'component<'i, 's, 'e>, (vid): '%str, (app): @'app_msg, (me): @'view_msg, (kids): 'kids, (n): 'int] {
+step_view = #<'i, 's, 'e>[
+  (state): 's,
+  (prev): 'frame,
+  (comp): 'component<'i, 's, 'e>,
+  (vid): '%str,
+  (app): @'app_msg,
+  (me): @'view_msg,
+  (kids): 'kids,
+  (n): 'int,
+] {
   // The loop closes over these, so bind them locally.
   app = $app
   me = $me
@@ -1154,7 +1169,17 @@ step_view = #<'i, 's, 'e>[(state): 's, (prev): 'frame, (comp): 'component<'i, 's
 // corpse so reconcile won't quietly respawn a repeat offender. (A deliberate
 // kill's Down finds no tracked vid — the entry is removed before the kill — and
 // is dropped.)
-vlife = #<'i, 's, 'e>[(mode): 'vmode, (state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e>, (vid): '%str, (app): @'app_msg, (kids): 'kids, (n): 'int, (synced): ('%str | [])] {
+vlife = #<'i, 's, 'e>[
+  (mode): 'vmode,
+  (state): 's,
+  (f): 'frame,
+  (comp): 'component<'i, 's, 'e>,
+  (vid): '%str,
+  (app): @'app_msg,
+  (kids): 'kids,
+  (n): 'int,
+  (synced): ('%str | []),
+] {
   // The spawned view closes over these, so bind them locally.
   app = $app
   me = @
@@ -1184,12 +1209,7 @@ vlife = #<'i, 's, 'e>[(mode): 'vmode, (state): 's, (f): 'frame, (comp): 'compone
     }
     | =Down(id: dv) => kid_by_vid [$kids, dv] ~> {
       | =KFound[_] => {
-        %proc.send [
-          app,
-          Frame[
-            encode [dv, Cons[SetHtml[path: Nil, html: crash_html], Nil]],
-          ],
-        ]
+        %proc.send [app, Frame[encode [dv, Cons[SetHtml[path: Nil, html: crash_html], Nil]]]]
         %proc.send [app, Unroute[dv]]
         ^ [$mode, $state, $f, $comp, $vid, app, $kids, $n, $synced]
       }
@@ -1242,12 +1262,7 @@ view_run = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>, '%str, @'app_msg, 'vboot] {
   boot ~> {
     | =Reply[reply] => { %proc.send [reply, Region[render rf]]; Ok }
     | =Replace => {
-      %proc.send [
-        app,
-        Frame[
-          encode [vid, Cons[SetHtml[path: Nil, html: render rf], Nil]],
-        ],
-      ]
+      %proc.send [app, Frame[encode [vid, Cons[SetHtml[path: Nil, html: render rf], Nil]]]]
       Ok
     }
   }
@@ -1310,10 +1325,7 @@ prune_ms = 45000
 // The entries younger than the cutoff (order irrelevant).
 prune_entries = #[(items): 'reg_entries, (cutoff): 'int] {
   cutoff = $cutoff
-  %list.filter [
-    $items,
-    #{ __integer_compare__ [$at, cutoff] ~> =(0 | 1); $ },
-  ]
+  %list.filter [$items, #{ __integer_compare__ [$at, cutoff] ~> =(0 | 1); $ }]
 }
 
 // Remove and answer a token's entry: `[found: Found[pid] | Missing, rest: …]`.
@@ -1439,20 +1451,14 @@ route_events = #[(req): '%http, (messages): '%http/websocket.messages, (routes):
       {
         // The three-element event envelope first — events dominate, so the common path
         // parses once (a two-element nav message can't match it).
-        | env_of t ~> =[v, payload, ev]; route_of [$routes, v] ~> =RFound[p] => {
-          %proc.send [p, Event[payload, ev]]; Ok
-        }
+        | env_of t ~> =[v, payload, ev]
+          route_of [$routes, v] ~> =RFound[p] => { %proc.send [p, Event[payload, ev]]; Ok }
         // A live-navigation message re-derives the root: build the request for the new
         // target (keeping the initial request's method/headers/cookies) and hand it to
         // the root view, which folds it through `nav`.
         | nav_of t ~> =Str[tb]; route_of [$routes, "0"] ~> =RFound[p] => {
           %http.split_target Str[tb] ~> =[path, query]
-          %proc.send [
-            p,
-            Nav[
-              req[..., target: Str[tb], path: path, query: query],
-            ],
-          ]
+          %proc.send [p, Nav[req[..., target: Str[tb], path: path, query: query]]]
           Ok
         }
         | Ok
@@ -1472,7 +1478,14 @@ route_events = #[(req): '%http, (messages): '%http/websocket.messages, (routes):
 // bytes. The attached select receives frames and route changes from the mailbox (an
 // `Attach` cannot arrive while attached — the registry claim is one-shot — and would
 // wait queued regardless).
-alife = #[(req): '%http, (mode): 'amode, (buffer): 'strs, (token): ('%str | []), (registry): @'reg_msg, (routes): 'routes] {
+alife = #[
+  (req): '%http,
+  (mode): 'amode,
+  (buffer): 'strs,
+  (token): ('%str | []),
+  (registry): @'reg_msg,
+  (routes): 'routes,
+] {
   // The pid is taken by reference (a bare access would send), so bind it locally.
   reg = $registry
   $mode ~> {
@@ -1488,50 +1501,49 @@ alife = #[(req): '%http, (mode): 'amode, (buffer): 'strs, (token): ('%str | []),
       }
       | =Frame[s] => ^ [$req, Parked, Cons[s, $buffer], $token, reg, $routes]
       | =Route[v, p] => ^ [
-        $req,
-        Parked,
-        $buffer,
-        $token,
-        reg,
-        Cons[[vid: v, pid: p], del_route [$routes, v]],
-      ]
+          $req,
+          Parked,
+          $buffer,
+          $token,
+          reg,
+          Cons[[vid: v, pid: p], del_route [$routes, v]],
+        ]
       | =Unroute[v] => ^ [$req, Parked, $buffer, $token, reg, del_route [$routes, v]]
       | Ok
     }
-    | =Attached[conn] => ![
-      conn.sock,
-      #(Frame['%str] | Route['%str, @'view_msg] | Unroute['%str])
-    ] ~> {
-      | =Data[sock: _, data: d] => {
-        %http/websocket.on_data [conn, d] ~> =[msgs, c2]
-        route_events [$req, msgs, $routes] ~> {
-          | =Go => ^ [$req, Attached[c2], Nil, $token, reg, $routes]
+    | =Attached[conn] => {
+      ![conn.sock, #(Frame['%str] | Route['%str, @'view_msg] | Unroute['%str])]
+      ~> {
+        | =Data[sock: _, data: d] => {
+          %http/websocket.on_data [conn, d] ~> =[msgs, c2]
+          route_events [$req, msgs, $routes] ~> {
+            | =Go => ^ [$req, Attached[c2], Nil, $token, reg, $routes]
+            | Ok
+          }
+        }
+        | =Frame[s] => {
+          %http/websocket.send_text [conn, s]; ^ [$req, Attached[conn], Nil, $token, reg, $routes]
+        }
+        | =Route[v, p] => ^ [
+            $req,
+            Attached[conn],
+            Nil,
+            $token,
+            reg,
+            Cons[[vid: v, pid: p], del_route [$routes, v]],
+          ]
+        | =Unroute[v] => ^ [$req, Attached[conn], Nil, $token, reg, del_route [$routes, v]]
+        // A clean `Closed`, or the nil of a failed read — a reset is how a browser tab
+        // usually vanishes. Either way the socket is gone, and gone means park: the
+        // recovery is deliberate, so the clean/failed difference is dropped with the nil.
+        | $token ~> {
+          | =Str[tb] => {
+            tell_views [$routes, Park]
+            %proc.send [reg, Register[Str[tb], @]]
+            ^ [$req, Parked, Nil, Str[tb], reg, $routes]
+          }
           | Ok
         }
-      }
-      | =Frame[s] => {
-        %http/websocket.send_text [conn, s]
-        ^ [$req, Attached[conn], Nil, $token, reg, $routes]
-      }
-      | =Route[v, p] => ^ [
-        $req,
-        Attached[conn],
-        Nil,
-        $token,
-        reg,
-        Cons[[vid: v, pid: p], del_route [$routes, v]],
-      ]
-      | =Unroute[v] => ^ [$req, Attached[conn], Nil, $token, reg, del_route [$routes, v]]
-      // A clean `Closed`, or the nil of a failed read — a reset is how a browser tab
-      // usually vanishes. Either way the socket is gone, and gone means park: the
-      // recovery is deliberate, so the clean/failed difference is dropped with the nil.
-      | $token ~> {
-        | =Str[tb] => {
-          tell_views [$routes, Park]
-          %proc.send [reg, Register[Str[tb], @]]
-          ^ [$req, Parked, Nil, Str[tb], reg, $routes]
-        }
-        | Ok
       }
     }
   }
@@ -1562,8 +1574,7 @@ classify_frame = #'%str -> 'fclass {
       r2 ~> =Cons[patchesj, Nil]
       patchesj ~> jval ~ ~> =Array[Cons[pj, Nil]]
 
-      pj
-      ~> jval ~ ~> =Array[Cons[tagj, Cons[pathj, Cons[htmlj, Nil]]]]
+      pj ~> jval ~ ~> =Array[Cons[tagj, Cons[pathj, Cons[htmlj, Nil]]]]
 
       tagj ~> jval ~ ~> ="h"
       pathj ~> jval ~ ~> =Array[Nil]
@@ -1650,7 +1661,16 @@ reprocess = #[(page): '%str, (pending): 'strs, (keep): 'strs] -> ['%str, 'strs] 
 // The composition loop: collect the root's `Region` and the views' first frames
 // (splicing as they arrive), buffer everything else, and answer the handler the
 // complete page — or whatever assembled by the deadline. Then park.
-compose = #[(handler): @'%str, (page): ('%str | []), (buffer): 'strs, (token): ('%str | []), (registry): @'reg_msg, (routes): 'routes, (end): 'int, (req): '%http] {
+compose = #[
+  (handler): @'%str,
+  (page): ('%str | []),
+  (buffer): 'strs,
+  (token): ('%str | []),
+  (registry): @'reg_msg,
+  (routes): 'routes,
+  (end): 'int,
+  (req): '%http,
+] {
   // The loop closes over these, so bind them locally.
   handler = $handler
   reg = $registry
@@ -1668,29 +1688,29 @@ compose = #[(handler): @'%str, (page): ('%str | []), (buffer): 'strs, (token): (
       | =Frame[s] => $page ~> {
         | =Str[pb] => classify_frame s ~> {
           | =FirstFrame[vid: Str[vb], html: Str[hb]] => ^ [
-            handler,
-            splice [Str[pb], Str[vb], Str[hb]],
-            $buffer,
-            $token,
-            reg,
-            $routes,
-            $end,
-            $req,
-          ]
+              handler,
+              splice [Str[pb], Str[vb], Str[hb]],
+              $buffer,
+              $token,
+              reg,
+              $routes,
+              $end,
+              $req,
+            ]
           | ^ [handler, Str[pb], Cons[s, $buffer], $token, reg, $routes, $end, $req]
         }
         | ^ [handler, [], Cons[s, $buffer], $token, reg, $routes, $end, $req]
       }
       | =Route[v, p] => ^ [
-        handler,
-        $page,
-        $buffer,
-        $token,
-        reg,
-        Cons[[vid: v, pid: p], del_route [$routes, v]],
-        $end,
-        $req,
-      ]
+          handler,
+          $page,
+          $buffer,
+          $token,
+          reg,
+          Cons[[vid: v, pid: p], del_route [$routes, v]],
+          $end,
+          $req,
+        ]
       | =Unroute[v] => ^ [handler, $page, $buffer, $token, reg, del_route [$routes, v], $end, $req]
       // An Attach cannot arrive before the page (the token is in it); dropping the
       // impossible conn closes it and the client retries cold.
@@ -2183,10 +2203,13 @@ client_js = """
 // The dead render's page shell: the instrumented region in a container the client owns,
 // plus the client script. Whole-page concerns (title, head) are the caller's, later.
 page_shell = #[(region): '%str, (token): '%str] {
-  "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><div id=\"q-root\" data-q-token=\"" ~> %str.concat [~, $token] ~> %str.concat [~, "\">"] ~> %str.concat [~, $region] ~> %str.concat [~, "</div>"] ~> %str.concat [~, client_js] ~> %str.concat [
-    ~,
-    "</body></html>",
-  ]
+  "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><div id=\"q-root\" data-q-token=\""
+  ~> %str.concat [~, $token]
+  ~> %str.concat [~, "\">"]
+  ~> %str.concat [~, $region]
+  ~> %str.concat [~, "</div>"]
+  ~> %str.concat [~, client_js]
+  ~> %str.concat [~, "</body></html>"]
 }
 
 handle = #[(req): '%http, (app): 'app] {
@@ -2197,8 +2220,8 @@ handle = #[(req): '%http, (app): 'app] {
   $app ~> =(root: rt, reg: rg)
   {
     | %http.header [req.headers, "sec-websocket-key"] => Upgrade[
-      handler: #'%http/websocket { join [$, req, rt, rg] },
-    ]
+        handler: #'%http/websocket { join [$, req, rt, rg] },
+      ]
     | {
       token = %random.hex 16
       me = @

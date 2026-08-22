@@ -59,7 +59,9 @@ rev = #<'t>[(items): 'items<'t>, (acc): 'items<'t>] {
 
 // The failure payload that got further through the input (the first on a tie).
 further = #[(a): ('perr | []), (b): ('perr | [])] {
-  | $a ~> =Expected(offset: ao); $b ~> =Expected(offset: bo); __integer_compare__ [ao, bo] ~> =(0 | 1) => $a
+  | $a ~> =Expected(offset: ao)
+    $b ~> =Expected(offset: bo)
+    __integer_compare__ [ao, bo] ~> =(0 | 1) => $a
   | $b ~> =('perr)x => x
   | $a
 }
@@ -110,12 +112,8 @@ ws = #' {
 }
 
 tw_end = #<'t>[(data): 'bin, (pos): 'int, (len): 'int, (pred): 'pred<'t>] {
-  | __integer_compare__ [$pos, $len] ~> =-1; %bin.get_byte [$data, $pos] ~> $pred ~ => ^ [
-    $data,
-    __integer_add__ [$pos, 1],
-    $len,
-    $pred,
-  ]
+  | __integer_compare__ [$pos, $len] ~> =-1
+    %bin.get_byte [$data, $pos] ~> $pred ~ => ^ [$data, __integer_add__ [$pos, 1], $len, $pred]
   | $pos
 }
 
@@ -134,9 +132,9 @@ digit_val = #'int {
 
 int_digits = #[(st): ', (acc): 'int] {
   | peek $st ~> =('int)b; digit_val b ~> =('int)d => ^ [
-    advance [$st, 1],
-    __integer_add__ [__integer_multiply__ [$acc, 10], d],
-  ]
+      advance [$st, 1],
+      __integer_add__ [__integer_multiply__ [$acc, 10], d],
+    ]
   | [n: $acc, st: $st]
 }
 
@@ -159,9 +157,12 @@ int = #' {
 
 ident_char? = #'int {
   | $ ~> =95 => Ok
-  | __integer_compare__ [$, 48] ~> =(0 | 1); __integer_compare__ [$, 57] ~> =(-1 | 0) => Ok
-  | __integer_compare__ [$, 65] ~> =(0 | 1); __integer_compare__ [$, 90] ~> =(-1 | 0) => Ok
-  | __integer_compare__ [$, 97] ~> =(0 | 1); __integer_compare__ [$, 122] ~> =(-1 | 0) => Ok
+  | __integer_compare__ [$, 48] ~> =(0 | 1)
+    __integer_compare__ [$, 57] ~> =(-1 | 0) => Ok
+  | __integer_compare__ [$, 65] ~> =(0 | 1)
+    __integer_compare__ [$, 90] ~> =(-1 | 0) => Ok
+  | __integer_compare__ [$, 97] ~> =(0 | 1)
+    __integer_compare__ [$, 122] ~> =(-1 | 0) => Ok
 }
 
 // The position after an optional single byte `b` at `pos` (unchanged when absent).
@@ -169,10 +170,8 @@ opt_byte_end = #[(data): 'bin, (pos): 'int, (len): 'int, (b): 'int] {
   // Bound locally: the pattern pins against a variable (`=&b`), not a parameter field.
   b = $b
   {
-    | __integer_compare__ [$pos, $len] ~> =-1; %bin.get_byte [$data, $pos] ~> =&b => __integer_add__ [
-      $pos,
-      1,
-    ]
+    | __integer_compare__ [$pos, $len] ~> =-1
+      %bin.get_byte [$data, $pos] ~> =&b => __integer_add__ [$pos, 1]
     | $pos
   }
 }
@@ -181,16 +180,16 @@ opt_byte_end = #[(data): 'bin, (pos): 'int, (len): 'int, (b): 'int] {
 // `?` then `!` suffixes — the host language's identifier grammar), as a Str.
 ident = #' {
   :doc "An identifier (lowercase start; letters, digits, underscores; optional `?` then `!` suffixes), as a Str."
-  | peek $ ~> =('int)b; __integer_compare__ [b, 97] ~> =(0 | 1); __integer_compare__ [b, 122] ~> =(-1 | 0) => {
-    end = tw_end [$data, __integer_add__ [$pos, 1], $len, ident_char?] ~> opt_byte_end [$data, ~, $len, 63] ~> opt_byte_end [
-      $data,
-      ~,
-      $len,
-      33,
-    ]
+  | peek $ ~> =('int)b
+    __integer_compare__ [b, 97] ~> =(0 | 1)
+    __integer_compare__ [b, 122] ~> =(-1 | 0) => {
+      end =
+        tw_end [$data, __integer_add__ [$pos, 1], $len, ident_char?]
+        ~> opt_byte_end [$data, ~, $len, 63]
+        ~> opt_byte_end [$data, ~, $len, 33]
 
-    [%bin.slice [$data, $pos, end] ~> Str[~], $[..., pos: end]]
-  }
+      [%bin.slice [$data, $pos, end] ~> Str[~], $[..., pos: end]]
+    }
   | fail_in [$, "a name"]
 }
 
@@ -215,10 +214,9 @@ qstr_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
               | =110 => 10
               | =116 => 9
               | =114 => 13
-            } ~> =('int)r => ^ [$data, __integer_add__ [p1, 1], $len, %bin.append [$acc, r, 1]]
-          | [] ~> {
-            :error Expected[offset: p1, message: "an escape character"]
-          }
+            }
+            ~> =('int)r => ^ [$data, __integer_add__ [p1, 1], $len, %bin.append [$acc, r, 1]]
+          | [] ~> { :error Expected[offset: p1, message: "an escape character"] }
         }
       }
       | ^ [$data, __integer_add__ [$pos, 1], $len, %bin.append [$acc, b, 1]]
@@ -229,7 +227,9 @@ qstr_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 quoted = #' {
   :doc "A double-quoted string with `\\\" \\\\ \\/ \\b \\f \\n \\t \\r` escapes, as a Str."
   | peek $ ~> =34 => {
-    qstr_loop [$data, __integer_add__ [$pos, 1], $len, <>] ~> =(bytes, end)
+    qstr_loop [$data, __integer_add__ [$pos, 1], $len, <>]
+    ~> =(bytes, end)
+
     [Str[bytes], $[..., pos: end]]
   }
   | fail_in [$, "a string"]
@@ -242,10 +242,9 @@ literal = #[(s): Str['bin], (what): Str['bin]] {
   what = $what
   n = %bin.length expected
   #' {
-    | end = __integer_add__ [$pos, n]; __integer_compare__ [end, $len] ~> =(-1 | 0); %bin.slice [$data, $pos, end] ~> =&expected => [
-      Ok,
-      advance [$, n],
-    ]
+    | end = __integer_add__ [$pos, n]
+      __integer_compare__ [end, $len] ~> =(-1 | 0)
+      %bin.slice [$data, $pos, end] ~> =&expected => [Ok, advance [$, n]]
     | fail_in [$, what]
   }
 }
@@ -261,8 +260,7 @@ map = #<'t, 'u>['p<'t>, #'t -> 'u] {
 // Both in sequence, as a pair.
 then = #<'t, 'u>['p<'t>, 'p<'u>] {
   :doc "Both in sequence, as a pair."
-  =[p, q]
-  #' { p $ ~> =[v, st]; q st ~> =[w, st2]; [[v, w], st2] }
+  =[p, q]; #' { p $ ~> =[v, st]; q st ~> =[w, st2]; [[v, w], st2] }
 }
 
 // Both in sequence, keeping only the first / only the second value.
@@ -270,13 +268,11 @@ then = #<'t, 'u>['p<'t>, 'p<'u>] {
 // generic body the literal's parameter inference has no concrete pin and misbehaves.)
 left = #<'t, 'u>['p<'t>, 'p<'u>] {
   :doc "Both in sequence, keeping only the first value."
-  =[p, q]
-  #' { p $ ~> =[v, st]; q st ~> =[_, st2]; [v, st2] }
+  =[p, q]; #' { p $ ~> =[v, st]; q st ~> =[_, st2]; [v, st2] }
 }
 right = #<'t, 'u>['p<'t>, 'p<'u>] {
   :doc "Both in sequence, keeping only the second value."
-  =[p, q]
-  #' { p $ ~> =[_, st]; q st ~> =[w, st2]; [w, st2] }
+  =[p, q]; #' { p $ ~> =[_, st]; q st ~> =[w, st2]; [w, st2] }
 }
 
 // `p` between `open` and `close`, keeping `p`'s value.

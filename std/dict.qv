@@ -147,23 +147,32 @@ get = #<'k, 'v>[(node): '<'k, 'v>, (key): 'k, (hash): 'int, (shift): 'int] {
 }
 
 // split two single entries (differing keys) into a fresh subtree at `shift`.
-split_pair = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (h1): 'int, (k1): 'k, (v1): 'v, (h2): 'int, (k2): 'k, (v2): 'v, (shift): 'int] {
+split_pair = #<'k, 'v>[
+  (self): #^ -> '<'k, 'v>,
+  (h1): 'int,
+  (k1): 'k,
+  (v1): 'v,
+  (h2): 'int,
+  (k2): 'k,
+  (v2): 'v,
+  (shift): 'int,
+] {
   // A pattern `&` can only reference a variable, not a parameter field, so bind the
   // second hash locally for the equality check.
   h2 = $h2
   {
     | $h1 ~> =&h2 => bucket_put [Nil, $k1, $v1, Nil] ~> bucket_put [~, $k2, $v2, Nil] ~> Collision[
-      $h1,
-      ~,
-    ]
+        $h1,
+        ~,
+      ]
     | f1 = fragment [$h1, $shift]
       f2 = fragment [$h2, $shift]
       {
         | f1 ~> =&f2 => {
-          children = %num.add [$shift, 5] ~> $self [$self, $h1, $k1, $v1, $h2, $k2, $v2, ~] ~> Cons[
-            ~,
-            Nil,
-          ]
+          children =
+            %num.add [$shift, 5]
+            ~> $self [$self, $h1, $k1, $v1, $h2, $k2, $v2, ~]
+            ~> Cons[~, Nil]
 
           %int.shift [1, f1] ~> Node[~, children]
         }
@@ -172,13 +181,10 @@ split_pair = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (h1): 'int, (k1): 'k, (v1): 'v, 
 
           {
             | %num.lt? [f1, f2] => Node[
-              bitmap,
-              Cons[Leaf[$h1, $k1, $v1], Cons[Leaf[$h2, $k2, $v2], Nil]],
-            ]
-            | Node[
-              bitmap,
-              Cons[Leaf[$h2, $k2, $v2], Cons[Leaf[$h1, $k1, $v1], Nil]],
-            ]
+                bitmap,
+                Cons[Leaf[$h1, $k1, $v1], Cons[Leaf[$h2, $k2, $v2], Nil]],
+              ]
+            | Node[bitmap, Cons[Leaf[$h2, $k2, $v2], Cons[Leaf[$h1, $k1, $v1], Nil]]]
           }
         }
       }
@@ -186,17 +192,25 @@ split_pair = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (h1): 'int, (k1): 'k, (v1): 'v, 
 }
 
 // split an existing node (a collision) against a new entry whose hash differs from it.
-split_node = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (cnode): '<'k, 'v>, (chash): 'int, (hash): 'int, (key): 'k, (value): 'v, (shift): 'int] {
+split_node = #<'k, 'v>[
+  (self): #^ -> '<'k, 'v>,
+  (cnode): '<'k, 'v>,
+  (chash): 'int,
+  (hash): 'int,
+  (key): 'k,
+  (value): 'v,
+  (shift): 'int,
+] {
   fc = fragment [$chash, $shift]
   fh = fragment [$hash, $shift]
   {
     | fc ~> =&fh => Node[
-      %int.shift [1, fc],
-      Cons[
-        $self [$self, $cnode, $chash, $hash, $key, $value, %num.add [$shift, 5]],
-        Nil,
-      ],
-    ]
+        %int.shift [1, fc],
+        Cons[
+          $self [$self, $cnode, $chash, $hash, $key, $value, %num.add [$shift, 5]],
+          Nil,
+        ],
+      ]
     | bitmap = %int.or [%int.shift [1, fc], %int.shift [1, fh]]
 
       {
@@ -206,7 +220,14 @@ split_node = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (cnode): '<'k, 'v>, (chash): 'in
   }
 }
 
-put = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (node): '<'k, 'v>, (key): 'k, (value): 'v, (hash): 'int, (shift): 'int] {
+put = #<'k, 'v>[
+  (self): #^ -> '<'k, 'v>,
+  (node): '<'k, 'v>,
+  (key): 'k,
+  (value): 'v,
+  (hash): 'int,
+  (shift): 'int,
+] {
   $node ~> {
     | =Empty => Leaf[$hash, $key, $value]
     | =Leaf[lhash, lkey, lvalue] => {
@@ -222,9 +243,9 @@ put = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (node): '<'k, 'v>, (key): 'k, (value): 
       idx = slot_index [bitmap, bit]
       {
         | %int.and [bitmap, bit] ~> =0 => Node[
-          %int.or [bitmap, bit],
-          insert_at [children, idx, Leaf[$hash, $key, $value], Nil],
-        ]
+            %int.or [bitmap, bit],
+            insert_at [children, idx, Leaf[$hash, $key, $value], Nil],
+          ]
         | child = child_at [children, idx]
 
           new_child = $self [$self, child, $key, $value, $hash, %num.add [$shift, 5]]
@@ -256,7 +277,13 @@ remove_slot = #<'k, 'v>[(bitmap): 'int, (bit): 'int, (children): 'list<'<'k, 'v>
   collapse_node [%int.and [$bitmap, %int.not $bit], remove_at [$children, $index, Nil]]
 }
 
-remove = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (node): '<'k, 'v>, (key): 'k, (hash): 'int, (shift): 'int] {
+remove = #<'k, 'v>[
+  (self): #^ -> '<'k, 'v>,
+  (node): '<'k, 'v>,
+  (key): 'k,
+  (hash): 'int,
+  (shift): 'int,
+] {
   $node ~> {
     | =Empty => Empty
     | =Leaf[lhash, k, v] => {
@@ -344,9 +371,9 @@ d_expr = #'%meta.cb {
     =st
     cb [st.data, st.pos] ~> {
       | =('int)end => [
-        Unquote[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
-        st[..., pos: end],
-      ]
+          Unquote[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
+          st[..., pos: end],
+        ]
       | %parse.fail [st.pos, "an expression"]
     }
   }
@@ -463,4 +490,5 @@ dict_dialect = #(content: '%str, chain: '%meta.cb) {
     :doc "A dict with every entry of the second dict added; the second's values win on conflict."
     Cons[$with, Nil] ~> entries [~, Nil] ~> from [from, $dict, ~]
   },
-] ~> { :dialect dict_dialect }
+]
+~> { :dialect dict_dialect }

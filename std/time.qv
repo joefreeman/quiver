@@ -7,7 +7,16 @@
 
 'weekday = Mon | Tue | Wed | Thu | Fri | Sat | Sun
 
-' = [year: 'int, month: 'int, day: 'int, hour: 'int, minute: 'int, second: 'int, millisecond: 'int, weekday: 'weekday]
+' = [
+  year: 'int,
+  month: 'int,
+  day: 'int,
+  hour: 'int,
+  minute: 'int,
+  second: 'int,
+  millisecond: 'int,
+  weekday: 'weekday,
+]
 
 // Floored division and modulo (the builtins truncate, which misplaces negative
 // timestamps by a day/second).
@@ -15,9 +24,7 @@ fmod = #[(a): 'int, (b): 'int] {
   __integer_modulo__ [__integer_add__ [__integer_modulo__ [$a, $b], $b], $b]
 }
 
-fdiv = #[(a): 'int, (b): 'int] {
-  __integer_divide__ [__integer_subtract__ [$a, fmod [$a, $b]], $b]
-}
+fdiv = #[(a): 'int, (b): 'int] { __integer_divide__ [__integer_subtract__ [$a, fmod [$a, $b]], $b] }
 
 parts = #'int {
   :doc "The UTC calendar components of an epoch-milliseconds timestamp: [year, month, day, hour, minute, second, millisecond, weekday]."
@@ -49,24 +56,25 @@ parts = #'int {
 
   doe = __integer_subtract__ [z, __integer_multiply__ [era, 146097]]
 
-  yoe = __integer_subtract__ [doe, __integer_divide__ [doe, 1460]] ~> __integer_add__ [~, __integer_divide__ [doe, 36524]] ~> __integer_subtract__ [~, __integer_divide__ [doe, 146096]] ~> __integer_divide__ [
-    ~,
-    365,
-  ]
+  yoe =
+    __integer_subtract__ [doe, __integer_divide__ [doe, 1460]]
+    ~> __integer_add__ [~, __integer_divide__ [doe, 36524]]
+    ~> __integer_subtract__ [~, __integer_divide__ [doe, 146096]]
+    ~> __integer_divide__ [~, 365]
 
   y = __integer_add__ [yoe, __integer_multiply__ [era, 400]]
 
-  doy = __integer_add__ [__integer_multiply__ [365, yoe], __integer_divide__ [yoe, 4]] ~> __integer_subtract__ [~, __integer_divide__ [yoe, 100]] ~> __integer_subtract__ [
-    doe,
-    ~,
-  ]
+  doy =
+    __integer_add__ [__integer_multiply__ [365, yoe], __integer_divide__ [yoe, 4]]
+    ~> __integer_subtract__ [~, __integer_divide__ [yoe, 100]]
+    ~> __integer_subtract__ [doe, ~]
 
   mp = __integer_divide__ [__integer_add__ [__integer_multiply__ [5, doy], 2], 153]
 
-  day = __integer_divide__ [
-    __integer_add__ [__integer_multiply__ [153, mp], 2],
-    5,
-  ] ~> __integer_subtract__ [doy, ~] ~> __integer_add__ [~, 1]
+  day =
+    __integer_divide__ [__integer_add__ [__integer_multiply__ [153, mp], 2], 5]
+    ~> __integer_subtract__ [doy, ~]
+    ~> __integer_add__ [~, 1]
 
   month = {
     | __integer_compare__ [mp, 10] ~> =-1 => __integer_add__ [mp, 3]
@@ -129,9 +137,7 @@ iso8601 = #'int {
 }
 
 [
-  now: __time_now__ ~> {
-    :doc "The wall-clock time as milliseconds since the Unix epoch (UTC)."
-  },
+  now: __time_now__ ~> { :doc "The wall-clock time as milliseconds since the Unix epoch (UTC)." },
   monotonic: __time_monotonic__ ~> {
     :doc "Milliseconds since an arbitrary per-run origin: steady, for measuring durations; unrelated to the wall clock."
   },

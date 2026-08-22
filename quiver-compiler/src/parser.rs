@@ -1333,10 +1333,23 @@ fn field_default(input: Span) -> IResult<Span, Chain> {
 }
 
 fn field_type(input: Span) -> IResult<Span, FieldType> {
+    let start = input;
     let (rest, base) = field_type_base(input)?;
     // Spreads name no field, so they take no default.
-    if matches!(base, FieldType::Spread { .. }) {
-        return Ok((rest, base));
+    if let FieldType::Spread {
+        identifier,
+        type_arguments,
+        ..
+    } = base
+    {
+        return Ok((
+            rest,
+            FieldType::Spread {
+                span: Spanned(Some(span_between(start, rest))),
+                identifier,
+                type_arguments,
+            },
+        ));
     }
     let (rest, default) = opt(map(field_default, Box::new))(rest)?;
     let FieldType::Field {
@@ -1351,6 +1364,8 @@ fn field_type(input: Span) -> IResult<Span, FieldType> {
     Ok((
         rest,
         FieldType::Field {
+            // The whole entry, so a comment written above it attaches here.
+            span: Spanned(Some(span_between(start, rest))),
             name,
             omittable,
             type_def,
@@ -1377,11 +1392,13 @@ fn field_type_base(input: Span) -> IResult<Span, FieldType> {
             |id_and_args| {
                 if let Some((id, type_args)) = id_and_args {
                     FieldType::Spread {
+                        span: Spanned::default(),
                         identifier: Some(id),
                         type_arguments: type_args.unwrap_or_default(),
                     }
                 } else {
                     FieldType::Spread {
+                        span: Spanned::default(),
                         identifier: None,
                         type_arguments: vec![],
                     }
@@ -1397,6 +1414,7 @@ fn field_type_base(input: Span) -> IResult<Span, FieldType> {
                 type_definition,
             ),
             |(name, type_def)| FieldType::Field {
+                span: Spanned::default(),
                 name: Some(name),
                 omittable: true,
                 type_def: Some(type_def),
@@ -1407,6 +1425,7 @@ fn field_type_base(input: Span) -> IResult<Span, FieldType> {
         map(
             separated_pair(identifier, tuple((char(':'), ws1)), type_definition),
             |(name, type_def)| FieldType::Field {
+                span: Spanned::default(),
                 name: Some(name),
                 omittable: false,
                 type_def: Some(type_def),
@@ -1425,6 +1444,7 @@ fn field_type_base(input: Span) -> IResult<Span, FieldType> {
                 peek(field_entry_end),
             ),
             |name| FieldType::Field {
+                span: Spanned::default(),
                 name: Some(name),
                 omittable: true,
                 type_def: None,
@@ -1433,6 +1453,7 @@ fn field_type_base(input: Span) -> IResult<Span, FieldType> {
         ),
         map(terminated(identifier, peek(field_entry_end)), |name| {
             FieldType::Field {
+                span: Spanned::default(),
                 name: Some(name),
                 omittable: false,
                 type_def: None,
@@ -1441,6 +1462,7 @@ fn field_type_base(input: Span) -> IResult<Span, FieldType> {
         }),
         // Unnamed field: type
         map(type_definition, |type_def| FieldType::Field {
+            span: Spanned::default(),
             name: None,
             omittable: false,
             type_def: Some(type_def),
@@ -1482,6 +1504,7 @@ fn field_type_list(input: Span) -> IResult<Span, Vec<FieldType>> {
                         omittable: false,
                         type_def: None,
                         default: None,
+                        ..
                     }
                 )
             };

@@ -510,6 +510,7 @@ fn resolve_tuple_fields_with_spread(
                 omittable,
                 type_def,
                 default,
+                ..
             } => {
                 // A default belongs to a function, not to a type. `compile_function` strips
                 // the ones it consumes from its parameter spelling before resolving it, so
@@ -575,6 +576,7 @@ fn resolve_tuple_fields_with_spread(
             ast::FieldType::Spread {
                 identifier,
                 type_arguments,
+                ..
             } => {
                 // Identifier must be specified (parser transforms `...` in `identifier[...]` to `...identifier`)
                 let spread_id = identifier.as_ref().ok_or_else(|| {
@@ -820,6 +822,7 @@ fn resolve_tuple_ast(
                 omittable,
                 type_def,
                 default,
+                ..
             } => {
                 // A default belongs to a function, not to a type. `compile_function`
                 // strips the ones it consumes from its parameter spelling before
