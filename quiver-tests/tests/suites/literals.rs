@@ -99,3 +99,38 @@ fn test_negative_decimal_still_works() {
 fn test_zero() {
     quiver().evaluate("0").expect("0");
 }
+
+// Constant folding: a literal whose fields are all data is interned once and shared by every
+// evaluation. These pin that the sharing stays invisible, which is what makes it sound.
+
+#[test]
+fn a_folded_literal_is_not_observably_shared() {
+    // Both `[1, 2]`s are the same interned constant, so they are the same `Rc` at runtime.
+    // Annotating one must not be visible through the other — annotation is copy-on-write,
+    // and this is the test that says so out loud.
+    quiver()
+        .evaluate("a = [1, 2] ~> { :note 7 }; b = [1, 2]; [a ~> :('int)note, b ~> :('int)note]")
+        .expect("[7, []]");
+}
+
+#[test]
+fn a_folded_literal_destructures_and_compares() {
+    quiver()
+        .evaluate("[1, 2] ~> =[x, y]; [y, x]")
+        .expect("[2, 1]");
+    quiver().evaluate("a = [1, 2]; [1, 2] ~> =&a").expect("Ok");
+}
+
+#[test]
+fn a_nested_literal_folds_whole() {
+    quiver()
+        .evaluate("[[1, 2], A[3, [4]]] ~> =[[_, b], A[_, [d]]]; [b, d]")
+        .expect("[2, 4]");
+}
+
+#[test]
+fn a_literal_mixing_data_and_a_binding_still_builds_correctly() {
+    quiver()
+        .evaluate("x = 5; p = [[1, 2], x]; p ~> =[[a, _], b]; [a, b]")
+        .expect("[1, 5]");
+}

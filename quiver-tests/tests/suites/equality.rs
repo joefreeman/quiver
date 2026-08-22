@@ -60,3 +60,23 @@ fn test_structural_equality_distinct_shapes_differ() {
     // ...nor are different tuple names.
     quiver().evaluate("a = A[1]; B[1] ~> =&a").expect("[]");
 }
+
+#[test]
+fn field_less_tuples_sharing_one_payload_are_still_distinguished() {
+    // Every field-less tuple carries the *same* interned empty payload, and equality has a
+    // pointer fast path over payloads — so the canonical-shape test must run first, or `Ok`,
+    // `[]` and `Blue` would all compare equal. Pinning the order here because moving the
+    // pointer test earlier would look like a harmless simplification.
+    quiver().evaluate("a = Ok; b = []; a ~> =&b").expect("[]");
+    quiver().evaluate("a = []; b = Ok; a ~> =&b").expect("[]");
+    quiver().evaluate("a = Blue; b = Ok; a ~> =&b").expect("[]");
+    quiver()
+        .evaluate("a = Blue; b = Blue; a ~> =&b")
+        .expect("Ok");
+    quiver().evaluate("a = Ok; b = Ok; a ~> =&b").expect("Ok");
+    quiver().evaluate("a = []; b = []; a ~> =&b").expect("Ok");
+    // A name still separates otherwise-identical shapes.
+    quiver()
+        .evaluate("a = A[1]; b = [1]; a ~> =&b")
+        .expect("[]");
+}

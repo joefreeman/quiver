@@ -1858,18 +1858,46 @@ impl<E: Effect> Environment<E> {
             }
         }
 
-        // Close over static instruction references: a live function's operands keep
-        // the functions and constants they name alive.
-        let mut worklist: Vec<usize> = live_functions.iter().copied().collect();
-        while let Some(index) = worklist.pop() {
-            let Some(function) = self.program.get_function(index) else {
-                continue;
-            };
-            let mut referenced = HashSet::new();
-            function.collect_code_refs(&mut referenced, &mut live_constants);
-            for function_index in referenced {
-                if live_functions.insert(function_index) {
-                    worklist.push(function_index);
+        // Close over static references, in both directions. A live function's operands keep
+        // the functions and constants they name alive; a live *constant* keeps its children
+        // alive — and, when it is a closure, the function it names — because a composite is
+        // only rebuildable if everything under it survives. The two feed each other, so the
+        // worklists run until both are empty.
+        let mut function_worklist: Vec<usize> = live_functions.iter().copied().collect();
+        let mut constant_worklist: Vec<usize> = live_constants.iter().copied().collect();
+        while !function_worklist.is_empty() || !constant_worklist.is_empty() {
+            while let Some(index) = function_worklist.pop() {
+                let Some(function) = self.program.get_function(index) else {
+                    continue;
+                };
+                let mut functions = HashSet::new();
+                let mut constants = HashSet::new();
+                function.collect_code_refs(&mut functions, &mut constants);
+                for function_index in functions {
+                    if live_functions.insert(function_index) {
+                        function_worklist.push(function_index);
+                    }
+                }
+                for constant_index in constants {
+                    if live_constants.insert(constant_index) {
+                        constant_worklist.push(constant_index);
+                    }
+                }
+            }
+            while let Some(index) = constant_worklist.pop() {
+                let Some(constant) = self.program.get_constant(index) else {
+                    continue;
+                };
+                let (children, function) = (constant.children(), constant.function());
+                for child in children {
+                    if live_constants.insert(child) {
+                        constant_worklist.push(child);
+                    }
+                }
+                if let Some(function_index) = function
+                    && live_functions.insert(function_index)
+                {
+                    function_worklist.push(function_index);
                 }
             }
         }

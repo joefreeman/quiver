@@ -104,11 +104,15 @@ impl Type {
     /// transplanting types between programs. `Cycle` markers are relative (binder
     /// depth, not a table id) and pass through untouched, as do names.
     pub fn remap_ids(&self, remaps: &crate::bytecode::IdRemaps) -> Type {
-        let ty = |id: &usize| *remaps.types.get(id).unwrap_or(id);
+        let ty = |id: &usize| crate::bytecode::IdRemaps::map(&remaps.types, "type", *id);
         match self {
             Type::Integer | Type::Binary | Type::Reference | Type::Cycle(_) => self.clone(),
             Type::Resource(_) | Type::Variable(_) => self.clone(),
-            Type::Tuple(tuple_id) => Type::Tuple(*remaps.tuples.get(tuple_id).unwrap_or(tuple_id)),
+            Type::Tuple(tuple_id) => Type::Tuple(crate::bytecode::IdRemaps::map(
+                &remaps.tuples,
+                "tuple",
+                *tuple_id,
+            )),
             Type::Partial { name, fields } => Type::Partial {
                 name: name.clone(),
                 fields: fields
@@ -141,7 +145,14 @@ impl Type {
                 entries: entries
                     .iter()
                     .map(|(key, value)| {
-                        (*remaps.annotation_keys.get(key).unwrap_or(key), ty(value))
+                        (
+                            crate::bytecode::IdRemaps::map(
+                                &remaps.annotation_keys,
+                                "annotation key",
+                                *key,
+                            ),
+                            ty(value),
+                        )
                     })
                     .collect(),
             },
@@ -176,7 +187,12 @@ impl TupleTypeInfo {
             fields: self
                 .fields
                 .iter()
-                .map(|(name, id)| (name.clone(), *remaps.types.get(id).unwrap_or(id)))
+                .map(|(name, id)| {
+                    (
+                        name.clone(),
+                        crate::bytecode::IdRemaps::map(&remaps.types, "type", *id),
+                    )
+                })
                 .collect(),
         }
     }

@@ -2,6 +2,22 @@ use crate::types::{BuiltinInfo, NIL, OK, TupleTypeInfo, Type, TypeLookup};
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
+/// A value the program carries rather than builds: the compiler interns it once and the
+/// bytecode names it by index, where it would otherwise emit instructions that rebuild it on
+/// every evaluation.
+///
+/// Composites reference their children **by constant index** rather than nesting them. That
+/// is what makes [`crate::program::Program::register_constant`]'s content interning exact —
+/// children are registered first, so structurally identical subtrees get identical indices
+/// and their parents then digest identically — and it is what lets the executor's
+/// materialisation memo reproduce the compile-time graph's sharing instead of expanding it
+/// into a tree. It also keeps remapping shallow: a slot rewrites a few ids, with no
+/// recursive walk over value structure.
+///
+/// The graph is acyclic. Values are built bottom-up, and a module's members cannot reference
+/// each other (aliases are positional — a definition precedes its uses), so nothing closes a
+/// loop. Identity-bearing values — refs, pids, resources — have no constant form at all,
+/// which is the same exclusion compile-time evaluation already imposes.
 #[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Clone)]
 pub enum Constant {
     // One form for all integers: the small/big split is a runtime-representation
@@ -10,6 +26,90 @@ pub enum Constant {
     Integer(BigInt),
     #[serde(rename = "bin", with = "base64_bytes")]
     Binary(Vec<u8>),
+    /// `id` is the tuple id an `Opcode::Tuple` operand would carry — the same table, the
+    /// same remap. A field-less tuple needs no constant (`Payload::shared` interns the
+    /// empty payload, so building one is already a refcount bump).
+    #[serde(rename = "tuple")]
+    Tuple { id: usize, fields: Vec<usize> },
+    /// A closure: `id` indexes the function table, `captures` are its capture values.
+    #[serde(rename = "fn")]
+    Function { id: usize, captures: Vec<usize> },
+    /// A builtin, bare or instantiated — `register_builtin_instantiated` folds the type
+    /// argument into the id, so materialisation reads it back off the builtin's table entry
+    /// rather than storing it twice.
+    #[serde(rename = "builtin")]
+    Builtin { id: usize },
+    /// Annotations over another constant. A separate node rather than a field on each
+    /// carrier: one variant serves tuples, functions and builtins alike, and the
+    /// *unannotated* carrier stays a slot of its own that other uses can share. `entries`
+    /// is `(annotation key id, constant index)`, sorted by key id so that the interning
+    /// digest does not depend on attach order.
+    #[serde(rename = "anno")]
+    Annotated {
+        value: usize,
+        entries: Vec<(usize, usize)>,
+    },
+}
+
+impl Constant {
+    /// The constant indices this one references. The edge set of the graph: reclamation
+    /// closes over it, and the linker topologically sorts by it.
+    pub fn children(&self) -> Vec<usize> {
+        match self {
+            Constant::Integer(_) | Constant::Binary(_) | Constant::Builtin { .. } => Vec::new(),
+            Constant::Tuple { fields, .. } => fields.clone(),
+            Constant::Function { captures, .. } => captures.clone(),
+            Constant::Annotated { value, entries } => std::iter::once(*value)
+                .chain(entries.iter().map(|(_, index)| *index))
+                .collect(),
+        }
+    }
+
+    /// The function index a closure constant names, for the linker's dependency edges.
+    pub fn function(&self) -> Option<usize> {
+        match self {
+            Constant::Function { id, .. } => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The same constant with every table reference rewritten through `remaps`. Shallow —
+    /// children are rewritten as indices, not walked.
+    pub fn remap_ids(self, remaps: &IdRemaps) -> Constant {
+        let map_child = |index: usize| IdRemaps::map(&remaps.constants, "constant", index);
+        match self {
+            Constant::Integer(_) | Constant::Binary(_) => self,
+            Constant::Tuple { id, fields } => Constant::Tuple {
+                id: IdRemaps::map(&remaps.tuples, "tuple", id),
+                fields: fields.into_iter().map(map_child).collect(),
+            },
+            Constant::Function { id, captures } => Constant::Function {
+                id: IdRemaps::map(&remaps.functions, "function", id),
+                captures: captures.into_iter().map(map_child).collect(),
+            },
+            Constant::Builtin { id } => Constant::Builtin {
+                id: IdRemaps::map(&remaps.builtins, "builtin", id),
+            },
+            Constant::Annotated { value, entries } => Constant::Annotated {
+                value: map_child(value),
+                // Key ids are remapped, so the sort that keeps the digest canonical has to
+                // be re-established rather than assumed to survive.
+                entries: {
+                    let mut entries: Vec<(usize, usize)> = entries
+                        .into_iter()
+                        .map(|(key, index)| {
+                            (
+                                IdRemaps::map(&remaps.annotation_keys, "annotation key", key),
+                                map_child(index),
+                            )
+                        })
+                        .collect();
+                    entries.sort_by_key(|(key, _)| *key);
+                    entries
+                },
+            },
+        }
+    }
 }
 
 /// A concrete type that uniquely identifies a runtime value's type.
@@ -28,7 +128,11 @@ pub enum ConcreteType {
 
 /// Id remap tables for transplanting bytecode between programs — the environment
 /// merging a compiled line into its program, or the linker loading a module artifact
-/// into a session. A missing entry means the id is unchanged.
+/// into a session.
+///
+/// Each table is **total** over the ids it will be asked about: a caller adds an entry per
+/// row it links, and finishes filling a table before anything consults it. A miss is a
+/// caller bug and [`IdRemaps::map`] says so.
 #[derive(Debug, Default)]
 pub struct IdRemaps {
     pub constants: std::collections::HashMap<usize, usize>,
@@ -42,8 +146,30 @@ pub struct IdRemaps {
 }
 
 impl IdRemaps {
-    fn map(table: &std::collections::HashMap<usize, usize>, id: usize) -> usize {
-        *table.get(&id).unwrap_or(&id)
+    /// Rewrite one id through `table`.
+    ///
+    /// A remap is **total** over the ids it will be asked about: whoever builds one adds an
+    /// entry per row it links, and extraction's `verify` checks that a unit references
+    /// nothing outside its own tables. So a miss is a bug in the caller, and this says so
+    /// rather than answering the id unchanged.
+    ///
+    /// Passing the id through was the old behaviour, and it is the worst available answer:
+    /// an unmapped id is not an absent one, it is a *plausible* one naming whatever else
+    /// happens to sit at that index — another module's function, another module's
+    /// provenance site. That produces a program that links, runs, and is quietly wrong,
+    /// which is exactly how a site-table ordering bug once made every failure report
+    /// against another module's source while every payload stayed correct.
+    pub(crate) fn map(
+        table: &std::collections::HashMap<usize, usize>,
+        label: &str,
+        id: usize,
+    ) -> usize {
+        *table.get(&id).unwrap_or_else(|| {
+            panic!(
+                "no {label} remap for id {id}: a remap must cover every id it is asked \
+                 about, so this means the table was consulted before it was filled"
+            )
+        })
     }
 }
 
@@ -67,27 +193,33 @@ impl Function {
             .map(|instruction| {
                 // Fixed-width packing is what lets this be an operand rewrite: the opcode
                 // is untouched and nothing downstream shifts.
-                let table = match instruction.opcode() {
-                    Opcode::Constant => &remaps.constants,
-                    Opcode::Function => &remaps.functions,
-                    Opcode::Builtin => &remaps.builtins,
-                    Opcode::Tuple => &remaps.tuples,
-                    Opcode::IsType => &remaps.types,
-                    Opcode::GetNamed => &remaps.field_names,
-                    Opcode::Annotate | Opcode::GetAnnotation => &remaps.annotation_keys,
-                    Opcode::Stamp => &remaps.sites,
+                let (table, label) = match instruction.opcode() {
+                    Opcode::Constant => (&remaps.constants, "constant"),
+                    Opcode::Function => (&remaps.functions, "function"),
+                    Opcode::Builtin => (&remaps.builtins, "builtin"),
+                    Opcode::Tuple => (&remaps.tuples, "tuple"),
+                    Opcode::IsType => (&remaps.types, "type"),
+                    Opcode::GetNamed => (&remaps.field_names, "field name"),
+                    Opcode::Annotate | Opcode::GetAnnotation => {
+                        (&remaps.annotation_keys, "annotation key")
+                    }
+                    Opcode::Stamp => (&remaps.sites, "site"),
                     // Stack slots, jump offsets, positions and arities are not table ids;
                     // `Process` names a function whose index is already session-space.
                     _ => return instruction,
                 };
-                instruction.with_operand(IdRemaps::map(table, instruction.operand() as usize))
+                instruction.with_operand(IdRemaps::map(
+                    table,
+                    label,
+                    instruction.operand() as usize,
+                ))
             })
             .collect();
 
         Function {
             instructions,
             captures: self.captures,
-            type_id: IdRemaps::map(&remaps.types, self.type_id),
+            type_id: IdRemaps::map(&remaps.types, "type", self.type_id),
         }
     }
 
@@ -381,10 +513,79 @@ mod tests {
             Constant::Binary(vec![]),
             Constant::Binary(vec![0x00, 0xff, 0x68, 0x69]),
             Constant::Binary((0..=255).collect()),
+            Constant::Tuple {
+                id: 4,
+                fields: vec![0, 1],
+            },
+            Constant::Tuple {
+                id: 0,
+                fields: vec![],
+            },
+            Constant::Function {
+                id: 12,
+                captures: vec![7],
+            },
+            Constant::Builtin { id: 3 },
+            Constant::Annotated {
+                value: 7,
+                entries: vec![(1, 4), (2, 5)],
+            },
         ];
         let json = serde_json::to_string(&constants).expect("serialize");
         let restored: Vec<Constant> = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored, constants);
+    }
+
+    /// Remapping is shallow: children move as indices, and annotation entries re-sort
+    /// under their new key ids so the interning digest stays canonical.
+    #[test]
+    fn composite_constants_remap() {
+        let mut remaps = super::IdRemaps::default();
+        remaps
+            .constants
+            .extend([(0, 10), (1, 11), (4, 14), (5, 15)]);
+        remaps.tuples.insert(4, 40);
+        remaps.functions.insert(12, 120);
+        remaps.builtins.insert(3, 30);
+        remaps.annotation_keys.extend([(1, 9), (2, 8)]);
+
+        assert_eq!(
+            Constant::Tuple {
+                id: 4,
+                fields: vec![0, 1]
+            }
+            .remap_ids(&remaps),
+            Constant::Tuple {
+                id: 40,
+                fields: vec![10, 11]
+            }
+        );
+        assert_eq!(
+            Constant::Function {
+                id: 12,
+                captures: vec![0]
+            }
+            .remap_ids(&remaps),
+            Constant::Function {
+                id: 120,
+                captures: vec![10]
+            }
+        );
+        assert_eq!(
+            Constant::Builtin { id: 3 }.remap_ids(&remaps),
+            Constant::Builtin { id: 30 }
+        );
+        assert_eq!(
+            Constant::Annotated {
+                value: 0,
+                entries: vec![(1, 4), (2, 5)]
+            }
+            .remap_ids(&remaps),
+            Constant::Annotated {
+                value: 10,
+                entries: vec![(8, 15), (9, 14)]
+            }
+        );
     }
 
     /// A corrupt stream must be a deserialization error, never a panic — the range check

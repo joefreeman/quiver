@@ -487,11 +487,60 @@ fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Erro
             .map_err(|e| format!("Cannot link the program: {e:?}"))?;
     let bytecode_data = program.to_bytecode(entry_id);
 
+    // Table sizes up front. Types are the largest table in a linked program by some margin
+    // and the only one with no section below, so without this line the biggest thing in a
+    // program is invisible here.
+    println!(
+        "Tables: {} types, {} tuples, {} constants, {} functions, {} builtins",
+        bytecode_data.types.len(),
+        bytecode_data.tuples.len(),
+        bytecode_data.constants.len(),
+        bytecode_data.functions.len(),
+        bytecode_data.builtins.len(),
+    );
+    println!();
+
     println!("Constants:");
     for (i, constant) in bytecode_data.constants.iter().enumerate() {
+        // Composites name their children by index, so they print as `#n` references rather
+        // than being expanded — the table is a graph, and showing it as one is the point.
+        let refs = |indices: &[usize]| {
+            indices
+                .iter()
+                .map(|index| format!("#{index}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let formatted = match constant {
             bytecode::Constant::Integer(n) => n.to_string(),
             bytecode::Constant::Binary(bytes) => format_binary(bytes),
+            bytecode::Constant::Tuple { id, fields } => {
+                let name = bytecode_data
+                    .tuples
+                    .get(*id)
+                    .and_then(|info| info.name.clone())
+                    .unwrap_or_default();
+                format!("{name}[{}]", refs(fields))
+            }
+            bytecode::Constant::Function { id, captures } => {
+                format!("Function{id}({})", refs(captures))
+            }
+            bytecode::Constant::Builtin { id } => format!("Builtin{id}"),
+            bytecode::Constant::Annotated { value, entries } => {
+                let entries = entries
+                    .iter()
+                    .map(|(key, index)| {
+                        let key = bytecode_data
+                            .annotation_keys
+                            .get(*key)
+                            .cloned()
+                            .unwrap_or_else(|| key.to_string());
+                        format!(":{key} #{index}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("#{value} {entries}")
+            }
         };
         println!("  {}: {}", i, formatted);
     }

@@ -4,6 +4,7 @@ mod annotations;
 mod codegen;
 mod dialect;
 mod elision;
+mod folding;
 mod helpers;
 mod modules;
 mod narrowing;
@@ -37,7 +38,7 @@ use crate::{
 
 use quiver_core::{
     bytecode::{Constant, Function, Instruction, Opcode},
-    program::Program,
+    program::{InternError, Program},
     types::{NIL, OK, Type, TypeLookup},
     value::{Binary, Payload, Value},
 };
@@ -729,51 +730,6 @@ fn value_fn_index(value: &Value) -> Option<usize> {
     match value {
         Value::Function(index, _) => Some(*index),
         _ => None,
-    }
-}
-
-/// The reconstruction-CSE key for a value, or `None` for values too cheap to share
-/// (their build is a single instruction — a `Store`/`Load` pair would only add weight).
-/// `Value` equality would be the wrong identity here — annotations are invisible to it —
-/// so the key is the payload's pointer (see [`scopes::CseKey`]).
-fn cse_key(value: &Value) -> Option<scopes::CseKey> {
-    let (kind, id, payload) = match value {
-        Value::Tuple(tuple_id, payload)
-            if !payload.is_empty() || !payload.annotations().is_empty() =>
-        {
-            (scopes::CseKind::Tuple, *tuple_id, payload)
-        }
-        Value::Function(function, payload)
-            if !payload.is_empty() || !payload.annotations().is_empty() =>
-        {
-            (scopes::CseKind::Function, *function, payload)
-        }
-        Value::Builtin(builtin_id, Some(payload)) if !payload.annotations().is_empty() => {
-            (scopes::CseKind::Builtin, *builtin_id, payload)
-        }
-        _ => return None,
-    };
-    Some(scopes::CseKey {
-        kind,
-        id,
-        payload: std::rc::Rc::clone(payload),
-    })
-}
-
-/// Whether hoisting a compile-time-known value to a capture slot pays its way. A primitive,
-/// a bare or merely-instantiated builtin, and an empty-payload tuple or function all
-/// reconstruct as a single allocation-free instruction — a slot would only add capture
-/// weight. Everything else (captures, fields, annotations) allocates on every rebuild.
-fn worth_hoisting(value: &Value) -> bool {
-    match value {
-        Value::Int(_) | Value::BigInt(_) | Value::Binary(_) | Value::Reference(_) => false,
-        Value::Builtin(_, payload) => payload
-            .as_ref()
-            .is_some_and(|payload| !payload.annotations().is_empty()),
-        Value::Tuple(_, payload) | Value::Function(_, payload) => {
-            !payload.is_empty() || !payload.annotations().is_empty()
-        }
-        Value::Process(..) | Value::Resource(..) => false,
     }
 }
 
@@ -1673,6 +1629,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Compile field values and collect their types and provenances
         let mut field_types = Vec::new();
         let mut field_provenances = Vec::new();
+        // Where this literal's build starts, so a fully-constant one can be folded away
+        // once the whole of it has been emitted (see below).
+        let build_start = self.codegen.instructions.len();
         for (fields_compiled, field) in order.iter().map(|&i| &fields[i]).enumerate() {
             // This field's expected type, with the variables solved so far substituted in.
             let field_expected = expected_fields
@@ -1738,6 +1697,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Register the tuple type and emit instruction
         let tuple_id = self.program.register_tuple(tuple_name, field_types);
         self.codegen.add_instruction(Instruction::tuple(tuple_id));
+
+        // A literal that turns out to be data folds into the single constant that names it,
+        // so evaluating it costs a refcount bump rather than a payload allocation per field.
+        // `rewritable_from` asks the same question argument fusion does: nothing may jump
+        // into what is about to be cut. The replacement leaves the stack exactly as the cut
+        // range did — one new value on top — which is what `constant_of_range` establishes.
+        //
+        // Field-less tuples are skipped: `Nil`, `Ok` and an interned empty payload already
+        // cost nothing to push, so folding one would only add a table lookup.
+        if !fields.is_empty() && self.codegen.rewritable_from(build_start) {
+            let range = &self.codegen.instructions[build_start..];
+            if let Some(constant) = folding::constant_of_range(self.program, range) {
+                self.codegen.instructions.truncate(build_start);
+                self.codegen
+                    .add_instruction(Instruction::constant(constant));
+            }
+        }
 
         // Clean up ripple value if we own it
         if let Some(ctx) = ripple_context
@@ -2623,33 +2599,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             },
         );
 
-        // A hoisted import earns its slot only when its reconstruction is non-trivial. The
-        // capture list must stay exact — registration, the build-site pushes, and the
-        // runtime's capture count all walk it — so drop rejects here, before anything
-        // counts them. A resolution failure is also dropped: the body's own reference
-        // reports it with full context (and compiles inline, exactly as without hoisting).
-        // The resolved type is kept (parallel to the list) so registration below doesn't
-        // resolve a second time; `import_types[i]` is `Some` exactly for `Import` sources.
-        let mut import_types: Vec<Option<usize>> = Vec::with_capacity(unique_captures.len());
-        let unique_captures: Vec<variables::Capture> = unique_captures
-            .into_iter()
-            .filter_map(|capture| {
-                let import_type = match &capture.source {
-                    variables::CaptureSource::Import(module) => {
-                        match self.resolve_import(module, &capture.accessors) {
-                            Ok((_, value, resolved_type, _)) if worth_hoisting(&value) => {
-                                Some(resolved_type)
-                            }
-                            _ => return None,
-                        }
-                    }
-                    _ => None,
-                };
-                import_types.push(import_type);
-                Some(capture)
-            })
-            .collect();
-
         // Resolve parameter type with declared type parameters, uniquifying their names.
         // Distinct top-level definitions get distinct suffixes — `Type::Variable` is
         // name-keyed, so `map`'s `'t` called from `left`'s body would otherwise unify "a
@@ -2750,7 +2699,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.current_omittable = parameter_omittable;
 
         // Define captures as first locals in function body scope
-        for (capture, import_type) in unique_captures.iter().zip(&import_types) {
+        for capture in unique_captures.iter() {
             // Determine the type of the captured value
             let capture_type = match &capture.source {
                 variables::CaptureSource::OuterParameter(levels) => {
@@ -2784,18 +2733,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         };
                         outer_type
                     }
-                }
-                variables::CaptureSource::Import(_) => {
-                    // A hoisted import slot, typed exactly as the use site would type the
-                    // member — the annotation row included, so contract detection and
-                    // retrieval through the slot see what inline emission would. The type
-                    // was resolved (once) by the filter above; a `None` here would mean
-                    // the two walks disagreed, silently skewing every later capture's
-                    // local index — fail loudly instead.
-                    import_type.ok_or_else(|| Error::InternalError {
-                        message: "import capture kept by the filter without a resolved type"
-                            .to_string(),
-                    })?
                 }
                 variables::CaptureSource::Variable(base) => {
                     // First check if the full path is already available (for nested captures)
@@ -3144,14 +3081,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         };
                         self.codegen.add_instruction(Instruction::load(index));
                     }
-                }
-                variables::CaptureSource::Import(module) => {
-                    // Emit the hoisted value at the closure's build site. `compile_import`
-                    // consults the *enclosing* function's own slots, so nested builds
-                    // bubble outward — a Load where the parent also hoisted the value,
-                    // inline reconstruction once the chain reaches top level.
-                    self.current_span = capture.span.get().or(self.current_span);
-                    self.compile_import(module, &capture.accessors, &[])?;
                 }
                 variables::CaptureSource::Variable(base) => {
                     // First check if the full path is available (for nested captures)
@@ -3579,10 +3508,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 })?;
                 scope.bindings.clear();
                 scope.narrowings = provenance::Narrowings::default();
-                // The previous branch's CSE slots point at locals that were never
-                // allocated on this branch's path (or were reset) — drop them with the
-                // bindings, for the same reason.
-                scope.cse_slots.clear();
 
                 // Re-apply the complement narrowings accumulated from ALL previous branches.
                 // Applying every accumulated complement — not just the immediately preceding
@@ -3896,12 +3821,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // (bindings, interpolation holes) number from `locals_before` to match the
         // truncated frame — and any locals the chains allocate are cleared again after.
         self.local_count = locals_before;
-        // The runtime `Reset(locals_before)` above discarded every local the block
-        // allocated, so the block scope's CSE slots (all at indices ≥ `locals_before`)
-        // are dead — the attach chains compiled next must rebuild, not load them.
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.cse_slots.clear();
-        }
         let annotated_result = if block_annotations.is_empty() {
             None
         } else {
@@ -4818,43 +4737,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok((cached, resolved_value, resolved_type, origin))
     }
 
-    /// Compile an import with optional accessor chain.
-    /// Resolves accessors statically on the cached module value, emitting only
-    /// instructions needed for the resolved value. Explicit type arguments instantiate
-    /// a type-consuming builtin member (`&%data.decode<'ev>`).
-    fn compile_import(
-        &mut self,
-        module: &[String],
-        accessors: &[ast::AccessPath],
-        type_arguments: &[ast::Type],
-    ) -> Result<(usize, ModuleOrigin), Error> {
-        let (_cached, resolved_value, resolved_type, origin) =
-            self.resolve_import(module, accessors)?;
-        let resolved_value =
-            self.instantiate_builtin_member(resolved_value, type_arguments, false)?;
-
-        // Hoisted: inside a function whose collector registered this import as a
-        // synthetic capture, the built value sits in a slot — load it instead of
-        // re-emitting its construction. A miss (top level, an instantiated member, a
-        // value too cheap to hoist) falls through to inline emission, so any collector
-        // gap degrades to the unhoisted behavior rather than a miscompile.
-        if type_arguments.is_empty()
-            && let Some((_, index)) = scopes::lookup_variable(
-                &self.scopes,
-                &variables::CaptureSource::Import(module.to_vec()).scope_name(),
-                accessors,
-            )
-        {
-            self.codegen.add_instruction(Instruction::load(index));
-            return Ok((resolved_type, origin));
-        }
-
-        // Emit instructions for just the resolved value, sharing repeated nodes
-        self.emit_value_cse(&resolved_value)?;
-
-        Ok((resolved_type, origin))
-    }
-
     /// Import a module, execute it, and cache the result. The module is compiled in *its own*
     /// package context, so its imports resolve hermetically against its package's manifest.
     fn import_and_cache_module(
@@ -5196,8 +5078,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Load the dialect function and check that it takes the context record
         // `[content: Str['bin], term: <fn>, chain: <fn>]` (a partial parameter type
         // naming only the fields the dialect uses also works).
-        let (function_instructions, function_type) =
-            self.value_to_instructions_from_cache(&function)?;
+        // The dialect's mini-program runs over this program's own tables (`to_bytecode`
+        // below), so the interned constant naming the function is valid there.
+        let function_constant = self.intern_value(&function)?;
+        let function_type = self.value_type(&function)?;
         let Some((parameter, result)) = self.callable_signature(function_type) else {
             return Err(Error::DialectFailed {
                 module: module_name,
@@ -5277,7 +5161,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Instruction::builtin(chain_builtin),
             Instruction::tuple(context_tuple),
         ];
-        instructions.extend(function_instructions);
+        instructions.push(Instruction::constant(function_constant));
         instructions.push(Instruction::call());
         bytecode.functions.push(quiver_core::bytecode::Function {
             instructions,
@@ -5506,182 +5390,76 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    /// Emit instructions reconstructing a compile-time value directly into the current
-    /// stream, sharing repeated nodes ([`reconstruct_value`](Self::reconstruct_value)
-    /// with the memo on).
-    fn emit_value_cse(&mut self, value: &Value) -> Result<usize, Error> {
-        let mut instructions = Vec::new();
-        let value_type = self.reconstruct_value(value, &mut instructions, true)?;
-        for instruction in instructions {
-            self.codegen.add_instruction(instruction);
-        }
-        Ok(value_type)
-    }
-
-    /// Convert a cached runtime value back to instructions that reconstruct it, with no
-    /// sharing — for callers whose instructions never join the current frame's stream (a
-    /// type probe that discards them; dialect evaluation in its own mini-program), where
-    /// memo slots would corrupt `local_count`.
-    fn value_to_instructions_from_cache(
-        &mut self,
-        value: &Value,
-    ) -> Result<(Vec<Instruction>, usize), Error> {
-        let mut instructions = Vec::new();
-        let value_type = self.reconstruct_value(value, &mut instructions, false)?;
-        Ok((instructions, value_type))
-    }
-
-    /// The one reconstruction emitter: convert a cached runtime value back to
-    /// instructions (appended to `out`) that rebuild it, using pre-extracted binary data
-    /// instead of an executor.
+    /// Emit a compile-time value as the single constant that names it, answering its type id.
     ///
-    /// With `memo` on, repeated nodes share: the first emission of each non-trivial node
-    /// stores the built value into an internal local (a [`scopes::CseKey`] slot — see
-    /// `Scope::cse_slots` for the lifetime story) and every later occurrence of the same
-    /// payload loads it, so the emitted program (and the runtime values it builds) keep
-    /// the sharing the cached value's DAG had instead of expanding it to a tree. The memo
-    /// allocates locals as it emits, so `out` must join the current function's stream,
-    /// in order, immediately — allocation order is execution order.
-    fn reconstruct_value(
-        &mut self,
-        value: &Value,
-        out: &mut Vec<Instruction>,
-        memo: bool,
-    ) -> Result<usize, Error> {
-        let key = if memo { cse_key(value) } else { None };
-        if let Some(key) = &key
-            && let Some((slot_type, index)) = scopes::lookup_cse_slot(&self.scopes, key)
-        {
-            out.push(Instruction::load(index));
-            return Ok(slot_type);
-        }
+    /// What the bytecode carries is an index, not the instructions to rebuild the value. The
+    /// constants table's content interning is what makes repeated emissions share: two sites
+    /// naming the same value reach the same slot, and the executor materialises that slot
+    /// once per worker, so the runtime graph keeps whatever sharing the value had.
+    fn emit_value(&mut self, value: &Value) -> Result<usize, Error> {
+        let index = self.intern_value(value)?;
+        self.codegen.add_instruction(Instruction::constant(index));
+        self.value_type(value)
+    }
 
-        let value_type = match value {
-            Value::Int(int_value) => {
-                let index = self
-                    .program
-                    .register_constant(Constant::Integer((*int_value).into()));
-                out.push(Instruction::constant(index));
-                self.program.register_type(Type::Integer)
-            }
-            Value::BigInt(int_value) => {
-                let index = self
-                    .program
-                    .register_constant(Constant::Integer((**int_value).clone()));
-                out.push(Instruction::constant(index));
-                self.program.register_type(Type::Integer)
-            }
-            Value::Binary(binary) => {
-                let index = match binary {
-                    // Just use the existing constant
-                    Binary::Constant(const_idx) => *const_idx,
-                    // The value carries its own bytes; nothing to look up.
-                    Binary::Data(data) => self
-                        .program
-                        .register_constant(Constant::Binary(data.to_vec())),
-                };
-                out.push(Instruction::constant(index));
-                self.program.register_type(Type::Binary)
-            }
-            Value::Tuple(tuple_id, payload) => {
-                for field in payload.iter() {
-                    self.reconstruct_value(field, out, memo)?;
+    /// Intern a compile-time value into the constants table, reporting an identity-bearing
+    /// one (a ref, a pid, a resource) as a compile error against the current site.
+    fn intern_value(&mut self, value: &Value) -> Result<usize, Error> {
+        self.program
+            .intern_value(value, self.builtins)
+            .map_err(|error| match error {
+                InternError::Identity(kind) => {
+                    Error::FeatureUnsupported(format!("Cannot use {kind} in constant context"))
                 }
-                out.push(Instruction::tuple(*tuple_id));
-                self.reconstruct_annotations(payload, out, memo)?;
-                self.program.register_type(Type::Tuple(*tuple_id))
-            }
-            Value::Function(function, payload) => {
-                // The callable type comes straight from the function's table entry —
-                // the same index is reused, no re-registration.
-                let callable_type_id = self
-                    .program
+                InternError::BuiltinUndefined(id) => {
+                    Error::BuiltinUndefined(format!("builtin_id {id}"))
+                }
+            })
+    }
+
+    /// The type id of a compile-time value, as the surrounding code sees it. Annotations do
+    /// not enter into it — they ride the value, and a caller that needs the annotated type
+    /// computes it from this one.
+    fn value_type(&mut self, value: &Value) -> Result<usize, Error> {
+        Ok(match value {
+            Value::Int(_) | Value::BigInt(_) => self.program.register_type(Type::Integer),
+            Value::Binary(_) => self.program.register_type(Type::Binary),
+            Value::Tuple(tuple_id, _) => self.program.register_type(Type::Tuple(*tuple_id)),
+            // The callable type comes straight from the function's table entry — the same
+            // index is reused, no re-registration.
+            Value::Function(function, _) => {
+                self.program
                     .get_function(*function)
                     .ok_or(Error::FunctionUndefined(*function))?
-                    .type_id;
-                for capture in payload.iter() {
-                    self.reconstruct_value(capture, out, memo)?;
-                }
-                out.push(Instruction::function(*function));
-                self.reconstruct_annotations(payload, out, memo)?;
-                callable_type_id
+                    .type_id
             }
-            Value::Builtin(builtin_id, payload) => {
+            // The generic signature, not the instantiation's: acceptable while no module
+            // exports an instantiated builtin whose *result* depends on its type argument.
+            Value::Builtin(builtin_id, _) => {
                 let builtin_info = self
                     .program
                     .get_builtins()
                     .get(*builtin_id)
                     .ok_or_else(|| Error::BuiltinUndefined(format!("builtin_id {builtin_id}")))?;
-                let param_type = builtin_info.param_type;
-                let result_type = builtin_info.result_type;
-                let builtin_name = builtin_info.name.clone();
-                let never_id = self.program.never();
-                let callable_type_id = self.program.register_type(Type::Callable {
-                    parameter: param_type,
-                    result: result_type,
-                    receive: never_id,
+                let parameter = builtin_info.param_type;
+                let result = builtin_info.result_type;
+                let receive = self.program.never();
+                self.program.register_type(Type::Callable {
+                    parameter,
+                    result,
+                    receive,
                     // Builtins never tail-call: their states are their parameter.
-                    states: Some(param_type),
+                    states: Some(parameter),
                     omittable: Vec::new(),
-                });
-                // A module-cached instantiated builtin resolves to this program's entry for
-                // that instantiation (the static type above stays the generic signature —
-                // acceptable while no module exports an instantiated builtin whose
-                // *result* depends on it). Registration is idempotent, so an id that is
-                // already the right entry answers itself.
-                let type_argument = payload.as_deref().and_then(Payload::type_argument);
-                let builtin_index = self.program.register_builtin_instantiated(
-                    builtin_name,
-                    type_argument,
-                    self.builtins,
-                );
-                out.push(Instruction::builtin(builtin_index));
-                if let Some(payload) = payload {
-                    self.reconstruct_annotations(payload, out, memo)?;
-                }
-                callable_type_id
+                })
             }
-            Value::Process(_, _) => {
-                return Err(Error::FeatureUnsupported(
-                    "Cannot use process in constant context".to_string(),
-                ));
+            Value::Process(..) | Value::Resource(..) | Value::Reference(_) => {
+                return Err(Error::FeatureUnsupported(format!(
+                    "Cannot use {} in constant context",
+                    value.type_name()
+                )));
             }
-            Value::Resource(..) => {
-                return Err(Error::FeatureUnsupported(
-                    "Cannot use resource in constant context".to_string(),
-                ));
-            }
-            Value::Reference(_) => {
-                return Err(Error::FeatureUnsupported(
-                    "Cannot use ref in constant context".to_string(),
-                ));
-            }
-        };
-
-        if let Some(key) = key {
-            // Allocation order equals execution order — nested nodes registered and
-            // stored above land at exactly the local indices `local_count` predicted.
-            let index =
-                scopes::define_cse_slot(&mut self.scopes, &mut self.local_count, key, value_type);
-            out.push(Instruction::store());
-            out.push(Instruction::load(index));
-        }
-        Ok(value_type)
-    }
-
-    /// Append each annotation of `payload` (value, then `Annotate`) onto the value the
-    /// preceding instructions left on the stack.
-    fn reconstruct_annotations(
-        &mut self,
-        payload: &quiver_core::value::Payload,
-        out: &mut Vec<Instruction>,
-        memo: bool,
-    ) -> Result<(), Error> {
-        for (key, value) in payload.annotations() {
-            self.reconstruct_value(value, out, memo)?;
-            out.push(Instruction::annotate(*key));
-        }
-        Ok(())
+        })
     }
 
     /// Resolve an accessor chain on a compile-time known value.
@@ -5724,7 +5502,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         // Apply the gate now: the entry is a compile-time value, so its
                         // precise type is reconstructible and the shape test is static.
                         if let Some(entry) = current_value.get_annotation(key_id).cloned() {
-                            let (_, entry_type) = self.value_to_instructions_from_cache(&entry)?;
+                            let entry_type = self.value_type(&entry)?;
                             if !quiver_core::types::is_compatible(entry_type, asked, &*self.program)
                             {
                                 current_value = Value::nil();
@@ -6375,21 +6153,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 } else {
                     None
                 };
-                // Hoisted-slot gate, as in `compile_import`: load the synthetic capture
-                // when the enclosing function registered one, else emit inline (sharing
-                // repeated nodes).
                 if forwarder.is_some() {
                     // Elided: no callee push.
-                } else if type_args.is_empty()
-                    && let Some((_, index)) = scopes::lookup_variable(
-                        &self.scopes,
-                        &variables::CaptureSource::Import(module.to_vec()).scope_name(),
-                        &access.accessors,
-                    )
-                {
-                    self.codegen.add_instruction(Instruction::load(index));
                 } else {
-                    self.emit_value_cse(&resolved_value)?;
+                    self.emit_value(&resolved_value)?;
                 }
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
@@ -6636,6 +6403,37 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .register_tuple(Some("Str".to_string()), vec![(None, binary_type)]);
         let plain_str_type = self.program.register_type(Type::Tuple(str_tuple));
         let str_type = annotations::exact_empty(self.program, plain_str_type);
+
+        // A hole-free string is data, so it is interned whole rather than built: one constant
+        // for the bytes, one for the `Str` around them, and evaluating it is a refcount bump
+        // instead of a push and a tuple allocation. `Str[<…>]` is the commonest tuple literal
+        // in any program, so this is where the fold pays most. (Several text segments arise
+        // from line continuations in a `"""` string; they concatenate here, at compile time.)
+        if segments
+            .iter()
+            .all(|segment| matches!(segment, ast::StrSegment::Text(_)))
+        {
+            let bytes: Vec<u8> = segments
+                .into_iter()
+                .flat_map(|segment| match segment {
+                    ast::StrSegment::Text(bytes) => bytes,
+                    ast::StrSegment::Hole(_) => unreachable!("checked hole-free above"),
+                })
+                .collect();
+            let binary = self.program.register_constant(Constant::Binary(bytes));
+            let string = self.program.register_constant(Constant::Tuple {
+                id: str_tuple,
+                fields: vec![binary],
+            });
+            self.codegen.add_instruction(Instruction::constant(string));
+            // Discard the flowing value kept beneath the result, as the general path does.
+            if value_type.is_some() {
+                self.codegen.add_instruction(Instruction::rotate(2));
+                self.codegen.add_instruction(Instruction::pop());
+            }
+            return Ok((str_type, Provenance::Unknown));
+        }
+
         // The `['bin, 'bin]` argument tuple for each concatenation step.
         let pair_tuple = self
             .program

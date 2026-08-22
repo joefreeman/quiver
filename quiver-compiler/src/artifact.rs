@@ -680,6 +680,29 @@ fn drain(
                     add_type(*field_type, closure, queue);
                 }
             }
+            Item::Constant(constant_id) => {
+                let constant = program
+                    .get_constant(constant_id)
+                    .expect("constant id out of range")
+                    .clone();
+                for child in constant.children() {
+                    add_constant(child, closure, queue);
+                }
+                // Whatever else the constant names travels with it, exactly as it would if
+                // an instruction named it: a constant is a value the unit must be able to
+                // rebuild on its own.
+                match &constant {
+                    Constant::Tuple { id, .. } => add_tuple(*id, closure, queue),
+                    Constant::Function { id, .. } => add_function(*id, closure, queue),
+                    Constant::Builtin { id } => add_builtin(*id, closure, queue),
+                    Constant::Annotated { entries, .. } => {
+                        for (key, _) in entries {
+                            closure.annotation_keys.insert(*key);
+                        }
+                    }
+                    Constant::Integer(_) | Constant::Binary(_) => {}
+                }
+            }
             Item::Function(function_id) => match classify(function_id, owner, module_cache) {
                 FunctionClass::Own => {
                     let function = &program.get_functions()[function_id];
@@ -696,7 +719,7 @@ fn drain(
                     .debug_sites()
                     .expect("stamped function without a site table")
                     .sites[site_id];
-                closure.constants.insert(site.module_constant);
+                add_constant(site.module_constant, closure, queue);
             }
             Item::Builtin(builtin_id) => {
                 if let Some(type_argument) = program.get_builtins()[builtin_id].type_argument {
@@ -1032,7 +1055,11 @@ pub(crate) fn extract(
         constants: closure
             .constants
             .iter()
-            .map(|&constant_id| program.get_constants()[constant_id].clone())
+            .map(|&constant_id| {
+                program.get_constants()[constant_id]
+                    .clone()
+                    .remap_ids(&remaps)
+            })
             .collect(),
         annotation_keys: closure
             .annotation_keys
@@ -1445,7 +1472,7 @@ pub fn extract_unit(
         constants: closure
             .constants
             .iter()
-            .map(|&id| program.get_constants()[id].clone())
+            .map(|&id| program.get_constants()[id].clone().remap_ids(&remaps))
             .collect(),
         annotation_keys: closure
             .annotation_keys
@@ -1483,9 +1510,18 @@ pub fn extract_unit(
 enum Item {
     Type(usize),
     Tuple(usize),
+    Constant(usize),
     Function(usize),
     Site(usize),
     Builtin(usize),
+}
+
+/// A constant, and — because a composite names its children by index — everything under
+/// it. A constant reached only as another's field would otherwise be missing from the unit.
+fn add_constant(constant_id: usize, closure: &mut Closure, queue: &mut Vec<Item>) {
+    if closure.constants.insert(constant_id) {
+        queue.push(Item::Constant(constant_id));
+    }
 }
 
 fn add_type(type_id: usize, closure: &mut Closure, queue: &mut Vec<Item>) {
@@ -1581,7 +1617,7 @@ fn collect_value(value: &Value, closure: &mut Closure, queue: &mut Vec<Item>) {
     match value {
         Value::Int(_) | Value::BigInt(_) | Value::Reference(_) => {}
         Value::Binary(quiver_core::value::Binary::Constant(constant_id)) => {
-            closure.constants.insert(*constant_id);
+            add_constant(*constant_id, closure, queue);
         }
         Value::Binary(quiver_core::value::Binary::Data(_)) => {}
         Value::Tuple(tuple_id, payload) => {
@@ -1623,9 +1659,7 @@ fn collect_payload(
 fn collect_instruction(instruction: &Instruction, closure: &mut Closure, queue: &mut Vec<Item>) {
     let id = instruction.operand() as usize;
     match instruction.opcode() {
-        Opcode::Constant => {
-            closure.constants.insert(id);
-        }
+        Opcode::Constant => add_constant(id, closure, queue),
         Opcode::Function => add_function(id, closure, queue),
         Opcode::Builtin => add_builtin(id, closure, queue),
         Opcode::Tuple => add_tuple(id, closure, queue),
@@ -1729,6 +1763,26 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
             check("type", type_argument, unit.types.len())?;
         }
     }
+    // A composite constant's references must resolve inside the unit: children into the
+    // constants table, and the tuple/function/builtin/key ids it names into theirs.
+    for (position, constant) in unit.constants.iter().enumerate() {
+        for child in constant.children() {
+            check("constant", child, unit.constants.len())
+                .map_err(|error| format!("{error} (from constant {position})"))?;
+        }
+        match constant {
+            Constant::Tuple { id, .. } => check("tuple", *id, unit.tuples.len())?,
+            Constant::Function { id, .. } => check("function", *id, function_space)?,
+            Constant::Builtin { id } => check("builtin", *id, unit.builtins.len())?,
+            Constant::Annotated { entries, .. } => {
+                for (key, _) in entries {
+                    check("annotation key", *key, unit.annotation_keys.len())?;
+                }
+            }
+            Constant::Integer(_) | Constant::Binary(_) => {}
+        }
+    }
+
     for (position, function) in unit.functions.iter().enumerate() {
         check("type", function.type_id, unit.types.len())?;
         for instruction in &function.instructions {
@@ -1798,11 +1852,13 @@ pub fn link_unit<E: Effect>(
     // Re-intern the value-like tables, building the artifact-local → session remap.
     // Types and tuples are mutually recursive, so intern on demand with memoisation
     // (references form a DAG — recursion markers are relative, never table cycles).
+    //
+    // Constants come last of the value-like tables, with the functions: a constant names
+    // tuple, builtin and annotation-key ids, so those remaps must be complete before one is
+    // rewritten — and constants and functions reference *each other* (a closure constant
+    // names a function; a function body names constants), so the two link interleaved in
+    // dependency order rather than one table after the other.
     let mut remaps = IdRemaps::default();
-    for (local, constant) in unit.constants.iter().enumerate() {
-        let session = program.register_constant(constant.clone());
-        remaps.constants.insert(local, session);
-    }
     for (local, key) in unit.annotation_keys.iter().enumerate() {
         let session = program.register_annotation_key(key);
         remaps.annotation_keys.insert(local, session);
@@ -1821,14 +1877,6 @@ pub fn link_unit<E: Effect>(
     for local in 0..unit.tuples.len() {
         program.register_type(Type::Tuple(remaps.tuples[&local]));
     }
-    for (local, site) in unit.sites.iter().enumerate() {
-        let session = program.register_debug_site(Site {
-            module_constant: remaps.constants[&site.module_constant],
-            ..site.clone()
-        });
-        remaps.sites.insert(local, session);
-    }
-
     // Builtins resolve by name against the host registry — the link-time capability
     // check: a host that doesn't provide a builtin refuses the module.
     for (local, builtin) in unit.builtins.iter().enumerate() {
@@ -1871,26 +1919,144 @@ pub fn link_unit<E: Effect>(
     // Registering in order (rather than precomputing ids and appending) is what lets
     // `Intern` collapse onto an existing entry, and is sound for both policies because
     // the references point strictly backward.
-    for (local, function) in unit.functions.iter().enumerate() {
-        for instruction in &function.instructions {
-            if instruction.opcode() == Opcode::Function {
-                let target = instruction.operand() as usize;
-                assert!(
-                    remaps.functions.contains_key(&target),
-                    "{label}: function {local} references function {target} before it is \
-                     linked — the backward-reference contract does not hold"
-                );
+    // Sites, and the constants they name, link *before* the functions: `Function::remap_ids`
+    // rewrites `Stamp` operands through `remaps.sites`, and a missing entry falls back to
+    // identity — which would silently point a stamp at whatever site already sits at that
+    // index in the session. A site names one constant, the module display name, which is a
+    // leaf binary, so linking those ahead of the interleaved pass costs nothing and cannot
+    // pull a function in with it. The pass below re-registers them idempotently.
+    for site in &unit.sites {
+        let constant = unit.constants[site.module_constant].clone();
+        debug_assert!(
+            constant.children().is_empty() && constant.function().is_none(),
+            "{label}: a site's constant must be a leaf"
+        );
+        let session = program.register_constant(constant.remap_ids(&remaps));
+        remaps.constants.insert(site.module_constant, session);
+    }
+    for (local, site) in unit.sites.iter().enumerate() {
+        let session = program.register_debug_site(Site {
+            module_constant: remaps.constants[&site.module_constant],
+            ..site.clone()
+        });
+        remaps.sites.insert(local, session);
+    }
+
+    for item in link_order(unit, label)? {
+        match item {
+            LinkItem::Constant(local) => {
+                let remapped = unit.constants[local].clone().remap_ids(&remaps);
+                let session = program.register_constant(remapped);
+                remaps.constants.insert(local, session);
+            }
+            LinkItem::Function(local) => {
+                let function = &unit.functions[local];
+                for instruction in &function.instructions {
+                    if instruction.opcode() == Opcode::Function {
+                        let target = instruction.operand() as usize;
+                        assert!(
+                            remaps.functions.contains_key(&target),
+                            "{label}: function {local} references function {target} before it \
+                             is linked — the backward-reference contract does not hold"
+                        );
+                    }
+                }
+                let remapped = function.clone().remap_ids(&remaps);
+                let session = match registration {
+                    Registration::Append => program.push_function(remapped),
+                    Registration::Intern => program.register_function(remapped),
+                };
+                remaps.functions.insert(local, session);
             }
         }
-        let remapped = function.clone().remap_ids(&remaps);
-        let session = match registration {
-            Registration::Append => program.push_function(remapped),
-            Registration::Intern => program.register_function(remapped),
-        };
-        remaps.functions.insert(local, session);
     }
 
     Ok(remaps)
+}
+
+/// One entry of a unit's link order: the constants and functions tables reference each
+/// other, so they link as a single interleaved sequence.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LinkItem {
+    Constant(usize),
+    Function(usize),
+}
+
+/// The order in which a unit's constants and own functions can be linked: every entry
+/// after everything it references.
+///
+/// Derived rather than stored. The tables already carry the edges, so computing the order
+/// keeps `CompiledUnit` unchanged — no new field to change every unit's content key — and
+/// the traversal doubles as the acyclicity check, which is a stronger guarantee than a
+/// stored order could be validated against.
+///
+/// Functions are the first roots, in unit order, so a function still registers before any
+/// later one. That is what `Registration::Intern` relies on to collapse onto an existing
+/// entry, and what keeps the backward-reference contract meaningful; a constant is pulled in
+/// ahead of the first function that needs it.
+fn link_order(unit: &CompiledUnit, label: &str) -> Result<Vec<LinkItem>, Error> {
+    // Per node: unvisited, on the stack (an ancestor), or emitted.
+    const UNVISITED: u8 = 0;
+    const OPEN: u8 = 1;
+    const EMITTED: u8 = 2;
+    let mut constant_state = vec![UNVISITED; unit.constants.len()];
+    let mut function_state = vec![UNVISITED; unit.functions.len()];
+    let mut order = Vec::with_capacity(unit.constants.len() + unit.functions.len());
+    // `(item, expanded)`: an unexpanded entry queues its dependencies above its own
+    // expanded marker, so the marker pops once they are all emitted.
+    let mut stack: Vec<(LinkItem, bool)> = Vec::new();
+
+    let roots = (0..unit.functions.len())
+        .map(LinkItem::Function)
+        .chain((0..unit.constants.len()).map(LinkItem::Constant));
+
+    for root in roots {
+        stack.push((root, false));
+        while let Some((item, expanded)) = stack.pop() {
+            let state = match item {
+                LinkItem::Constant(index) => &mut constant_state[index],
+                LinkItem::Function(index) => &mut function_state[index],
+            };
+            if expanded {
+                *state = EMITTED;
+                order.push(item);
+                continue;
+            }
+            match *state {
+                EMITTED => continue,
+                OPEN => {
+                    return Err(Error::FeatureUnsupported(format!(
+                        "{label}: constants and functions form a cycle at {item:?}"
+                    )));
+                }
+                _ => *state = OPEN,
+            }
+            stack.push((item, true));
+            match item {
+                LinkItem::Constant(index) => {
+                    let constant = &unit.constants[index];
+                    for child in constant.children() {
+                        stack.push((LinkItem::Constant(child), false));
+                    }
+                    // An imported function is already linked; only an own one is ordered here.
+                    if let Some(function) = constant.function()
+                        && function < unit.functions.len()
+                    {
+                        stack.push((LinkItem::Function(function), false));
+                    }
+                }
+                LinkItem::Function(index) => {
+                    for instruction in &unit.functions[index].instructions {
+                        if instruction.opcode() == Opcode::Constant {
+                            let constant = instruction.operand() as usize;
+                            stack.push((LinkItem::Constant(constant), false));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(order)
 }
 
 /// Why a unit's imports could not be resolved against a host's linked-module map.

@@ -443,33 +443,137 @@ fn a_program_that_is_not_executable_still_extracts() {
 }
 
 #[test]
-#[ignore = "known gap: linked modules emit ~17% more code than source-compiled ones"]
 fn cold_and_warm_module_loading_emit_the_same_code() {
-    // Transparency holds for types (module_cache.rs) but NOT for emitted code. A line
-    // compiled against `%list` built from source emits 140 instructions; against the
-    // same `%list` linked from its artifact, 164.
+    // Transparency: a line compiled against `%list` built from source and the same line
+    // compiled against `%list` linked from its artifact emit the same code.
     //
-    // Cause: `emit_value_cse` shares repeated nodes by `Rc` pointer identity, and a
-    // module value that has been through an artifact has lost its sharing, so the memo
-    // sees distinct nodes where the source-compiled value had one. Semantics are
-    // unaffected (every other test here passes either way); the cost is code size in
-    // every consumer, on the path a warm cache always takes.
+    // This was long a known gap — the warm path emitted ~17% more instructions, because
+    // reconstruction shared repeated nodes by `Rc` pointer identity and a module value that
+    // had been through an artifact had lost that sharing. Composite constants closed it
+    // without any of the memoised-remap machinery that gap seemed to call for: a module
+    // value is interned into the constants table, and interning is by *content*, so a value
+    // whose pointer sharing was flattened in transit reaches exactly the same graph as one
+    // whose never was.
     //
-    // Narrowed: source-compiled 140, extracted into an in-memory store 164, serialised
-    // and reloaded 164. The loss is in the `Value::remap_ids` walk that moves the value
-    // between session and unit space, which rebuilds each node rather than memoising on
-    // pointer identity — serialisation adds nothing further, though it would flatten a
-    // repaired graph again on its own. So a full fix is both: a memoised remap, and a
-    // value *table* in the artifact (root index plus nodes) the way types and tuples
-    // already work.
-    //
-    // Deliberately not fixed here: stage 2 needs exactly that representation anyway, to
-    // ship module values to workers with sharing intact, so the three belong together.
+    // Operands are compared only for shape. They are session-relative table ids, and the two
+    // sessions register different numbers of intermediate entries on the way in, so equal
+    // ids were never the claim — equal *code* is.
     let source = "%list{1, 2, 3} ~> %list.map [~, #{ %num.mul [$, 2] }]";
     let cold = compile_with(source, false, Rc::new(ArtifactStore::in_memory()));
     let warm = compile(source, false);
-    let entry_of = |c: &Compiled| c.program.get_functions()[c.entry].instructions.clone();
-    assert_eq!(entry_of(&cold), entry_of(&warm));
+    let opcodes_of = |c: &Compiled| {
+        c.program.get_functions()[c.entry]
+            .instructions
+            .iter()
+            .map(|instruction| instruction.opcode())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(opcodes_of(&cold), opcodes_of(&warm));
+}
+
+#[test]
+fn identical_values_reach_one_constant() {
+    // Constants intern by content, and composites name their children by index, so
+    // interning is exact all the way down: two occurrences of the same literal register
+    // the same bytes, therefore the same `Str` around them, therefore one slot.
+    let compiled = compile(r#"a = "same"; b = "same"; [a, b]"#, false);
+    let strings = compiled
+        .program
+        .get_constants()
+        .iter()
+        .filter(|constant| {
+            matches!(constant, quiver_core::bytecode::Constant::Binary(bytes) if bytes == b"same")
+        })
+        .count();
+    assert_eq!(strings, 1, "the same literal must reach one slot");
+}
+
+/// The opcodes a function's instructions use, for structural assertions about codegen.
+fn opcodes(compiled: &Compiled) -> Vec<quiver_core::bytecode::Opcode> {
+    compiled.program.get_functions()[compiled.entry]
+        .instructions
+        .iter()
+        .map(|instruction| instruction.opcode())
+        .collect()
+}
+
+#[test]
+fn a_constant_literal_folds_to_one_constant() {
+    // Every field is data, so the whole literal is: no tuple is built at runtime.
+    let compiled = compile("[1, 2]", false);
+    let opcodes = opcodes(&compiled);
+    assert!(
+        !opcodes.contains(&quiver_core::bytecode::Opcode::Tuple),
+        "a constant literal must not build a tuple: {opcodes:?}"
+    );
+}
+
+#[test]
+fn folding_is_bottom_up_through_a_dynamic_parent() {
+    // The outer literal reads a binding, so it must still be built — but its constant
+    // subtree folds, which is what keeps a template with one hole from rebuilding all of
+    // its static parts. The inner `[1, 2]` is in the table; the outer is not.
+    let compiled = compile("x = 5; [[1, 2], x]", false);
+    assert!(
+        opcodes(&compiled).contains(&quiver_core::bytecode::Opcode::Tuple),
+        "the outer literal reads a binding, so it is built"
+    );
+    let inner_arity = compiled
+        .program
+        .get_constants()
+        .iter()
+        .filter(|constant| {
+            matches!(constant, quiver_core::bytecode::Constant::Tuple { fields, .. }
+                if fields.len() == 2)
+        })
+        .count();
+    assert!(inner_arity > 0, "the constant subtree must have folded");
+}
+
+#[test]
+fn a_literal_reading_the_flowing_value_does_not_fold() {
+    // `~` is not data. The walk sees a value from below the range reach a tuple field and
+    // refuses, which is the case that makes folding by instruction *shape* unsound.
+    let compiled = compile("0 ~> [~, 1]", false);
+    assert!(
+        opcodes(&compiled).contains(&quiver_core::bytecode::Opcode::Tuple),
+        "a literal over the flowing value must still be built"
+    );
+}
+
+#[test]
+fn a_unit_with_a_dangling_constant_child_is_refused() {
+    // A composite constant's children are unit-local indices like any other reference, so
+    // validation must range-check them — a unit whose constant points past its own table
+    // would otherwise link a child from whatever happened to sit at that index.
+    let compiled = compile(r#""hi""#, false);
+    let mut unit = quiver_compiler::extract_unit(
+        &compiled.program,
+        &compiled.module_cache,
+        Some(compiled.entry),
+        compiled.own_floor,
+        quiver_compiler::Imports::Bundle,
+    );
+    let dangling = unit.constants.len();
+    let composite = unit
+        .constants
+        .iter_mut()
+        .find_map(|constant| match constant {
+            quiver_core::bytecode::Constant::Tuple { fields, .. } if !fields.is_empty() => {
+                Some(fields)
+            }
+            _ => None,
+        })
+        .expect("the string literal interned as a composite constant");
+    composite[0] = dangling;
+
+    let error = environment()
+        .start_process_unit(&unit, &builtins())
+        .expect_err("a dangling constant child must be refused");
+    assert!(
+        matches!(error, quiver_environment::EnvironmentError::InvalidUnit(_)),
+        "got {error:?}"
+    );
 }
 
 #[test]
@@ -546,6 +650,68 @@ fn a_unit_round_trips_through_serialization() {
     .expect("link");
     let entry = remaps.functions[&restored.entry.expect("entry")];
     assert_eq!(run(&fresh, entry), "\"99\"");
+}
+
+#[test]
+fn a_linked_units_stamps_name_its_own_sites() {
+    // `Function::remap_ids` rewrites `Stamp` operands through `remaps.sites`, and
+    // `IdRemaps::map` falls back to identity on a miss — so a site table that is not
+    // populated before the functions link points every stamp at whatever site already sits
+    // at that index in the session, silently reporting failures against another module's
+    // source. Linking into a session that already holds std's sites is what exposes it:
+    // index 0 there is some std module's, never the unit's own.
+    let compiled = compile("%num.mul [7, 6] ~> =0", true);
+    let unit = quiver_compiler::extract_unit(
+        &compiled.program,
+        &compiled.module_cache,
+        Some(compiled.entry),
+        compiled.own_floor,
+        quiver_compiler::Imports::Bundle,
+    );
+
+    let mut fresh = Program::new();
+    let mut fresh_cache = ModuleCache::new();
+    fresh_cache.artifact_store = Some(store());
+    for (module, _, _) in &unit.imports {
+        link_module_tree(
+            module,
+            &compiled.module_cache.key_cache,
+            &mut fresh,
+            &mut fresh_cache,
+        );
+    }
+    let resolved = quiver_compiler::resolve_imports(&unit, &fresh_cache, "unit");
+    let remaps = quiver_compiler::link_unit(
+        &unit,
+        "unit",
+        &mut fresh,
+        &resolved,
+        &builtins(),
+        Registration::Intern,
+    )
+    .expect("link unit");
+
+    let entry = remaps.functions[&unit.entry.expect("a line's unit has an entry")];
+    let sites = &fresh
+        .debug_sites()
+        .expect("a debug session has sites")
+        .sites;
+    let stamped: Vec<_> = fresh.get_functions()[entry]
+        .instructions
+        .iter()
+        .filter(|instruction| instruction.opcode() == quiver_core::bytecode::Opcode::Stamp)
+        .map(|instruction| sites[instruction.operand() as usize].module_constant)
+        .collect();
+    assert!(!stamped.is_empty(), "a debug entry stamps its nil results");
+    for module_constant in stamped {
+        let name = match fresh.get_constant(module_constant) {
+            Some(quiver_core::bytecode::Constant::Binary(bytes)) => {
+                String::from_utf8_lossy(bytes).into_owned()
+            }
+            other => panic!("a site's module constant must be a binary, got {other:?}"),
+        };
+        assert_eq!(name, "unit-test", "a stamp must name the unit's own source");
+    }
 }
 
 #[test]

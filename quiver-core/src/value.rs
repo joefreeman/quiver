@@ -696,15 +696,17 @@ impl Value {
             let annotations = src
                 .annotations()
                 .iter()
-                .map(|(key, _)| *remaps.annotation_keys.get(key).unwrap_or(key))
+                .map(|(key, _)| {
+                    crate::bytecode::IdRemaps::map(&remaps.annotation_keys, "annotation key", *key)
+                })
                 .zip(done.split_off(src.elements.len()))
                 .collect();
-            let payload = Payload::with_annotations(done, annotations)
-                .with_type_argument(
-                    src.type_argument()
-                        .map(|type_id| *remaps.types.get(&type_id).unwrap_or(&type_id)),
-                )
-                .shared();
+            let payload =
+                Payload::with_annotations(done, annotations)
+                    .with_type_argument(src.type_argument().map(|type_id| {
+                        crate::bytecode::IdRemaps::map(&remaps.types, "type", type_id)
+                    }))
+                    .shared();
             match node {
                 Node::Tuple(id) => Value::Tuple(id, payload),
                 Node::Function(id) => Value::Function(id, payload),
@@ -714,12 +716,13 @@ impl Value {
 
         fn leaf(value: &Value, remaps: &crate::bytecode::IdRemaps) -> Value {
             match value {
-                Value::Binary(Binary::Constant(idx)) => {
-                    Value::Binary(Binary::Constant(*remaps.constants.get(idx).unwrap_or(idx)))
-                }
-                Value::Builtin(id, None) => {
-                    Value::Builtin(*remaps.builtins.get(id).unwrap_or(id), None)
-                }
+                Value::Binary(Binary::Constant(idx)) => Value::Binary(Binary::Constant(
+                    crate::bytecode::IdRemaps::map(&remaps.constants, "constant", *idx),
+                )),
+                Value::Builtin(id, None) => Value::Builtin(
+                    crate::bytecode::IdRemaps::map(&remaps.builtins, "builtin", *id),
+                    None,
+                ),
                 other => other.clone(),
             }
         }
@@ -729,15 +732,24 @@ impl Value {
             remaps: &crate::bytecode::IdRemaps,
         ) -> Option<(Node, &'a Payload)> {
             match value {
-                Value::Tuple(id, payload) => {
-                    Some((Node::Tuple(*remaps.tuples.get(id).unwrap_or(id)), payload))
-                }
+                Value::Tuple(id, payload) => Some((
+                    Node::Tuple(crate::bytecode::IdRemaps::map(&remaps.tuples, "tuple", *id)),
+                    payload,
+                )),
                 Value::Function(id, payload) => Some((
-                    Node::Function(*remaps.functions.get(id).unwrap_or(id)),
+                    Node::Function(crate::bytecode::IdRemaps::map(
+                        &remaps.functions,
+                        "function",
+                        *id,
+                    )),
                     payload,
                 )),
                 Value::Builtin(id, Some(payload)) => Some((
-                    Node::Builtin(*remaps.builtins.get(id).unwrap_or(id)),
+                    Node::Builtin(crate::bytecode::IdRemaps::map(
+                        &remaps.builtins,
+                        "builtin",
+                        *id,
+                    )),
                     payload,
                 )),
                 _ => None,

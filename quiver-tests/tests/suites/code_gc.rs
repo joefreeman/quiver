@@ -35,6 +35,21 @@ fn live_closure_survives_a_sweep() {
 }
 
 #[test]
+fn a_live_composite_constant_keeps_its_children() {
+    // A composite constant names its children by index, so the liveness walk has to close
+    // over those edges as well as over instruction operands. The binding holds a `Str[…]`
+    // whose binary is a constant of its own; stubbing that child would leave the string
+    // structurally intact but empty, which is exactly the kind of quiet wrong answer the
+    // sweep must not produce.
+    quiver()
+        .isolated()
+        .evaluate(r#"s = "kept""#)
+        .force_code_collection()
+        .then_evaluate("s")
+        .expect(r#""kept""#);
+}
+
+#[test]
 fn identical_code_revives_its_reclaimed_slot() {
     // Line 1's function is reclaimed after the rebind; defining an identical function
     // afterwards re-registers the same content, which must revive the stubbed slot

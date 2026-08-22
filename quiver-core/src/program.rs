@@ -75,6 +75,17 @@ pub struct Program {
     field_name_index: std::collections::HashMap<String, usize>,
 }
 
+/// Why a value has no constant form. Reported in the caller's own vocabulary — the compiler
+/// turns these into its own errors, naming the site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InternError {
+    /// A value carrying identity (a ref, a pid, a resource): `Value::type_name` of the
+    /// offender.
+    Identity(&'static str),
+    /// A builtin id with no entry in this program's table.
+    BuiltinUndefined(usize),
+}
+
 impl TypeLookup for Program {
     fn lookup_type(&self, type_id: usize) -> Option<&Type> {
         self.types.get(type_id)
@@ -175,6 +186,138 @@ impl Program {
         self.constants.push(constant);
         self.constant_index.entry(digest).or_default().push(index);
         index
+    }
+
+    /// Intern a compile-time value into the constants table, answering its index — the
+    /// inverse of the executor's materialisation. Fails for a value carrying identity (a ref,
+    /// a pid, a resource), which has no constant form; the caller reports that in its own
+    /// vocabulary.
+    ///
+    /// Bottom-up, which is what makes [`Self::register_constant`]'s content interning exact:
+    /// a child is registered before the parent naming it, so structurally identical subtrees
+    /// reach identical indices and their parents then digest identically and collapse. That
+    /// is also why there is no pointer-identity memo — sharing is re-established here by
+    /// content, not carried over from the source value, so a value that lost its `Rc` sharing
+    /// on the way through an artifact interns to the same graph as one that never did.
+    ///
+    /// **Iterative**, like every other walk over value structure: a compile-time value is
+    /// normally shallow, but nothing enforces that, and the failure mode is an uncatchable
+    /// abort.
+    pub fn intern_value<E: crate::effects::Effect>(
+        &mut self,
+        value: &crate::value::Value,
+        registry: &crate::builtins::BuiltinRegistry<E>,
+    ) -> Result<usize, InternError> {
+        // `(value, its children, how many of them are interned)`. A node is revisited once
+        // per child and then assembled, at which point its children's indices are the tail
+        // of `done`. Children are computed on the way down, once per node.
+        let mut stack: Vec<(&crate::value::Value, Vec<&crate::value::Value>, usize)> =
+            vec![(value, Self::constant_children(value), 0)];
+        let mut done: Vec<usize> = Vec::new();
+
+        while let Some((value, children, visited)) = stack.pop() {
+            if let Some(child) = children.get(visited).copied() {
+                stack.push((value, children, visited + 1));
+                stack.push((child, Self::constant_children(child), 0));
+                continue;
+            }
+            let child_indices = done.split_off(done.len() - children.len());
+            done.push(self.assemble_constant(value, child_indices, registry)?);
+        }
+        Ok(done.pop().expect("the root assembles last"))
+    }
+
+    /// The sub-values a constant form must carry: a payload's elements, then its annotation
+    /// values (the order [`crate::value::Payload::all_values`] yields, which is the order
+    /// [`Self::assemble_constant`] reads them back in).
+    fn constant_children(value: &crate::value::Value) -> Vec<&crate::value::Value> {
+        use crate::value::Value;
+        match value {
+            Value::Tuple(_, payload) | Value::Function(_, payload) => {
+                payload.all_values().collect()
+            }
+            Value::Builtin(_, Some(payload)) => payload.all_values().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Register one node, given its already-interned children. Annotations wrap the carrier
+    /// in a separate `Annotated` node, so the bare carrier stays a slot other uses can share.
+    fn assemble_constant<E: crate::effects::Effect>(
+        &mut self,
+        value: &crate::value::Value,
+        children: Vec<usize>,
+        registry: &crate::builtins::BuiltinRegistry<E>,
+    ) -> Result<usize, InternError> {
+        use crate::value::{Binary, Value};
+
+        let (base, annotations) = match value {
+            Value::Int(int) => (
+                self.register_constant(Constant::Integer((*int).into())),
+                None,
+            ),
+            Value::BigInt(int) => (
+                self.register_constant(Constant::Integer((**int).clone())),
+                None,
+            ),
+            // Already a constant; nothing to register.
+            Value::Binary(Binary::Constant(index)) => (*index, None),
+            Value::Binary(Binary::Data(data)) => (
+                self.register_constant(Constant::Binary(data.to_vec())),
+                None,
+            ),
+            Value::Tuple(id, payload) => (
+                self.register_constant(Constant::Tuple {
+                    id: *id,
+                    fields: children[..payload.len()].to_vec(),
+                }),
+                Some(payload.as_ref()),
+            ),
+            Value::Function(id, payload) => (
+                self.register_constant(Constant::Function {
+                    id: *id,
+                    captures: children[..payload.len()].to_vec(),
+                }),
+                Some(payload.as_ref()),
+            ),
+            Value::Builtin(id, payload) => {
+                // A cached instantiated builtin resolves to *this* program's entry for that
+                // instantiation; registration is idempotent, so an id that is already the
+                // right entry answers itself.
+                let info = self
+                    .builtins
+                    .get(*id)
+                    .ok_or(InternError::BuiltinUndefined(*id))?;
+                let name = info.name.clone();
+                let type_argument = payload
+                    .as_deref()
+                    .and_then(crate::value::Payload::type_argument);
+                let id = self.register_builtin_instantiated(name, type_argument, registry);
+                (
+                    self.register_constant(Constant::Builtin { id }),
+                    payload.as_deref(),
+                )
+            }
+            Value::Reference(_) | Value::Process(..) | Value::Resource(..) => {
+                return Err(InternError::Identity(value.type_name()));
+            }
+        };
+
+        let Some(payload) = annotations.filter(|payload| !payload.annotations().is_empty()) else {
+            return Ok(base);
+        };
+        // The annotation values are the children after the elements, in the same order.
+        let mut entries: Vec<(usize, usize)> = payload
+            .annotations()
+            .iter()
+            .map(|(key, _)| *key)
+            .zip(children[payload.len()..].iter().copied())
+            .collect();
+        entries.sort_by_key(|(key, _)| *key);
+        Ok(self.register_constant(Constant::Annotated {
+            value: base,
+            entries,
+        }))
     }
 
     /// The number of registered types. Monotonically increasing, so it doubles as a
@@ -281,9 +424,26 @@ impl Program {
             if !self.stubbed_constants.insert(index) {
                 continue;
             }
+            // Composites carry almost no weight — a `Vec` of indices — but they are stubbed
+            // all the same, because the marker is what `register_constant` consults: an
+            // unstubbed slot reads as live content, so an identical re-registration would
+            // hand back a composite whose *children* had been reclaimed underneath it.
             self.constants[index] = match &self.constants[index] {
                 Constant::Integer(_) => Constant::Integer(0.into()),
                 Constant::Binary(_) => Constant::Binary(Vec::new()),
+                Constant::Tuple { id, .. } => Constant::Tuple {
+                    id: *id,
+                    fields: Vec::new(),
+                },
+                Constant::Function { id, .. } => Constant::Function {
+                    id: *id,
+                    captures: Vec::new(),
+                },
+                Constant::Builtin { id } => Constant::Builtin { id: *id },
+                Constant::Annotated { value, .. } => Constant::Annotated {
+                    value: *value,
+                    entries: Vec::new(),
+                },
             };
         }
     }

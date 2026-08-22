@@ -342,57 +342,48 @@ fn test_reexported_closure_with_foreign_capture() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Constant-build hoisting + reconstruction CSE.
-//
-// A module reference in a function body becomes a synthetic capture (built where the
-// closure is built, loaded in the body), and repeated emission of the same cached value
-// shares one CSE slot per scope. The slots are ordinary locals, so their lifetime must
-// track the compiler's Reset choreography exactly; each test below pins one edge where a
-// stale slot would load a local the runtime has discarded (observed as an
-// undefined-variable runtime error, or a wrong value).
+// A module reference is a compile-time-known value, so it compiles to the single constant
+// that names it, wherever it appears. These pin the positions that used to need care, when
+// the value was rebuilt inline and shared through per-scope slots whose lifetime had to
+// track the compiler's Reset choreography exactly: each was once an edge where a stale slot
+// loaded a local the runtime had discarded.
 
 #[test]
-fn hoisted_import_rebuilds_in_next_branch() {
-    // Branch isolation clears the shared block scope (no per-branch push): a slot
-    // registered by the failed first branch must not survive into the second, whose
-    // path never allocated the local.
+fn import_emits_in_each_branch() {
+    // Branches share one block scope, and the first one here fails.
     quiver()
         .evaluate("x = 5 ~> { | =4 => %num.add [1, 2] | %num.add [10, 20] }; x")
         .expect("30");
 }
 
 #[test]
-fn hoisted_import_shared_from_condition_to_consequence() {
-    // Same branch: the condition's slot is live for the consequence — the sharing case.
+fn import_emits_across_condition_and_consequence() {
+    // The same member in a branch's condition and in its consequence.
     quiver()
         .evaluate("x = { %num.add [1, 2] ~> =3 => %num.add [4, 5] | 0 }; x")
         .expect("9");
 }
 
 #[test]
-fn hoisted_import_rebuilds_after_block_scope_exit() {
-    // A slot registered inside a block dies with the block's scope (and its Reset); the
-    // sequence continuing outside must rebuild, not load the discarded local.
+fn import_emits_after_block_scope_exit() {
+    // Inside a block, then again in the sequence that continues after it.
     quiver()
         .evaluate("x = 1 ~> { t = %num.add [~, 1]; t }; y = %num.add [x, 10]; y")
         .expect("12");
 }
 
 #[test]
-fn cse_slots_cleared_before_convergence_attach() {
-    // A block's annotation-attach chains compile at the convergence, after the runtime
-    // Reset(locals_before) but with the block scope still current — every slot a branch
-    // registered is dead there and the attach value must rebuild. (This edge was latent
-    // in the first CSE implementation.)
+fn import_emits_in_a_convergence_attach() {
+    // A block's annotation-attach chains compile at the convergence — after the runtime
+    // `Reset(locals_before)`, with the block scope still current.
     quiver()
         .evaluate("x = 0 ~> {\n  :note %num.add [1, 2]\n  | A[%num.add [10, 20]]\n}\nx ~> :note")
         .expect("3");
 }
 
 #[test]
-fn hoisting_through_module_binding() {
-    // A member reached through a whole-module binding captures by path; the closure
-    // loads its slot rather than re-emitting the member's construction per call.
+fn import_through_a_module_binding() {
+    // A member reached through a whole-module binding rather than named directly.
     quiver()
         .evaluate("num = %num; f = #'int { num.sub [~, 1] }; 8 ~> f ~")
         .expect("7");
@@ -448,11 +439,12 @@ fn module_receive_stalls_precisely_at_compile_time() {
 }
 
 #[test]
-fn instantiated_members_never_share_a_cse_slot() {
-    // An instantiated builtin member's payload is synthesized fresh per use site, so two
-    // instantiations must never collapse into one slot — `CseKey` owns the payload `Rc`
-    // precisely so a freed payload's address can't alias a later one. Each decode below
-    // must keep its own type argument.
+fn instantiated_members_never_share_a_constant() {
+    // Constants intern by content, so anything the content does not distinguish collapses.
+    // A type-consuming builtin's instantiation must therefore be part of what its constant
+    // says — it is, because `register_builtin_instantiated` gives each instantiation its own
+    // builtin id, and that id is what `Constant::Builtin` carries. Each decode below must
+    // keep its own type argument.
     quiver()
         .evaluate(
             r#"a = %data.decode<'int> "42"; b = %data.decode<'bin> "<0a>"; c = %data.decode<'int> "7"; [a, b, c]"#,

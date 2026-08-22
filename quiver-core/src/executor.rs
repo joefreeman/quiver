@@ -82,9 +82,18 @@ pub enum CompatibilityUpdate {
 pub struct ProgramUpdate {
     pub constants: TableUpdate<Constant>,
     pub functions: TableUpdate<Function>,
-    /// Full tuple type information (name, fields, is_partial)
+    /// Full tuple type information (name, fields, is_partial). The arities a worker reads on
+    /// the hot path are projected from this; the infos themselves serve `TypeLookup`.
     pub tuples: TableUpdate<TupleTypeInfo>,
-    /// Types used by IsType instructions for pattern matching
+    /// The type table, for the worker's [`crate::types::TypeLookup`] — which serves the
+    /// *type-consuming* builtins alone (`%data.decode<'t>`, `%json.decode`/`encode<'t>`),
+    /// the only things that walk a type at runtime.
+    ///
+    /// Not, despite appearances, for `IsType`: pattern matching reads the precomputed
+    /// compatibility sets below, which the environment builds and ships already resolved. A
+    /// worker therefore uses a vanishingly small part of this table — 7 rows of 6,419 in
+    /// `examples/todo.qv` — but pruning it to the reachable closure has been measured and
+    /// rejected: the copy it would save is ~1% of startup (see `docs/type-census.md`).
     pub types: TableUpdate<Type>,
     /// Builtin information (name and resolved types)
     pub builtins: TableUpdate<BuiltinInfo>,
@@ -185,9 +194,12 @@ pub struct Executor<E: Effect> {
     field_offsets: Arc<Vec<Vec<Option<usize>>>>,
     // Cumulative count of tombstone process entries reclaimed (see `reclaim_process`).
     reclaimed_processes: usize,
-    // Cache of constant binaries already materialised on the heap, keyed by constant index,
-    // so a binary literal in a loop is allocated once rather than on every load.
-    constant_binaries: Vec<Option<Binary>>,
+    // Constants already materialised into runtime values, keyed by constant index, so a
+    // literal costs one build per worker rather than one per evaluation. Composite constants
+    // reference their children by index, so memoising per slot is also what reproduces the
+    // compile-time graph's sharing: every use of a constant tuple is the same `Rc`, and a
+    // nested one is shared with every other constant naming it.
+    constant_values: Vec<Option<Value>>,
     // Failure provenance (debug builds): per-site prebuilt values. `site_nils[i]` is a nil
     // already carrying site i's `origin` annotation — `Stamp` clones it (an Arc refcount
     // bump, no allocation) onto fresh bare nils. `site_origins[i]` is the bare `Site[...]`
@@ -222,7 +234,7 @@ impl<E: Effect> Executor<E> {
 
     /// The `BinaryData` behind a binary value: its own bytes, or a constant's.
     ///
-    /// A constant is materialised on first use and cached (see `cached_constant_binary`), so
+    /// A constant is materialised on first use and cached (see `materialize_constant`), so
     /// this only meets `Binary::Constant` on values the runtime never allocated for — the
     /// module-name binaries in failure-provenance sites, which the formatter reads directly.
     ///
@@ -783,7 +795,7 @@ impl<E: Effect> Executor<E> {
             builtin_param_compatibility: Arc::default(),
             field_offsets: Arc::default(),
             reclaimed_processes: 0,
-            constant_binaries: vec![],
+            constant_values: vec![],
             site_nils: vec![],
             site_origins: vec![],
             origin_key: None,
@@ -1290,8 +1302,10 @@ impl<E: Effect> Executor<E> {
             }
         }
         let mut constants = HashMap::new();
-        for binary in self.constant_binaries.iter().flatten() {
-            collect_binaries(&Value::Binary(binary.clone()), &mut constants);
+        // Walks the materialised values rather than a binaries-only cache: a composite
+        // constant carries binaries in its fields and annotations like any other value.
+        for value in self.constant_values.iter().flatten() {
+            collect_binaries(value, &mut constants);
         }
         crate::process::WorkerInfo {
             worker_id: self.worker_id,
@@ -1375,6 +1389,11 @@ impl<E: Effect> Executor<E> {
     ///
     /// On a fresh executor (empty state), this is equivalent to initializing with complete data.
     pub fn update_program(&mut self, update: ProgramUpdate) {
+        // A wholesale replacement can reuse slots for different content, so nothing
+        // materialised from the old table survives it. Appends leave existing slots alone.
+        if matches!(update.constants, TableUpdate::Shared(_)) {
+            self.constant_values.clear();
+        }
         update.constants.apply(&mut self.constants);
         update.functions.apply(&mut self.functions);
         update.types.apply(&mut self.types);
@@ -1385,8 +1404,17 @@ impl<E: Effect> Executor<E> {
         for (index, function) in update.patched_functions {
             Arc::make_mut(&mut self.functions)[index] = function;
         }
+        let patched_constants = !update.patched_constants.is_empty();
         for (index, constant) in update.patched_constants {
             Arc::make_mut(&mut self.constants)[index] = constant;
+        }
+        if patched_constants {
+            // The whole memo, not just the patched slots: a composite that was built from a
+            // patched child holds the old value inside it, and finding those parents would
+            // cost more than rebuilding on demand. Patches are revived stubs, so this is rare
+            // — and revival restores byte-identical content anyway, which is what makes the
+            // coarse answer free rather than merely safe.
+            self.constant_values.clear();
         }
 
         // `tuples` (arities) is the hot-path projection of `tuple_infos`; the full infos stay
@@ -1795,23 +1823,92 @@ impl<E: Effect> Executor<E> {
         }
     }
 
-    /// Resolve a binary constant to owned bytes, materialising and caching them on first use so
-    /// a literal in a loop allocates once rather than per iteration. The cache holds a handle
-    /// like any other holder; every value carrying the constant shares that one allocation.
-    fn cached_constant_binary(&mut self, index: usize) -> Result<Binary, Error> {
-        if let Some(Some(binary)) = self.constant_binaries.get(index) {
-            return Ok(binary.clone());
+    /// The runtime value of a constant, built on first use and memoised.
+    ///
+    /// Post-order over the constant graph: each node is visited once to queue its children
+    /// and once to build itself, so a deep constant costs stack space here rather than in the
+    /// Rust call stack — the same reason every other walk over value structure is iterative.
+    /// The memo means a node is built once per worker however many constants name it.
+    fn materialize_constant(&mut self, index: usize) -> Result<Value, Error> {
+        if let Some(Some(value)) = self.constant_values.get(index) {
+            return Ok(value.clone());
         }
-        let bytes = match self.get_constant(index) {
-            Some(Constant::Binary(bytes)) => bytes.clone(),
-            _ => return Err(Error::ConstantUndefined(index)),
+        // A separate handle on the table, so reading a constant does not borrow `self` across
+        // the build below.
+        let constants = Arc::clone(&self.constants);
+        let mut stack = vec![(index, false)];
+        while let Some((at, assembling)) = stack.pop() {
+            if matches!(self.constant_values.get(at), Some(Some(_))) {
+                continue;
+            }
+            let constant = constants.get(at).ok_or(Error::ConstantUndefined(at))?;
+            if !assembling {
+                stack.push((at, true));
+                stack.extend(constant.children().into_iter().map(|child| (child, false)));
+                continue;
+            }
+            let value = self.build_constant(constant)?;
+            if self.constant_values.len() <= at {
+                self.constant_values.resize(at + 1, None);
+            }
+            self.constant_values[at] = Some(value);
+        }
+        self.constant_values[index]
+            .clone()
+            .ok_or(Error::ConstantUndefined(index))
+    }
+
+    /// Build one constant, with every child already memoised.
+    fn build_constant(&mut self, constant: &Constant) -> Result<Value, Error> {
+        let child = |values: &[Option<Value>], index: usize| {
+            values
+                .get(index)
+                .and_then(|slot| slot.clone())
+                .ok_or(Error::ConstantUndefined(index))
         };
-        let binary = self.allocate_binary(bytes)?;
-        if self.constant_binaries.len() <= index {
-            self.constant_binaries.resize(index + 1, None);
-        }
-        self.constant_binaries[index] = Some(binary.clone());
-        Ok(binary)
+        let children = |values: &[Option<Value>], indices: &[usize]| {
+            indices
+                .iter()
+                .map(|&index| child(values, index))
+                .collect::<Result<Vec<Value>, Error>>()
+        };
+
+        Ok(match constant {
+            // Normalised to the canonical small/big runtime form; no allocation for an
+            // i64-sized constant.
+            Constant::Integer(integer) => match integer.to_i64() {
+                Some(small) => Value::int(small),
+                None => Value::integer(integer.clone()),
+            },
+            Constant::Binary(bytes) => Value::Binary(self.allocate_binary(bytes.clone())?),
+            Constant::Tuple { id, fields } => {
+                let fields = children(&self.constant_values, fields)?;
+                Value::Tuple(*id, Payload::new(fields).shared())
+            }
+            Constant::Function { id, captures } => {
+                let captures = children(&self.constant_values, captures)?;
+                Value::Function(*id, Payload::new(captures).shared())
+            }
+            // The instantiation lives on the builtin's table entry, which the id already
+            // selects; the value carries it because that is where an implementation reads it.
+            Constant::Builtin { id } => {
+                Value::builtin_typed(*id, self.builtin_type_arguments.get(*id).copied().flatten())
+            }
+            Constant::Annotated { value, entries } => {
+                let mut carrier = child(&self.constant_values, *value)?;
+                for (key, index) in entries {
+                    let annotation = child(&self.constant_values, *index)?;
+                    carrier = carrier.annotated(*key, annotation).ok_or_else(|| {
+                        Error::InvalidArgument(format!(
+                            "Annotations require a tuple or function carrier, but constant \
+                             {value} is {}",
+                            carrier.type_name()
+                        ))
+                    })?;
+                }
+                carrier
+            }
+        })
     }
 
     fn handle_constant(
@@ -1819,23 +1916,7 @@ impl<E: Effect> Executor<E> {
         proc: &mut Process,
         index: usize,
     ) -> Result<Option<Action<E>>, Error> {
-        // Resolve integers directly, normalizing to the canonical small/big runtime form
-        // (no clone or allocation for i64-sized constants); binaries go through the constant
-        // cache. Determine which up front so the constants borrow ends before the (mutable)
-        // cache call.
-        let integer = match self.get_constant(index) {
-            Some(Constant::Integer(integer)) => Some(match integer.to_i64() {
-                Some(small) => Value::int(small),
-                None => Value::integer(integer.clone()),
-            }),
-            Some(Constant::Binary(_)) => None,
-            None => return Err(Error::ConstantUndefined(index)),
-        };
-        let value = match integer {
-            Some(value) => value,
-            None => Value::Binary(self.cached_constant_binary(index)?),
-        };
-
+        let value = self.materialize_constant(index)?;
         self.push_value(proc, value);
 
         if let Some(frame) = proc.frames.last_mut() {
@@ -3495,6 +3576,16 @@ impl<E: Effect> Executor<E> {
                         || elements_a.len() != elements_b.len()
                     {
                         return false;
+                    }
+                    // One payload, already known to be under the same shape: the elements
+                    // cannot differ. Worth testing because sharing is now the common case —
+                    // a constant is materialised once per worker, so every evaluation of a
+                    // literal yields the same payload, and comparing two of them is O(1)
+                    // instead of a walk. (The shape test above is what makes this sound on
+                    // its own: the interned empty payload is shared by *every* field-less
+                    // tuple, so pointer equality alone would equate `Ok` with nil.)
+                    if Rc::ptr_eq(elements_a, elements_b) {
+                        continue;
                     }
                     pending.extend(elements_a.iter().zip(elements_b.iter()));
                     continue;
