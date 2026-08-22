@@ -30,7 +30,13 @@ pub trait TypeLookup {
 
 /// The unified type representation used throughout compiler, runtime, and bytecode.
 /// All nested type references use IDs into a type registry.
+///
+/// Serialized through [`TypeRepr`], which spells the struct-shaped variants positionally.
+/// Field names are a third of the bytes in a compiled program's largest table and carry no
+/// information a reader of the schema does not already have; the in-memory form keeps them,
+/// because that is where they are read.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+#[serde(from = "TypeRepr", into = "TypeRepr")]
 pub enum Type {
     #[serde(rename = "int")]
     Integer,
@@ -172,11 +178,34 @@ impl Type {
 /// Type alias for tuple field information: (optional name, type_id)
 pub type TupleField = (Option<String>, usize);
 
-/// Tuple type information: name and field definitions
+/// Tuple type information: name and field definitions.
+///
+/// Serialized positionally, for the reason [`Type`] is — `"name"`/`"fields"` on every row of
+/// the second-largest table in a compiled program.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "TupleTypeRepr", into = "TupleTypeRepr")]
 pub struct TupleTypeInfo {
     pub name: Option<String>,
     pub fields: Vec<TupleField>,
+}
+
+/// `[name, fields]` — the serialized spelling of [`TupleTypeInfo`].
+#[derive(Serialize, Deserialize)]
+struct TupleTypeRepr(Option<String>, Vec<TupleField>);
+
+impl From<TupleTypeInfo> for TupleTypeRepr {
+    fn from(info: TupleTypeInfo) -> Self {
+        TupleTypeRepr(info.name, info.fields)
+    }
+}
+
+impl From<TupleTypeRepr> for TupleTypeInfo {
+    fn from(repr: TupleTypeRepr) -> Self {
+        TupleTypeInfo {
+            name: repr.0,
+            fields: repr.1,
+        }
+    }
 }
 
 impl TupleTypeInfo {
@@ -211,6 +240,118 @@ pub struct BuiltinInfo {
     /// instantiation for the `Builtin` instruction that pushes it.
     #[serde(default)]
     pub type_argument: Option<usize>,
+}
+
+/// The serialized spelling of [`Type`]: the same variants, with the struct-shaped ones
+/// written as arrays. Purely a wire/disk form — nothing reads it as a value.
+///
+/// Trailing components that are usually empty (`Callable::omittable`, `Annotated::entries`)
+/// are omitted when they are, which is what keeps the common rows short: an exact-empty
+/// annotation row is `{"annotated":[3,true]}`, and 82% of them are exactly that.
+#[derive(Serialize, Deserialize)]
+enum TypeRepr {
+    #[serde(rename = "int")]
+    Integer,
+    #[serde(rename = "bin")]
+    Binary,
+    #[serde(rename = "ref")]
+    Reference,
+    #[serde(rename = "tuple")]
+    Tuple(usize),
+    #[serde(rename = "partial")]
+    Partial(Option<String>, Vec<(String, usize)>),
+    /// `[parameter, result, receive, states]`, plus `omittable` when non-empty.
+    #[serde(rename = "fn")]
+    Callable(
+        usize,
+        usize,
+        usize,
+        Option<usize>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")] Vec<usize>,
+    ),
+    #[serde(rename = "cycle")]
+    Cycle(usize),
+    #[serde(rename = "union")]
+    Union(Vec<usize>),
+    /// `[base, exact]`, plus `entries` when non-empty.
+    #[serde(rename = "annotated")]
+    Annotated(
+        usize,
+        bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")] Vec<(usize, usize)>,
+    ),
+    #[serde(rename = "process")]
+    Process(Option<usize>, Option<usize>, Option<usize>),
+    #[serde(rename = "resource")]
+    Resource(String),
+    #[serde(rename = "var")]
+    Variable(String),
+}
+
+impl From<Type> for TypeRepr {
+    fn from(ty: Type) -> Self {
+        match ty {
+            Type::Integer => TypeRepr::Integer,
+            Type::Binary => TypeRepr::Binary,
+            Type::Reference => TypeRepr::Reference,
+            Type::Tuple(id) => TypeRepr::Tuple(id),
+            Type::Partial { name, fields } => TypeRepr::Partial(name, fields),
+            Type::Callable {
+                parameter,
+                result,
+                receive,
+                states,
+                omittable,
+            } => TypeRepr::Callable(parameter, result, receive, states, omittable),
+            Type::Cycle(depth) => TypeRepr::Cycle(depth),
+            Type::Union(members) => TypeRepr::Union(members),
+            Type::Annotated {
+                base,
+                exact,
+                entries,
+            } => TypeRepr::Annotated(base, exact, entries),
+            Type::Process {
+                send,
+                receive,
+                state,
+            } => TypeRepr::Process(send, receive, state),
+            Type::Resource(name) => TypeRepr::Resource(name),
+            Type::Variable(name) => TypeRepr::Variable(name),
+        }
+    }
+}
+
+impl From<TypeRepr> for Type {
+    fn from(repr: TypeRepr) -> Self {
+        match repr {
+            TypeRepr::Integer => Type::Integer,
+            TypeRepr::Binary => Type::Binary,
+            TypeRepr::Reference => Type::Reference,
+            TypeRepr::Tuple(id) => Type::Tuple(id),
+            TypeRepr::Partial(name, fields) => Type::Partial { name, fields },
+            TypeRepr::Callable(parameter, result, receive, states, omittable) => Type::Callable {
+                parameter,
+                result,
+                receive,
+                states,
+                omittable,
+            },
+            TypeRepr::Cycle(depth) => Type::Cycle(depth),
+            TypeRepr::Union(members) => Type::Union(members),
+            TypeRepr::Annotated(base, exact, entries) => Type::Annotated {
+                base,
+                exact,
+                entries,
+            },
+            TypeRepr::Process(send, receive, state) => Type::Process {
+                send,
+                receive,
+                state,
+            },
+            TypeRepr::Resource(name) => Type::Resource(name),
+            TypeRepr::Variable(name) => Type::Variable(name),
+        }
+    }
 }
 
 impl Type {
@@ -953,5 +1094,109 @@ mod annotation_row_tests {
         assert!(t.without_nil(&p).is_never());
         let union = Type::Union(vec![int, annotated_nil]);
         assert!(union.contains_nil(&p));
+    }
+
+    /// Every variant must survive the positional serialized spelling, including the
+    /// components that are omitted when empty and the `Option`s that are `null` when absent.
+    /// A hand-shaped codec is exactly where a variant gets forgotten, so this enumerates them.
+    #[test]
+    fn types_round_trip_through_their_serialized_form() {
+        let types = vec![
+            Type::Integer,
+            Type::Binary,
+            Type::Reference,
+            Type::Tuple(7),
+            Type::Partial {
+                name: None,
+                fields: vec![],
+            },
+            Type::Partial {
+                name: Some("Point".to_string()),
+                fields: vec![("x".to_string(), 1), ("y".to_string(), 2)],
+            },
+            Type::Callable {
+                parameter: 1,
+                result: 2,
+                receive: 3,
+                states: None,
+                omittable: vec![],
+            },
+            Type::Callable {
+                parameter: 1,
+                result: 2,
+                receive: 3,
+                states: Some(4),
+                omittable: vec![0, 2],
+            },
+            Type::Cycle(2),
+            Type::Union(vec![]),
+            Type::Union(vec![1, 2, 3]),
+            Type::Annotated {
+                base: 5,
+                exact: true,
+                entries: vec![],
+            },
+            Type::Annotated {
+                base: 5,
+                exact: false,
+                entries: vec![(1, 2), (3, 4)],
+            },
+            Type::Process {
+                send: None,
+                receive: None,
+                state: None,
+            },
+            Type::Process {
+                send: Some(1),
+                receive: Some(2),
+                state: Some(3),
+            },
+            Type::Resource("TcpSocket".to_string()),
+            Type::Variable("t#1".to_string()),
+        ];
+        let json = serde_json::to_string(&types).expect("serialize");
+        let restored: Vec<Type> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, types);
+
+        // The shape the size win rests on: an exact-empty annotation row, which is 82% of
+        // them, and a states-less callable.
+        assert_eq!(
+            serde_json::to_string(&Type::Annotated {
+                base: 3,
+                exact: true,
+                entries: vec![]
+            })
+            .unwrap(),
+            r#"{"annotated":[3,true]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Type::Callable {
+                parameter: 1,
+                result: 2,
+                receive: 3,
+                states: None,
+                omittable: vec![]
+            })
+            .unwrap(),
+            r#"{"fn":[1,2,3,null]}"#
+        );
+    }
+
+    #[test]
+    fn tuple_infos_round_trip_through_their_serialized_form() {
+        let infos = vec![
+            TupleTypeInfo {
+                name: None,
+                fields: vec![],
+            },
+            TupleTypeInfo {
+                name: Some("Cons".to_string()),
+                fields: vec![(None, 1), (Some("rest".to_string()), 2)],
+            },
+        ];
+        let json = serde_json::to_string(&infos).expect("serialize");
+        assert_eq!(json, r#"[[null,[]],["Cons",[[null,1],["rest",2]]]]"#);
+        let restored: Vec<TupleTypeInfo> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, infos);
     }
 }

@@ -368,6 +368,87 @@ fn a_units_imports_are_a_sparse_subset_of_its_modules() {
 }
 
 #[test]
+fn a_compiled_program_drops_type_information_it_cannot_use() {
+    // A `.qx` is linked and run, never compiled against, so two kinds of type information in
+    // it are dead weight: annotation rows (compatibility strips them, the codecs recurse past
+    // them, the executor never reads them) and type-variable *names* (`check_type_relation`
+    // matches a variable as a wildcard). `extract_program` drops both and re-interns.
+    let compiled = compile(
+        "%list{1, 2, 3} ~> %list.map [~, #{ %num.mul [$, 2] }]",
+        false,
+    );
+    let program = quiver_compiler::extract_program(
+        &compiled.program,
+        &compiled.module_cache,
+        Some(compiled.entry),
+        compiled.own_floor,
+        quiver_compiler::Imports::Bundle,
+    );
+
+    let units = std::iter::once(&program.unit).chain(program.modules.iter().map(|(_, u)| u));
+    let mut names = std::collections::HashSet::new();
+    let mut rows = 0;
+    for unit in units {
+        for ty in &unit.types {
+            rows += 1;
+            assert!(
+                !matches!(ty, Type::Annotated { .. }),
+                "a shipped program keeps no annotation rows"
+            );
+            if let Type::Variable(name) = ty {
+                names.insert(name.clone());
+            }
+        }
+    }
+    assert!(
+        names.len() <= 1,
+        "every type variable must canonicalise to one name, got {names:?}"
+    );
+    assert!(rows > 0);
+    assert!(
+        rows < compiled.program.get_types().len(),
+        "shaking must remove rows: {rows} vs {}",
+        compiled.program.get_types().len()
+    );
+}
+
+#[test]
+fn a_compiled_programs_import_keys_match_the_units_it_bundles() {
+    // Shaking rewrites a unit's bytes, and a unit is named by the hash of those bytes with
+    // its dependencies cited by *their* keys — a Merkle chain. If the re-keying missed a
+    // citation, a host would refuse the program with a hash mismatch rather than run it, so
+    // this checks every citation against the unit actually shipped under that key.
+    let compiled = compile("%json.stringify %json{ {\"a\": [1, 2]} }", false);
+    let program = quiver_compiler::extract_program(
+        &compiled.program,
+        &compiled.module_cache,
+        Some(compiled.entry),
+        compiled.own_floor,
+        quiver_compiler::Imports::Bundle,
+    );
+
+    let bundled: HashMap<quiver_compiler::UnitKey, &quiver_compiler::CompiledUnit> =
+        program.modules.iter().map(|(key, u)| (*key, u)).collect();
+    for (key, unit) in &program.modules {
+        assert_eq!(
+            *key,
+            quiver_compiler::unit_key(unit),
+            "a bundled module's key must be the hash of the bytes shipped under it"
+        );
+    }
+    let citing = std::iter::once(&program.unit).chain(program.modules.iter().map(|(_, u)| u));
+    for unit in citing {
+        for (module, key, _) in &unit.imports {
+            assert!(
+                bundled.contains_key(key),
+                "import of {} cites key {key}, which no bundled unit hashes to",
+                module.display()
+            );
+        }
+    }
+}
+
+#[test]
 fn a_compiled_program_is_self_contained() {
     // What a `.qx` holds: an entry unit plus the units of every module it imports,
     // transitively. Serialised, handed to a host that has nothing, it must link and run —

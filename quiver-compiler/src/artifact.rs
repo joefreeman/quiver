@@ -1317,7 +1317,168 @@ pub fn extract_program(
             .map(|(key, artifact)| (key, artifact.unit.clone()))
             .collect()
     };
-    CompiledProgram { unit, modules }
+    let mut program = CompiledProgram { unit, modules };
+
+    // Shaking rewrites a unit's bytes, and a unit is named by the hash of those bytes — with
+    // dependencies cited by *their* content keys, so the keys form a Merkle chain. Re-key
+    // bottom-up: the closure is deepest-first, so a module's dependencies have already been
+    // rewritten and re-keyed when its own citations are updated.
+    let mut rekeyed: HashMap<UnitKey, UnitKey> = HashMap::new();
+    for (key, unit) in &mut program.modules {
+        recite_imports(unit, &rekeyed);
+        shake_types(unit);
+        let shaken = unit_key(unit);
+        rekeyed.insert(*key, shaken);
+        *key = shaken;
+    }
+    recite_imports(&mut program.unit, &rekeyed);
+    shake_types(&mut program.unit);
+    program
+}
+
+/// Point a unit's import citations at the re-keyed versions of the modules they name.
+fn recite_imports(unit: &mut CompiledUnit, rekeyed: &HashMap<UnitKey, UnitKey>) {
+    for (_, key, _) in &mut unit.imports {
+        if let Some(shaken) = rekeyed.get(key) {
+            *key = *shaken;
+        }
+    }
+}
+
+/// The type ids a type references directly. `Type::Tuple` is not among them: it names a
+/// *tuple* id, and the field types behind it are rewritten with the tuples table, after the
+/// map is complete.
+fn type_children(ty: &Type) -> Vec<usize> {
+    match ty {
+        Type::Integer
+        | Type::Binary
+        | Type::Reference
+        | Type::Cycle(_)
+        | Type::Resource(_)
+        | Type::Variable(_)
+        | Type::Tuple(_) => Vec::new(),
+        Type::Union(members) => members.clone(),
+        Type::Partial { fields, .. } => fields.iter().map(|(_, id)| *id).collect(),
+        Type::Callable {
+            parameter,
+            result,
+            receive,
+            states,
+            ..
+        } => [Some(*parameter), Some(*result), Some(*receive), *states]
+            .into_iter()
+            .flatten()
+            .collect(),
+        Type::Annotated { base, entries, .. } => std::iter::once(*base)
+            .chain(entries.iter().map(|(_, id)| *id))
+            .collect(),
+        Type::Process {
+            send,
+            receive,
+            state,
+        } => [*send, *receive, *state].into_iter().flatten().collect(),
+    }
+}
+
+/// Drop the type information a *program* cannot use, and re-intern what is left.
+///
+/// A `.qx` is only ever linked and run — never compiled against — and two kinds of type
+/// information exist solely for the compiler:
+///
+/// - **Annotation rows.** `Type::Annotated` records what annotations a value is statically
+///   known to carry, so `x:key` can be typed. Everything downstream discards it:
+///   `compute_compatible_concrete_types` opens by calling `Type::strip_annotations`, the
+///   `%data` and `%json` codecs recurse straight to `base`, and the executor never reads the
+///   variant at all. Each row is spliced out in favour of its base.
+/// - **Type-variable names.** `check_type_relation` matches a variable with
+///   `(Type::Variable(_), _) | (_, Type::Variable(_)) => true` — a wildcard whose name is
+///   ignored. Definition-site uniquification mints a distinct name per definition, so the
+///   same generic signature written in two modules produces two unrelated graphs. Collapsing
+///   every name to one makes them the same row.
+///
+/// Re-interning is where the second one pays: once names are gone, alpha-equivalent rows are
+/// *identical* rows, and dedupe removes them. Together the two take `examples/todo.qv` from
+/// 6,391 distinct type rows to 2,966.
+///
+/// This must not be applied to a unit a compiler will consume. A `ModuleArtifact` carries
+/// `module_type`, its type namespaces and `fn_case_tables` in the same id space, and typing a
+/// caller against the module needs exactly what is discarded here — the annotation row to
+/// type `f:doc`, and variable identity to unify. Only `extract_program` calls this.
+fn shake_types(unit: &mut CompiledUnit) {
+    // Extraction numbers types by first reach, so a parent's id is *lower* than its
+    // children's — the rewrite therefore runs post-order rather than as a forward sweep.
+    let mut interned: HashMap<Type, usize> = HashMap::new();
+    let mut types: Vec<Type> = Vec::with_capacity(unit.types.len());
+    // Only the type table moves. Every other table maps to itself — spelled out rather than
+    // left absent, because `IdRemaps::map` treats a missing entry as a caller bug, which is
+    // exactly what an unmapped id would be here.
+    let mut remap = IdRemaps {
+        constants: (0..unit.constants.len()).map(|id| (id, id)).collect(),
+        functions: (0..unit.function_space()).map(|id| (id, id)).collect(),
+        tuples: (0..unit.tuples.len()).map(|id| (id, id)).collect(),
+        builtins: (0..unit.builtins.len()).map(|id| (id, id)).collect(),
+        annotation_keys: (0..unit.annotation_keys.len()).map(|id| (id, id)).collect(),
+        field_names: (0..unit.field_names.len()).map(|id| (id, id)).collect(),
+        sites: (0..unit.sites.len()).map(|id| (id, id)).collect(),
+        types: HashMap::new(),
+    };
+
+    // `(id, children queued)`. A node is visited once to queue what it references and once
+    // to rewrite itself; `Type::Cycle` is a relative marker rather than an edge, so the graph
+    // is a DAG and this terminates. Iterative, like every other walk over type structure.
+    for root in 0..unit.types.len() {
+        let mut stack = vec![(root, false)];
+        while let Some((old, queued)) = stack.pop() {
+            if remap.types.contains_key(&old) {
+                continue;
+            }
+            if !queued {
+                stack.push((old, true));
+                stack.extend(
+                    type_children(&unit.types[old])
+                        .into_iter()
+                        .filter(|child| !remap.types.contains_key(child))
+                        .map(|child| (child, false)),
+                );
+                continue;
+            }
+            // An annotation row *is* its base once the row is gone. Reading the mapping
+            // rather than the raw id handles a base that was itself spliced.
+            if let Type::Annotated { base, .. } = &unit.types[old] {
+                let target = remap.types[base];
+                remap.types.insert(old, target);
+                continue;
+            }
+            let rewritten = match unit.types[old].clone().remap_ids(&remap) {
+                // One name for every variable, so alpha-equivalent rows intern together.
+                Type::Variable(_) => Type::Variable("_".to_string()),
+                other => other,
+            };
+            let new = *interned.entry(rewritten.clone()).or_insert_with(|| {
+                types.push(rewritten);
+                types.len() - 1
+            });
+            remap.types.insert(old, new);
+        }
+    }
+
+    // Tuples keep their rows and their order — a tuple id is a runtime value tag carried by
+    // `Opcode::Tuple` and `ConcreteType`, so merging them is a different question — but their
+    // field types move with everything else.
+    unit.tuples = unit
+        .tuples
+        .iter()
+        .map(|info| info.remap_ids(&remap))
+        .collect();
+    unit.functions = unit
+        .functions
+        .drain(..)
+        .map(|function| function.remap_ids(&remap))
+        .collect();
+    for builtin in &mut unit.builtins {
+        builtin.type_argument = builtin.type_argument.map(|id| remap.types[&id]);
+    }
+    unit.types = types;
 }
 
 /// Extract the unit reachable from `entry_function`: a compiled fragment with no module
