@@ -80,7 +80,10 @@ jobs:
 
   publish-npm:
     name: Publish to npm
-    needs: verify-version
+    # After the CLI build, not beside it: publishing a version to npm cannot be undone or
+    # reused, so it must be the last thing that can fail the release rather than something
+    # that has already happened when the binary turns out not to build.
+    needs: [verify-version, build-cli]
     runs-on: ubuntu-latest
     # Authenticates via OIDC trusted publishing (configured on npmjs.com for this
     # repo + workflow), so there is no npm token to expire.

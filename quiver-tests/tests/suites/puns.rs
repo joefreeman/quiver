@@ -52,9 +52,9 @@ fn test_bracket_field_calls_where_a_pun_references() {
 }
 
 #[test]
-fn test_leading_ampersand_accepted_and_redundant() {
-    // `&` says what a pun already means, so it is allowed (shortening `[f: &f]` by deleting
-    // the label alone) and carries no information; the formatter drops it.
+fn test_pun_stores_the_callable_it_names() {
+    // A pun is `[f: f]` with the label deleted, and names rather than applies, so punning a
+    // function stores it — the call is a separate step.
     quiver()
         .evaluate("f = #[] { 1 }; g = #[] { 2 }; (f, g) ~> .g ~> ~ []")
         .expect("2");

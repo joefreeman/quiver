@@ -454,7 +454,7 @@ mod tests {
     fn splits_chapters_and_collects_blocks() {
         let doc = Document::parse(
             "# Title\n\n```quiver\n1\n```\n\n## One\n\n```quiver ignore\n...\n```\n\n\
-             ```quiver program\n#{ 1 }\n```\n",
+             ```quiver program\n#[] { 1 }\n```\n",
         );
         assert_eq!(doc.chapters.len(), 2);
         assert_eq!(doc.chapters[0].title, None);

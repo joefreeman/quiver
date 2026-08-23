@@ -162,8 +162,8 @@ fn test_annotated_process_result() {
 #[test]
 fn test_pre_contract_attaches_and_is_callable() {
     // :pre expects `#'int -> ok?` here; a bare `#{ ... }` infers its parameter from it.
-    // The entry is definite, so retrieval types as the bare contract — reference it
-    // with `&` (a flowing value would call it) and then call it explicitly.
+    // The entry is definite, so retrieval types as the bare contract; binding it names the
+    // contract without applying it, and the call is then explicit.
     quiver()
         .evaluate("f = #'int { :pre #{ Ok }; [~, 1] ~> __integer_add__ ~ }; p = f:pre; 5 ~> p ~")
         .expect("Ok");

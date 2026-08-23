@@ -75,14 +75,23 @@ quiv run program.qv
 - **`quiv repl`** - Start an interactive REPL session
 - **`quiv run [FILE]`** - Run a Quiver program (`.qv` source or `.qx` bytecode)
   - `-e, --eval <CODE>` - Execute code directly from the command line
+  - `-q, --quiet` - Print nothing but the program's own output
+  - `--release` - Skip failure-provenance stamps (`run` compiles debug by default)
 - **`quiv compile [FILE]`** - Compile source to bytecode
   - `-o, --output <FILE>` - Write output to file
-  - `-d, --debug` - Include debug information in bytecode
+  - `--debug` - Include failure-provenance stamps in the bytecode
+  - `--inline` - Inline imported modules into the entry unit, shaken to what it reaches
   - `-e, --eval <CODE>` - Compile code directly from the command line
 - **`quiv inspect <FILE>`** - Inspect compiled bytecode structure
 - **`quiv format [PATH]...`** - Format files in place, walking any directory given (default: the current one)
   - `--check` - Write nothing; list what would change and exit non-zero
   - `-e, --eval <CODE>` - Format code directly from the command line
+- **`quiv test <FILE.md>...`** - Run the Quiver code embedded in a Markdown document and check its `//=` assertions. Each `##` chapter is one accumulating session; exits non-zero if any check fails
+- **`quiv server`** - Run the persistent server: one shared environment that client sessions connect to over a unix socket. `quiv run` and `quiv repl` spawn one automatically when none is listening, so this is only needed to run it in the foreground or to reach it from a browser
+  - `--socket <PATH>` - Listen on this socket path instead of the per-user default
+  - `--listen [<ADDRESS>]` - Additionally listen for browser clients on a loopback TCP address (default `127.0.0.1:2192`). Every request must carry the bearer token written beside the socket; non-loopback addresses are refused
+  - `--allow-origin <ORIGIN>` - Allow this browser origin on the TCP listener (repeatable)
+  - `quiv server status` / `quiv server stop` - Whether a server is listening, and stop it
 
 Commands read from stdin when no file is specified (`quiv format` spells that `-`).
 
@@ -92,10 +101,14 @@ Within the REPL:
 
 - `\?` - Show help message
 - `\q` - Exit the REPL
-- `\!` - Reset the environment
+- `\!` - Reset the REPL
+- `\r` - Reload project modules (keeps variables)
 - `\v` - List all variables
 - `\p` - List all processes
 - `\p X` - Inspect process with ID `X`
+- `\w` - List workers
+- `\w X` - Inspect worker with ID `X`
+- `\x` - Show the compile-time type of the last expression
 
 ## License
 

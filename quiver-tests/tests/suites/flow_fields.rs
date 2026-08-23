@@ -28,8 +28,8 @@ fn each_field_independently_receives_flow() {
 
 #[test]
 fn nil_arg_callable_field_is_stored_not_called() {
-    // A record of functions is the ordinary case: the field is the function, and `&` adds
-    // nothing to it.
+    // A record of functions is the ordinary case: the field holds the function itself,
+    // and applying it is a separate, explicit step.
     quiver()
         .evaluate("g = #[] { 42 }; [g] ~> .0 ~> ~ []")
         .expect("42");
@@ -37,16 +37,16 @@ fn nil_arg_callable_field_is_stored_not_called() {
 }
 
 #[test]
-fn amp_builtin_reference_in_record() {
-    // `&__builtin__` stores a builtin as a value (e.g. a module export tuple).
+fn builtin_reference_in_record() {
+    // A builtin named in a field is stored as a value (e.g. a module export tuple).
     quiver()
         .evaluate("r = [a: __integer_add__]; [3, 4] ~> r.a ~")
         .expect("7");
 }
 
 #[test]
-fn amp_passes_callable_by_value() {
-    // `&inc` stores the function, as the bare name now does; it can be called later.
+fn passes_callable_by_value() {
+    // A bare name stores the function; it can be called later.
     quiver()
         .evaluate(&format!("{INC} t = 5 ~> [inc, ~]; 10 ~> t.0 ~"))
         .expect("11");

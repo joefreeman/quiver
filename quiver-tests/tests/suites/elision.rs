@@ -57,7 +57,8 @@ fn test_forwarder_shapes() {
 
 #[test]
 fn test_forwarder_reference_is_a_real_function() {
-    // `&` opts out of application, so the member must still exist as a callable value.
+    // Naming a member does not call it, so the member must still exist as a callable
+    // value for a later application to reach.
     quiver()
         .with_modules(forwarders())
         .evaluate("f = %m.add1; f [41]")

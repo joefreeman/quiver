@@ -460,11 +460,16 @@ fn run_on_server(
             is_nil,
             ..
         } => {
-            // Nil is the failing result: surface its provenance (debug builds) and
-            // exit non-zero, exactly as the in-process runner did.
+            // Nil is the failing result: report it and exit non-zero, exactly as the
+            // in-process runner did. The nil itself is always printed — a release build
+            // carries no provenance, and exiting 1 with nothing said reads as a silent
+            // failure — with the site appended when a debug build stamped one.
             if is_nil {
-                if !quiet && let Some(origin) = origin {
-                    eprintln!("[]  ({origin})");
+                if !quiet {
+                    match origin {
+                        Some(origin) => eprintln!("[]  ({origin})"),
+                        None => eprintln!("[]"),
+                    }
                 }
                 std::process::exit(1);
             }

@@ -373,9 +373,14 @@ fn a_compiled_program_drops_type_information_it_cannot_use() {
     // it are dead weight: annotation rows (compatibility strips them, the codecs recurse past
     // them, the executor never reads them) and type-variable *names* (`check_type_relation`
     // matches a variable as a wildcard). `extract_program` drops both and re-interns.
-    let compiled = compile(
+    // A store of this test's own, rather than the shared cache: how many modules link from
+    // artifacts rather than compiling into the entry unit decides how many *per-unit* type
+    // tables the bundle has, and the row count below sums them. Against a warm cache that
+    // sum drifts with whatever earlier tests happened to store.
+    let compiled = compile_with(
         "%list{1, 2, 3} ~> %list.map [~, #{ %num.mul [$, 2] }]",
         false,
+        Rc::new(ArtifactStore::in_memory()),
     );
     let program = quiver_compiler::extract_program(
         &compiled.program,

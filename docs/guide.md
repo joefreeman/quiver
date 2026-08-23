@@ -1408,6 +1408,7 @@ __integer_add__ [3, 4]                       //= 7
 | `%dns` | name resolution |
 | `%url` | absolute URLs: parsing, rendering, resolution |
 | `%http` | the shared HTTP vocabulary: messages and codecs, no I/O |
+| `%http/tcp` | HTTP/1.1 over a socket, with the TLS upgrade `https://` needs |
 | `%http/client` | an HTTP client over `http://` and `https://` |
 | `%http/server` | an HTTP server, with optional TLS |
 | `%http/session` | signed-cookie sessions |
@@ -1418,5 +1419,7 @@ __integer_add__ [3, 4]                       //= 7
 | `%time` | clocks and calendar arithmetic |
 | `%random` | randomness from the host's entropy source |
 
-Per-function documentation lives in each module's `:doc` annotations, and is reachable in
-the REPL.
+Per-function documentation lives in each module's `:doc` annotations, which an editor
+surfaces through the language server. Each module also has a reference page under
+`std/docs/`, which is that module's test suite as well as its documentation — every
+example on it is executed, and its `//=` assertions checked, by `quiv test`.

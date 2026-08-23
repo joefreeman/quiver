@@ -237,8 +237,8 @@ fn visit_block_for_doc(block: &Block, definition: SourceSpan, found: &mut Option
 }
 
 /// The chain's `:doc` text: a single function literal with a doc prefix, or a chain
-/// ending in a block attach (`expr { :doc "..." }` — e.g. an annotated builtin export
-/// like `&__binary_and__ { :doc … }`). Plain-string docs only.
+/// ending in a block attach (`expr ~> { :doc "..." }` — e.g. an annotated builtin export
+/// like `__binary_and__ ~> { :doc … }`). Plain-string docs only.
 fn doc_of_chain(chain: &Chain) -> Option<String> {
     match chain.terms.as_slice() {
         [Term::Function(function)] => doc_of_function(function),
@@ -287,7 +287,8 @@ mod doc_tests {
 
     #[test]
     fn doc_of_a_local_function_binding() {
-        let source = "double = #'int {\n  :doc \"Doubles an integer.\"\n  [~, 2] ~> mul\n}\n";
+        let source =
+            "double = #'int {\n  :doc \"Doubles an integer.\"\n  [~, 2] ~> %num.mul ~\n}\n";
         let ast = quiver_compiler::parse(source).expect("parse");
         let definition = binding_span_of(&ast, "double");
         assert_eq!(
@@ -298,7 +299,7 @@ mod doc_tests {
 
     #[test]
     fn no_doc_yields_none() {
-        let source = "double = #'int { [~, 2] ~> mul }\n";
+        let source = "double = #'int { [~, 2] ~> %num.mul ~ }\n";
         let ast = quiver_compiler::parse(source).expect("parse");
         let definition = binding_span_of(&ast, "double");
         assert_eq!(doc_at_definition(&ast, definition), None);
@@ -306,7 +307,8 @@ mod doc_tests {
 
     #[test]
     fn doc_of_a_module_member() {
-        let source = "[\n  greet: #'int {\n    :doc \"Greets.\"\n    [~, 1] ~> add\n  },\n]\n";
+        let source =
+            "[\n  greet: #'int {\n    :doc \"Greets.\"\n    [~, 1] ~> %num.add ~\n  },\n]\n";
         let ast = quiver_compiler::parse(source).expect("parse");
         assert_eq!(member_doc(&ast, "greet").as_deref(), Some("Greets."));
         assert_eq!(member_doc(&ast, "missing"), None);

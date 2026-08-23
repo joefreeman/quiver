@@ -237,9 +237,16 @@ mod tests {
     fn semantics_survive_a_type_error_elsewhere_in_the_file() {
         // `double` typechecks; the second line fails (undefined builtin). Hover and
         // go-to-definition must still work on the first line.
-        let text = "double = #'int { ~ }\n5 ~> double ~ ~> __nope__";
+        let text = "double = #'int { ~ }\n5 ~> double ~ ~> __nope__ ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
-        assert_eq!(analysis.diagnostics.len(), 1, "expected the type error");
+        assert_eq!(analysis.diagnostics.len(), 1, "{:?}", analysis.diagnostics);
+        // Specifically the undefined builtin, so a different error (a malformed snippet, say)
+        // cannot stand in for it.
+        let message = &analysis.diagnostics[0].message;
+        assert!(
+            message.contains("unknown builtin") && message.contains("__nope__"),
+            "expected the undefined-builtin error, got {message:?}"
+        );
         let semantics = analysis
             .semantics
             .expect("partial semantics retained despite the error");
@@ -277,13 +284,13 @@ mod tests {
     #[test]
     fn goto_definition_for_tuple_destructuring_binding() {
         // `y` is bound by destructuring, then referenced; goto should land on the binding.
-        let text = "[x, y] = [1, 2]\ny ~> __increment__";
+        let text = "[x, y] = [1, 2]\ny ~> __integer_abs__ ~";
         assert_goto(text, "y", "y");
     }
 
     #[test]
     fn goto_definition_for_named_tuple_destructuring() {
-        let text = "Point[x, y] = Point[10, 20]\nx ~> __increment__";
+        let text = "Point[x, y] = Point[10, 20]\nx ~> __integer_abs__ ~";
         assert_goto(text, "x", "x");
     }
 
@@ -315,7 +322,7 @@ mod tests {
     fn goto_definition_for_partial_destructuring_binding() {
         // `(x)` binds the field by name (the form used by `(double) = %util`); a later use
         // should jump back to the binding.
-        let text = "(x) = [x: 5]\nx ~> __increment__";
+        let text = "(x) = [x: 5]\nx ~> __integer_abs__ ~";
         assert_goto(text, "x", "x");
     }
 
@@ -350,7 +357,7 @@ mod tests {
     #[test]
     fn goto_definition_for_mid_chain_bind() {
         // The `=request` mid-chain binding form.
-        let text = "5 ~> =request\nrequest ~> __increment__";
+        let text = "5 ~> =request\nrequest ~> __integer_abs__ ~";
         assert_goto(text, "request", "request");
     }
 
@@ -556,7 +563,7 @@ mod tests {
     #[test]
     fn local_references_finds_all_uses_in_the_file() {
         // `x` is bound once and used twice.
-        let text = "x = 5\n[x, x] ~> __integer_add__";
+        let text = "x = 5\n[x, x] ~> __integer_add__ ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let use_offset = text.rfind('x').unwrap();
@@ -577,7 +584,7 @@ mod tests {
     fn local_definition_at_identifies_the_binding_site() {
         // Drives document-highlight's WRITE-vs-READ distinction: the binding is the definition,
         // every use resolves back to it.
-        let text = "x = 5\n[x, x] ~> __integer_add__";
+        let text = "x = 5\n[x, x] ~> __integer_add__ ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let binding = 0;
@@ -745,7 +752,7 @@ mod tests {
         std::fs::write(&util, "[ double: #'int { [~, 2] ~> %num.mul ~ } ]").unwrap();
 
         // `double` is destructured (no `%util.double` access) and then used twice.
-        let text = "(double) = %util;\n#{ [ 1 ~> double ~, 2 ~> double ~ ] }";
+        let text = "(double) = %util;\n#[] { [ 1 ~> double ~, 2 ~> double ~ ] }";
         let resolver = PackageResolver::for_entry_file(&src.join("main.qv"));
         let analysis = analyze(text, &LineIndex::new(text), &resolver);
         let semantics = analysis.semantics.expect("semantics");
@@ -946,16 +953,28 @@ mod tests {
     fn undefined_builtin_diagnostic_points_at_the_builtin() {
         // Regression: the error used to land on the `~` argument because compiling the
         // argument clobbered the located span before the builtin was resolved.
-        let text = "5 ~> [~, 1] ~> __nope__";
+        let text = "5 ~> [~, 1] ~> __nope__ ~";
         let diags = diagnostics(text);
-        assert_eq!(diags.len(), 1);
-        let start = diags[0].range.start;
-        // Offset of `__nope__` in the source.
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        // It must be the undefined-builtin error: any other diagnostic on this line would
+        // otherwise satisfy the span assertion below without exercising the regression.
+        assert!(
+            diags[0].message.contains("unknown builtin") && diags[0].message.contains("__nope__"),
+            "expected the undefined-builtin error, got {:?}",
+            diags[0].message
+        );
+        let range = diags[0].range;
+        // The span covers `__nope__` itself — not the `~` argument that follows it.
         let builtin_col = text.find("__nope__").unwrap() as u32;
-        assert_eq!(start.line, 0);
+        assert_eq!(range.start.line, 0);
         assert_eq!(
-            start.character, builtin_col,
+            range.start.character, builtin_col,
             "diagnostic should start at the builtin, not the argument"
+        );
+        assert_eq!(
+            range.end.character,
+            builtin_col + "__nope__".len() as u32,
+            "diagnostic should end at the builtin, not run into the argument"
         );
     }
 
