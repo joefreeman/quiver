@@ -1974,7 +1974,10 @@ impl<E: Effect> Executor<E> {
         let process = &mut *proc;
 
         let len = process.stack.len();
-        if len < n {
+        // A count below 2 rotates nothing, and 0 would index past the end below — the
+        // builder asserts against it, so reaching here means the operand came from
+        // somewhere other than this compiler.
+        if n < 2 || len < n {
             return Err(Error::StackUnderflow);
         }
         // Rotate the top n items: move item at depth (n-1) to the top

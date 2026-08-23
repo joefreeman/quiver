@@ -83,8 +83,12 @@ impl ReplCli {
             &quiver_cli::protocol::default_socket_path(),
             &std::env::current_exe()?,
         )?;
+        // Leased: a REPL that is killed outright never gets to delete its root, and
+        // the beat below is what stops that root outliving the session.
         let process_id = Arc::new(AtomicU64::new(
-            client.create_process().map_err(|e| e.to_string())?,
+            client
+                .create_process(Some(quiver_cli::protocol::CLIENT_LEASE))
+                .map_err(|e| e.to_string())?,
         ));
 
         let in_flight = Arc::new(AtomicBool::new(false));
@@ -99,6 +103,7 @@ impl ReplCli {
             let in_flight = Arc::clone(&in_flight);
             let cancel_sent = Arc::clone(&cancel_sent);
             std::thread::spawn(move || {
+                let mut beat = std::time::Instant::now();
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(30));
                     if in_flight.load(Ordering::Relaxed)
@@ -106,6 +111,12 @@ impl ReplCli {
                         && !cancel_sent.swap(true, Ordering::Relaxed)
                     {
                         let _ = client.cancel(process_id.load(Ordering::Relaxed));
+                    }
+                    // The lease is kept from here too: the main thread is blocked
+                    // reading a resume's response, or sitting at the prompt.
+                    if beat.elapsed() >= quiver_cli::protocol::CLIENT_HEARTBEAT {
+                        let _ = client.heartbeat(process_id.load(Ordering::Relaxed));
+                        beat = std::time::Instant::now();
                     }
                 }
             });
@@ -240,6 +251,13 @@ impl ReplCli {
                     }
                 }
                 Err(ReadlineError::Interrupted) => {
+                    // A Ctrl-C the prompt caught ends nothing, so the flag it may have
+                    // set must not survive into the next line: left standing, the
+                    // *following* Ctrl-C would find the conditional shutdown already
+                    // armed and exit the client outright, skipping the delete below and
+                    // stranding the session's root on the server.
+                    self.interrupt.store(false, Ordering::Relaxed);
+                    self.cancel_sent.store(false, Ordering::Relaxed);
                     println!("{}", "(Use \\q to quit)".bright_black());
                 }
                 Err(ReadlineError::Eof) => {
@@ -276,7 +294,10 @@ impl ReplCli {
     fn reset(&mut self) {
         let old = self.process_id.load(Ordering::Relaxed);
         let _ = self.client.delete_process(old);
-        match self.client.create_process() {
+        match self
+            .client
+            .create_process(Some(quiver_cli::protocol::CLIENT_LEASE))
+        {
             Ok(id) => self.process_id.store(id, Ordering::Relaxed),
             Err(e) => {
                 eprintln!("{}", format!("Server connection lost: {e}").red());

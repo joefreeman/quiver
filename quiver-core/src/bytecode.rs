@@ -409,6 +409,7 @@ impl SiteKind {
 
 #[cfg(test)]
 mod tests {
+    use super::instruction_stream::{write_uleb, zigzag};
     use super::{BigInt, Constant, Function, Instruction, Opcode, SiteKind};
     use base64::Engine as _;
     use std::str::FromStr as _;
@@ -588,8 +589,10 @@ mod tests {
         );
     }
 
-    /// A corrupt stream must be a deserialization error, never a panic — the range check
-    /// in `with_id` is an assertion, so the decoder has to reject before constructing.
+    /// A corrupt stream must be a deserialization error, never a panic — the range checks
+    /// in `with_id` and `with_offset` are assertions, so the decoder has to reject before
+    /// constructing. This runs wherever a unit is deserialized, which for a host is
+    /// *before* it can validate anything.
     #[test]
     fn malformed_instruction_streams_are_rejected() {
         let case = |encoded: &str| {
@@ -597,13 +600,36 @@ mod tests {
                 r#"{{"instructions":"{encoded}","captures":0,"type_id":0}}"#
             ))
         };
+        let stream = |bytes: &[u8]| BASE64_TEST.encode(bytes);
+        let jump = Opcode::Jump as u8;
         assert!(case("!!!not base64!!!").is_err());
         // Opcode 200 does not exist.
-        assert!(case(&BASE64_TEST.encode([200u8])).is_err());
+        assert!(case(&stream(&[200u8])).is_err());
         // `Constant` (opcode 0) with its operand missing.
-        assert!(case(&BASE64_TEST.encode([0u8])).is_err());
+        assert!(case(&stream(&[0u8])).is_err());
         // An operand past the 24-bit field.
-        assert!(case(&BASE64_TEST.encode([0u8, 0x80, 0x80, 0x80, 0x80, 0x01])).is_err());
+        assert!(case(&stream(&[0u8, 0x80, 0x80, 0x80, 0x80, 0x01])).is_err());
+        // A jump with its offset missing.
+        assert!(case(&stream(&[jump])).is_err());
+        // Jump offsets past the field, in both directions (the encoding is zigzag, so
+        // an odd value is a backward jump).
+        let mut forward = vec![jump];
+        write_uleb(zigzag(Instruction::OFFSET_MAX) + 2, &mut forward);
+        assert!(case(&stream(&forward)).is_err());
+        let mut backward = vec![jump];
+        write_uleb(zigzag(Instruction::OFFSET_MIN) + 2, &mut backward);
+        assert!(case(&stream(&backward)).is_err());
+        // A zigzag value past 32 bits, which `unzigzag` would truncate into range.
+        let mut truncating = vec![jump];
+        write_uleb((1u64 << 33) | zigzag(4), &mut truncating);
+        assert!(case(&stream(&truncating)).is_err());
+        // The extremes themselves still decode.
+        for offset in [Instruction::OFFSET_MIN, Instruction::OFFSET_MAX] {
+            let mut bytes = vec![jump];
+            write_uleb(zigzag(offset), &mut bytes);
+            let function = case(&stream(&bytes)).expect("an in-range offset decodes");
+            assert_eq!(function.instructions[0].offset(), offset);
+        }
     }
 
     /// The two normalising constructors are what keep the encoding canonical.
@@ -783,6 +809,10 @@ impl Instruction {
 
     /// The widest table id or slot an instruction can name.
     pub const OPERAND_MAX: usize = Self::OPERAND_MASK as usize;
+    /// The widest relative jump an instruction can carry, the operand field reading as
+    /// signed. A decoder checks a stream against these before constructing.
+    pub const OFFSET_MIN: Offset = -(1 << (Self::OPERAND_BITS - 1));
+    pub const OFFSET_MAX: Offset = (1 << (Self::OPERAND_BITS - 1)) - 1;
 
     fn new(opcode: Opcode, operand: u32) -> Instruction {
         Instruction(((opcode as u32) << Self::OPERAND_BITS) | (operand & Self::OPERAND_MASK))
@@ -810,9 +840,8 @@ impl Instruction {
 
     /// An opcode carrying a relative jump. Range-checked like [`Self::with_id`].
     fn with_offset(opcode: Opcode, offset: Offset) -> Instruction {
-        let limit = 1 << (Self::OPERAND_BITS - 1);
         assert!(
-            offset >= -limit && offset < limit,
+            (Self::OFFSET_MIN..=Self::OFFSET_MAX).contains(&offset),
             "jump offset {offset} exceeds {} bits — this function is too large to encode",
             Self::OPERAND_BITS
         );
@@ -1065,7 +1094,7 @@ mod instruction_stream {
     const BASE64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::STANDARD;
 
-    fn write_uleb(mut value: u64, out: &mut Vec<u8>) {
+    pub(super) fn write_uleb(mut value: u64, out: &mut Vec<u8>) {
         while value >= 0x80 {
             out.push((value as u8) | 0x80);
             value >>= 7;
@@ -1087,7 +1116,7 @@ mod instruction_stream {
     }
 
     /// Jump offsets are small in both directions, so zigzag keeps a backward jump one byte.
-    fn zigzag(offset: i32) -> u64 {
+    pub(super) fn zigzag(offset: i32) -> u64 {
         ((offset << 1) ^ (offset >> 31)) as u32 as u64
     }
 
@@ -1138,7 +1167,19 @@ mod instruction_stream {
                     Instruction::with_id(opcode, id as usize)
                 }
                 OperandKind::Offset => {
-                    let offset = unzigzag(read_uleb(&bytes, &mut cursor).ok_or_else(truncated)?);
+                    let encoded = read_uleb(&bytes, &mut cursor).ok_or_else(truncated)?;
+                    let offset = unzigzag(encoded);
+                    // `unzigzag` truncates past 32 bits and the field holds 24, so
+                    // round-tripping the encoding is what catches both — the range check
+                    // in `with_offset` is an assertion, and a corrupt stream must be a
+                    // deserialization error rather than a panic.
+                    if zigzag(offset) != encoded
+                        || !(Instruction::OFFSET_MIN..=Instruction::OFFSET_MAX).contains(&offset)
+                    {
+                        return Err(D::Error::custom(format!(
+                            "jump offset out of range (encoded {encoded})"
+                        )));
+                    }
                     Instruction::with_offset(opcode, offset)
                 }
             });

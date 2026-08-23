@@ -10,9 +10,12 @@
 use quiver_cli::client::Client;
 use quiver_cli::protocol::Outcome;
 use quiver_cli::protocol::{MissingModules, ResumePayload};
+use quiver_core::bytecode::Instruction;
+use quiver_core::types::Type;
 use quiver_environment::LineCompiler;
 use quiver_io::NativeEffect;
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
@@ -151,7 +154,7 @@ struct Session {
 impl Session {
     fn open(server: &Server) -> Self {
         let client = server.client();
-        let pid = client.create_process().expect("create failed");
+        let pid = client.create_process(None).expect("create failed");
         Session {
             client,
             compiler: LineCompiler::new(
@@ -253,7 +256,7 @@ fn concurrent_sessions_evaluate_and_run_independently() {
                 }
                 // A run beside the session: its own root, one resume, delete.
                 let client = server.client();
-                let pid = client.create_process().expect("create failed");
+                let pid = client.create_process(None).expect("create failed");
                 let outcome = client
                     .resume(
                         pid,
@@ -297,7 +300,7 @@ fn cancel_interrupts_and_a_fresh_session_recovers() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let server = Server::start(&[]);
     let client = server.client();
-    let pid = client.create_process().expect("create failed");
+    let pid = client.create_process(None).expect("create failed");
     let spinner = std::thread::spawn({
         let client = client.clone();
         move || {
@@ -328,7 +331,7 @@ fn concurrent_resumes_answer_conflict() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let server = Server::start(&[]);
     let client = server.client();
-    let pid = client.create_process().expect("create failed");
+    let pid = client.create_process(None).expect("create failed");
     let spinner = std::thread::spawn({
         let client = client.clone();
         move || {
@@ -371,7 +374,7 @@ fn abandoned_processes_stay_visible_and_collectable() {
     let client = server.client();
     // An abandoned spinner: no cancel, no delete — the crashed-client shape. Detach
     // the resume into a thread nothing joins.
-    let pid = client.create_process().expect("create failed");
+    let pid = client.create_process(None).expect("create failed");
     let _abandoned = std::thread::spawn({
         let client = client.clone();
         move || {
@@ -491,7 +494,7 @@ fn exe() -> PathBuf {
 }
 
 fn quick_value(client: &Client, source: &str) -> String {
-    let pid = client.create_process().expect("create failed");
+    let pid = client.create_process(None).expect("create failed");
     let outcome = client
         .resume(
             pid,
@@ -616,7 +619,7 @@ struct UnitSession {
 impl UnitSession {
     fn open(server: &Server) -> Self {
         let client = server.client();
-        let pid = client.create_process().expect("create failed");
+        let pid = client.create_process(None).expect("create failed");
         let mut compiler = LineCompiler::new(
             Box::new(quiver_compiler::PackageResolver::inline()),
             quiver_cli::build_builtin_registry(),
@@ -755,6 +758,117 @@ fn an_invalid_unit_is_refused_and_the_server_survives() {
         Outcome::Value { rendered, .. } => assert_eq!(rendered, "42"),
         other => panic!("expected 42, got {other:?}"),
     }
+}
+
+#[test]
+fn a_malformed_unit_is_refused_without_taking_the_server_with_it() {
+    // Structure the compiler could never emit, and which the linker and the executor
+    // both take on trust. The first of these is the one that mattered: a type table
+    // that references itself recursed until the *native* stack overflowed, which in
+    // Rust is an abort — so one bad request killed the shared host and every session
+    // running on it. The rest panicked a worker thread or a link.
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::start(&[]);
+    let client = server.client();
+
+    let entry = program("#[] { 1 }").entry.expect("an entry function");
+
+    let mut cyclic = program("#[] { 1 }");
+    cyclic.types.push(Type::Union(vec![cyclic.types.len()]));
+
+    let mut zero_binder = program("#[] { 1 }");
+    zero_binder.types.push(Type::Cycle(0));
+
+    let mut rotate_nothing = program("#[] { 1 }");
+    rotate_nothing.functions[entry]
+        .instructions
+        // The constructor normalises and range-checks, so the operand is replaced after.
+        .push(Instruction::rotate(2).with_operand(0));
+
+    let mut too_many_captures = program("#[] { 1 }");
+    too_many_captures.functions[entry].captures = usize::MAX;
+
+    for (expected, unit) in [
+        ("acyclic", cyclic),
+        ("binder 0", zero_binder),
+        ("rotate", rotate_nothing),
+        ("captures", too_many_captures),
+    ] {
+        let pid = client.create_process(None).expect("create failed");
+        let error = client
+            .resume(
+                pid,
+                ResumePayload {
+                    unit,
+                    modules: Vec::new(),
+                },
+                None,
+            )
+            .expect_err(&format!("{expected}: a malformed unit must be refused"));
+        let quiver_cli::client::RequestError::Http { status, body } = error else {
+            panic!("{expected}: expected an HTTP error, got {error}");
+        };
+        assert_eq!(status, 422, "{expected}: {body}");
+        assert!(body.contains(expected), "{expected} not named in: {body}");
+        client.delete_process(pid).expect("delete failed");
+    }
+
+    // Every refusal left the host serviceable.
+    let mut session = Session::open(&server);
+    assert_eq!(session.evaluate_value("[40, 2] ~> __integer_add__ ~"), "42");
+}
+
+#[test]
+fn a_leased_root_outlives_its_client_only_as_long_as_its_lease() {
+    // The killed-client shape: the transport is a connection per request, so a client
+    // that dies says nothing at all, and what it leaves is a root that runs on — holding
+    // its subtree and everything in it, a bound listening port included.
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::start(&[]);
+    let client = server.client();
+    let lease = Duration::from_millis(500);
+
+    let orphan = client.create_process(Some(lease)).expect("create failed");
+    let _abandoned = std::thread::spawn({
+        let client = client.clone();
+        move || {
+            client.resume(
+                orphan,
+                ResumePayload {
+                    unit: program("#[] { f = #[] { ^ [] }; f [] }"),
+                    modules: Vec::new(),
+                },
+                None,
+            )
+        }
+    });
+    // Beside it, a root whose client is alive and beating, and one that took no lease
+    // at all — the browser's shape, which nothing may reap.
+    let kept = client.create_process(Some(lease)).expect("create failed");
+    let unleased = client.create_process(None).expect("create failed");
+    let deadline = Instant::now() + lease * 4;
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        client.heartbeat(kept).expect("heartbeat failed");
+    }
+
+    // The orphan is gone as a root the API knows, and as a running process.
+    assert!(
+        client.heartbeat(orphan).is_err(),
+        "the orphan's lease should have run out"
+    );
+    let listing = client.inspect("/processes").expect("inspect failed");
+    assert!(
+        !listing.contains(&format!("{orphan}: Active")),
+        "expected the orphan stopped in:\n{listing}"
+    );
+    // The other two are untouched.
+    client.heartbeat(kept).expect("a beaten root must survive");
+    client
+        .heartbeat(unleased)
+        .expect("an unleased root is never reaped");
+    client.delete_process(kept).expect("delete failed");
+    client.delete_process(unleased).expect("delete failed");
 }
 
 #[test]
@@ -963,6 +1077,88 @@ fn the_token_persists_across_restarts() {
         token
     };
     assert_eq!(first, second);
+}
+
+#[test]
+fn a_token_anyone_could_have_written_is_refused() {
+    // The token is the whole authentication of the TCP endpoint, and the endpoint
+    // evaluates arbitrary bytecode. A file left where the server looks was adopted
+    // whatever its mode or owner, so planting one was enough to be authenticated.
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let socket = scratch_socket("quiv-test-token-mode");
+    let token = socket.with_extension("token");
+    std::fs::write(&token, "planted").expect("plant a token");
+    std::fs::set_permissions(&token, PermissionsExt::from_mode(0o666)).expect("chmod");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_quiv"))
+        .arg("server")
+        .arg("--socket")
+        .arg(&socket)
+        .args(["--listen", "127.0.0.1:0"])
+        .output()
+        .expect("run quiv server");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("0666") && stderr.contains("owner alone"),
+        "{stderr}"
+    );
+    // Refused, not adopted — and not quietly replaced either, which would only invite
+    // the next plant.
+    assert_eq!(
+        std::fs::read_to_string(&token).expect("the token"),
+        "planted"
+    );
+    let _ = std::fs::remove_file(&token);
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(socket.with_extension("pid"));
+}
+
+#[test]
+fn listening_starts_on_a_first_run() {
+    // `--listen` read the token before anything created the directory it lives in, so
+    // the first start in a fresh runtime directory died with ENOENT while a plain
+    // `quiv server` on the same directory came up fine.
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let runtime_dir = scratch_socket("quiv-fresh-runtime").with_extension("dir");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+
+    let child = Command::new(env!("CARGO_BIN_EXE_quiv"))
+        .arg("server")
+        .args(["--listen", "127.0.0.1:0"])
+        // No --socket: the per-user default path is the one that has to be created.
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env_remove("QUIV_SOCKET")
+        .spawn()
+        .expect("failed to spawn quiv server");
+    let server = Server {
+        child,
+        socket: runtime_dir.join("quiv").join("server.sock"),
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if std::os::unix::net::UnixStream::connect(&server.socket).is_ok() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "server never started listening");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        server.client().status().expect("status failed").fingerprint,
+        quiver_compiler::compiler_fingerprint()
+    );
+    // The directory it made is this user's alone, and so is the token in it.
+    let mode = |path: &std::path::Path| {
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode(&runtime_dir.join("quiv")), 0o700);
+    assert_eq!(mode(&server.socket.with_extension("token")), 0o600);
+    drop(server);
+    let _ = std::fs::remove_dir_all(&runtime_dir);
 }
 
 #[test]

@@ -401,7 +401,11 @@ fn run_on_server(
         &quiver_cli::protocol::default_socket_path(),
         &std::env::current_exe()?,
     )?;
-    let pid = client.create_process().map_err(|e| e.to_string())?;
+    // Leased: a run that is killed outright — a SIGKILL, a closed terminal — never gets
+    // to delete its root, and the beat below is what stops that root outliving it.
+    let pid = client
+        .create_process(Some(quiver_cli::protocol::CLIENT_LEASE))
+        .map_err(|e| e.to_string())?;
 
     // Forward Ctrl-C as a cancel; the second Ctrl-C hard-exits (conditional shutdown
     // sees the flag from the previous one).
@@ -420,11 +424,18 @@ fn run_on_server(
         let interrupt = std::sync::Arc::clone(&interrupt);
         std::thread::spawn(move || {
             let mut sent = false;
+            let mut beat = std::time::Instant::now();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(30));
                 if interrupt.load(Ordering::Relaxed) && !sent {
                     let _ = client.cancel(pid);
                     sent = true;
+                }
+                // The main thread spends the whole run blocked on the resume's
+                // response, so the lease is kept from here.
+                if beat.elapsed() >= quiver_cli::protocol::CLIENT_HEARTBEAT {
+                    let _ = client.heartbeat(pid);
+                    beat = std::time::Instant::now();
                 }
             }
         });

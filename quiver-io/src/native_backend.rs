@@ -116,17 +116,31 @@ impl Resource {
 #[derive(Debug)]
 pub enum IoOpType {
     Read {
+        /// The resource being read, so a close can cancel the in-flight read (see
+        /// `cancel_inflight`).
+        resource_id: ResourceId,
         buffer: Vec<u8>,
     },
     Write {
+        /// The resource being written, so a close can cancel the in-flight write (see
+        /// `cancel_inflight`).
+        resource_id: ResourceId,
         buffer: Vec<u8>, // Keep buffer alive for the duration of the async operation
     },
-    Flush,
+    Flush {
+        /// The file being synced, so a close can cancel the in-flight fsync (see
+        /// `cancel_inflight`).
+        resource_id: ResourceId,
+    },
     Accept {
         /// The listener, so a close can cancel the in-flight accept (see
         /// `cancel_inflight`).
         resource_id: ResourceId,
     },
+    /// A connect, which owns its socket outright: no `ResourceId` exists until the
+    /// operation completes and `handle_connect_completion` registers it. There is nothing
+    /// for `cancel_inflight` to match, and equally nothing that could ask it to — the
+    /// socket is reachable from no resource table until it is already connected.
     Connect {
         socket: Socket,
         peer_addr: SocketAddr,
@@ -140,10 +154,7 @@ pub enum IoOpType {
     },
     /// A socket operation serving an `http_request` exchange; its completion feeds the
     /// exchange's state machine — see `http_drive`.
-    Http {
-        exchange: u64,
-        io: HttpIo,
-    },
+    Http { exchange: u64, io: HttpIo },
 }
 
 /// Native effect backend using io_uring for async I/O operations
@@ -193,16 +204,11 @@ enum ArmedOp {
 }
 
 impl NativeEffectBackend {
-    /// Cancel every in-flight io_uring operation touching `resource_id` — select-armed
-    /// stream reads and pending effect operations alike. A submitted operation holds its
-    /// own reference to the underlying *file*, so closing the fd without this leaves the
-    /// kernel object alive until the operation completes — which an idle accept never
-    /// does: a closed listener's socket would stay bound, accepting connections into a
-    /// backlog nothing drains. The cancelled operations complete with `-ECANCELED`
-    /// through the ordinary handlers, whose events and completions are dropped at
-    /// routing when the owner is gone. The cancel's own completion carries user data 0,
-    /// which no operation uses (ids start at 1), so the drain loop ignores it.
-    fn cancel_inflight(&mut self, resource_id: ResourceId) {
+    /// The completion ids of every in-flight operation touching `resource_id` —
+    /// select-armed stream reads and pending effect operations alike. Every operation
+    /// bound to a resource carries its id for this reason; a `Connect` is the one that
+    /// does not, and cannot, since its socket has no id until it completes.
+    fn inflight_ops(&self, resource_id: ResourceId) -> Vec<u64> {
         // Exchanges whose internal socket is the closing resource: their ops are keyed by
         // exchange id, so resolve the mapping first.
         let exchanges: Vec<u64> = self
@@ -226,13 +232,35 @@ impl NativeEffectBackend {
             .map(|(&id, _)| id)
             .collect();
         targets.extend(self.pending.iter().filter_map(|(&id, (_, op))| match op {
-            IoOpType::Accept { resource_id: rid } if *rid == resource_id => Some(id),
-            IoOpType::Tls {
+            IoOpType::Read {
+                resource_id: rid, ..
+            }
+            | IoOpType::Write {
+                resource_id: rid, ..
+            }
+            | IoOpType::Flush { resource_id: rid }
+            | IoOpType::Accept { resource_id: rid }
+            | IoOpType::Tls {
                 resource_id: rid, ..
             } if *rid == resource_id => Some(id),
             IoOpType::Http { exchange, .. } if exchanges.contains(exchange) => Some(id),
             _ => None,
         }));
+        targets
+    }
+
+    /// Cancel every in-flight io_uring operation touching `resource_id` — select-armed
+    /// stream reads and pending effect operations alike. A submitted operation holds its
+    /// own reference to the underlying *file*, so closing the fd without this leaves the
+    /// kernel object alive until the operation completes — which an idle accept or a read
+    /// of a silent peer never does: a closed listener's socket would stay bound, accepting
+    /// connections into a backlog nothing drains, and a closed connection would stay
+    /// established with no owner left to read it. The cancelled operations complete with
+    /// `-ECANCELED` through the ordinary handlers, whose events and completions are
+    /// dropped at routing when the owner is gone. The cancel's own completion carries user
+    /// data 0, which no operation uses (ids start at 1), so the drain loop ignores it.
+    fn cancel_inflight(&mut self, resource_id: ResourceId) {
+        let targets = self.inflight_ops(resource_id);
         if targets.is_empty() {
             return;
         }
@@ -589,19 +617,19 @@ impl EffectBackend for NativeEffectBackend {
             }
             if let Some((process_id, op_type)) = self.pending.remove(&completion_id) {
                 match op_type {
-                    IoOpType::Read { buffer } => {
+                    IoOpType::Read { buffer, .. } => {
                         completions
                             .push((process_id, self.handle_read_completion(result_code, buffer)));
                     }
 
-                    IoOpType::Write { buffer } => {
+                    IoOpType::Write { buffer, .. } => {
                         completions.push((
                             process_id,
                             self.handle_write_completion(result_code, buffer.len()),
                         ));
                     }
 
-                    IoOpType::Flush => {
+                    IoOpType::Flush { .. } => {
                         completions.push((process_id, self.handle_flush_completion(result_code)));
                     }
 
@@ -1202,8 +1230,16 @@ impl NativeEffectBackend {
             .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
 
         // Track the pending operation
-        self.pending
-            .insert(completion_id, (process_id, IoOpType::Read { buffer }));
+        self.pending.insert(
+            completion_id,
+            (
+                process_id,
+                IoOpType::Read {
+                    resource_id,
+                    buffer,
+                },
+            ),
+        );
 
         // Async operation, no immediate completion
         Ok(None)
@@ -1254,8 +1290,16 @@ impl NativeEffectBackend {
             .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
 
         // Track the pending operation
-        self.pending
-            .insert(completion_id, (process_id, IoOpType::Read { buffer }));
+        self.pending.insert(
+            completion_id,
+            (
+                process_id,
+                IoOpType::Read {
+                    resource_id,
+                    buffer,
+                },
+            ),
+        );
 
         // Async operation, no immediate completion
         Ok(None)
@@ -1297,7 +1341,13 @@ impl NativeEffectBackend {
         // Track the pending operation (keep buffer alive until completion)
         self.pending.insert(
             completion_id,
-            (process_id, IoOpType::Write { buffer: data }),
+            (
+                process_id,
+                IoOpType::Write {
+                    resource_id,
+                    buffer: data,
+                },
+            ),
         );
 
         Ok(None)
@@ -1350,7 +1400,13 @@ impl NativeEffectBackend {
         // Track the pending operation (keep buffer alive until completion)
         self.pending.insert(
             completion_id,
-            (process_id, IoOpType::Write { buffer: data }),
+            (
+                process_id,
+                IoOpType::Write {
+                    resource_id,
+                    buffer: data,
+                },
+            ),
         );
 
         Ok(None)
@@ -1387,7 +1443,7 @@ impl NativeEffectBackend {
             .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
 
         self.pending
-            .insert(completion_id, (process_id, IoOpType::Flush));
+            .insert(completion_id, (process_id, IoOpType::Flush { resource_id }));
 
         Ok(None)
     }
@@ -3091,6 +3147,139 @@ impl NativeEffectBackend {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read as _;
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    /// How long a test waits for the kernel before calling an outcome a failure.
+    const DEADLINE: Duration = Duration::from_secs(5);
+
+    /// Submit `effect` and require that it parks the process rather than completing.
+    fn submit(backend: &mut NativeEffectBackend, process_id: ProcessId, effect: NativeEffect) {
+        let immediate = backend.execute(process_id, effect).expect("submit failed");
+        assert!(immediate.is_none(), "the operation did not stay in flight");
+    }
+
+    #[test]
+    fn every_resource_bound_operation_is_cancellable() {
+        // The hazard is structural: an operation carrying no resource id can never be
+        // matched, so its reference to the kernel object outlives the close that was
+        // meant to release it. Every pending variant bound to a resource must therefore
+        // be found by the sweep, and only that resource's.
+        let mut backend = NativeEffectBackend::new(8).expect("io_uring backend");
+        let ops = [
+            IoOpType::Read {
+                resource_id: 1,
+                buffer: vec![0; 4],
+            },
+            IoOpType::Write {
+                resource_id: 1,
+                buffer: vec![0; 4],
+            },
+            IoOpType::Flush { resource_id: 1 },
+            IoOpType::Accept { resource_id: 1 },
+            IoOpType::Tls {
+                resource_id: 1,
+                goal: TlsGoal::Read { want: 4 },
+                io: TlsIo::Write,
+            },
+            // A second resource's operations, which the sweep must leave alone.
+            IoOpType::Read {
+                resource_id: 2,
+                buffer: vec![0; 4],
+            },
+            IoOpType::Flush { resource_id: 2 },
+        ];
+        for (index, op) in ops.into_iter().enumerate() {
+            backend.pending.insert(index as u64 + 1, (7, op));
+        }
+
+        let mut targets = backend.inflight_ops(1);
+        targets.sort();
+        assert_eq!(targets, vec![1, 2, 3, 4, 5]);
+        let mut others = backend.inflight_ops(2);
+        others.sort();
+        assert_eq!(others, vec![6, 7]);
+    }
+
+    #[test]
+    fn closing_a_socket_cancels_an_inflight_read() {
+        // The reproduction: a process parked in a socket read whose owner goes away. The
+        // submitted read holds its own reference to the socket, so removing the resource —
+        // which closes the fd — leaves the connection established and ownerless until the
+        // read completes, and a peer that never sends means never. Only the cancel ends it.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let mut backend = NativeEffectBackend::new(8).expect("io_uring backend");
+        let process_id = 1;
+
+        submit(
+            &mut backend,
+            process_id,
+            NativeEffect::TcpConnect {
+                ip: vec![127, 0, 0, 1],
+                port,
+            },
+        );
+        let (mut peer, _) = listener.accept().expect("accept");
+        peer.set_nonblocking(true).expect("non-blocking peer");
+        let resource_id = await_resource(&mut backend, "the connect never completed");
+
+        submit(
+            &mut backend,
+            process_id,
+            NativeEffect::TcpSocketRead {
+                resource_id,
+                length: 64,
+            },
+        );
+        assert!(backend.has_operations_in_flight());
+
+        backend.close_resource(resource_id);
+
+        // Released means the peer sees the connection end — not merely that this process
+        // dropped its descriptor while the read kept the kernel socket established.
+        let deadline = Instant::now() + DEADLINE;
+        let mut byte = [0u8; 1];
+        loop {
+            backend.process_completions();
+            match peer.read(&mut byte) {
+                Ok(0) => break,
+                Ok(n) => panic!("the peer read {n} bytes from a socket nothing wrote to"),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => panic!("peer read failed: {error}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the connection outlived its close: the read was never cancelled"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !backend.has_operations_in_flight(),
+            "the cancelled read was never reaped"
+        );
+    }
+
+    /// Drive completions until one answers with a resource, and return its id.
+    fn await_resource(backend: &mut NativeEffectBackend, context: &str) -> ResourceId {
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            if let Some((_, result)) = backend.process_completions().into_iter().next() {
+                match result.expect("the operation failed") {
+                    WireValue::Resource(resource_id, _) => return resource_id,
+                    other => panic!("expected a resource, got {other:?}"),
+                }
+            }
+            assert!(Instant::now() < deadline, "{context}");
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 }

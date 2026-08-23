@@ -4,7 +4,8 @@
 //! deleted explicitly — the ownership cascade takes each root's subtree, and
 //! `%proc.detach` is the escape hatch that lets a service outlive the client that
 //! started it. The server holds no compiler and no session state: what remains per
-//! root is a cancel flag and a busy marker.
+//! root is a cancel flag, a busy marker and — for a client that asked for one — a
+//! lease, which is what reclaims the root of a client that died without deleting it.
 //!
 //! Async edge, sync core: axum handlers never touch the environment — every
 //! operation crosses into the existing blocking machinery (the env mutex, the
@@ -20,9 +21,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use quiver_cli::native_transport::Progress;
 use quiver_cli::protocol::{
-    CompactRequest, CreateResponse, EventsParams, FINGERPRINT_HEADER, MissingModules, Outcome,
-    PROTOCOL_VERSION, ProcessDetail, ProcessEvent, ProcessSummary, ProcessesEvent, ResumePayload,
-    ResumeRequest, StatusResponse, WorkersEvent, http_endpoint_path, pidfile_path, token_path,
+    CompactRequest, CreateParams, CreateResponse, EventsParams, FINGERPRINT_HEADER, MissingModules,
+    Outcome, PROTOCOL_VERSION, ProcessDetail, ProcessEvent, ProcessSummary, ProcessesEvent,
+    ResumePayload, ResumeRequest, StatusResponse, WorkersEvent, http_endpoint_path, pidfile_path,
+    token_path,
 };
 use quiver_cli::spawn_worker;
 use quiver_core::process::ProcessId;
@@ -38,12 +40,44 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 /// Per-root control state: the busy marker serializes resumes (they are sequential
-/// and non-idempotent — an overlapping one answers 409), and the cancel flag is how
-/// `POST …/cancel` reaches a resume in flight.
+/// and non-idempotent — an overlapping one answers 409), the cancel flag is how
+/// `POST …/cancel` reaches a resume in flight, and the lease is how a root outlives its
+/// client for a bounded time rather than forever.
 struct RootControl {
     cancel: AtomicBool,
     busy: AtomicBool,
+    /// How long this root may go unheard-from before the server stops it, and when that
+    /// runs out. `None` is no lease — the root lives until an explicit `DELETE`, which
+    /// is what a client that cannot beat gets.
+    lease: Option<std::time::Duration>,
+    expiry: Mutex<std::time::Instant>,
 }
+
+impl RootControl {
+    fn new(lease: Option<std::time::Duration>) -> RootControl {
+        RootControl {
+            cancel: AtomicBool::new(false),
+            busy: AtomicBool::new(false),
+            lease,
+            expiry: Mutex::new(std::time::Instant::now() + lease.unwrap_or_default()),
+        }
+    }
+
+    /// Renew the lease: any request naming this root is its client saying it is there.
+    fn touch(&self) {
+        if let Some(lease) = self.lease {
+            *lock(&self.expiry, "lease") = std::time::Instant::now() + lease;
+        }
+    }
+
+    fn expired(&self, now: std::time::Instant) -> bool {
+        self.lease.is_some() && *lock(&self.expiry, "lease") <= now
+    }
+}
+
+/// How often the reaper looks for roots whose lease has run out. Coarse beside the
+/// lease itself, which is what actually bounds how long an orphan lives.
+const REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The `/events` fan-out: each environment subscription id maps to its SSE event name
 /// and the connection's channel. The stepping thread renders updates into here; a
@@ -62,6 +96,18 @@ struct ServerState {
 
 type Shared = Arc<ServerState>;
 
+/// Take one of this server's locks, treating poisoning as fatal. A panic under a lock
+/// leaves the state behind it — the environment above all, which every session shares —
+/// part-way through an update, and answering from it, or stepping over it, would serve
+/// that middle to sessions that had nothing to do with the fault. Nothing here is
+/// honestly recoverable, so the host stops instead of degrading.
+fn lock<'a, T>(mutex: &'a Mutex<T>, what: &str) -> std::sync::MutexGuard<'a, T> {
+    mutex.lock().unwrap_or_else(|_| {
+        eprintln!("quiv server: the {what} lock is poisoned; aborting");
+        std::process::abort()
+    })
+}
+
 pub fn server_command(
     socket: Option<String>,
     listen: Option<String>,
@@ -69,13 +115,11 @@ pub fn server_command(
     code_collection_threshold: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = resolve_socket(socket);
-    // Everything the TCP listener needs, resolved before the runtime spins up so a bad
-    // address or an unwritable token file fails the start rather than surfacing later.
+    // The address is parsed before anything is created, so a bad one fails the start
+    // rather than leaving a bound socket and a minted token behind. The token itself is
+    // read (or minted) only once the TCP listener is up, at the bottom of this function.
     let listen = listen
-        .map(|address| -> Result<_, Box<dyn std::error::Error>> {
-            let address = parse_listen_address(&address)?;
-            Ok((address, load_or_create_token(&token_path(&socket_path))?))
-        })
+        .map(|address| parse_listen_address(&address))
         .transpose()?;
     let listener = bind_socket(&socket_path)?;
     let pidfile = pidfile_path(&socket_path);
@@ -116,34 +160,29 @@ pub fn server_command(
     let subscribers_clone = Arc::clone(&subscribers);
     let stepping = thread::spawn(move || {
         while !shutdown_clone.load(Ordering::Relaxed) {
-            let did_work = env_clone
-                .lock()
-                .map(|mut env| {
-                    let did_work = env.step().unwrap_or(false);
-                    // Fan subscription updates out to their `/events` connections,
-                    // rendered under the same lock (types and values need the
-                    // environment). An update for a dropped connection is discarded.
-                    let updates = env.take_subscription_updates();
-                    if !updates.is_empty() {
-                        let subscribers = subscribers_clone.lock().unwrap();
-                        for (id, result) in updates {
-                            if let Some((name, sender)) = subscribers.get(&id)
-                                && let Some(event) = render_event(&mut env, name, result)
-                            {
-                                let _ = sender.send(event);
-                            }
+            let did_work = {
+                let mut env = lock(&env_clone, "environment");
+                let did_work = env.step().unwrap_or(false);
+                // Fan subscription updates out to their `/events` connections,
+                // rendered under the same lock (types and values need the
+                // environment). An update for a dropped connection is discarded.
+                let updates = env.take_subscription_updates();
+                if !updates.is_empty() {
+                    let subscribers = lock(&subscribers_clone, "subscribers");
+                    for (id, result) in updates {
+                        if let Some((name, sender)) = subscribers.get(&id)
+                            && let Some(event) = render_event(&mut env, name, result)
+                        {
+                            let _ = sender.send(event);
                         }
                     }
-                    did_work
-                })
-                .unwrap_or(false);
+                }
+                did_work
+            };
             if did_work {
                 progress_clone.notify();
             } else {
-                let in_flight = env_clone
-                    .lock()
-                    .map(|env| env.io_in_flight())
-                    .unwrap_or(true);
+                let in_flight = lock(&env_clone, "environment").io_in_flight();
                 wake.wait(in_flight);
             }
         }
@@ -170,6 +209,7 @@ pub fn server_command(
         .route("/processes/{id}/resume", post(resume_process))
         .route("/processes/{id}/compact", post(compact_process))
         .route("/processes/{id}/cancel", post(cancel_process))
+        .route("/processes/{id}/heartbeat", post(heartbeat_process))
         .route("/workers", get(list_workers))
         .route("/workers/{id}", get(inspect_worker))
         .route("/events", get(events))
@@ -182,6 +222,7 @@ pub fn server_command(
 
     let runtime = tokio::runtime::Runtime::new()?;
     let served = runtime.block_on(async {
+        tokio::spawn(reap_expired_roots(Arc::clone(&state)));
         listener.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(listener)?;
         let socket_server = axum::serve(listener, router.clone()).with_graceful_shutdown({
@@ -204,7 +245,13 @@ pub fn server_command(
             async move {
                 match listen {
                     None => socket_server.await,
-                    Some((address, token)) => {
+                    Some(address) => {
+                        let tcp_listener = tokio::net::TcpListener::bind(address).await?;
+                        // The credential is minted only now that the endpoint it opens
+                        // exists: a token file left behind by a start that never got
+                        // this far would be adopted by the next server, which is not
+                        // what "persists across restarts" is meant to mean.
+                        let token = load_or_create_token(&token_path(&socket_path))?;
                         // The browser endpoint: the same router, wrapped in the
                         // bearer-token gate (innermost, so it guards every route
                         // including the two the socket exempts — a hostile page cannot
@@ -223,7 +270,7 @@ pub fn server_command(
                                             .get(axum::http::header::AUTHORIZATION)
                                             .and_then(|value| value.to_str().ok());
                                         match presented {
-                                            Some(header) if header == expected.as_ref() => {
+                                            Some(header) if secret_eq(header, &expected) => {
                                                 next.run(request).await
                                             }
                                             _ => StatusCode::UNAUTHORIZED.into_response(),
@@ -232,7 +279,6 @@ pub fn server_command(
                                 },
                             ))
                             .layer(cors_layer(&allow_origins));
-                        let tcp_listener = tokio::net::TcpListener::bind(address).await?;
                         let endpoint = format!("http://{}", tcp_listener.local_addr()?);
                         // Recorded beside the socket so tooling can discover a port-0 bind.
                         std::fs::write(http_endpoint_path(&socket_path), &endpoint)?;
@@ -294,12 +340,39 @@ fn parse_listen_address(address: &str) -> Result<std::net::SocketAddr, String> {
 /// Read the TCP bearer token, or mint one (32 random bytes, hex) at mode 0600. It
 /// persists across restarts deliberately: the dev loop replaces the server on every
 /// rebuild, and a per-boot token would strand every connected browser each time.
+///
+/// An existing file is adopted only if it is a plain file this user owns and nobody
+/// else can read or write. The token is the entire authentication of an endpoint that
+/// evaluates arbitrary bytecode, so one that was planted — or left readable — is
+/// refused rather than trusted: replacing it silently would be no better, since the
+/// planter would then simply plant another.
 fn load_or_create_token(path: &Path) -> std::io::Result<String> {
-    if let Ok(existing) = std::fs::read_to_string(path) {
-        let existing = existing.trim().to_string();
-        if !existing.is_empty() {
-            return Ok(existing);
+    use std::os::unix::fs::MetadataExt as _;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            // SAFETY-free: geteuid never fails.
+            let euid = unsafe { libc::geteuid() };
+            if !metadata.is_file() || metadata.uid() != euid {
+                return Err(std::io::Error::other(format!(
+                    "{} is not a plain file owned by this user (uid {})",
+                    path.display(),
+                    metadata.uid()
+                )));
+            }
+            let mode = metadata.mode() & 0o777;
+            if mode & 0o077 != 0 {
+                return Err(std::io::Error::other(format!(
+                    "{} is mode {mode:04o}: the token must be readable by its owner alone",
+                    path.display()
+                )));
+            }
+            let existing = std::fs::read_to_string(path)?.trim().to_string();
+            if !existing.is_empty() {
+                return Ok(existing);
+            }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -314,6 +387,20 @@ fn load_or_create_token(path: &Path) -> std::io::Result<String> {
         .open(path)?
         .write_all(token.as_bytes())?;
     Ok(token)
+}
+
+/// Compare a presented credential against the expected one without an early exit, so
+/// that how long the answer takes says nothing about how much of the token was right.
+/// Lengths are compared first and are not secret: the token's is fixed and published
+/// with the format.
+fn secret_eq(presented: &str, expected: &str) -> bool {
+    let (presented, expected) = (presented.as_bytes(), expected.as_bytes());
+    presented.len() == expected.len()
+        && presented
+            .iter()
+            .zip(expected)
+            .fold(0u8, |differing, (a, b)| differing | (a ^ b))
+            == 0
 }
 
 /// CORS for browser clients: the built-in allowlist (quiver.run, plus any localhost
@@ -410,18 +497,14 @@ async fn blocking<T: Send + 'static>(
 
 async fn create_process(
     State(state): State<Shared>,
+    axum::extract::Query(params): axum::extract::Query<CreateParams>,
 ) -> Result<axum::Json<CreateResponse>, Response> {
+    let lease = params.lease_ms.map(std::time::Duration::from_millis);
     let shared = Arc::clone(&state);
-    let pid = blocking(move || shared.environment.lock().unwrap().start_process())
+    let pid = blocking(move || lock(&shared.environment, "environment").start_process())
         .await?
         .map_err(internal)?;
-    state.roots.lock().unwrap().insert(
-        pid,
-        Arc::new(RootControl {
-            cancel: AtomicBool::new(false),
-            busy: AtomicBool::new(false),
-        }),
-    );
+    lock(&state.roots, "roots").insert(pid, Arc::new(RootControl::new(lease)));
     Ok(axum::Json(CreateResponse { id: pid as u64 }))
 }
 
@@ -430,13 +513,10 @@ async fn delete_process(
     AxumPath(id): AxumPath<u64>,
 ) -> Result<StatusCode, Response> {
     let pid = id as ProcessId;
-    if state.roots.lock().unwrap().remove(&pid).is_none() {
+    if lock(&state.roots, "roots").remove(&pid).is_none() {
         return Err(StatusCode::NOT_FOUND.into_response());
     }
-    let shared = Arc::clone(&state);
-    blocking(move || shared.environment.lock().unwrap().stop_process(pid))
-        .await?
-        .map_err(internal)?;
+    stop_root(&state, pid).await?.map_err(internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -447,6 +527,57 @@ async fn cancel_process(
     let control = root_control(&state, id)?;
     control.cancel.store(true, Ordering::Relaxed);
     Ok(StatusCode::OK)
+}
+
+/// `POST …/heartbeat` — renew the root's lease and nothing else. A client with a long
+/// resume in flight sends nothing else for as long as it runs, so this is what tells the
+/// server the far end is still there.
+async fn heartbeat_process(
+    State(state): State<Shared>,
+    AxumPath(id): AxumPath<u64>,
+) -> Result<StatusCode, Response> {
+    root_control(&state, id)?;
+    Ok(StatusCode::OK)
+}
+
+/// Stop a root and its owned subtree, off the async threads like every other
+/// environment operation.
+async fn stop_root(
+    state: &Shared,
+    pid: ProcessId,
+) -> Result<Result<(), EnvironmentError>, Response> {
+    let shared = Arc::clone(state);
+    blocking(move || lock(&shared.environment, "environment").stop_process(pid)).await
+}
+
+/// Stop the roots whose leases have run out.
+///
+/// A leased root is one whose client undertook to keep beating. The transport is a
+/// short-lived connection per request, so a client that is killed says nothing at all —
+/// and what it leaves is a root that goes on running, holding its owned subtree and
+/// every resource in it, a bound listening port included. Roots created without a lease
+/// are untouched: they are the ones whose client cannot beat, and an explicit `DELETE`
+/// remains their only end.
+async fn reap_expired_roots(state: Shared) {
+    let mut ticker = tokio::time::interval(REAP_INTERVAL);
+    loop {
+        ticker.tick().await;
+        let now = std::time::Instant::now();
+        let mut expired: Vec<ProcessId> = Vec::new();
+        lock(&state.roots, "roots").retain(|&pid, control| {
+            let alive = !control.expired(now);
+            if !alive {
+                expired.push(pid);
+            }
+            alive
+        });
+        for pid in expired {
+            eprintln!("quiv server: stopping root {pid}, whose client stopped answering");
+            if let Ok(Err(error)) = stop_root(&state, pid).await {
+                eprintln!("quiv server: root {pid} would not stop: {error:?}");
+            }
+        }
+    }
 }
 
 async fn compact_process(
@@ -502,7 +633,7 @@ fn run_resume(
 ) -> Result<Outcome, Response> {
     control.cancel.store(false, Ordering::Relaxed);
     let request_id = {
-        let mut env = state.environment.lock().unwrap();
+        let mut env = lock(&state.environment, "environment");
         let ResumePayload { unit, modules } = request.payload;
         let builtins = quiver_cli::build_builtin_registry();
         // Link what the client attached; a stale sent-record answers 424 with the keys
@@ -569,12 +700,12 @@ fn wait_for(
             && !stopped
             && cancel.load(Ordering::Relaxed)
         {
-            let _ = state.environment.lock().unwrap().stop_process(pid);
+            let _ = lock(&state.environment, "environment").stop_process(pid);
             stopped = true;
         }
         let seen = state.progress.generation();
         // Bound to a local so the environment guard drops before the wait below.
-        let polled = state.environment.lock().unwrap().poll_request(request);
+        let polled = lock(&state.environment, "environment").poll_request(request);
         match polled {
             Ok(Some(result)) => return Ok(result),
             Ok(None) => state
@@ -589,7 +720,7 @@ fn wait_for(
 /// data values); its type for functions, builtins and pids; its failure origin for
 /// stamped nils.
 fn render(state: &Shared, value: &WireValue) -> Outcome {
-    let mut env = state.environment.lock().unwrap();
+    let mut env = lock(&state.environment, "environment");
     render_value(&mut env, value)
 }
 
@@ -630,7 +761,7 @@ async fn events(
 > {
     let mut ids: Vec<u64> = Vec::new();
     let register = |ids: &mut Vec<u64>| -> Result<Vec<(u64, &'static str)>, EnvironmentError> {
-        let mut env = state.environment.lock().unwrap();
+        let mut env = lock(&state.environment, "environment");
         let mut named = Vec::new();
         if params.processes {
             let id = env.subscribe_process_statuses()?;
@@ -653,7 +784,7 @@ async fn events(
         Ok(named) => named,
         Err(error) => {
             // Roll back whatever did register before failing the request.
-            let mut env = state.environment.lock().unwrap();
+            let mut env = lock(&state.environment, "environment");
             for id in ids {
                 let _ = env.unsubscribe(id);
             }
@@ -670,7 +801,7 @@ async fn events(
 
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     {
-        let mut subscribers = state.subscribers.lock().unwrap();
+        let mut subscribers = lock(&state.subscribers, "subscribers");
         for (id, name) in &named {
             subscribers.insert(*id, (name, sender.clone()));
         }
@@ -698,15 +829,15 @@ struct Unsubscriber {
 
 impl Drop for Unsubscriber {
     fn drop(&mut self) {
-        if let Ok(mut subscribers) = self.state.subscribers.lock() {
+        {
+            let mut subscribers = lock(&self.state.subscribers, "subscribers");
             for id in &self.ids {
                 subscribers.remove(id);
             }
         }
-        if let Ok(mut env) = self.state.environment.lock() {
-            for id in &self.ids {
-                let _ = env.unsubscribe(*id);
-            }
+        let mut env = lock(&self.state.environment, "environment");
+        for id in &self.ids {
+            let _ = env.unsubscribe(*id);
         }
     }
 }
@@ -759,14 +890,15 @@ fn render_event(
     Some(SseEvent::default().event(name).data(payload))
 }
 
+/// The control block for a root, renewing its lease on the way: a request naming a root
+/// is its client saying it is still there.
 fn root_control(state: &Shared, id: u64) -> Result<Arc<RootControl>, Response> {
-    state
-        .roots
-        .lock()
-        .unwrap()
+    let control = lock(&state.roots, "roots")
         .get(&(id as ProcessId))
         .cloned()
-        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())
+        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
+    control.touch();
+    Ok(control)
 }
 
 // --- Inspection (text/plain) -------------------------------------------------------
@@ -816,7 +948,7 @@ async fn inspect_process(
             .map_err(|e| (StatusCode::NOT_FOUND, format!("{e:?}")).into_response())?;
         match wait_for(&shared, request, None) {
             Ok(RequestResult::ProcessInfo(Some(info))) => {
-                let mut env = shared.environment.lock().unwrap();
+                let mut env = lock(&shared.environment, "environment");
                 Ok(render_process_info(id as usize, &info, &mut env))
             }
             Ok(RequestResult::ProcessInfo(None)) => Err(StatusCode::NOT_FOUND.into_response()),
@@ -984,17 +1116,10 @@ fn resolve_socket(socket: Option<String>) -> PathBuf {
     }
 }
 
-/// Bind the listener, creating the (0700) socket directory, and replacing a stale
+/// Bind the listener, readying the (0700) socket directory, and replacing a stale
 /// socket file if no server answers on it.
 fn bind_socket(path: &Path) -> Result<UnixListener, Box<dyn std::error::Error>> {
-    if let Some(dir) = path.parent()
-        && !dir.exists()
-    {
-        // Only a directory this server creates is locked down; a pre-existing one
-        // (an explicit --socket in /tmp, a re-used runtime dir) is left alone.
-        std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-    }
+    quiver_cli::protocol::prepare_socket_dir(path)?;
     match UnixListener::bind(path) {
         Ok(listener) => Ok(listener),
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {

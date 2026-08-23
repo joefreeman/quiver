@@ -1844,15 +1844,148 @@ fn verify(unit: &CompiledUnit, label: &str) {
     }
 }
 
+/// One unit-local reference a type entry makes.
+#[derive(Clone, Copy)]
+enum TypeRef {
+    Type(usize),
+    Tuple(usize),
+    AnnotationKey(usize),
+}
+
+/// A node of the type graph — the two tables that reference each other.
+#[derive(Clone, Copy)]
+enum TypeNode {
+    Type(usize),
+    Tuple(usize),
+}
+
+impl std::fmt::Display for TypeNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypeNode::Type(id) => write!(f, "type {id}"),
+            TypeNode::Tuple(id) => write!(f, "tuple {id}"),
+        }
+    }
+}
+
+/// Everything a type entry refers to. One walk drives both the range check and the
+/// acyclicity search below, so neither can drift from the other — or from
+/// `intern_types_and_tuples`, whose recursion follows exactly these edges.
+fn type_refs(ty: &Type) -> Vec<TypeRef> {
+    match ty {
+        Type::Tuple(tuple_id) => vec![TypeRef::Tuple(*tuple_id)],
+        Type::Partial { fields, .. } => fields
+            .iter()
+            .map(|(_, type_id)| TypeRef::Type(*type_id))
+            .collect(),
+        Type::Callable {
+            parameter,
+            result,
+            receive,
+            states,
+            ..
+        } => [parameter, result, receive]
+            .into_iter()
+            .chain(states.iter())
+            .map(|type_id| TypeRef::Type(*type_id))
+            .collect(),
+        Type::Union(members) => members.iter().map(|id| TypeRef::Type(*id)).collect(),
+        Type::Annotated { base, entries, .. } => std::iter::once(TypeRef::Type(*base))
+            .chain(
+                entries
+                    .iter()
+                    .flat_map(|(key, value)| [TypeRef::AnnotationKey(*key), TypeRef::Type(*value)]),
+            )
+            .collect(),
+        Type::Process {
+            send,
+            receive,
+            state,
+        } => [send, receive, state]
+            .into_iter()
+            .flatten()
+            .map(|type_id| TypeRef::Type(*type_id))
+            .collect(),
+        Type::Integer
+        | Type::Binary
+        | Type::Reference
+        | Type::Cycle(_)
+        | Type::Resource(_)
+        | Type::Variable(_) => Vec::new(),
+    }
+}
+
+/// The type and tuple tables must form a DAG: a recursive type is expressed with
+/// `Type::Cycle`, a marker relative to the enclosing binders, never as a cycle between
+/// table entries. [`link_unit`] interns a type's children before memoising it, so a
+/// cyclic table recurses until the native stack overflows — an abort, which no host can
+/// catch. Ids must already be range-checked.
+fn check_types_acyclic(unit: &CompiledUnit, label: &str) -> Result<(), String> {
+    // Per node: unvisited, on the stack (an ancestor), or fully explored.
+    const UNVISITED: u8 = 0;
+    const OPEN: u8 = 1;
+    const DONE: u8 = 2;
+    let mut type_state = vec![UNVISITED; unit.types.len()];
+    let mut tuple_state = vec![UNVISITED; unit.tuples.len()];
+    // `(node, expanded)`: an unexpanded entry queues its children above its own expanded
+    // marker, which pops once they are all explored.
+    let mut stack: Vec<(TypeNode, bool)> = Vec::new();
+
+    let roots = (0..unit.types.len())
+        .map(TypeNode::Type)
+        .chain((0..unit.tuples.len()).map(TypeNode::Tuple));
+    for root in roots {
+        stack.push((root, false));
+        while let Some((node, expanded)) = stack.pop() {
+            let state = match node {
+                TypeNode::Type(id) => &mut type_state[id],
+                TypeNode::Tuple(id) => &mut tuple_state[id],
+            };
+            if expanded {
+                *state = DONE;
+                continue;
+            }
+            match *state {
+                DONE => continue,
+                OPEN => {
+                    return Err(format!(
+                        "{label}: {node} is its own descendant (the type table must be acyclic)"
+                    ));
+                }
+                _ => *state = OPEN,
+            }
+            stack.push((node, true));
+            match node {
+                TypeNode::Type(id) => {
+                    for reference in type_refs(&unit.types[id]) {
+                        match reference {
+                            TypeRef::Type(child) => stack.push((TypeNode::Type(child), false)),
+                            TypeRef::Tuple(child) => stack.push((TypeNode::Tuple(child), false)),
+                            TypeRef::AnnotationKey(_) => {}
+                        }
+                    }
+                }
+                TypeNode::Tuple(id) => {
+                    for (_, type_id) in &unit.tuples[id].fields {
+                        stack.push((TypeNode::Type(*type_id), false));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Structural well-formedness of a unit: every reference inside it must land inside its
-/// tables, function references must point strictly backward, and the entry (when
-/// present) must be one of its own functions. This is the check a *trust boundary* runs
-/// on a unit it did not produce — linking a violating unit would panic mid-link or
-/// silently corrupt a session, and a host must refuse it as a bad request instead.
+/// tables, the type graph must be acyclic, function references must point strictly
+/// backward, and the entry (when present) must be one of its own functions. This is the
+/// check a *trust boundary* runs on a unit it did not produce — linking a violating unit
+/// would panic mid-link, recurse until the native stack overflows, or silently corrupt a
+/// session, and a host must refuse it as a bad request instead.
 ///
-/// Scope: link-time soundness only. Validated bytecode can still misbehave at runtime
-/// (stack discipline is not analysed here); who may submit code at all is the host's
-/// authentication model.
+/// Scope: link-time soundness, plus the instruction operands whose own decoding is
+/// unchecked. Validated bytecode can still misbehave at runtime (stack discipline is not
+/// analysed here); who may submit code at all is the host's authentication model.
 pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
     let function_space = unit.function_space();
     let check = |what: &str, id: usize, len: usize| -> Result<(), String> {
@@ -1864,61 +1997,30 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
             ))
         }
     };
-    let check_type_shallow = |ty: &Type| -> Result<(), String> {
-        match ty {
-            Type::Tuple(tuple_id) => check("tuple", *tuple_id, unit.tuples.len())?,
-            Type::Partial { fields, .. } => {
-                for (_, type_id) in fields {
-                    check("type", *type_id, unit.types.len())?;
-                }
-            }
-            Type::Callable {
-                parameter,
-                result,
-                receive,
-                states,
-                ..
-            } => {
-                for type_id in [parameter, result, receive]
-                    .into_iter()
-                    .chain(states.iter())
-                {
-                    check("type", *type_id, unit.types.len())?;
-                }
-            }
-            Type::Union(members) => {
-                for member in members {
-                    check("type", *member, unit.types.len())?;
-                }
-            }
-            Type::Annotated { base, entries, .. } => {
-                check("type", *base, unit.types.len())?;
-                for (key, value) in entries {
-                    check("annotation key", *key, unit.annotation_keys.len())?;
-                    check("type", *value, unit.types.len())?;
-                }
-            }
-            Type::Process {
-                send,
-                receive,
-                state,
-            } => {
-                for type_id in [send, receive, state].into_iter().flatten() {
-                    check("type", *type_id, unit.types.len())?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    };
     for ty in &unit.types {
-        check_type_shallow(ty)?;
+        // Binders count from 1 — `Cycle(0)` names nothing, and the walks that resolve a
+        // marker against the binder stack index past its end.
+        if matches!(ty, Type::Cycle(0)) {
+            return Err(format!(
+                "{label}: a cycle marker names binder 0, but binders count from 1"
+            ));
+        }
+        for reference in type_refs(ty) {
+            match reference {
+                TypeRef::Type(id) => check("type", id, unit.types.len())?,
+                TypeRef::Tuple(id) => check("tuple", id, unit.tuples.len())?,
+                TypeRef::AnnotationKey(id) => {
+                    check("annotation key", id, unit.annotation_keys.len())?
+                }
+            }
+        }
     }
     for info in &unit.tuples {
         for (_, type_id) in &info.fields {
             check("type", *type_id, unit.types.len())?;
         }
     }
+    check_types_acyclic(unit, label)?;
     for builtin in &unit.builtins {
         if let Some(type_argument) = builtin.type_argument {
             check("type", type_argument, unit.types.len())?;
@@ -1946,6 +2048,16 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
 
     for (position, function) in unit.functions.iter().enumerate() {
         check("type", function.type_id, unit.types.len())?;
+        // Captures become the frame's leading locals, which instructions name through a
+        // 24-bit operand: past that they are unaddressable, and the closure build would
+        // reserve a nonsense allocation before discovering the stack is short.
+        if function.captures > Instruction::OPERAND_MAX {
+            return Err(format!(
+                "{label}: function {position} declares {} captures, past the {} a local slot can name",
+                function.captures,
+                Instruction::OPERAND_MAX
+            ));
+        }
         for instruction in &function.instructions {
             let id = instruction.operand() as usize;
             match instruction.opcode() {
@@ -1970,6 +2082,14 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
                     check("annotation key", id, unit.annotation_keys.len())?
                 }
                 Opcode::Stamp => check("site", id, unit.sites.len())?,
+                // Not a table id, but not free either: a rotate names the top `id` stack
+                // slots, and fewer than two is not an operation — a rotate of nothing
+                // reaches one slot past the top of the stack.
+                Opcode::Rotate if id < 2 => {
+                    return Err(format!(
+                        "{label}: function {position} rotates {id} stack slots (a rotate names at least 2)"
+                    ));
+                }
                 _ => {}
             }
         }

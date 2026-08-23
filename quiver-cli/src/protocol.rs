@@ -12,12 +12,13 @@
 //!
 //! ```text
 //! GET    /status                        → StatusResponse
-//! POST   /processes                     → CreateResponse     (pure allocation)
+//! POST   /processes[?lease_ms=N]        → CreateResponse     (pure allocation)
 //! POST   /processes/{id}/resume         ResumeRequest → Outcome; 409 while busy,
 //!                                       424 + MissingModules when a named module is
 //!                                       neither held nor attached
 //! POST   /processes/{id}/compact        CompactRequest
 //! POST   /processes/{id}/cancel
+//! POST   /processes/{id}/heartbeat      renew a lease
 //! DELETE /processes/{id}                stop + ownership cascade
 //! GET    /processes[/{id}]              text/plain inspection
 //! GET    /workers[/{id}]                text/plain inspection
@@ -60,6 +61,47 @@ pub fn default_socket_path() -> PathBuf {
     }
 }
 
+/// Ready the directory holding the socket: create it 0700 when it is absent, and when
+/// it is already there, check it is still this user's alone.
+///
+/// Reachability of the socket *is* the authentication model for an endpoint that
+/// evaluates arbitrary bytecode, and everything beside it — the token, the pidfile, the
+/// log — inherits the directory's protection. Creating it locked down is not enough on
+/// its own: the `/tmp/quiv-<uid>` fallback ([`default_socket_dir`], taken whenever
+/// `XDG_RUNTIME_DIR` is unset, as under cron, a plain ssh session or a container) can be
+/// pre-created world-writable by anyone, and a directory another user owns is refused
+/// rather than served from. Only that per-user default is vouched for: an explicit
+/// `--socket` elsewhere is the operator's own arrangement.
+pub fn prepare_socket_dir(socket: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let Some(dir) = socket.parent() else {
+        return Ok(());
+    };
+    if !dir.exists() {
+        std::fs::create_dir_all(dir)?;
+        return std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    if dir != default_socket_dir() {
+        return Ok(());
+    }
+    let metadata = std::fs::symlink_metadata(dir)?;
+    // SAFETY-free: geteuid never fails.
+    let euid = unsafe { libc::geteuid() };
+    if !metadata.is_dir() || metadata.uid() != euid {
+        return Err(std::io::Error::other(format!(
+            "{} is not a directory owned by this user (uid {})",
+            dir.display(),
+            metadata.uid()
+        )));
+    }
+    // Ours, but reachable by others: put it back the way it is created. Everything in
+    // it is this user's, so tightening the mode can lose nobody anything.
+    if metadata.mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// The pidfile beside the socket: the SIGTERM fallback for stopping a server too old
 /// to speak the protocol.
 pub fn pidfile_path(socket: &std::path::Path) -> PathBuf {
@@ -90,6 +132,27 @@ pub struct StatusResponse {
 pub struct CreateResponse {
     pub id: u64,
 }
+
+/// `POST /processes` — a root's **lease**, in milliseconds. A leased root must be kept
+/// alive by its client (any request naming it renews the lease, and
+/// `POST …/heartbeat` renews nothing else), and the server stops one whose lease has
+/// run out. This is how an abruptly-killed client's root is reclaimed: the transport is
+/// one short-lived connection per request, so nothing else tells the server that the
+/// process on the other end is gone, and a root left running holds its subtree and
+/// whatever resources it owns — a bound listening port among them.
+///
+/// Omitted means no lease: the root lives until an explicit `DELETE`, which is what a
+/// client that cannot beat (a browser tab, a one-shot script) gets.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateParams {
+    pub lease_ms: Option<u64>,
+}
+
+/// The lease a `quiv` client takes on its root, and how often it beats: often enough
+/// that a beat lost to a busy machine is not fatal, rare enough to be invisible beside
+/// the traffic a session already makes.
+pub const CLIENT_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
+pub const CLIENT_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// What a resume hands the server to run: the line's own relocatable code, plus the
 /// units of any modules it imports that this client has not already sent to this

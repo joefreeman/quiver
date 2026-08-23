@@ -279,9 +279,24 @@ impl Client {
         serde_json::from_slice(&body).map_err(|e| ConnectError::Io(std::io::Error::other(e)))
     }
 
-    pub fn create_process(&self) -> Result<u64, RequestError> {
-        let response: CreateResponse = self.json("POST", "/processes", None)?;
+    /// Create a root process. With a `lease`, the server stops it unless this client
+    /// keeps beating ([`Self::heartbeat`]) — the reclamation an abruptly-killed client
+    /// cannot ask for itself; without one, the root lives until [`Self::delete_process`].
+    pub fn create_process(&self, lease: Option<Duration>) -> Result<u64, RequestError> {
+        let path = match lease {
+            Some(lease) => format!("/processes?lease_ms={}", lease.as_millis()),
+            None => "/processes".to_string(),
+        };
+        let response: CreateResponse = self.json("POST", &path, None)?;
         Ok(response.id)
+    }
+
+    /// Renew the root's lease. A client holding one beats every
+    /// [`crate::protocol::CLIENT_HEARTBEAT`], from a thread of its own: the main thread
+    /// spends a resume blocked on its response, and that is exactly the window in which
+    /// dying strands the root.
+    pub fn heartbeat(&self, id: u64) -> Result<(), RequestError> {
+        self.expect_ok("POST", &format!("/processes/{id}/heartbeat"), None)
     }
 
     pub fn resume(
@@ -419,14 +434,9 @@ fn wait_until_gone(socket: &Path, deadline: Duration) -> bool {
 /// Spawn a detached server on this socket, logging beside it. Losing a spawn race is
 /// fine: the loser exits on the bind and the connect retries reach the winner.
 fn spawn_server(exe: &Path, socket: &Path) -> std::io::Result<()> {
-    // The log lives beside the socket, whose directory may not exist yet on first
-    // use. Same rule as the server's own bind: lock down only a directory we create.
-    if let Some(dir) = socket.parent()
-        && !dir.exists()
-    {
-        std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-    }
+    // The log lives beside the socket, whose directory may not exist yet on first use —
+    // and which is the protection everything beside the socket inherits.
+    crate::protocol::prepare_socket_dir(socket)?;
     let log = socket.with_extension("log");
     let stdout = std::fs::File::create(&log)?;
     let stderr = stdout.try_clone()?;
