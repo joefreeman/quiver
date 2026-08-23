@@ -271,10 +271,13 @@ impl<'a> FreeVariableCollector<'a> {
                     self.visit_match(alternative);
                 }
             }
-            // These don't contain nested patterns or variable references (the as-binder's
-            // parenthesised part is a type, which binds nothing and names no variable).
-            ast::Match::As(_, _, _)
-            | ast::Match::Identifier(_, _)
+            ast::Match::As(head, _, _) => {
+                // The binder itself names no variable, but its head is an ordinary pattern and may
+                // hold pins (`=(&a | &b)v`).
+                self.visit_match(head);
+            }
+            // These don't contain nested patterns or variable references.
+            ast::Match::Identifier(_, _)
             | ast::Match::Literal(_)
             | ast::Match::String(_, _)
             | ast::Match::Star(_)

@@ -641,12 +641,15 @@ module.exports = grammar({
       repeat(seq('.', field('field', choice($.identifier, $.index)))),
     )),
 
-    // A type-ascribed binding: a *parenthesised type* immediately followed by a binding
-    // identifier — `('int)x`, `('int | 'bin)v`. Asserts the value's type and binds the whole
-    // (narrowed) value. The identifier must be glued (token.immediate), matching the real
+    // An ascribed binding: a *parenthesised* pattern head immediately followed by a binding
+    // identifier — `('int)x`, `('int | 'bin)v`, `(0 | 1)n`. Matches the head and binds the whole
+    // (narrowed) value. The head is a type where the contents are one, else an alternation, as
+    // it is without the binder. The identifier must be glued (token.immediate), matching the real
     // parser: `('int) x` is a type pattern with `x` left for the next term.
+    // The type reading wins where both are live, as it does without the binder, so the positive
+    // dynamic precedence mirrors the `prec.dynamic(-1, …)` that tips `=(A[x] | B[x])` the other way.
     pattern_ascription: $ => seq(
-      $._paren_type,
+      choice(prec.dynamic(1, $._paren_type), $.pattern_or),
       field('binding', alias($._identifier_immediate, $.identifier)),
     ),
     _identifier_immediate: _ => token.immediate(/[a-z][a-zA-Z0-9_]*\??!?/),

@@ -666,6 +666,69 @@ fn test_as_pattern_with_union_type() {
     quiver().evaluate("42 ~> =('int | 'bin)x; x").expect("42");
 }
 
+#[test]
+fn test_as_pattern_over_literal_alternation() {
+    // The ascribed head is a pattern, so it reaches alternations the type grammar cannot
+    // spell — a set of integer literals has no type to state.
+    quiver()
+        .evaluate("9 ~> =(32 | 9 | 10 | 13)b; b")
+        .expect("9");
+    quiver()
+        .evaluate("7 ~> =(32 | 9 | 10 | 13)b; b")
+        .expect("[]");
+}
+
+#[test]
+fn test_as_pattern_over_literal_alternation_narrows() {
+    // The binder takes the alternatives' union, so an int-only operation accepts it.
+    quiver()
+        .evaluate("1 ~> =(0 | 1)n; %num.add [n, 1]")
+        .expect("2");
+    // ... and a nil alternative widens it back, so the narrowed type is not just `'int`.
+    quiver()
+        .evaluate("[] ~> =([] | 1)n; { n ~> ='int => Int | Other }")
+        .expect("Other");
+}
+
+#[test]
+fn test_as_pattern_over_binding_alternation() {
+    // Alternatives may bind, and the ascription's own binder captures the whole value
+    // alongside them — one binding set per alternative, each carrying both.
+    let src = "[1, []] ~> =([x, []] | [[], x])whole; [x, whole]";
+    quiver().evaluate(src).expect("[1, [1, []]]");
+    let src = "[[], 2] ~> =([x, []] | [[], x])whole; [x, whole]";
+    quiver().evaluate(src).expect("[2, [[], 2]]");
+}
+
+#[test]
+fn test_as_pattern_over_alternation_of_pins() {
+    // A pin inside an ascribed alternation still resolves against the enclosing scope.
+    let src = "f = #[x: 'int, y: 'int] { { 3 ~> =(&$x | &$y)v => v | No } };\n\
+               [f [x: 3, y: 9], f [x: 9, y: 3], f [x: 9, y: 9]]";
+    quiver().evaluate(src).expect("[3, 3, No]");
+}
+
+#[test]
+fn test_as_pattern_over_alternation_repeated_binder() {
+    // A repeated binder is a runtime equality check, as it is for a plain ascription.
+    quiver().evaluate("[0, 0] ~> =[(0 | 1)n, n]; n").expect("0");
+    quiver()
+        .evaluate("[0, 1] ~> =[(0 | 1)n, n]; n")
+        .expect("[]");
+}
+
+#[test]
+fn test_as_pattern_over_alternation_inconsistent_bindings_is_error() {
+    // The head is analysed as an ordinary alternation, so its balance rule still applies.
+    let src = "'ab = A['int] | B['int];\nf = #'ab { =(A[x] | B[y])v => 9 };\nA[1] ~> f ~";
+    quiver().evaluate(src).expect_compile_error(
+        quiver_compiler::compiler::Error::OrPatternBindingMismatch {
+            expected: vec!["x".to_string()],
+            found: vec!["y".to_string()],
+        },
+    );
+}
+
 // --- Unnamed tuple patterns destructure any tuple name ---------------------------
 // An unnamed tuple pattern with fields doesn't constrain the value's name (state the
 // name to require it); the empty unnamed pattern `[]` is the nil literal, an exact

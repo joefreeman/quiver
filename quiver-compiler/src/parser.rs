@@ -2783,18 +2783,31 @@ fn or_pattern(input: Span) -> IResult<Span, Vec<Match>> {
     )(input)
 }
 
-/// Parse a type-ascribed binding: a *parenthesised type* immediately followed by a binding
-/// identifier, e.g. `('int)x` or `('int | 'bin)x`. Asserts the value's type and binds the whole
-/// (narrowed) value to the trailing identifier. The identifier must be *adjacent* — no whitespace
-/// after `)` — so `('int) x` is not an as-pattern (the `x` is left for the next term). The leading
-/// `(` is required, so a bare type (`'int`, `A['int]`) is never silently turned into a binder.
+/// A type expression, or — where the contents are not a type — an alternation of patterns. Both
+/// spell "one of these", and the type form wins wherever it parses, so `('int | 'bin)` is a single
+/// union test and `(0 | 1)` an alternation (the type grammar has no literal members). This is the
+/// sole place that order is decided: `match_pattern` and `as_pattern` both defer to it, so a `( … )`
+/// head reads the same way whether or not a binder follows it.
+fn type_or_alternation(input: Span) -> IResult<Span, Match> {
+    alt((
+        map(inline_type_expression, Match::Type),
+        map(or_pattern, Match::Or),
+    ))(input)
+}
+
+/// Parse an ascribed binding: a *parenthesised* pattern head immediately followed by a binding
+/// identifier — `('int)x`, `('int | 'bin)x`, `(0 | 1)x`. Matches the head, then binds the whole
+/// value, at the type the head narrowed it to, to the trailing identifier. The identifier must be
+/// *adjacent* — no whitespace after `)` — so `('int) x` is not an as-pattern (the `x` is left for
+/// the next term). The leading `(` is required, so a bare type (`'int`, `A['int]`) is never
+/// silently turned into a binder.
 fn as_pattern(input: Span) -> IResult<Span, Match> {
-    // Require a parenthesised type. `peek('(')` keeps a bare type like `A['int]` from being read
+    // Require the parenthesised form. `peek('(')` keeps a bare type like `A['int]` from being read
     // as `('A['int]')` + binder; and lets a non-type `(x)` fall through to the partial-pattern rule.
     peek(char('('))(input)?;
-    let (input, ty) = inline_type_expression(input)?;
+    let (input, head) = type_or_alternation(input)?;
     let (input, (span, name)) = spanned(identifier)(input)?;
-    Ok((input, Match::As(ty, name, Spanned(Some(span)))))
+    Ok((input, Match::As(Box::new(head), name, Spanned(Some(span)))))
 }
 
 fn match_pattern(input: Span) -> IResult<Span, Match> {
@@ -2813,12 +2826,10 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
         map(match_tuple, Match::Tuple),
         // Try partial patterns before inline types (partial patterns use parentheses too)
         map(partial_pattern_inner, Match::Partial),
-        // Type reference: 'int, 'list<'t>, ('int | 'bin). Types need no & since they
-        // are never bound. Must come after partial patterns to avoid ambiguity with (...).
-        map(inline_type_expression, Match::Type),
-        // Alternation of (structural) patterns: `([[], _] | [_, []])`. After the type form so a
-        // pure type union stays a single `Match::Type`.
-        map(or_pattern, Match::Or),
+        // Type reference (`'int`, `'list<'t>`, `('int | 'bin)`), else an alternation of patterns
+        // (`([[], _] | [_, []])`). Types need no & since they are never bound. Must come after
+        // partial patterns to avoid ambiguity with (...).
+        type_or_alternation,
         // Numeric literal patterns: decimal (`=1.5`) and fraction (`=1/3`), before bare
         // literals so the leading digits aren't consumed as a plain integer.
         match_decimal,

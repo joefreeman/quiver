@@ -899,8 +899,9 @@ fn collect_binding_spans(pattern: &ast::Match, out: &mut Vec<(String, SourceSpan
                 collect_binding_spans(alternative, out);
             }
         }
-        ast::Match::As(_, name, span) => {
-            // The type-ascribed binder `(T)x` binds `x`; the type part carries no bindings.
+        ast::Match::As(head, name, span) => {
+            // The ascribed binder `(P)x` binds `x`, and its head may bind too (`=(&a | [b])v`).
+            collect_binding_spans(head, out);
             if let Some(span) = span.get() {
                 out.push((name.clone(), span));
             }
@@ -931,6 +932,7 @@ fn collect_pin_targets<'m>(pattern: &'m ast::Match, out: &mut Vec<&'m ast::PinTa
                 collect_pin_targets(alternative, out);
             }
         }
+        ast::Match::As(head, _, _) => collect_pin_targets(head, out),
         _ => {}
     }
 }

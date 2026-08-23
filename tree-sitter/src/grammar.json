@@ -3407,8 +3407,21 @@
       "type": "SEQ",
       "members": [
         {
-          "type": "SYMBOL",
-          "name": "_paren_type"
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "PREC_DYNAMIC",
+              "value": 1,
+              "content": {
+                "type": "SYMBOL",
+                "name": "_paren_type"
+              }
+            },
+            {
+              "type": "SYMBOL",
+              "name": "pattern_or"
+            }
+          ]
         },
         {
           "type": "FIELD",

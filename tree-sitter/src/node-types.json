@@ -1472,6 +1472,10 @@
           "named": true
         },
         {
+          "type": "pattern_or",
+          "named": true
+        },
+        {
           "type": "process_type",
           "named": true
         },

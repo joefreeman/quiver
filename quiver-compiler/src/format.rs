@@ -1733,18 +1733,29 @@ fn render_match_flat(pattern: &Match) -> String {
                 .collect::<Vec<_>>()
                 .join(" | ")
         ),
-        // A type-ascribed binding always parenthesises its type: the parser requires `('(' type ')'`
-        // immediately followed by the binder. A self-parenthesised rendering — a union or an
-        // unnamed partial — already provides that pair (`('int | 'bin)v`, `(x: 'int)p`); a named
-        // partial's parens don't lead, so it still takes the explicit pair (`(Point(x))p`).
-        Match::As(type_def, name, _) => {
-            let self_parenthesised = matches!(type_def, Type::Union(_))
-                || matches!(type_def, Type::Tuple(t) if t.is_partial && t.name.is_none());
-            if self_parenthesised {
-                format!("{}{}", render_type(type_def), name)
-            } else {
-                format!("({}){}", render_type(type_def), name)
-            }
+        // An ascribed binding always parenthesises its head: the parser requires `'(' head ')'`
+        // immediately followed by the binder. A self-parenthesised rendering — an alternation, a
+        // union or an unnamed partial — already provides that pair (`(0 | 1)v`, `('int | 'bin)v`,
+        // `(x: 'int)p`); a named partial's parens don't lead, so it still takes the explicit pair
+        // (`(Point(x))p`).
+        Match::As(head, name, _) => {
+            // The head must end up parenthesised exactly once, and the two head forms arrive
+            // differently: an alternation renders its own parens, while `render_type` never does
+            // except for the self-parenthesising types above.
+            let head = match head.as_ref() {
+                Match::Or(_) => render_match(head),
+                Match::Type(type_def) => {
+                    let self_parenthesised = matches!(type_def, Type::Union(_))
+                        || matches!(type_def, Type::Tuple(t) if t.is_partial && t.name.is_none());
+                    if self_parenthesised {
+                        render_type(type_def)
+                    } else {
+                        format!("({})", render_type(type_def))
+                    }
+                }
+                other => format!("({})", render_match(other)),
+            };
+            format!("{}{}", head, name)
         }
     }
 }
@@ -2841,8 +2852,13 @@ mod tests {
             "=('int | 'bin)v",
             "=(x: 'int)p",
             "=(Point(x: 'int))p",
+            // A resource type renders bare, so the binder supplies the only pair.
+            "=(\\File)fd",
             "('bin)ip = f x; ip",
             "=([a] | [b])",
+            // An alternation head renders its own pair, and takes a binder like a type head.
+            "=(32 | 9 | 10 | 13)b",
+            "=([a, _] | [_, a])whole",
             "='int",
             "=Circle[radius: r]",
             "=\"hello\"",

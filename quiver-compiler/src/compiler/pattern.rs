@@ -467,22 +467,33 @@ fn analyze_match_pattern(
             scopes,
             value_provenance,
         ),
-        ast::Match::As(ast_type, name, _) => {
-            // Type-ascribed binding `(T)x`: assert the value has type `T` (narrowing it), then bind
-            // `name` to the whole value at the *narrowed* type, so `('int)x` binds `x: 'int`. This
-            // is the `Type` check plus a whole-value binding — the type carries no bindings itself.
-            let (mut requirements, narrowed_type_id) =
-                type_check_requirements(env, program, scopes, ast_type, value_type_id, &path)?;
-            let bindings = match identifiers.get_mut(name) {
+        ast::Match::As(head, name, _) => {
+            // Ascribed binding `(P)x`: match the head, then bind `name` to the whole value at the
+            // type the head narrowed it to — so `('int)x` binds `x: 'int` and `(0 | 1)x` binds `x`
+            // at the two literals' union. The head is analysed like any other pattern, so an
+            // alternation contributes one binding set per alternative and the binder joins each.
+            let (mut sets, narrowed_type_id) = analyze_match_pattern(
+                env,
+                program,
+                head,
+                value_type_id,
+                path.clone(),
+                identifiers,
+                scopes,
+                value_provenance,
+            )?;
+            match identifiers.get_mut(name) {
                 // A repeated binder (`=[('int)x, x]`) becomes a runtime equality check against the
                 // first occurrence, exactly like a repeated plain identifier.
                 Some(info) => {
                     info.is_repeated = true;
-                    requirements.push(Requirement {
+                    let requirement = Requirement {
                         path: info.first_path.clone(),
                         check: RuntimeCheck::Path(path.clone()),
-                    });
-                    vec![]
+                    };
+                    for set in &mut sets {
+                        set.requirements.push(requirement.clone());
+                    }
                 }
                 None => {
                     identifiers.insert(
@@ -492,20 +503,16 @@ fn analyze_match_pattern(
                             is_repeated: false,
                         },
                     );
-                    vec![Binding {
-                        name: name.clone(),
-                        path: path.clone(),
-                        var_type_id: narrowed_type_id,
-                    }]
+                    for set in &mut sets {
+                        set.bindings.push(Binding {
+                            name: name.clone(),
+                            path: path.clone(),
+                            var_type_id: narrowed_type_id,
+                        });
+                    }
                 }
-            };
-            Ok((
-                vec![BindingSet {
-                    requirements,
-                    bindings,
-                }],
-                narrowed_type_id,
-            ))
+            }
+            Ok((sets, narrowed_type_id))
         }
         ast::Match::Star(name) => {
             analyze_star_pattern(program, name.as_ref(), value_type_id, path, identifiers)
