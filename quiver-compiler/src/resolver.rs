@@ -8,34 +8,26 @@ use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use include_dir::{Dir, include_dir};
-
 use crate::manifest::{Manifest, Provider};
 
-/// The standard library, compiled into the binary so it resolves regardless of where (or how)
-/// the host runs. This is the source of the built-in `std` package.
-static STD_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../std");
+// The standard library, compiled into the binary so it resolves regardless of where (or how)
+// the host runs — the source of the built-in `std` package. `build.rs` generates the table,
+// embedding the `.qv` modules only: `std/docs/` is prose that `quiv test` reads from the
+// filesystem, so embedding it would be dead weight in every binary and in the wasm bundle.
+include!(concat!(env!("OUT_DIR"), "/std_sources.rs"));
 
 /// Every standard-library module name, sorted: `"bin"`, `"http/websocket"`, … (the
 /// relative `.qv` paths without the extension). The fixed order gives whole-std
-/// artifacts such as [`crate::image::StdImage`] a canonical compilation sequence.
+/// artifacts a canonical compilation sequence — see [`crate::artifact::warm_std_store`].
 pub fn std_module_names() -> Vec<String> {
-    fn walk(dir: &Dir, names: &mut Vec<String>) {
-        for file in dir.files() {
-            let path = file.path();
-            if path.extension().is_some_and(|extension| extension == "qv") {
-                names.push(path.with_extension("").to_string_lossy().into_owned());
-            }
-        }
-        for sub in dir.dirs() {
-            walk(sub, names);
-        }
-    }
-    let mut names = Vec::new();
-    walk(&STD_DIR, &mut names);
-    names.sort();
-    names.dedup();
-    names
+    STD_SOURCES
+        .iter()
+        .map(|(path, _)| {
+            path.strip_suffix(".qv")
+                .expect("the std table holds .qv modules")
+                .to_string()
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,16 +166,22 @@ impl Vfs for OverlayVfs {
     }
 }
 
-struct EmbeddedVfs(&'static Dir<'static>);
+struct EmbeddedVfs(&'static [(&'static str, &'static str)]);
+impl EmbeddedVfs {
+    fn get(&self, path: &Path) -> Option<&'static str> {
+        let key = path.to_string_lossy();
+        self.0
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, source)| *source)
+    }
+}
 impl Vfs for EmbeddedVfs {
     fn read(&self, path: &Path) -> Option<String> {
-        self.0
-            .get_file(path.to_string_lossy().as_ref())
-            .and_then(|f| f.contents_utf8())
-            .map(str::to_string)
+        self.get(path).map(str::to_string)
     }
     fn exists(&self, path: &Path) -> bool {
-        self.0.get_file(path.to_string_lossy().as_ref()).is_some()
+        self.get(path).is_some()
     }
 }
 
@@ -231,7 +229,7 @@ impl PackageResolver {
                 }],
             },
             root: PathBuf::new(),
-            vfs: Arc::new(EmbeddedVfs(&STD_DIR)),
+            vfs: Arc::new(EmbeddedVfs(STD_SOURCES)),
             on_disk: false,
         })
     }
