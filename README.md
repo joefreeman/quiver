@@ -9,17 +9,22 @@
 
 
 ```quiver
-// Define a recursive list type
+// Define a recursive list type (matching the list module's)
 'list<'t> = Nil | Cons['t, ^]
 
-// Compute the sum of a list using tail recursion
+// Define a function to compute the sum of a list using tail recursion
 sum = #['list<'int>, (acc): 'int = 0] {
   | =[Nil, acc] => acc
-  | =[Cons[head, tail], acc] => %num.add [head, acc] ~> ^ [tail, ~]
+  | =[Cons[head, tail], acc] => {
+    %num.add [head, acc] ~> ^ [tail, ~]
+  }
 }
 
-// Build and sum a list
-#{ %list{ 1, 2, 3 } ~> sum [~] }  // 6
+// Entrypoint of the program
+#[] {
+  // Build a list (using the list module's dialect), and sum it
+  %list{ 1, 2, 3 } ~> sum [~]  //= 6
+}
 ```
 
 > Run the example above in the REPL (`quiv repl`, or at [quiver.run](https://quiver.run)), or run the executable version in [examples/sum.qv](examples/sum.qv) with `quiv run examples/sum.qv`.
