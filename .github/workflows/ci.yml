@@ -33,11 +33,20 @@ jobs:
             exit 1
           }
 
-      # Every runnable example in the guide and the module references is executed and its
-      # `//=` assertions checked. The references are the modules' test suites as well as
-      # their documentation, so a failure here is a failing test, not a stale doc.
-      - name: Check the guide and module references
-        run: cargo run --quiet --bin quiv -- test docs/guide.md std/docs/*.md
+      # Every runnable example in the README, the guide and the module references is executed
+      # and its `//=` assertions checked. The references are the modules' test suites as well
+      # as their documentation, so a failure here is a failing test, not a stale doc. The
+      # README's block is annotated `quiver program`, which runs its entry point — without
+      # that its assertions would sit in a function nothing calls, and be reported deferred
+      # rather than checked.
+      - name: Check the README, the guide and module references
+        run: cargo run --quiet --bin quiv -- test README.md docs/guide.md std/docs/*.md
+
+      # The executable companion to the README's block. Named rather than globbed: an example
+      # that serves or connects would never return, so a new one belongs here only if it runs
+      # to completion on its own.
+      - name: Run the examples
+        run: cargo run --quiet --bin quiv -- run examples/sum.qv
 
       - name: Run clippy
         run: cargo clippy --all --all-targets -- -D warnings

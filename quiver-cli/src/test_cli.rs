@@ -14,7 +14,7 @@ use quiver_cli::spawn_worker;
 use quiver_compiler::PackageResolver;
 use quiver_environment::{Environment, Repl, ReplError, RequestResult, WorkerHandle};
 use quiver_io::NativeEffect;
-use quiver_markdown::{Block, Chapter, Document, Mode};
+use quiver_markdown::{Assertions, Block, Chapter, Document, Mode};
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
@@ -32,6 +32,9 @@ enum Cause {
     Assertion {
         pattern: String,
         actual: Option<String>,
+        /// Where the check itself is written, when that is not the step being reported — which
+        /// is the case whenever the step called a function holding the assertion.
+        site: Option<usize>,
     },
     /// A `//! text` step did not fail as promised: either it succeeded (`actual` absent), or it
     /// failed with an error that does not mention `expected`.
@@ -52,6 +55,12 @@ struct ChapterReport {
     title: String,
     passed: usize,
     total: usize,
+    /// Assertions written inside a function body, which is not evaluated by the step that
+    /// defines it. They are checked if and when something calls that function — a later step, a
+    /// combinator it is handed to, or nothing at all — and the runner cannot see which, so they
+    /// are reported apart rather than counted as passed. One that does run and fails is not
+    /// lost: it aborts its caller's step, which is reported as that step's failure.
+    deferred: usize,
     runnable_blocks: usize,
     skipped_blocks: usize,
     failures: Vec<Failure>,
@@ -217,6 +226,7 @@ impl Runner {
             title: title_of(chapter),
             passed: 0,
             total: 0,
+            deferred: 0,
             runnable_blocks: chapter.runnable().count(),
             skipped_blocks: chapter.skipped(),
             failures: Vec::new(),
@@ -300,10 +310,11 @@ impl Runner {
                     continue;
                 }
 
-                report.total += step.assertions;
+                report.total += step.assertions.checked;
+                report.deferred += step.assertions.deferred;
                 match self.evaluate(&mut session, &source) {
                     Ok(()) => {
-                        report.passed += step.assertions;
+                        report.passed += step.assertions.checked;
                         history.push(source);
                     }
                     // A parse or compile error leaves the session intact — the REPL commits
@@ -320,7 +331,7 @@ impl Runner {
                         report.failures.push(Failure {
                             line: step.line,
                             step: step.source.clone(),
-                            cause: self.explain(&message, &history, &source, path),
+                            cause: self.explain(&message, &history, &source, path, step.line),
                         });
                         report.unreached = remaining_assertions(chapter, step.line);
                         report.total += report.unreached;
@@ -338,7 +349,9 @@ impl Runner {
     /// evaluate in a session. Its assertions sit inside that function and check themselves.
     fn run_program(&mut self, block: &Block, path: &Path, report: &mut ChapterReport) {
         let source = format!("{}{}", "\n".repeat(block.line - 1), block.source);
-        report.total += count_assertions(block);
+        let assertions = program_assertions(block);
+        report.total += assertions.checked;
+        report.deferred += assertions.deferred;
 
         let result = (|| -> Result<(), String> {
             let builtins = quiver_cli::build_builtin_registry();
@@ -395,16 +408,23 @@ impl Runner {
         })();
 
         match result {
-            Ok(()) => report.passed += count_assertions(block),
-            Err(message) => report.failures.push(Failure {
-                line: block.line,
-                step: String::new(),
-                cause: match assertion_site(&message) {
-                    Some((pattern, _)) => Cause::Assertion {
+            Ok(()) => report.passed += assertions.checked,
+            // A program block is run whole, so there is no step to name: a failed check is
+            // blamed on the line the compiler stamped into it, which is the assertion itself.
+            Err(message) => report.failures.push(match assertion_site(&message) {
+                Some((pattern, line)) => Failure {
+                    line: line.unwrap_or(block.line),
+                    step: String::new(),
+                    cause: Cause::Assertion {
                         pattern,
                         actual: None,
+                        site: None,
                     },
-                    None => Cause::Error(message),
+                },
+                None => Failure {
+                    line: block.line,
+                    step: String::new(),
+                    cause: Cause::Error(message),
                 },
             }),
         }
@@ -412,13 +432,27 @@ impl Runner {
 
     /// Classify a runtime failure, and — when it is an assertion — recover the value the check
     /// saw by replaying the chapter and re-running the step without it.
-    fn explain(&mut self, message: &str, history: &[String], source: &str, path: &Path) -> Cause {
+    fn explain(
+        &mut self,
+        message: &str,
+        history: &[String],
+        source: &str,
+        path: &Path,
+        step_line: usize,
+    ) -> Cause {
         let Some((pattern, line)) = assertion_site(message) else {
             return Cause::Error(message.to_string());
         };
+        // A check written above the step that ran is one inside a function the step called. Its
+        // value lives in that call's frame, so re-running the step recovers nothing — the site
+        // is what there is to report.
+        let inside_step = line.is_none_or(|line| line >= step_line);
         Cause::Assertion {
             pattern,
-            actual: self.replay(history, source, path, line),
+            actual: inside_step
+                .then(|| self.replay(history, source, path, line))
+                .flatten(),
+            site: line.filter(|_| !inside_step),
         }
     }
 
@@ -642,8 +676,8 @@ fn title_of(chapter: &Chapter) -> String {
         .unwrap_or_else(|| "(preamble)".to_string())
 }
 
-fn count_assertions(block: &Block) -> usize {
-    quiver_markdown::count_assertions(&block.source).unwrap_or(0)
+fn program_assertions(block: &Block) -> Assertions {
+    quiver_markdown::count_program_assertions(&block.source).unwrap_or_default()
 }
 
 /// The assertions a chapter carries at or below `line` — what abandoning it costs.
@@ -653,7 +687,7 @@ fn remaining_assertions(chapter: &Chapter, line: usize) -> usize {
         .filter_map(|block| block.steps().ok())
         .flatten()
         .filter(|step| step.line > line)
-        .map(|step| step.assertions)
+        .map(|step| step.assertions.checked)
         .sum()
 }
 
@@ -671,11 +705,22 @@ fn summarise(report: &ChapterReport) -> String {
         "✔".green()
     };
 
-    let skipped = format!("{} skipped", report.skipped_blocks);
-    let tally = match (report.runnable_blocks, report.skipped_blocks) {
-        (0, _) => format!("({skipped})"),
-        (_, 0) => format!("({}/{})", report.passed, report.total),
-        _ => format!("({}/{}; {skipped})", report.passed, report.total),
+    let mut notes = Vec::new();
+    if report.deferred > 0 {
+        notes.push(format!("{} deferred", report.deferred));
+    }
+    if report.skipped_blocks > 0 {
+        notes.push(format!("{} skipped", report.skipped_blocks));
+    }
+
+    let tally = if report.runnable_blocks == 0 {
+        format!("({})", notes.join("; "))
+    } else {
+        let counts = format!("{}/{}", report.passed, report.total);
+        match notes.is_empty() {
+            true => format!("({counts})"),
+            false => format!("({counts}; {})", notes.join("; ")),
+        }
     };
 
     format!("{marker}  {} {}", report.title, tally.bright_black())
@@ -691,7 +736,18 @@ fn print_failure(document: &str, chapter: &str, failure: &Failure) {
         println!("      {line}");
     }
     match &failure.cause {
-        Cause::Assertion { pattern, actual } => {
+        Cause::Assertion {
+            pattern,
+            actual,
+            site,
+        } => {
+            if let Some(site) = site {
+                println!(
+                    "    {}",
+                    format!("checked at {document}:{site}, inside a function this step called")
+                        .bright_black()
+                );
+            }
             println!("    expected  {pattern}");
             match actual {
                 Some(actual) => println!("    actual    {}", actual.red()),
@@ -719,25 +775,33 @@ fn print_failure(document: &str, chapter: &str, failure: &Failure) {
 fn total_line(reports: &[ChapterReport]) -> String {
     let passed: usize = reports.iter().map(|r| r.passed).sum();
     let total: usize = reports.iter().map(|r| r.total).sum();
+    let deferred: usize = reports.iter().map(|r| r.deferred).sum();
     let skipped: usize = reports.iter().map(|r| r.skipped_blocks).sum();
     let chapters = reports.len();
 
+    // Coloured by the verdict rather than by the counts: a check that ran only because
+    // something called the function holding it is not in `total`, so a failing document can
+    // still have every counted assertion pass.
     let head = format!("{passed}/{total} assertions in {chapters} chapters");
-    let head = if passed == total {
+    let head = if reports.iter().all(ChapterReport::ok) {
         head.green().bold()
     } else {
         head.red().bold()
     };
+
+    let mut notes = Vec::new();
+    if deferred > 0 {
+        notes.push(format!("{deferred} deferred to a call"));
+    }
     if skipped > 0 {
-        format!(
-            "{head}, {}",
-            format!(
-                "{skipped} block{} skipped",
-                if skipped == 1 { "" } else { "s" }
-            )
-            .bright_black()
-        )
-    } else {
+        notes.push(format!(
+            "{skipped} block{} skipped",
+            if skipped == 1 { "" } else { "s" }
+        ));
+    }
+    if notes.is_empty() {
         head.to_string()
+    } else {
+        format!("{head}, {}", notes.join(", ").bright_black())
     }
 }

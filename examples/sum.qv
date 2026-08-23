@@ -1,10 +1,11 @@
 // Define a recursive list type
 'list<'t> = Nil | Cons['t, ^]
 
-// Compute the sum of a list using tail recursion
+// Compute the sum of a list using tail recursion. `acc` is optional at the call site, so the
+// value the function receives is labelled — and the patterns read it by that label.
 sum = #['list<'int>, (acc): 'int = 0] {
-  | =[Nil, acc] => acc
-  | =[Cons[head, tail], acc] => %num.add [head, acc] ~> ^ [tail, ~]
+  | =[Nil, acc: acc] => acc
+  | =[Cons[head, tail], acc: acc] => %num.add [head, acc] ~> ^ [tail, ~]
 }
 
 #[] {

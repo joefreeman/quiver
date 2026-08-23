@@ -8,14 +8,14 @@
 </div>
 
 
-```quiver
+```quiver program
 // Define a recursive list type (matching the list module's)
 'list<'t> = Nil | Cons['t, ^]
 
 // Define a function to compute the sum of a list using tail recursion
 sum = #['list<'int>, (acc): 'int = 0] {
-  | =[Nil, acc] => acc
-  | =[Cons[head, tail], acc] => {
+  | =[Nil, acc: acc] => acc
+  | =[Cons[head, tail], acc: acc] => {
     %num.add [head, acc] ~> ^ [tail, ~]
   }
 }

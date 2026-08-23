@@ -373,6 +373,18 @@ at [1, y: 2]                  //= [1, 2]
 at [y: 2, x: 1]               //= [1, 2]
 ```
 
+Fully labelled is also what the *body* sees, so a pattern over an optionally-labelled
+parameter must read those fields by label. A positional pattern looks for fields the built
+value does not have, and quietly matches nothing:
+
+```quiver
+at = #[(x): 'int, (y): 'int] { $ ~> { =[x: a, y: b] => [a, b] | Missed } }
+at [1, 2]                     //= [1, 2]
+
+positional = #[(x): 'int, (y): 'int] { $ ~> { =[a, b] => [a, b] | Missed } }
+positional [1, 2]             //= Missed
+```
+
 Despite being specified on the type, the optionality belongs to the function itself. A spread parameter can be used to define the optionality on an existing type:
 
 ```quiver
@@ -1281,6 +1293,10 @@ double 5
 //= 10
 double 5 ~> %num.add [~, 3] //= 13
 ```
+
+A check inside a function body runs when the function is *called*, not where it is written,
+so one in a function nothing calls never runs at all. `quiv test` counts those apart, as
+**deferred**, rather than reporting them as assertions it saw hold.
 
 ### Expected failures
 
