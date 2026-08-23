@@ -581,3 +581,36 @@ fn test_dict_dialect_key_chain_and_flow() {
         .evaluate(r#"%dict{ %num.add [1, 2] => "three" } ~> [~, 3] ~> %dict.get ~"#)
         .expect("\"three\"");
 }
+
+/// A dialect's list-shaped output nests once per element, and every level mints a tuple
+/// type of its own — so a long literal is quadratically expensive to compile long before
+/// it is deep enough to exhaust the compiler's stack walking it. The bound turns what was
+/// a process abort (fatal, and in the shared server fatal for every other session too)
+/// into an ordinary compile error. A *wide* literal is untouched: `[1, …, 1000]` is one
+/// level and one type however many fields it has.
+#[test]
+fn test_dialect_expansion_depth_is_bounded() {
+    let items = |n: usize| vec!["1"; n].join(", ");
+
+    // At the bound, and one past it.
+    quiver()
+        .evaluate(&format!("%list{{ {} }} ~> %list.count ~", items(256)))
+        .expect("256");
+    quiver()
+        .evaluate(&format!("%list{{ {} }} ~> %list.count ~", items(257)))
+        .expect_error_containing("nesting more than 256 levels deep");
+
+    // The same bound covers every dialect, because they share one list emitter.
+    quiver()
+        .evaluate(&format!(
+            "%json{{ [{}] }} ~> %json.stringify ~ ~> %str.length ~",
+            items(300)
+        ))
+        .expect_error_containing("nesting more than 256 levels deep");
+
+    // Width is not depth: a flat tuple far longer than the bound compiles fine, because
+    // it is one level and one type however many fields it has.
+    quiver()
+        .evaluate(&format!("wide = [{}]; wide.999", items(1000)))
+        .expect("1");
+}

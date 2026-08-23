@@ -2564,90 +2564,76 @@ pub fn link_module<E: Effect>(
 /// Intern the artifact's types and tuples into the session program, on demand with
 /// memoisation (the two tables reference each other).
 fn intern_types_and_tuples(unit: &CompiledUnit, program: &mut Program, remaps: &mut IdRemaps) {
-    fn intern_type(
-        local: usize,
-        unit: &CompiledUnit,
-        program: &mut Program,
-        remaps: &mut IdRemaps,
-    ) -> usize {
-        if let Some(&session) = remaps.types.get(&local) {
-            return session;
-        }
-        let ty = &unit.types[local];
-        // Intern children first so the remap covers every reference.
-        match ty {
-            Type::Tuple(tuple_id) => {
-                intern_tuple(*tuple_id, unit, program, remaps);
-            }
-            Type::Partial { fields, .. } => {
-                for (_, type_id) in fields {
-                    intern_type(*type_id, unit, program, remaps);
-                }
-            }
-            Type::Callable {
-                parameter,
-                result,
-                receive,
-                states,
-                ..
-            } => {
-                for &type_id in [parameter, result, receive]
-                    .into_iter()
-                    .chain(states.iter())
-                {
-                    intern_type(type_id, unit, program, remaps);
-                }
-            }
-            Type::Union(members) => {
-                for member in members {
-                    intern_type(*member, unit, program, remaps);
-                }
-            }
-            Type::Annotated { base, entries, .. } => {
-                intern_type(*base, unit, program, remaps);
-                for (_, value) in entries {
-                    intern_type(*value, unit, program, remaps);
-                }
-            }
-            Type::Process {
-                send,
-                receive,
-                state,
-            } => {
-                for &type_id in [send, receive, state].into_iter().flatten() {
-                    intern_type(type_id, unit, program, remaps);
-                }
-            }
-            _ => {}
-        }
-        let session = program.register_type(ty.remap_ids(remaps));
-        remaps.types.insert(local, session);
-        session
+    // Driven by an explicit stack rather than by recursion. A unit's type graph is as deep
+    // as the values it describes, and a `%list{ … }` literal's is one level per element, so
+    // recursing per node would let a long literal exhaust the native stack — here, in the
+    // process that links units on behalf of every session.
+    //
+    // Post-order: a node is expanded, pushing its children above its own registration, so
+    // every child is in `remaps` before the parent's ids are rewritten through it.
+    // `validate_unit` rejects a cyclic type graph, which is what makes that well-defined;
+    // `expanded` only stops a cycle that slipped through from looping here forever, and
+    // `IdRemaps::map` then fails loudly on the child that never registered.
+    enum Job {
+        Expand(TypeRef),
+        Register(TypeRef),
     }
 
-    fn intern_tuple(
-        local: usize,
-        unit: &CompiledUnit,
-        program: &mut Program,
-        remaps: &mut IdRemaps,
-    ) -> usize {
-        if let Some(&session) = remaps.tuples.get(&local) {
-            return session;
-        }
-        let info = &unit.tuples[local];
-        for (_, type_id) in &info.fields {
-            intern_type(*type_id, unit, program, remaps);
-        }
-        let session = program.register_tuple(info.name.clone(), info.remap_ids(remaps).fields);
-        remaps.tuples.insert(local, session);
-        session
-    }
+    let mut jobs: Vec<Job> = Vec::new();
+    let mut expanded_types = vec![false; unit.types.len()];
+    let mut expanded_tuples = vec![false; unit.tuples.len()];
 
-    for local in 0..unit.types.len() {
-        intern_type(local, unit, program, remaps);
-    }
-    for local in 0..unit.tuples.len() {
-        intern_tuple(local, unit, program, remaps);
+    let seeds = (0..unit.types.len())
+        .map(TypeRef::Type)
+        .chain((0..unit.tuples.len()).map(TypeRef::Tuple));
+
+    for seed in seeds {
+        jobs.push(Job::Expand(seed));
+        while let Some(job) = jobs.pop() {
+            match job {
+                Job::Expand(TypeRef::Type(local)) => {
+                    if remaps.types.contains_key(&local)
+                        || std::mem::replace(&mut expanded_types[local], true)
+                    {
+                        continue;
+                    }
+                    jobs.push(Job::Register(TypeRef::Type(local)));
+                    // Annotation keys are their own table, interned elsewhere.
+                    jobs.extend(
+                        type_refs(&unit.types[local])
+                            .into_iter()
+                            .filter(|node| !matches!(node, TypeRef::AnnotationKey(_)))
+                            .map(Job::Expand),
+                    );
+                }
+                Job::Expand(TypeRef::Tuple(local)) => {
+                    if remaps.tuples.contains_key(&local)
+                        || std::mem::replace(&mut expanded_tuples[local], true)
+                    {
+                        continue;
+                    }
+                    jobs.push(Job::Register(TypeRef::Tuple(local)));
+                    jobs.extend(
+                        unit.tuples[local]
+                            .fields
+                            .iter()
+                            .map(|(_, type_id)| Job::Expand(TypeRef::Type(*type_id))),
+                    );
+                }
+                Job::Register(TypeRef::Type(local)) => {
+                    let session = program.register_type(unit.types[local].remap_ids(remaps));
+                    remaps.types.insert(local, session);
+                }
+                Job::Register(TypeRef::Tuple(local)) => {
+                    let info = &unit.tuples[local];
+                    let session =
+                        program.register_tuple(info.name.clone(), info.remap_ids(remaps).fields);
+                    remaps.tuples.insert(local, session);
+                }
+                Job::Expand(TypeRef::AnnotationKey(_))
+                | Job::Register(TypeRef::AnnotationKey(_)) => {}
+            }
+        }
     }
 }
 

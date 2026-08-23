@@ -215,28 +215,120 @@ pub struct Splicer<'a, F: Fn(&Binary) -> Option<Vec<u8>>> {
     pub holes: RefCell<Vec<Hole>>,
 }
 
+/// One entry of [`Splicer::value_to_chain`]'s work stack. `Visit` expands a value; the other
+/// two consume the chains their children left behind, which is what makes the walk a loop
+/// rather than a recursion.
+enum Step<'v> {
+    /// Expand this value, which sits `depth` levels below the expansion's root.
+    Visit(&'v Value, usize),
+    /// Build a tuple from the last `labels.len()` chains.
+    Tuple {
+        name: ast::TupleName,
+        labels: Vec<Option<String>>,
+    },
+    /// Append a call to the chain the argument left.
+    Apply(Callee),
+}
+
+/// How deeply a dialect's expansion may nest.
+///
+/// This walk is a loop, so it is not the one at risk — the bound is on what the expansion
+/// then costs everyone downstream. A dialect's list-shaped output is a `Cons` spine with one
+/// level per element, and each level mints its own tuple *type*: measured, a `%list{ … }` of
+/// n elements adds n type-table entries and costs quadratic compile time (n=100 is +7ms,
+/// n=1000 is +1.4s, n=2000 is +6.7s). The compiler's own walk over that AST recurses, and
+/// overflows its stack somewhere past 2000.
+///
+/// 256 sits an order of magnitude under the point where the stack goes, and at the point
+/// where the compile cost stops being something a caller would accept without knowing why.
+/// A flat literal is unaffected however wide it is: `[1, …, 1000]` is one level and one type.
+const MAX_EMISSION_DEPTH: usize = 256;
+
 impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
     /// Convert the `'expr` value a dialect function returned into a chain to splice at the
     /// invocation site.
     pub fn value_to_chain(&self, value: &Value) -> Result<ast::Chain, Error> {
+        // Driven by an explicit stack rather than by recursion. A dialect's expansion is as
+        // deep as its output is long — `%list{ … }` returns a `Cons` spine with one level
+        // per element — so recursing per node would put the native stack, not the language,
+        // in charge of how long a literal may be.
+        let mut steps = vec![Step::Visit(value, 0)];
+        let mut done: Vec<ast::Chain> = Vec::new();
+        while let Some(step) = steps.pop() {
+            match step {
+                Step::Visit(value, depth) => {
+                    if depth > MAX_EMISSION_DEPTH {
+                        return Err(self.error(&format!(
+                            "returned an expansion nesting more than {MAX_EMISSION_DEPTH} levels \
+                             deep. A list-shaped expansion nests once per element, and each \
+                             level costs a type of its own — build a long list at run time \
+                             instead of writing it as one literal"
+                        )));
+                    }
+                    self.visit(value, depth, &mut steps, &mut done)?
+                }
+                Step::Tuple { name, labels } => {
+                    // The fields were pushed in order, so they are the last `labels.len()`
+                    // results and are already in the right order.
+                    let fields = done
+                        .split_off(done.len() - labels.len())
+                        .into_iter()
+                        .zip(labels)
+                        .map(|(chain, name)| ast::TupleField {
+                            name,
+                            name_span: ast::Spanned::default(),
+                            span: ast::Spanned::default(),
+                            value: ast::FieldValue::Chain(chain),
+                        })
+                        .collect();
+                    done.push(term_chain(ast::Term::Tuple(ast::Tuple {
+                        name,
+                        fields,
+                        span: self.dialect.span,
+                        // A dialect emits tuples structurally; punning is a source spelling only.
+                        punned: false,
+                    })));
+                }
+                Step::Apply(callee) => {
+                    let mut chain = done.pop().expect("a Call's argument leaves its chain");
+                    chain.terms.push(callee.applied());
+                    done.push(chain);
+                }
+            }
+        }
+        Ok(done.pop().expect("the root value leaves its chain"))
+    }
+
+    /// One node of [`value_to_chain`]'s walk: either finish a chain onto `done`, or push the
+    /// steps that will.
+    fn visit<'v>(
+        &self,
+        value: &'v Value,
+        depth: usize,
+        steps: &mut Vec<Step<'v>>,
+        done: &mut Vec<ast::Chain>,
+    ) -> Result<(), Error> {
         // Plain data splices as itself: integers and binaries become literals.
         match value {
             Value::Int(int) => {
-                return Ok(term_chain(ast::Term::Literal(ast::Literal::Integer(
+                done.push(term_chain(ast::Term::Literal(ast::Literal::Integer(
                     num_bigint::BigInt::from(*int),
                 ))));
+                return Ok(());
             }
             Value::BigInt(big) => {
-                return Ok(term_chain(ast::Term::Literal(ast::Literal::Integer(
+                done.push(term_chain(ast::Term::Literal(ast::Literal::Integer(
                     (**big).clone(),
                 ))));
+                return Ok(());
             }
             Value::Binary(binary) => {
                 let bytes = (self.read_binary)(binary)
                     .ok_or_else(|| self.error("returned an unreadable binary"))?;
-                return Ok(term_chain(ast::Term::Literal(ast::Literal::Binary(
+                done.push(term_chain(ast::Term::Literal(ast::Literal::Binary(
                     ast::BinaryLiteral::ungrouped(bytes),
                 ))));
+                return Ok(());
             }
             _ => {}
         }
@@ -246,20 +338,25 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
             // both splice as themselves (identical to spelling them out with `Tuple`).
             "Str" => {
                 let bytes = self.str_bytes(value, "Str")?;
-                Ok(term_chain(ast::Term::String(
+                done.push(term_chain(ast::Term::String(
                     ast::StringStyle::Single,
                     vec![ast::StrSegment::Text(bytes)],
-                )))
+                )));
+                Ok(())
             }
-            "Nil" if fields.is_empty() => Ok(term_chain(ast::Term::Tuple(ast::Tuple {
-                name: ast::TupleName::Named("Nil".to_string()),
-                fields: vec![],
-                span: self.dialect.span,
-                punned: false,
-            }))),
+            "Nil" if fields.is_empty() => {
+                done.push(term_chain(ast::Term::Tuple(ast::Tuple {
+                    name: ast::TupleName::Named("Nil".to_string()),
+                    fields: vec![],
+                    span: self.dialect.span,
+                    punned: false,
+                })));
+                Ok(())
+            }
             "Unquote" => {
                 let (offset, length) = self.unquote_span(value)?;
-                self.unquote(offset, length, None)
+                done.push(self.unquote(offset, length, None)?);
+                Ok(())
             }
             "Call" => {
                 let callee = self.callee(value)?;
@@ -268,22 +365,28 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 // callee's argument rather than bound first and piped in, so it compiles
                 // against the parameter type.
                 if let Some((offset, length)) = self.as_unquote(arg)? {
-                    return self.unquote(offset, length, Some(callee));
+                    done.push(self.unquote(offset, length, Some(callee))?);
+                    return Ok(());
                 }
-                let mut chain = self.value_to_chain(arg)?;
-                chain.terms.push(callee.applied());
-                Ok(chain)
+                // The apply is queued first so it runs after the argument it consumes.
+                steps.push(Step::Apply(callee));
+                steps.push(Step::Visit(arg, depth + 1));
+                Ok(())
             }
             "Tuple" => {
                 let name = self.tuple_name(self.field(value, "Tuple", &["name"], 0)?)?;
-                let fields = self.tuple_fields(self.field(value, "Tuple", &["fields"], 1)?)?;
-                Ok(term_chain(ast::Term::Tuple(ast::Tuple {
-                    name,
-                    fields,
-                    span: self.dialect.span,
-                    // A dialect emits tuples structurally; punning is a source spelling only.
-                    punned: false,
-                })))
+                let entries =
+                    self.tuple_field_entries(self.field(value, "Tuple", &["fields"], 1)?)?;
+                let (labels, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+                steps.push(Step::Tuple { name, labels });
+                // Reversed, so the stack hands them back in field order.
+                steps.extend(
+                    values
+                        .into_iter()
+                        .rev()
+                        .map(|value| Step::Visit(value, depth + 1)),
+                );
+                Ok(())
             }
             "Labeled" => {
                 Err(self
@@ -437,7 +540,10 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
         }
     }
 
-    fn tuple_fields(&self, mut list: &Value) -> Result<Vec<ast::TupleField>, Error> {
+    fn tuple_field_entries<'v>(
+        &self,
+        mut list: &'v Value,
+    ) -> Result<Vec<(Option<String>, &'v Value)>, Error> {
         let mut fields = Vec::new();
         loop {
             match self.expect_tuple(list)? {
@@ -464,12 +570,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                         }
                         _ => (None, entry),
                     };
-                    fields.push(ast::TupleField {
-                        name: label,
-                        name_span: ast::Spanned::default(),
-                        span: ast::Spanned::default(),
-                        value: ast::FieldValue::Chain(self.value_to_chain(value)?),
-                    });
+                    fields.push((label, value));
                     list = self.field(list, "Cons", &[], 1)?;
                 }
                 (other, _) => {
