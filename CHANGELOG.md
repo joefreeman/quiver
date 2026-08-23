@@ -2,7 +2,22 @@
 
 ## [Unreleased]
 
-- `%json` gained a document-model query/update API: a polymorphic `get`/`set`/`update`/`delete` keyed by an object key, a 0-based array index, or a path list of either; a shallow `merge`; and `%dict`/`%list` bridges (`to_dict`, `object`, `array`). Every JSON-valued operand accepts `'%json.opt` (`'%json | []`) and a miss answers nil, so deep lookups and edits chain like `%num` arithmetic — and in debug builds the provenance stamp names the first step that missed.
+## [0.5.0] - 2026-08-23
+
+- Function application is now explicit - naming a callable references it (`double`), and juxtaposition calls it (`double 5`).
+- Every term after a chain's first must use the value flowing into it.
+- A nilary function is now explicitly written `#[] { … }` - `#{ … }` is used to infer the function parameter.
+- Binary literals are written in angle brackets (`<0a1b>`, `<428a2f98 71374491>`).
+- Sending is `%proc.send [p, msg]`, a bare `@` is used to reference the current process.
+- A process type is now defined with `@'msg !'result ?'state`.
+- Assertions are `//=` and attach to a term rather than a whole step, so a chain spread over lines checks each of them, and `x = e //= P` observes `e`. `//! text` marks a step that must fail, naming what the error must say.
+- Added `%registry` - a process table shared across the environment, binding keys to live processes, and freed when the process ends. A lookup must state the process type it expects, and is checked at runtime.
+- `%json` gained a document-model API with `get`/`set`/`update`/`delete`/`merge` functions and `%dict`/`%list` bridges. And typed `decode<'t>`/`encode<'t>`.
+- Builtin availability is checked at runtime rather than at compile time, so one compiled program runs on any host.
+- `%http/client` now goes through a host-mediated exchange - the browser's `fetch`, or native sockets - with `%http/tcp` for socket-level control.
+- Each standard library module has a reference page under `std/docs/` that is also its test suite: `quiv test` runs them, counting assertions in uncalled functions apart as deferred.
+- Improvements to the `quiv format` formatting.
+- Added `quiv server` to start a persistent environment that client sessions share over a unix socket (or spawned automatically by `run` and `repl`). Optionally reachable from a browser over token-authenticated loopback TCP.
 
 ## [0.4.0] - 2026-08-05
 
@@ -91,7 +106,8 @@
 
 - Initial release.
 
-[unreleased]: https://github.com/joefreeman/quiver/compare/v0.4.0...HEAD
+[unreleased]: https://github.com/joefreeman/quiver/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/joefreeman/quiver/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/joefreeman/quiver/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/joefreeman/quiver/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/joefreeman/quiver/compare/v0.2.0...v0.2.1

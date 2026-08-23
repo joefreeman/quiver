@@ -1,6 +1,6 @@
 {
   "name": "tree-sitter-quiver",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Quiver grammar for tree-sitter",
   "license": "MIT",
   "keywords": [
