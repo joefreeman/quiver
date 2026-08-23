@@ -4095,7 +4095,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             module_cache: &mut *self.module_cache,
             package: &self.current_package,
         };
-        let (bindings, binding_sets, result_type, _) = pattern::analyze_pattern(
+        let (bindings, binding_sets, _, narrowed_type) = pattern::analyze_pattern(
             &mut env,
             self.program,
             &assertion.pattern,
@@ -4111,7 +4111,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 bindings: bindings.into_iter().map(|(name, _)| name).collect(),
             });
         }
-        if self.is_never(result_type) {
+        // The *narrowed* type — what the value would be if the pattern matched — is what
+        // says whether matching is possible at all. The result type is no use here: a
+        // pattern with a runtime check contributes `nil | narrowed`, so an impossible one
+        // reads as plain nil rather than never.
+        //
+        // Only when the value's own type is inhabited, though. Inference answers never
+        // where it has given up as well as where nothing can arrive — a tail-recursive
+        // function's result is never today — and an empty intersection with such a type
+        // says nothing about the pattern.
+        if !self.is_never(value_type) && self.is_never(narrowed_type) {
             return Err(Error::PatternNoMatchingTypes {
                 pattern: crate::format::render_match(&assertion.pattern),
             });
