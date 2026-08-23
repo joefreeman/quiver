@@ -5009,11 +5009,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // carries it — while the frame is still open: its loads are the module's own
         // declared references, not the importer's.
         if self.module_cache.artifact_store.is_some()
-            && let Err(error) = modules::module_type_namespace(
-                &resolved.id.name,
+            && let Err(error) = modules::resolved_type_namespace(
+                resolved,
                 self.resolver,
                 self.module_cache,
-                &resolved.package,
                 self.program,
             )
         {

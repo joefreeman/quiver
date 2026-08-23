@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     ast, parser,
-    resolver::{ModuleId, ModuleResolver, PackageId},
+    resolver::{ModuleId, ModuleResolver, PackageId, ResolvedModule},
 };
 use quiver_core::program::Program;
 use quiver_core::types::Type;
@@ -283,6 +283,22 @@ pub fn module_type_namespace(
     let resolved = resolver
         .resolve(from_package, module)
         .map_err(Error::ModuleLoad)?;
+    resolved_type_namespace(&resolved, resolver, module_cache, program)
+}
+
+/// [`module_type_namespace`] for a module that is already resolved.
+///
+/// A module's id names its file relative to its package root, which is *not* the import
+/// path that reached it: an import routed through a `path` provider has the provider's
+/// directory in the id but not in the path. Resolving an id as though it were a path
+/// would prepend that directory a second time, so a caller holding a resolution passes it
+/// in here rather than round-tripping through the resolver.
+pub fn resolved_type_namespace(
+    resolved: &ResolvedModule,
+    resolver: &dyn ModuleResolver,
+    module_cache: &mut ModuleCache,
+    program: &mut Program,
+) -> Result<ModuleTypeNamespace, Error> {
     let id = resolved.id.clone();
     // Before the cache check: cached or not, the innermost module compile depends on
     // this namespace, and an undeclared dependency must mark it hidden.
@@ -292,7 +308,7 @@ pub fn module_type_namespace(
         return Ok(namespace.clone());
     }
     if module_cache.type_namespace_stack.contains(&id) {
-        return Err(Error::ModuleTypeCycle(module.join("/")));
+        return Err(Error::ModuleTypeCycle(id.name.join("/")));
     }
 
     let parsed = module_cache.load_and_cache_ast(&id, &resolved.source)?;

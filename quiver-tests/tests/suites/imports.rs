@@ -451,6 +451,83 @@ fn instantiated_members_never_share_a_constant() {
         .expect("[42, <0a>, 7]");
 }
 
+/// The manifest routing tests below address a module by *file path* and reach it through a
+/// `path` provider, which is what makes them distinct from the `with_modules` tests above:
+/// a provider's directory appears in the module's id (its path relative to the package
+/// root) but not in the import path that reached it. Anything that resolves an id as
+/// though it were an import path prepends that directory twice, so these projects only
+/// compile while the two stay distinguished. The test harness always attaches an artifact
+/// store, which is what drives the type namespace to be built for every compiled module.
+#[test]
+fn a_module_resolves_through_a_path_provider() {
+    quiver()
+        .with_files(&[
+            (
+                "quiver.toml",
+                r#"modules = [{ std = true }, { path = "./src" }]"#,
+            ),
+            ("src/util.qv", "[double: #'int { %num.mul [$, 2] }]"),
+        ])
+        .evaluate("%util.double 21")
+        .expect("42");
+}
+
+#[test]
+fn a_module_resolves_through_a_named_path_provider() {
+    quiver()
+        .with_files(&[
+            (
+                "quiver.toml",
+                r#"modules = [{ std = true }, { name = "mathx", path = "./vendor/mathx/src" }]"#,
+            ),
+            (
+                "vendor/mathx/src/calc.qv",
+                "[triple: #'int { %num.mul [$, 3] }]",
+            ),
+        ])
+        .evaluate("%mathx/calc.triple 14")
+        .expect("42");
+}
+
+#[test]
+fn a_module_under_a_path_provider_imports_its_neighbour() {
+    // The importing module is itself resolved through the provider, so its own imports
+    // are the recursive case: each level must keep resolving by path, not by id.
+    quiver()
+        .with_files(&[
+            (
+                "quiver.toml",
+                r#"modules = [{ std = true }, { path = "./src" }]"#,
+            ),
+            ("src/inner.qv", "[triple: #'int { %num.mul [$, 3] }]"),
+            (
+                "src/outer.qv",
+                "[sextuple: #'int { %inner.triple $ ~> %num.mul [~, 2] }]",
+            ),
+        ])
+        .evaluate("%outer.sextuple 7")
+        .expect("42");
+}
+
+#[test]
+fn a_module_type_resolves_through_a_path_provider() {
+    // `'%util` builds the module's type namespace by name, the same machinery the
+    // compiler drives eagerly for every module once a store is attached.
+    quiver()
+        .with_files(&[
+            (
+                "quiver.toml",
+                r#"modules = [{ std = true }, { path = "./src" }]"#,
+            ),
+            (
+                "src/util.qv",
+                "' = Point[x: 'int, y: 'int]\n[origin: Point[x: 0, y: 0]]",
+            ),
+        ])
+        .evaluate("x = #'%util { $x }; x %util.origin")
+        .expect("0");
+}
+
 #[test]
 fn test_the_std_listing_is_stable_and_unique() {
     // `std_module_names` gives whole-std artifacts a canonical compilation sequence, so
