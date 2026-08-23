@@ -93,7 +93,7 @@ pub struct ProgramUpdate {
     /// compatibility sets below, which the environment builds and ships already resolved. A
     /// worker therefore uses a vanishingly small part of this table — 7 rows of 6,419 in
     /// `examples/todo.qv` — but pruning it to the reachable closure has been measured and
-    /// rejected: the copy it would save is ~1% of startup (see `docs/type-census.md`).
+    /// rejected: the copy it would save is ~1% of startup.
     pub types: TableUpdate<Type>,
     /// Builtin information (name and resolved types)
     pub builtins: TableUpdate<BuiltinInfo>,
@@ -234,9 +234,12 @@ impl<E: Effect> Executor<E> {
 
     /// The `BinaryData` behind a binary value: its own bytes, or a constant's.
     ///
-    /// A constant is materialised on first use and cached (see `materialize_constant`), so
-    /// this only meets `Binary::Constant` on values the runtime never allocated for — the
-    /// module-name binaries in failure-provenance sites, which the formatter reads directly.
+    /// A `Binary::Constant` names the constants table rather than owning bytes, and reaches
+    /// here by more than one route: a failure-provenance stamp's module name, and any such
+    /// binary that then crossed the wire, which travels as its index rather than as a byte
+    /// copy and is rebuilt naming it. It is resolved through the same memo the `Constant`
+    /// opcode uses, so a constant is built once per worker however it is reached, and every
+    /// use shares the one node.
     ///
     /// Returns the *handle*, not the node. A reader is unaffected (`Rc` derefs, so
     /// `data.len()` and friends read through it), but a builder needs the handle: `concat`,
@@ -244,12 +247,16 @@ impl<E: Effect> Executor<E> {
     /// `Rc::new(data.clone())` — allocating a fresh node for an operand that was already
     /// refcounted, at every rope operation. Structural sharing is the point of the rope, and
     /// borrowing here was quietly paying to opt out of it.
-    pub fn get_binary_data<'a>(&'a self, binary: &'a Binary) -> Result<&'a Rc<BinaryData>, Error> {
+    pub fn get_binary_data(&mut self, binary: &Binary) -> Result<Rc<BinaryData>, Error> {
         match binary {
-            Binary::Data(data) => Ok(data),
-            Binary::Constant(index) => Err(Error::InvalidArgument(format!(
-                "constant binary {index} is not materialised"
-            ))),
+            Binary::Data(data) => Ok(Rc::clone(data)),
+            Binary::Constant(index) => match self.materialize_constant(*index)? {
+                Value::Binary(Binary::Data(data)) => Ok(data),
+                other => Err(Error::TypeMismatch {
+                    expected: "binary".to_string(),
+                    found: other.type_name().to_string(),
+                }),
+            },
         }
     }
 
@@ -3806,9 +3813,7 @@ impl<E: Effect> Executor<E> {
             Value::Int(n) => WireValue::Int(*n),
             Value::BigInt(n) => WireValue::BigInt((**n).clone()),
             Value::Binary(Binary::Constant(index)) => WireValue::Constant(*index),
-            Value::Binary(binary) => {
-                WireValue::Binary(self.get_binary_data(binary)?.shared_bytes())
-            }
+            Value::Binary(Binary::Data(data)) => WireValue::Binary(data.shared_bytes()),
             Value::Reference(id) => WireValue::Reference(*id),
             Value::Builtin(id, None) => WireValue::Builtin(*id, None),
             Value::Process(pid, function_index) => WireValue::Process(*pid, *function_index),

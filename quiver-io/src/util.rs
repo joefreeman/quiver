@@ -3,7 +3,7 @@
 use crate::effects::NativeEffect;
 use quiver_core::builtins::BuiltinContext;
 use quiver_core::error::Error;
-use quiver_core::value::{Binary, ResourceId, Value};
+use quiver_core::value::{ResourceId, Value};
 
 /// Extract a resource id from a value that must be a resource handle. The single-resource IO
 /// builtins (close/flush/next/accept/…) take the handle directly, not wrapped in a tuple.
@@ -34,7 +34,8 @@ pub fn expect_tuple(value: &Value, arity: usize) -> Result<&[Value], Error> {
     Ok(fields)
 }
 
-/// The bytes of a binary value, resolving a constant through the executor's table.
+/// The bytes of a binary value. The executor resolves a constant, so a path or a payload
+/// that arrived as one (over the wire, say) reads the same as one that owns its bytes.
 pub fn binary_bytes(
     value: &Value,
     ctx: &mut BuiltinContext<NativeEffect>,
@@ -45,18 +46,5 @@ pub fn binary_bytes(
             found: value.type_name().to_string(),
         });
     };
-    match binary {
-        Binary::Constant(index) => match ctx
-            .executor
-            .get_constant(*index)
-            .ok_or(Error::ConstantUndefined(*index))?
-        {
-            quiver_core::bytecode::Constant::Binary(bytes) => Ok(bytes.clone()),
-            _ => Err(Error::TypeMismatch {
-                expected: "binary".to_string(),
-                found: "integer".to_string(),
-            }),
-        },
-        Binary::Data(data) => Ok(data.to_vec()),
-    }
+    Ok(ctx.executor.get_binary_data(binary)?.to_vec())
 }

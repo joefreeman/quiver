@@ -1,8 +1,8 @@
 use crate::effects::NativeEffect;
-use crate::util::expect_resource;
+use crate::util::{binary_bytes, expect_resource};
 use quiver_core::builtins::{BuiltinContext, BuiltinFn, BuiltinRegistry, Completion, value_to_i64};
 use quiver_core::error::Error;
-use quiver_core::value::{Binary, Value};
+use quiver_core::value::Value;
 
 /// file_open([path: bin, flags: int, mode: int]) -> File
 /// Open a file with the specified flags and permissions
@@ -25,16 +25,7 @@ pub fn builtin_file_open(
         });
     }
 
-    // Get path binary
-    let path_binary = match &fields[0] {
-        Value::Binary(binary) => binary.clone(),
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "binary".to_string(),
-                found: fields[0].type_name().to_string(),
-            });
-        }
-    };
+    let path = binary_bytes(&fields[0], ctx)?;
 
     // Get flags
     let flags = value_to_i64(&fields[1])? as i32;
@@ -42,29 +33,9 @@ pub fn builtin_file_open(
     // Get mode (permissions)
     let mode = value_to_i64(&fields[2])? as u32;
 
-    // Get path bytes from binary
-    let path_bytes = match &path_binary {
-        Binary::Constant(idx) => {
-            let constant = ctx
-                .executor
-                .get_constant(*idx)
-                .ok_or(Error::ConstantUndefined(*idx))?;
-            match constant {
-                quiver_core::bytecode::Constant::Binary(bytes) => bytes.clone(),
-                _ => {
-                    return Err(Error::TypeMismatch {
-                        expected: "binary".to_string(),
-                        found: "integer".to_string(),
-                    });
-                }
-            }
-        }
-        Binary::Data(data) => data.to_vec(),
-    };
-
     // Return Action to request file opening from Environment
     Ok(Completion::Effect(NativeEffect::FileOpen {
-        path: path_bytes,
+        path,
         flags,
         mode,
     }))
@@ -160,16 +131,7 @@ pub fn builtin_file_write(
 
     let offset = value_to_i64(&fields[1])?;
 
-    // Get data binary
-    let data_binary = match &fields[2] {
-        Value::Binary(binary) => binary.clone(),
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "binary".to_string(),
-                found: fields[2].type_name().to_string(),
-            });
-        }
-    };
+    let data = binary_bytes(&fields[2], ctx)?;
 
     if offset < 0 {
         return Err(Error::InvalidArgument(format!(
@@ -177,26 +139,6 @@ pub fn builtin_file_write(
             offset
         )));
     }
-
-    // Get data bytes
-    let data = match &data_binary {
-        Binary::Constant(idx) => {
-            let constant = ctx
-                .executor
-                .get_constant(*idx)
-                .ok_or(Error::ConstantUndefined(*idx))?;
-            match constant {
-                quiver_core::bytecode::Constant::Binary(bytes) => bytes.clone(),
-                _ => {
-                    return Err(Error::TypeMismatch {
-                        expected: "binary".to_string(),
-                        found: "integer".to_string(),
-                    });
-                }
-            }
-        }
-        Binary::Data(data) => data.to_vec(),
-    };
 
     // Return Action to request write operation from Environment
     Ok(Completion::Effect(NativeEffect::FileWrite {
@@ -236,38 +178,9 @@ pub fn builtin_directory_read(
     value: &Value,
     ctx: &mut BuiltinContext<NativeEffect>,
 ) -> Result<Completion<NativeEffect>, Error> {
-    let path_binary = match value {
-        Value::Binary(binary) => binary.clone(),
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "binary".to_string(),
-                found: value.type_name().to_string(),
-            });
-        }
-    };
+    let path = binary_bytes(value, ctx)?;
 
-    let path_bytes = match &path_binary {
-        Binary::Constant(idx) => {
-            let constant = ctx
-                .executor
-                .get_constant(*idx)
-                .ok_or(Error::ConstantUndefined(*idx))?;
-            match constant {
-                quiver_core::bytecode::Constant::Binary(bytes) => bytes.clone(),
-                _ => {
-                    return Err(Error::TypeMismatch {
-                        expected: "binary".to_string(),
-                        found: "integer".to_string(),
-                    });
-                }
-            }
-        }
-        Binary::Data(data) => data.to_vec(),
-    };
-
-    Ok(Completion::Effect(NativeEffect::ReadDirOpen {
-        path: path_bytes,
-    }))
+    Ok(Completion::Effect(NativeEffect::ReadDirOpen { path }))
 }
 
 /// filesystem_stat(path: bin) -> [kind, size, modified, mode] | Nil
@@ -276,36 +189,9 @@ pub fn builtin_filesystem_stat(
     value: &Value,
     ctx: &mut BuiltinContext<NativeEffect>,
 ) -> Result<Completion<NativeEffect>, Error> {
-    let path_binary = match value {
-        Value::Binary(binary) => binary.clone(),
-        _ => {
-            return Err(Error::TypeMismatch {
-                expected: "binary".to_string(),
-                found: value.type_name().to_string(),
-            });
-        }
-    };
+    let path = binary_bytes(value, ctx)?;
 
-    let path_bytes = match &path_binary {
-        Binary::Constant(idx) => {
-            let constant = ctx
-                .executor
-                .get_constant(*idx)
-                .ok_or(Error::ConstantUndefined(*idx))?;
-            match constant {
-                quiver_core::bytecode::Constant::Binary(bytes) => bytes.clone(),
-                _ => {
-                    return Err(Error::TypeMismatch {
-                        expected: "binary".to_string(),
-                        found: "integer".to_string(),
-                    });
-                }
-            }
-        }
-        Binary::Data(data) => data.to_vec(),
-    };
-
-    Ok(Completion::Effect(NativeEffect::Stat { path: path_bytes }))
+    Ok(Completion::Effect(NativeEffect::Stat { path }))
 }
 
 /// directory_next(dir: Dir) -> bin | Nil

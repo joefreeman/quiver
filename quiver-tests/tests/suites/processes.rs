@@ -1296,3 +1296,41 @@ fn test_spawn_captures_and_heap_argument_share_one_index_space() {
         )
         .expect(r#"["ws", "plain", "boo!"]"#);
 }
+
+// A binary whose bytes live in the constants table crosses to another process as that
+// *index* rather than as a byte copy — workers share the table — and is rebuilt on the
+// far side still naming it. The receiving process must be able to use what it got, so
+// the builtins that read bytes have to resolve the index. A debug build's failure-origin
+// module name is such a binary (the site table names the constant instead of allocating
+// bytes), which is what these two carry across.
+
+#[test]
+fn test_constant_binary_crosses_as_a_spawn_init() {
+    quiver()
+        .debug()
+        .evaluate(
+            r#"
+            r = { 1 ~> =2 };
+            r:((module: '%str, line: 'int))origin ~> =(module: m);
+            p = m ~> @'%str { %str.length $ } ~;
+            !p
+            "#,
+        )
+        .expect("4");
+}
+
+#[test]
+fn test_constant_binary_crosses_in_a_message() {
+    quiver()
+        .debug()
+        .evaluate(
+            r#"
+            p = @#[] { !'%str ~> { =Str[b] => %bin.length b } } [];
+            r = { 1 ~> =2 };
+            r:((module: '%str, line: 'int))origin ~> =(module: m);
+            %proc.send [p, m];
+            !p
+            "#,
+        )
+        .expect("4");
+}

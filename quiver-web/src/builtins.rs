@@ -14,7 +14,7 @@ use crate::effects::WebEffect;
 use quiver_core::binary::BinaryData;
 use quiver_core::builtins::{BuiltinContext, BuiltinFn, BuiltinRegistry, Completion};
 use quiver_core::error::Error;
-use quiver_core::value::{Binary, Value};
+use quiver_core::value::Value;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
@@ -119,7 +119,8 @@ fn attach_http_builtin(registry: &mut BuiltinRegistry<WebEffect>) {
     registry.attach_implementation("http_request", builtin_http_request);
 }
 
-/// The bytes of a binary field, resolving a constant through the executor's table.
+/// The bytes of a binary field. The executor resolves a constant, so a field that arrived
+/// as one (over the wire, say) reads the same as one that owns its bytes.
 fn field_bytes(
     fields: &[Value],
     index: usize,
@@ -134,22 +135,7 @@ fn field_bytes(
                 .unwrap_or_else(|| "nothing".to_string()),
         });
     };
-    match binary {
-        Binary::Constant(index) => {
-            match ctx
-                .executor
-                .get_constant(*index)
-                .ok_or(Error::ConstantUndefined(*index))?
-            {
-                quiver_core::bytecode::Constant::Binary(bytes) => Ok(bytes.clone()),
-                _ => Err(Error::TypeMismatch {
-                    expected: "binary".to_string(),
-                    found: "integer".to_string(),
-                }),
-            }
-        }
-        Binary::Data(data) => Ok(data.to_vec()),
-    }
+    Ok(ctx.executor.get_binary_data(binary)?.to_vec())
 }
 
 pub fn builtin_http_request(

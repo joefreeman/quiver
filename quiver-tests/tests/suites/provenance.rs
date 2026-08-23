@@ -120,3 +120,18 @@ fn test_module_sites_name_the_module() {
         .evaluate("[5, 0] ~> %int.div ~")
         .expect_origin("nil result at int:24:18");
 }
+
+#[test]
+fn test_origin_module_name_is_an_ordinary_string() {
+    // A site's module name is a *constant* binary — the site table names the constants
+    // table rather than allocating bytes — so a program that retrieves it and hands it
+    // to a `%str` builtin exercises the constant-resolving path, not the owned-bytes one.
+    quiver()
+        .debug()
+        .evaluate(
+            "r = { 1 ~> =2 };
+             r:((module: '%str, line: 'int))origin ~> =(module: m);
+             [m, %str.length m]",
+        )
+        .expect("[\"test\", 4]");
+}

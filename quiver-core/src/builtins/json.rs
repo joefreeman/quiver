@@ -119,7 +119,7 @@ type ObjectPairs = Vec<(Vec<u8>, Value)>;
 
 /// An `Object[pairs]`-shaped value's pairs, in order.
 fn as_json_object<E: Effect>(
-    ctx: &BuiltinContext<E>,
+    ctx: &mut BuiltinContext<E>,
     value: &Value,
 ) -> Result<Option<ObjectPairs>, Error> {
     let Value::Tuple(_, payload) = value else {
