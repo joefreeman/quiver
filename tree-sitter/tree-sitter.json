@@ -13,11 +13,11 @@
     }
   ],
   "metadata": {
-    "version": "0.1.0",
+    "version": "0.4.0",
     "license": "MIT",
     "description": "Quiver grammar for tree-sitter",
     "links": {
-      "repository": "https://github.com/quiver-lang/quiver"
+      "repository": "https://github.com/joefreeman/quiver"
     }
   },
   "bindings": {

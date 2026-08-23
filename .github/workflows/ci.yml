@@ -93,6 +93,37 @@ jobs:
         with:
           node-version: "20"
 
+      # The grammar carries the *language's* version: a grammar release means exactly "the
+      # grammar that parses Quiver X.Y.Z". It is excluded from the Cargo workspace (it has
+      # a Node toolchain of its own) so it cannot inherit the number, which leaves four
+      # files holding it and nothing keeping them together. Assert it here, on every push,
+      # rather than discovering the drift when something is published.
+      - name: Verify the grammar's version matches the workspace
+        run: |
+          workspace=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          status=0
+          expect() {
+            if [ "$2" != "$workspace" ]; then
+              echo "::error file=$1::$1 declares $2, but the workspace is $workspace"
+              status=1
+            fi
+          }
+          expect tree-sitter/Cargo.toml \
+            "$(grep -m1 '^version = ' tree-sitter/Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
+          expect tree-sitter/package.json \
+            "$(node -p "require('./tree-sitter/package.json').version")"
+          expect tree-sitter/tree-sitter.json \
+            "$(node -p "require('./tree-sitter/tree-sitter.json').metadata.version")"
+          expect tree-sitter/package-lock.json \
+            "$(node -p "require('./tree-sitter/package-lock.json').version")"
+          expect tree-sitter/package-lock.json \
+            "$(node -p "require('./tree-sitter/package-lock.json').packages[''].version")"
+          if [ "$status" != 0 ]; then
+            echo "::error::Set every version at once with 'scripts/set-version.sh <version>'."
+            exit 1
+          fi
+          echo "Grammar and workspace agree on $workspace"
+
       - name: Install dependencies
         run: cd tree-sitter && npm install
 
