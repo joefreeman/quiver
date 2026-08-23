@@ -5,10 +5,9 @@
 
 (comment) @comment
 
-; A step assertion's `//=` marker and prose note read as comment; the pattern between
-; them is real, checked syntax and keeps its ordinary highlighting.
+; A step assertion's `//=` marker reads as comment; the pattern after it is real, checked
+; syntax and keeps its ordinary highlighting. A prose note after one is a plain `comment`.
 (assertion "//=" @comment)
-(assertion_note) @comment
 
 ; ------------------------------------------------------------------- literals
 

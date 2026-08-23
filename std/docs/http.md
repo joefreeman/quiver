@@ -52,8 +52,8 @@ keep-alive connection, and come back as the leftover rather than being buffered 
 
 ```quiver
 "POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET /" ~> .0 ~> %http.parse_request ~ ~> =[r, rest]
-r.body   //= <68656c6c6f>   "hello"
-rest     //= <474554202f>   "GET /"
+r.body   //= <68656c6c6f> // "hello"
+rest     //= <474554202f> // "GET /"
 ```
 
 ### What it rejects

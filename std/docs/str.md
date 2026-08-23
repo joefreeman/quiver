@@ -187,11 +187,11 @@ empty string is found at 0.
 
 ```quiver
 %str.index_of ["hello world", "hello"]       //= 0
-%str.index_of ["hello world", "o"]           //= 4   the first occurrence
+%str.index_of ["hello world", "o"]           //= 4 // the first occurrence
 %str.index_of ["hello world", "world"]       //= 6
 %str.index_of ["hello world", "xyz"]         //= []
 %str.index_of ["hello", ""]                  //= 0
-%str.index_of ["🚀 rocket 🌙", "rocket"]     //= 2   characters, not bytes
+%str.index_of ["🚀 rocket 🌙", "rocket"]     //= 2 // characters, not bytes
 %str.index_of ["🚀 rocket 🌙", "🌙"]         //= 9
 ```
 
@@ -276,9 +276,9 @@ compares against a codepoint from anywhere else.
 ```quiver
 "hello" ~> %str.iter ~ ~> %list.collect ~   //= Cons[104, Cons[101, Cons[108, Cons[108, Cons[111, Nil]]]]]
 "" ~> %str.iter ~ ~> %list.collect ~        //= Nil
-"é" ~> %str.iter ~ ~> %list.collect ~       //= Cons[233, Nil]        two bytes, one codepoint
-"€" ~> %str.iter ~ ~> %list.collect ~       //= Cons[8364, Nil]       three
-"🚀" ~> %str.iter ~ ~> %list.collect ~      //= Cons[128640, Nil]     four
+"é" ~> %str.iter ~ ~> %list.collect ~       //= Cons[233, Nil] // two bytes, one codepoint
+"€" ~> %str.iter ~ ~> %list.collect ~       //= Cons[8364, Nil] // three
+"🚀" ~> %str.iter ~ ~> %list.collect ~      //= Cons[128640, Nil] // four
 "hi🚀" ~> %str.iter ~ ~> %list.collect ~    //= Cons[104, Cons[105, Cons[128640, Nil]]]
 ```
 
@@ -320,7 +320,7 @@ optionally-signed run of decimal digits.
 %str.parse_int ""             //= []
 %str.parse_int "12a"          //= []
 %str.parse_int "-"            //= []
-%str.parse_int " 1"           //= []   no surrounding whitespace is allowed
+%str.parse_int " 1"           //= [] // no surrounding whitespace is allowed
 ```
 
 The pair round-trips, and the arbitrary precision of `'int` survives it:

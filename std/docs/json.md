@@ -111,10 +111,10 @@ Malformed input answers nil, like a failed match — the sequence ends and the n
 positioned `:error`.
 
 ```quiver
-"[1, 2" ~> %json.parse ~    //= []   unterminated array
-"tru" ~> %json.parse ~      //= []   incomplete keyword
-"nope" ~> %json.parse ~     //= []   not a keyword at all
-"[1 2]" ~> %json.parse ~    //= []   missing separator
+"[1, 2" ~> %json.parse ~    //= [] // unterminated array
+"tru" ~> %json.parse ~      //= [] // incomplete keyword
+"nope" ~> %json.parse ~     //= [] // not a keyword at all
+"[1 2]" ~> %json.parse ~    //= [] // missing separator
 ```
 
 ## Numbers are exact
@@ -234,12 +234,12 @@ doc = %json{ { "a": 1 } }
 Every miss is nil, whether the key is absent, the kind is wrong, or the index is out of range:
 
 ```quiver
-%json{ { "a": 1 } } ~> %json.get [~, "z"]   //= []   no such key
-%json{ [1, 2] } ~> %json.get [~, "a"]       //= []   a key applied to an array
-%json{ { "a": 1 } } ~> %json.get [~, 0]     //= []   an index applied to an object
-%json{ [1, 2] } ~> %json.get [~, 5]         //= []   out of range
-%json{ [1, 2] } ~> %json.get [~, -1]        //= []   no negative indices
-%json{ { "a": 1 } } ~> %json.get [~, %list{ "z", "x" }]   //= []   a missing intermediate
+%json{ { "a": 1 } } ~> %json.get [~, "z"]   //= [] // no such key
+%json{ [1, 2] } ~> %json.get [~, "a"]       //= [] // a key applied to an array
+%json{ { "a": 1 } } ~> %json.get [~, 0]     //= [] // an index applied to an object
+%json{ [1, 2] } ~> %json.get [~, 5]         //= [] // out of range
+%json{ [1, 2] } ~> %json.get [~, -1]        //= [] // no negative indices
+%json{ { "a": 1 } } ~> %json.get [~, %list{ "z", "x" }]   //= [] // a missing intermediate
 ```
 
 Because nil is also *accepted*, a miss can be piped onward and answers nil again — so a deep
@@ -407,7 +407,7 @@ later ones winning, as `get` does) in exchange for hashed lookup.
 ```
 
 ```quiver
-%json{ [1] } ~> %json.to_dict ~   //= []   an array is not an object
+%json{ [1] } ~> %json.to_dict ~   //= [] // an array is not an object
 ```
 
 `object` builds one back, from either a pair list or a dict, and `array` wraps a list of
@@ -438,7 +438,7 @@ is applied. Anything that does not fit is nil, like a failed match.
 %json{ "hi" } ~> %json.decode<'%str> ~             //= "hi"
 %json{ true } ~> %json.decode<(True | False)> ~    //= True
 %json{ "hi" } ~> %json.decode<'int> ~              //= []
-"3.5" ~> %json.parse ~ ~> %json.decode<'int> ~     //= []   not a whole number
+"3.5" ~> %json.parse ~ ~> %json.decode<'int> ~     //= [] // not a whole number
 "3.5" ~> %json.parse ~ ~> %json.decode<'%num.coeff> ~   //= 7/2
 ```
 

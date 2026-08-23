@@ -13,7 +13,7 @@ expressed — a negative square root, arithmetic across two different radicals �
 nil, and the sequence ends as it would for any other failure.
 
 ```quiver
-%num.add [0.1, 0.2]           //= 3/10   exact, unlike binary floating point
+%num.add [0.1, 0.2]           //= 3/10 // exact, unlike binary floating point
 ```
 
 ## Numeric literals
@@ -119,7 +119,7 @@ a rational denoting the same number are equal despite their different representa
 %num.eq? [1/2, 2/4]           //= Ok
 %num.eq? [1/2, 1/3]           //= []
 %num.eq? [2, 2]               //= Ok
-%num.eq? [2, 4/2]             //= Ok   same number, different kinds
+%num.eq? [2, 4/2]             //= Ok // same number, different kinds
 ```
 
 ```quiver
@@ -181,10 +181,10 @@ any other value. It *renders* in mathematical notation — `√2`, `2√2`, `1 +
 display convention, not a second representation.
 
 ```quiver
-%num.sqrt 2                   //= Surd[0, 1, 2]     √2
-%num.sqrt 8                   //= Surd[0, 2, 2]     2√2, the square factor pulled out
-%num.sqrt 12                  //= Surd[0, 2, 3]     2√3
-%num.sqrt 1/2                 //= Surd[0, 1/2, 2]   (1/2)√2
+%num.sqrt 2                   //= Surd[0, 1, 2] // √2
+%num.sqrt 8                   //= Surd[0, 2, 2] // 2√2, the square factor pulled out
+%num.sqrt 12                  //= Surd[0, 2, 3] // 2√3
+%num.sqrt 1/2                 //= Surd[0, 1/2, 2] // (1/2)√2
 ```
 
 Two roots have no answer in this domain, and are nil: a negative one, and the root of a surd
@@ -201,9 +201,9 @@ Within one radical, arithmetic is closed and exact. Like terms collect:
 
 ```quiver
 s = %num.sqrt 2
-%num.add [s, s]               //= Surd[0, 2, 2]   √2 + √2 = 2√2
-%num.add [s, %num.sqrt 8]     //= Surd[0, 3, 2]   √2 + 2√2 = 3√2
-%num.add [1, s]               //= Surd[1, 1, 2]   1 + √2
+%num.add [s, s]               //= Surd[0, 2, 2] // √2 + √2 = 2√2
+%num.add [s, %num.sqrt 8]     //= Surd[0, 3, 2] // √2 + 2√2 = 3√2
+%num.add [1, s]               //= Surd[1, 1, 2] // 1 + √2
 ```
 
 A result whose radical part cancels collapses back to a bare rational or integer:
@@ -211,8 +211,8 @@ A result whose radical part cancels collapses back to a bare rational or integer
 ```quiver
 s = %num.sqrt 2
 x = %num.add [1, s]
-%num.sub [x, s]               //= 1               (1 + √2) − √2
-%num.mul [s, s]               //= 2               √2 · √2
+%num.sub [x, s]               //= 1 // (1 + √2) − √2
+%num.mul [s, s]               //= 2 // √2 · √2
 ```
 
 Multiplying conjugates, and dividing — which rationalises the denominator:
@@ -221,15 +221,15 @@ Multiplying conjugates, and dividing — which rationalises the denominator:
 s = %num.sqrt 2
 a = %num.add [1, s]
 b = %num.add [1, %num.neg s]
-%num.mul [a, b]               //= -1              (1 + √2)(1 − √2)
-%num.div [1, s]               //= Surd[0, 1/2, 2]   1/√2 = (1/2)√2
+%num.mul [a, b]               //= -1 // (1 + √2)(1 − √2)
+%num.div [1, s]               //= Surd[0, 1/2, 2] // 1/√2 = (1/2)√2
 ```
 
 `neg` and `abs` behave as they do for the other kinds:
 
 ```quiver
-%num.sqrt 2 ~> %num.neg ~                  //= Surd[0, -1, 2]   −√2
-%num.sqrt 2 ~> %num.neg ~ ~> %num.abs ~    //= Surd[0, 1, 2]    √2
+%num.sqrt 2 ~> %num.neg ~                  //= Surd[0, -1, 2] // −√2
+%num.sqrt 2 ~> %num.neg ~ ~> %num.abs ~    //= Surd[0, 1, 2] // √2
 ```
 
 Two *different* radicals live in different fields, and arithmetic across them is unsupported
@@ -253,8 +253,8 @@ s = %num.sqrt 2
 %num.gt? [s, 1]               //= Ok
 %num.lt? [s, 1]               //= []
 %num.lt? [s, 3/2]             //= Ok
-%num.lt? [s, 141/100]         //= []   √2 > 1.41
-%num.lt? [s, 142/100]         //= Ok   √2 < 1.42
+%num.lt? [s, 141/100]         //= [] // √2 > 1.41
+%num.lt? [s, 142/100]         //= Ok // √2 < 1.42
 %num.lt? [%num.neg s, 0]      //= Ok
 ```
 
@@ -287,7 +287,7 @@ binding narrows the nil away, and a failure would end the sequence at that step.
 ```quiver
 r = %num.sqrt 5
 s = %num.add [1, r]
-phi = %num.div [s, 2]         //= Surd[1/2, 1/2, 5]   1/2 + (1/2)√5
+phi = %num.div [s, 2]         //= Surd[1/2, 1/2, 5] // 1/2 + (1/2)√5
 ```
 
 It sits between consecutive Fibonacci ratios, 8/5 and 13/8:

@@ -134,31 +134,8 @@
             "type": "SYMBOL",
             "name": "_pattern"
           }
-        },
-        {
-          "type": "CHOICE",
-          "members": [
-            {
-              "type": "SYMBOL",
-              "name": "assertion_note"
-            },
-            {
-              "type": "BLANK"
-            }
-          ]
         }
       ]
-    },
-    "assertion_note": {
-      "type": "TOKEN",
-      "content": {
-        "type": "PREC",
-        "value": 1,
-        "content": {
-          "type": "PATTERN",
-          "value": " {3}[^\\n]*"
-        }
-      }
     },
     "type_alias": {
       "type": "SEQ",

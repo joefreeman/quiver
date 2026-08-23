@@ -119,16 +119,27 @@ fn test_pattern_vocabulary() {
 }
 
 #[test]
-fn test_prose_note_after_three_spaces() {
+fn test_prose_note_is_an_ordinary_comment() {
     quiver()
         .debug()
-        .evaluate("5 //= 5   an explanatory note, to end of line")
+        .evaluate("5 //= 5 // an explanatory note, to end of line")
         .expect("5");
-    // Three-space runs inside a string pattern are pattern, not note.
+    // A `//` inside a string pattern is pattern, not the note's marker.
     quiver()
         .debug()
-        .evaluate(r#""a   b" //= "a   b""#)
-        .expect("\"a   b\"");
+        .evaluate(r#""a//b" //= "a//b""#)
+        .expect("\"a//b\"");
+    // Only a comment may follow the pattern: code after it is an error, so a pattern that
+    // runs on cannot quietly shrink to a weaker one with prose after it.
+    quiver()
+        .debug()
+        .evaluate("5 //= Point [x: 1]")
+        .expect_parse_failure();
+    // Nor may a second assertion, which would otherwise read as the first one's note.
+    quiver()
+        .debug()
+        .evaluate("5 //= 5 //= 6")
+        .expect_parse_failure();
 }
 
 // A chain spread over lines can assert on each of them: an assertion ends its line, so what

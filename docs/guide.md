@@ -75,7 +75,7 @@ Integers are arbitrary precision, and never wrap:
 ```quiver
 42                                  //= ('int)
 -17                                 //= ('int)
-%num.add [9223372036854775807, 1]   //= 9223372036854775808   past a 64-bit word
+%num.add [9223372036854775807, 1]   //= 9223372036854775808 // past a 64-bit word
 ```
 
 Binaries are specified as an even number of hex digits between angle
@@ -174,9 +174,9 @@ Every term after the first must use the value flowing into it.
 ```quiver
 double = #'int { %num.mul [$, 2] }
 
-5 ~> 99               //! must use the value flowing into it   the 99 ignores the 5
-5 ~> [1, 2]           //! must use the value flowing into it   so do both fields
-5 ~> double           //! must use the value flowing into it   naming one is not calling it
+5 ~> 99               //! must use the value flowing into it // the 99 ignores the 5
+5 ~> [1, 2]           //! must use the value flowing into it // so do both fields
+5 ~> double           //! must use the value flowing into it // naming one is not calling it
 ```
 
 A chain can be spread over multiple lines by starting each line with a continuation (`~>`).
@@ -209,8 +209,8 @@ Two rules govern a sequence, and together they are most of Quiver's control flow
 Nil flows through a chain, but short-circuits a sequence:
 
 ```quiver
-[] ~> [~, 5]              //= [[], 5]   one step; nil flows through the chain
-{ []; 2 }                 //= []        two steps; the first is nil, so it stops
+[] ~> [~, 5]              //= [[], 5] // one step; nil flows through the chain
+{ []; 2 }                 //= [] // two steps; the first is nil, so it stops
 ```
 
 ### Building values in a chain
@@ -225,10 +225,10 @@ Nil flows through a chain, but short-circuits a sequence:
 
 ```quiver
 a = A[x: 1, y: 2]
-a[..., y: 3]                  //= A[x: 1, y: 3]   keeps the name
+a[..., y: 3]                  //= A[x: 1, y: 3] // keeps the name
 a[..., z: 4]                  //= A[x: 1, y: 2, z: 4]
-[...a, y: 3]                  //= [x: 1, y: 3]    drops the name
-B[...a]                       //= B[x: 1, y: 2]   replaces it
+[...a, y: 3]                  //= [x: 1, y: 3] // drops the name
+B[...a]                       //= B[x: 1, y: 2] // replaces it
 [w: 0, ...a]                  //= [w: 0, x: 1, y: 2]
 ```
 
@@ -240,8 +240,8 @@ source.
 n = [inner: P[x: 1, y: 2]]
 n.inner[..., y: 5]            //= P[x: 1, y: 5]
 B[...n.inner, y: 3]           //= B[x: 1, y: 3]
-A[x: 1] ~> ~[..., y: 2]       //= A[x: 1, y: 2]   `~` as the source, name kept
-A[x: 1] ~> [..., y: 2]        //= [x: 1, y: 2]    in-tuple, name dropped
+A[x: 1] ~> ~[..., y: 2]       //= A[x: 1, y: 2] // `~` as the source, name kept
+A[x: 1] ~> [..., y: 2]        //= [x: 1, y: 2] // in-tuple, name dropped
 ```
 
 When a tuple's fields are just variables of the same name, `( … )` **puns** them:
@@ -317,8 +317,8 @@ add3 4   //= 7
 A call is a **juxtaposition**: a callable and the argument, separated by a space.
 
 ```quiver
-%num.add [3, 4]               //= 7    write the argument after the callee
-[3, 4] ~> %num.add ~          //= 7    ... or pipe it in as `~`
+%num.add [3, 4]               //= 7 // write the argument after the callee
+[3, 4] ~> %num.add ~          //= 7 // ... or pipe it in as `~`
 ```
 
 The flowing value can be used in either part:
@@ -403,8 +403,8 @@ There are two variants of the syntax, which both work the same: `x = ...` and `.
 
 ```quiver
 x = 42
-42 ~> =x                      //= Ok   match, in a chain
-42 ~> =41                     //= []   and it can fail
+42 ~> =x                      //= Ok // match, in a chain
+42 ~> =41                     //= [] // and it can fail
 ```
 
 ### Destructuring
@@ -414,11 +414,11 @@ Full or partial destructuring is supported. Partial destructuring happens with p
 ```quiver
 p = Point[x: 10, y: 20]
 
-Point[x: a, y: b] = p; [a, b]   //= [10, 20]   bind both fields
-(x, y) = p; [x, y]              //= [10, 20]   partial: named fields only
-Point(x) = p; x                 //= 10         named partial
-* = p; [x, y]                   //= [10, 20]   every named field
-Point* = p; [x, y]              //= [10, 20]   ... and require the name
+Point[x: a, y: b] = p; [a, b]   //= [10, 20] // bind both fields
+(x, y) = p; [x, y]              //= [10, 20] // partial: named fields only
+Point(x) = p; x                 //= 10 // named partial
+* = p; [x, y]                   //= [10, 20] // every named field
+Point* = p; [x, y]              //= [10, 20] // ... and require the name
 ```
 
 A pattern field matches by label when it has one and by position when it does not, so a
@@ -427,7 +427,7 @@ positional pattern reads a positionally-built tuple:
 ```quiver
 q = Point[10, 20]
 Point[a, b] = q; [a, b]       //= [10, 20]
-Point[m, _] = q; m            //= 10          `_` ignores a field
+Point[m, _] = q; m            //= 10 // `_` ignores a field
 ```
 
 A tuple pattern's name must correspond to the value's: a stated name requires that name,
@@ -436,8 +436,8 @@ literal, simply the rule's empty case: it never matches a named empty tuple. To
 destructure a named tuple without stating its name, use a partial or star pattern.
 
 ```quiver
-{ [x: a, y: b] = Point[x: 1, y: 2]; a }   //= []       the name must be stated...
-(x, y) = Point[x: 1, y: 2]; [x, y]        //= [1, 2]   ...or left to a partial
+{ [x: a, y: b] = Point[x: 1, y: 2]; a }   //= [] // the name must be stated...
+(x, y) = Point[x: 1, y: 2]; [x, y]        //= [1, 2] // ...or left to a partial
 ```
 
 Literals inside a pattern test rather than bind:
@@ -459,7 +459,7 @@ against an existing *value*, prefix it with `&`.
 y = 2
 2 ~> =&y                      //= Ok
 3 ~> =&y                      //= []
-Point[1, 2] ~> =Point[x, &y]  //= Ok   binds x, checks y is 2
+Point[1, 2] ~> =Point[x, &y]  //= Ok // binds x, checks y is 2
 ```
 
 A pin's target may be any access path — a field of a variable, or of the enclosing
@@ -478,7 +478,7 @@ adjacent to the `)`. The parenthesised part is a pattern head, so it also takes 
 
 ```quiver
 42 ~> =('int)n; n             //= 42
-{ [] ~> =('int)n }            //= []   nil is not an int, so this fails
+{ [] ~> =('int)n }            //= [] // nil is not an int, so this fails
 ```
 
 This is the idiom for "bind, but fail on the wrong type", which combines with
@@ -952,7 +952,7 @@ recently entered with, which is the spawn init and then each tail call in the ro
 'status = Loading | Done['int]
 step = #'status { =Loading => 7 ~> ^ Done[~] | =Done[x] => x }
 p = Loading ~> @step ~
-?p ~> ='status                //= Ok   Loading, then Done[7]
+?p ~> ='status                //= Ok // Loading, then Done[7]
 ```
 
 The sample's type is inferred at the spawn site: the root function's own parameter type
@@ -1004,9 +1004,9 @@ travels upward, so a child's death is only ever observed by its parent.
 
 ```quiver
 p = @#[] { !'int } []
-%proc.link p       //= Ok   fate-sharing: either dying abnormally kills the other
-%proc.detach p     //= Ok   relinquish ownership; p outlives this process
-%proc.kill p       //= Ok   terminate p and its subtree
+%proc.link p       //= Ok // fate-sharing: either dying abnormally kills the other
+%proc.detach p     //= Ok // relinquish ownership; p outlives this process
+%proc.kill p       //= Ok // terminate p and its subtree
 ```
 
 ### The registry
@@ -1026,12 +1026,12 @@ a failed check answers nil, like any failed match.
 ```quiver
 p = @#[] { !'int ~> %num.mul [~, 2] } []
 %registry.register [Doubler, p]              //= Ok
-%registry.register [Doubler, p]              //= []   the name is taken
-%registry.lookup<@'bin> Doubler              //= []   wrong message type
+%registry.register [Doubler, p]              //= [] // the name is taken
+%registry.lookup<@'bin> Doubler              //= [] // wrong message type
 %registry.lookup<@'int> Doubler ~> =(@'int)q
 %proc.send [q, 21]
 !p                                           //= 42
-%registry.lookup<@'int> Doubler              //= []   freed when the process ended
+%registry.lookup<@'int> Doubler              //= [] // freed when the process ended
 ```
 
 Names free at termination, whatever the cause, kill and cascade included, so the registry
@@ -1074,7 +1074,7 @@ already received.
 ```quiver
 filter = @#[] { !'int { =42 => Ok | [] } } []      // waits specifically for 42
 %proc.send [filter, 1]; %proc.send [filter, 42]
-!filter                       //= 42   the 1 is still in the mailbox
+!filter                       //= 42 // the 1 is still in the mailbox
 ```
 
 ```quiver
@@ -1098,7 +1098,7 @@ tag = %ref []
 
 ```quiver
 a = %ref []; b = %ref []
-a ~> =&b                      //= []   distinct refs are not equal
+a ~> =&b                      //= [] // distinct refs are not equal
 ```
 
 ## Resources and failure
@@ -1230,7 +1230,7 @@ running it.
 ```quiver
 double = #'int { %num.mul [$, 2] }
 5 ~> double ~ //= 10
-x = double 3  //= 6   the value, not the binding's verdict
+x = double 3  //= 6 // the value, not the binding's verdict
 x             //= 6
 ```
 
@@ -1243,12 +1243,22 @@ continuation — which is what lets a chain spread over lines assert on each of 
 ~> %num.mul [~, 3]        //= 9
 ```
 
-The value flows on unchanged, so an asserted nil still ends its sequence, and a run of
-three or more spaces after the pattern starts a prose note that is ignored to the end of
-the line. The pattern may not bind, since an assertion only observes, and pins and type
-tests cover most of what a binder would. A pattern that could never match the value's type
-is a compile error, so a stale expectation fails the build even in release mode, where the
-check itself costs nothing.
+The value flows on unchanged, so an asserted nil still ends its sequence. An assertion ends
+at its pattern, and the only thing that may follow it on the line is an ordinary `//`
+comment — which is how a step carries a note explaining it, and it is a comment like any
+other rather than part of the assertion. Anything else after the pattern is an error, so a
+pattern that runs on (`//= Point [x: 1]`) cannot quietly shrink to a weaker one with prose
+after it.
+
+```quiver
+p = Point[x: 1, y: 2]
+p[..., y: 3] //= Point[x: 1, y: 3] // the name is kept
+```
+
+The pattern may not bind, since an assertion only observes, and pins and type tests cover
+most of what a binder would. A pattern that could never match the value's type is a compile
+error, so a stale expectation fails the build even in release mode, where the check itself
+costs nothing.
 
 Since it is a *chain* the assertion observes, a binding's is applied after: `x = e //= P`
 tests `e`, not the `Ok` the step goes on to evaluate to. The verdict is what the match
@@ -1264,7 +1274,7 @@ asserts the value just computed.
 
 ```quiver
 double = #'int {
-  //= ('int)   observed on entry: the parameter
+  //= ('int) // observed on entry: the parameter
   %num.mul [~, 2]
 }
 double 5
@@ -1283,6 +1293,14 @@ compiler rejects, and rejected code cannot carry a compiled check. It is read by
 ```quiver
 5 ~> 99                        //! must use the value flowing into it
 %ref [] ~> %data.encode ~      //! cannot encode a ref
+```
+
+A `//` ends the expected text and starts a note, as after a `//=` pattern. The marker
+matters more here, the expectation being prose itself: nothing else would say where the
+checked text stops.
+
+```quiver
+5 ~> 99   //! must use the value flowing into it // the 99 ignores the 5
 ```
 
 Either kind of error works: a compile error leaves the session untouched, and a runtime one

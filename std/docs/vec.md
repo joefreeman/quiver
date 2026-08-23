@@ -6,7 +6,7 @@ is `storedᵢ × scale`, so integer lanes carry fractional values exactly — fi
 floating point anywhere.
 
 ```quiver
-%vec.of [I32, 1/2, %list{ 1, 2, 3 }] ~> %vec.sum ~   //= 3   stored [1,2,3] at ½ is [½, 1, 1½]
+%vec.of [I32, 1/2, %list{ 1, 2, 3 }] ~> %vec.sum ~   //= 3 // stored [1,2,3] at ½ is [½, 1, 1½]
 ```
 
 Every operation is exact. Where a result cannot be represented — a lane that overflows its
@@ -120,8 +120,8 @@ integral comes back as an `'int`, whatever the scale was. That is what keeps the
 readable, and what makes scale equality — which `add` relies on — a structural test.
 
 ```quiver
-%vec.of [I32, 1/2, %list{ 1, 2, 3 }] ~> %vec.sum ~   //= 3     6 × ½, not 3/1
-%vec.of [I32, 4/2, %list{ 1 }] ~> %vec.scale ~       //= 2     the scale itself, too
+%vec.of [I32, 1/2, %list{ 1, 2, 3 }] ~> %vec.sum ~   //= 3 // 6 × ½, not 3/1
+%vec.of [I32, 4/2, %list{ 1 }] ~> %vec.scale ~       //= 2 // the scale itself, too
 ```
 
 ## Lane-wise arithmetic
@@ -130,9 +130,9 @@ readable, and what makes scale equality — which `add` relies on — a structur
 
 ```quiver
 a = %vec.of [I32, 1, %list{ 1, 2, 3 }]
-[a, %vec.fill [I32, 1, 10, 3]] ~> %vec.add ~ ~> %vec.sum ~   //= 36   [11,12,13]
+[a, %vec.fill [I32, 1, 10, 3]] ~> %vec.add ~ ~> %vec.sum ~   //= 36 // [11,12,13]
 [a, a] ~> %vec.sub ~ ~> %vec.sum ~                           //= 0
-[a, a] ~> %vec.mul ~ ~> %vec.sum ~                           //= 14   [1,4,9]
+[a, a] ~> %vec.mul ~ ~> %vec.sum ~                           //= 14 // [1,4,9]
 ```
 
 The lane types must agree — an `I32` and an `I64` vector cannot be combined — and a lane that
@@ -155,7 +155,7 @@ and `get` apply it, and nothing about the buffer changes.
 
 ```quiver
 h = %vec.of [I32, 1/2, %list{ 1, 2, 3 }]   //= Vec(data: <010000000200000003000000>)
-[h, 2] ~> %vec.get ~   //= 3/2   stored 3, at scale ½
+[h, 2] ~> %vec.get ~   //= 3/2 // stored 3, at scale ½
 h ~> %vec.sum ~        //= 3
 ```
 
@@ -173,8 +173,8 @@ just multiply.
 
 ```quiver
 h = %vec.of [I32, 1/2, %list{ 2, 2 }]
-[h, h] ~> %vec.mul ~ ~> %vec.scale ~   //= 1/4   ½ × ½
-[h, h] ~> %vec.mul ~ ~> %vec.sum ~     //= 2     logical [1,1] · [1,1]
+[h, h] ~> %vec.mul ~ ~> %vec.scale ~   //= 1/4 // ½ × ½
+[h, h] ~> %vec.mul ~ ~> %vec.sum ~     //= 2 // logical [1,1] · [1,1]
 ```
 
 `add` and `sub` cannot: two lanes only add if they mean the same unit. So unequal scales are
@@ -184,7 +184,7 @@ the buffers rescaled to match. Equal scales skip all of it.
 ```quiver
 p = %vec.fill [I32, 1/2, 1, 1]
 q = %vec.fill [I32, 1/3, 1, 1]
-[p, q] ~> %vec.add ~ ~> %vec.scale ~   //= 1/6   ½ and ⅓ are 3 and 2 sixths
+[p, q] ~> %vec.add ~ ~> %vec.scale ~   //= 1/6 // ½ and ⅓ are 3 and 2 sixths
 [p, q] ~> %vec.add ~ ~> %vec.sum ~     //= 5/6
 ```
 
@@ -203,8 +203,8 @@ the lanes.
 integer.
 
 ```quiver
-%vec.of_exact [I32, 1/2, %list{ 1/2, 3/2 }] ~> %vec.sum ~   //= 2   stored [1, 3]
-%vec.of_exact [I32, 1/2, %list{ 1/3 }]                      //= []   ⅓ is no multiple of ½
+%vec.of_exact [I32, 1/2, %list{ 1/2, 3/2 }] ~> %vec.sum ~   //= 2 // stored [1, 3]
+%vec.of_exact [I32, 1/2, %list{ 1/3 }]                      //= [] // ⅓ is no multiple of ½
 ```
 
 `of_round` takes the same arguments but rounds to the nearest multiple of the scale — lossy, and
@@ -226,7 +226,7 @@ the layout is not your concern.
 
 ```quiver
 %vec.of_values [I32, %list{ 1/2, 1/3 }] ~> =('%vec.vec)v
-v ~> %vec.scale ~   //= 1/6   1/lcm(2, 3)
+v ~> %vec.scale ~   //= 1/6 // 1/lcm(2, 3)
 v ~> %vec.sum ~     //= 5/6
 ```
 
@@ -280,8 +280,8 @@ vector cannot filter it:
 
 ```quiver
 a = %vec.of [I32, 1, %list{ 1, 2, 3 }]
-[a, %vec.fill [I32, 1, 2, 2]] ~> %vec.lt ~   //= []   three lanes against two
-[a, %vec.fill [I64, 1, 2, 3]] ~> %vec.lt ~   //= []   I32 against I64
+[a, %vec.fill [I32, 1, 2, 2]] ~> %vec.lt ~   //= [] // three lanes against two
+[a, %vec.fill [I64, 1, 2, 3]] ~> %vec.lt ~   //= [] // I32 against I64
 [a, Mask[<0101>]] ~> %vec.filter ~           //= []
 ```
 
@@ -293,7 +293,7 @@ narrowing at each step: check once at the end.
 
 ```quiver
 %vec.sum []   //= []
-%vec.of [I32, 1, %list{ 5000000000 }] ~> %vec.len ~   //= []   the overflow surfaces here
+%vec.of [I32, 1, %list{ 5000000000 }] ~> %vec.len ~   //= [] // the overflow surfaces here
 ```
 
 Only `dtype` stays strict, because it is always a literal and never computed.

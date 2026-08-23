@@ -209,21 +209,27 @@ fn sequence_parts(
                 // A step laid out as `~>` continuation lines has nothing delimiting it, so it is
                 // set off from its neighbours with a blank line.
                 let tall = set_off_tall && breaks_into_pipeline(trivia, chain);
-                // The assertions ending the step's last line ride after the chain, before any
-                // trailing comment; they do not make a step "tall". A trailing assertion is
-                // glued to the step's line; an own-line one (a leading `//=`) starts a fresh
-                // line at the step's indent, keeping any comments written above it (it is an
-                // anchor — see `visit_chain`). Assertions written above a `~>` continuation
-                // sit inside the chain, and `chain_terms_doc` has already placed them on the
-                // line whose value they observe.
-                let mut parts = vec![body];
+                // The assertions ending the step's last line ride after the chain; they do not
+                // make a step "tall". A trailing assertion is glued to the step's line; an
+                // own-line one (a leading `//=`) starts a fresh line at the step's indent,
+                // keeping any comments written above it. Each is an anchor (see `visit_chain`),
+                // so a prose note written after one — an ordinary trailing comment — follows it
+                // rather than the step. Assertions written above a `~>` continuation sit inside
+                // the chain, and `chain_terms_doc` has already placed them on the line whose
+                // value they observe.
+                // A comment trailing the step belongs to the line the chain ends on — the line a
+                // trailing assertion finishes. It is a line suffix, so emitting it here, ahead
+                // of the assertions, still renders it after them, while keeping it off any
+                // own-line assertions stacked below.
+                let mut parts = vec![body, trivia.trailing_doc(span)];
                 let final_assertions = chain
                     .assertions
                     .iter()
                     .filter(|assertion| assertion.after == chain.terms.len());
                 for (index, assertion) in final_assertions.enumerate() {
-                    // The first assertion of an assertion-only step opens the step itself,
-                    // so the step-level leading trivia above already covers it.
+                    // The first assertion of an assertion-only step opens the step itself, so
+                    // the step-level trivia above already covers it — both the leading comments
+                    // and, sharing the step's offset, its own trailing note.
                     let opens_step = index == 0 && chain.terms.is_empty();
                     let own_line = assertion.own_line && !opens_step;
                     if own_line {
@@ -231,6 +237,9 @@ fn sequence_parts(
                         parts.push(trivia.leading_doc(assertion.span));
                     }
                     parts.push(assertion_doc(assertion, own_line || opens_step));
+                    if !opens_step {
+                        parts.push(trivia.trailing_doc(assertion.span));
+                    }
                 }
                 (pretty::concat(parts), tall)
             }
@@ -240,11 +249,14 @@ fn sequence_parts(
                 type_definition,
                 ..
             } => (
-                type_alias_doc(trivia, name, type_parameters, type_definition),
+                pretty::concat(vec![
+                    type_alias_doc(trivia, name, type_parameters, type_definition),
+                    trivia.trailing_doc(span),
+                ]),
                 false,
             ),
         };
-        let item = pretty::concat(vec![leading, body, trivia.trailing_doc(span)]);
+        let item = pretty::concat(vec![leading, body]);
         if index == 0 {
             first = item;
         } else {
@@ -453,23 +465,15 @@ fn breaks_into_pipeline(trivia: &Trivia, chain: &Chain) -> bool {
     pretty::flat_width(&doc, CHAIN_SOFT_WIDTH).is_none()
 }
 
-/// Render a step-final `//= P` assertion: the canonical pattern, plus any prose note three
-/// spaces off. An assertion terminates its line like a comment, so every form forces the
-/// enclosing construct to break — a closing `}` must never land after one. A trailing
-/// assertion with a note is additionally deferred to the line's end via `line_suffix`, like
-/// the trailing comment it resembles; an assertion rendered at the start of its line (`bare`)
-/// keeps its text in place — the line is its own.
+/// Render a `//= P` assertion: just the canonical pattern, since a prose note after one is an
+/// ordinary trailing comment that the caller emits from the trivia attached to the assertion.
+/// An assertion terminates its line like a comment, so every form forces the enclosing construct
+/// to break — a closing `}` must never land after one. An assertion rendered at the start of its
+/// line (`bare`) needs no separating space: the line is its own.
 fn assertion_doc(assertion: &Assertion, bare: bool) -> Doc {
-    let text = match &assertion.note {
-        Some(note) => format!("//= {}   {}", render_match(&assertion.pattern), note),
-        None => format!("//= {}", render_match(&assertion.pattern)),
-    };
+    let text = format!("//= {}", render_match(&assertion.pattern));
     let text = if bare { text } else { format!(" {text}") };
-    let doc = match (&assertion.note, bare) {
-        (Some(_), false) => pretty::line_suffix(pretty::text(text)),
-        _ => pretty::text(text),
-    };
-    pretty::concat(vec![doc, pretty::break_parent()])
+    pretty::concat(vec![pretty::text(text), pretty::break_parent()])
 }
 
 /// A chain: an optional `pattern = ` binding followed by `~>`-joined terms. When the terms do not
@@ -561,6 +565,7 @@ fn chain_terms_doc(trivia: &Trivia, chain: &Chain, count: usize) -> Doc {
                     parts.push(trivia.leading_doc(assertion.span));
                 }
                 parts.push(assertion_doc(assertion, assertion.own_line));
+                parts.push(trivia.trailing_doc(assertion.span));
             }
             let breaks =
                 !assertions.is_empty() || trivia.has_trivia(gap.end) || trivia.has_trivia(gap.pipe);
@@ -1302,6 +1307,29 @@ fn trivia_doc(items: &[TriviaItem]) -> Doc {
 /// when code precedes it on its line. String-aware so a `//` or blank line inside a `"…"` literal is
 /// not mistaken for trivia; `skip` holds the (sorted, disjoint) byte ranges of dialect content,
 /// which is raw text the scanner must likewise not read trivia out of.
+/// The `//=` marker that opens an assertion.
+const MARKER: &str = "//=";
+
+/// How far a `//=` assertion's text runs, measured from just after the marker: to the `//` of a
+/// prose note, or to the end of the line. String-aware, so a `//` inside a pattern's string
+/// literal is not mistaken for the note's marker.
+fn assertion_end(rest: &str) -> usize {
+    let mut quoted = false;
+    let mut chars = rest.char_indices();
+    while let Some((index, c)) = chars.next() {
+        match c {
+            '\n' => return index,
+            '\\' if quoted => {
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            '/' if !quoted && rest[index..].starts_with("//") => return index,
+            _ => {}
+        }
+    }
+    rest.len()
+}
+
 fn scan_trivia(source: &str, skip: &[(usize, usize)]) -> Vec<Scanned> {
     let mut out = Vec::new();
     let mut chars = source.char_indices().peekable();
@@ -1349,16 +1377,19 @@ fn scan_trivia(source: &str, skip: &[(usize, usize)]) -> Vec<Scanned> {
                 line_blank = true;
             }
             '/' if matches!(chars.peek(), Some((_, '/'))) => {
-                // A `//=` assertion is AST, not trivia: consume it like a comment so its
-                // pattern text isn't scanned, but record nothing — the formatter re-emits it
-                // from the `Chain.assertion` node.
+                // A `//=` assertion is AST, not trivia: consume it so its pattern text isn't
+                // scanned, but record nothing — the formatter re-emits it from the
+                // `Chain.assertions` node. It ends at the `//` of a prose note, which the loop
+                // then reads as the ordinary trailing comment it is.
                 let is_assertion = source[index..].starts_with("//=");
-                let mut end = source.len();
-                while let Some(&(j, next)) = chars.peek() {
-                    if next == '\n' {
-                        end = j;
-                        break;
-                    }
+                let end = if is_assertion {
+                    index + MARKER.len() + assertion_end(&source[index + MARKER.len()..])
+                } else {
+                    source[index..]
+                        .find('\n')
+                        .map_or(source.len(), |offset| index + offset)
+                };
+                while chars.peek().is_some_and(|&(offset, _)| offset < end) {
                     chars.next();
                 }
                 if !is_assertion {
@@ -1475,7 +1506,12 @@ fn visit_chain(chain: &Chain, out: &mut Collected) {
         push_anchor(gap.end, out);
         push_anchor(gap.pipe, out);
     }
-    // An own-line assertion is its own anchor, so comments written above it keep their place.
+    // An own-line assertion is its own anchor, so comments written above it keep their place and
+    // a prose note written after it trails it. A *trailing* assertion is deliberately not one: a
+    // note after it attaches to the term or gap before it instead, and still renders in the right
+    // place, since a trailing comment is a `line_suffix` and so is deferred past the assertion to
+    // the end of the line either way. Anchoring it would capture comments written above it — a
+    // dangling one inside a container the step ends with — that nothing then emits.
     // The first assertion of an assertion-only step shares the step's offset and is covered by
     // the step's anchor.
     for (index, assertion) in chain.assertions.iter().enumerate() {
@@ -2176,7 +2212,7 @@ mod tests {
         // A leading `//=` continues the step above; the formatter keeps it on its own line,
         // at the step's indent, with any comments and blanks between held in place.
         assert_idempotent("1 ~> f\n//= 2\n", "own-line assertion");
-        assert_idempotent("5 //= 'int\n//= 5   note\n", "trailing then own-line");
+        assert_idempotent("5 //= 'int\n//= 5 // note\n", "trailing then own-line");
         assert_idempotent("5 ~> f\n\n// why\n//= 10\n", "trivia above an assertion");
         assert_idempotent(
             "x = {\n  5 ~> f\n  //= 10\n}\nx\n",
@@ -2195,21 +2231,68 @@ mod tests {
             "opening assertion",
         );
         assert_formats(
-            "f = #'int {\n  //= 5   the note\n  $\n}\n",
-            "f = #'int {\n  //= 5   the note\n  $\n}\n",
+            "f = #'int {\n  //= 5 // the note\n  $\n}\n",
+            "f = #'int {\n  //= 5 // the note\n  $\n}\n",
         );
     }
 
     #[test]
     fn assertion_note_and_trailing_comment_survive() {
-        // The note is preserved three spaces off.
-        assert_idempotent("x = 5 //= 5\nx //= 5   the note\n", "assertion note");
+        // A note after an assertion is an ordinary trailing comment, and rides after it.
+        assert_idempotent("x = 5 //= 5\nx //= 5 // the note\n", "assertion note");
         assert_idempotent(
             "f = #'int {\n  $ //= 'int\n}\nf 3 //= 3\n",
             "assertion in body",
         );
         // A redundant block whose body asserts is kept, not spliced.
         assert_idempotent("{\n  5 //= 6\n}\n", "assertion keeps its block");
+    }
+
+    #[test]
+    fn assertion_notes_attach_to_their_assertion() {
+        // A note follows the assertion it was written after, at every emission site: a
+        // step-final assertion, an own-line one, and one in a `~>` continuation gap.
+        assert_idempotent("5 //= 5 // trailing\n", "note on a step-final assertion");
+        assert_idempotent(
+            "1 ~> f\n//= 2 // own-line\n",
+            "note on an own-line assertion",
+        );
+        assert_idempotent(
+            "1 //= 1 // the head\n~> f //= 2 // the result\n",
+            "notes on chain-line assertions",
+        );
+        // A comment trailing the term and a note on the assertion above it are distinct
+        // attachments, and keep their order.
+        assert_idempotent(
+            "1 // the term\n//= 1 // the assertion\n~> f\n",
+            "term comment then assertion note",
+        );
+        // A note on a trailing assertion stays on its line, rather than being carried down to
+        // the own-line assertions stacked below it.
+        assert_idempotent(
+            "1 ~> f //= 2 // the result\n//= 'int // the type\n",
+            "note above stacked own-line assertions",
+        );
+        // A comment dangling inside the container a step ends with keeps its place, and is not
+        // captured by the assertion that follows the container.
+        assert_formats(
+            "f [\n  1,\n  // why\n] //= 2\ng\n",
+            "f [1] //= 2\n// why\ng\n",
+        );
+        // Note spacing normalizes to a single space, as any trailing comment does.
+        assert_formats("5 //= 5    // spaced out\n", "5 //= 5 // spaced out\n");
+        // A `//` inside the pattern's own string is not the note's marker.
+        assert_idempotent("x //= \"http://a\" // a url\n", "url in an asserted string");
+    }
+
+    #[test]
+    fn code_may_not_follow_an_assertion() {
+        // Only a comment may follow the pattern; anything else is the error that keeps
+        // `//= Point [x: 1]` from silently weakening to `//= Point` plus prose.
+        assert!(parse("5 //= Point [x: 1]\n").is_err());
+        assert!(parse("5 //= 5 6\n").is_err());
+        // A second `//=` would otherwise be swallowed as the first one's note.
+        assert!(parse("5 //= 5 //= 6\n").is_err());
     }
 
     #[test]
@@ -2775,7 +2858,7 @@ mod tests {
         let corpus: &[&str] = &[
             // --- step-final assertions ---
             "5 //= 5",
-            "x = f y //= Ok   the note runs to end of line",
+            "x = f y //= Ok // the note runs to end of line",
             // --- argument-first application (chain terms joined by `~>`) ---
             "[3, 4] ~> add ~ ~> [~, 2] ~> mul ~",
             "x ~> f ~",

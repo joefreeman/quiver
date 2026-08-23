@@ -176,15 +176,11 @@ module.exports = grammar({
     comment: _ => token(seq('//', optional(/[^=\n][^\n]*/))),
 
     // A step assertion: `//= P` matches the step's value against the pattern `P` in
-    // debug builds. It reads as a comment but the pattern is real syntax; a run of three
-    // or more spaces after the pattern starts a prose note running to the end of the line.
+    // debug builds. It reads as a comment but the pattern is real syntax, and it ends
+    // there: a prose note after one is an ordinary `comment`, picked up by the `extras`.
     // Like a comment, an assertion terminates its line — the real parser rejects code
     // after it; this grammar stays permissive there, as it does for binding patterns.
-    assertion: $ => seq('//=', field('pattern', $._pattern), optional($.assertion_note)),
-
-    // Lexical precedence over the whitespace `extras`, which would otherwise skip the
-    // note's leading spaces and lex its prose as code.
-    assertion_note: _ => token(prec(1, / {3}[^\n]*/)),
+    assertion: $ => seq('//=', field('pattern', $._pattern)),
 
     // ----------------------------------------------------------------- type aliases
 

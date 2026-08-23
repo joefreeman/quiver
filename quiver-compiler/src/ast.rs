@@ -191,13 +191,12 @@ pub struct Assertion {
     /// `e`, not the binding's `Ok`/nil verdict. The verdict is what the match spelling
     /// (`e ~> =P //= []`) observes, that being the chain's value there.
     pub after: usize,
-    /// A prose note following the pattern, separated from it by three or more spaces and
-    /// running to the end of the line; ignored by the compiler, preserved by the formatter.
-    pub note: Option<String>,
     /// Whether the assertion sits on its own line (a leading `//=` continuing the line above)
     /// rather than trailing at the end of it; preserved by the formatter.
     pub own_line: bool,
-    /// Span of the whole `//= …`, for diagnostics.
+    /// Span of the `//=` and its pattern, for diagnostics. It stops at the pattern's end, so a
+    /// prose note — an ordinary trailing comment, `//= P // why` — falls outside it and attaches
+    /// to the assertion as trivia rather than being swallowed by it.
     pub span: Spanned,
 }
 

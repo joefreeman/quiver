@@ -6,7 +6,7 @@ rationals and surds too. What is here has no such analogue: truncating quotient 
 integer square root, and the bitwise primitives.
 
 ```quiver
-%int.div [17, 5]              //= 3   where %num.div, being exact, would answer 17/5
+%int.div [17, 5]              //= 3 // where %num.div, being exact, would answer 17/5
 ```
 
 ## Quotient and remainder
@@ -72,7 +72,7 @@ Rounding down is the whole difference from `%num.sqrt`, which stays exact by ans
 
 ```quiver
 %int.sqrt 8                   //= 2
-%num.sqrt 8                   //= Surd[0, 2, 2]   2√2
+%num.sqrt 8                   //= Surd[0, 2, 2] // 2√2
 ```
 
 ## Bitwise operations

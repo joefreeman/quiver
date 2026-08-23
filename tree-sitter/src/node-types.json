@@ -311,16 +311,6 @@
           }
         ]
       }
-    },
-    "children": {
-      "multiple": false,
-      "required": false,
-      "types": [
-        {
-          "type": "assertion_note",
-          "named": true
-        }
-      ]
     }
   },
   {
@@ -3145,10 +3135,6 @@
   },
   {
     "type": "annotation_name",
-    "named": true
-  },
-  {
-    "type": "assertion_note",
     "named": true
   },
   {

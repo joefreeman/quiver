@@ -100,11 +100,11 @@ A URL that does not parse is nil, like any other failed match, so a caller eithe
 it or lets the sequence end.
 
 ```quiver
-%url.parse "not a url"           //= []   no scheme separator
-%url.parse "://example.com"      //= []   no scheme
-%url.parse "http:///p"           //= []   no host
-%url.parse "http:/example.com"   //= []   one slash, so no authority
-%url.parse "http://h:notaport/"  //= []   the port is not a number
+%url.parse "not a url"           //= [] // no scheme separator
+%url.parse "://example.com"      //= [] // no scheme
+%url.parse "http:///p"           //= [] // no host
+%url.parse "http:/example.com"   //= [] // one slash, so no authority
+%url.parse "http://h:notaport/"  //= [] // the port is not a number
 ```
 
 Since it is nil, a guard is a step boundary and nothing more:
@@ -221,5 +221,5 @@ A reference that composes into something that is not a well-formed URL is nil, e
 bad `parse` is:
 
 ```quiver
-%url.resolve [base, "//"]      //= []   scheme-relative, but with no host
+%url.resolve [base, "//"]      //= [] // scheme-relative, but with no host
 ```

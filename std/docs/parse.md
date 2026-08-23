@@ -118,7 +118,7 @@ result is a `Str` over whatever bytes those escapes produced, which need not be 
 
 ```quiver
 %parse.run ["\"a\\nb\"", %parse.quoted]     //= "a\nb"
-%parse.run ["\"a\\b\\f\"", %parse.quoted]   //= Str[<61080c>]   backspace, form feed
+%parse.run ["\"a\\b\\f\"", %parse.quoted]   //= Str[<61080c>] // backspace, form feed
 ```
 
 ## Sequencing

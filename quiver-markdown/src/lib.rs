@@ -73,10 +73,11 @@ fn failure_expectation(source: &str) -> Option<String> {
             }
             '"' => quoted = !quoted,
             '/' if !quoted && line[index..].starts_with("//!") => {
-                // As after a `//=` pattern, a run of three or more spaces starts a prose note
-                // that is not part of the expectation.
+                // As after a `//=` pattern, a `//` ends the expectation and starts a prose note.
+                // The cut is visible, which matters more here than there: the expectation is
+                // itself prose, so nothing but the marker says where the checked text stops.
                 let rest = line[index + 3..].trim_start();
-                let message = match rest.find("   ") {
+                let message = match rest.find("//") {
                     Some(note) => &rest[..note],
                     None => rest,
                 };
@@ -428,11 +429,11 @@ mod tests {
         let block = Block {
             mode: Mode::Session,
             line: 1,
-            source: "5 ~> 99   //! must use the value   a prose note\nx = \"//! not this\"\n1 //!"
+            source: "5 ~> 99 //! must use the value // a prose note\nx = \"//! not this\"\n1 //!"
                 .to_string(),
         };
         let steps = block.steps().unwrap();
-        // Three or more spaces end the expectation and start a note, as after a `//=` pattern.
+        // A `//` ends the expectation and starts a note, as after a `//=` pattern.
         assert_eq!(
             steps[0].expect_failure.as_deref(),
             Some("must use the value")

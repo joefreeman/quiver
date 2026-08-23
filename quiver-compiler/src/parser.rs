@@ -3178,39 +3178,39 @@ fn sequence_boundary_cut(input: Span) -> IResult<Span, ()> {
     Ok((input, ()))
 }
 
-/// A step-final assertion: `//= P`, with an optional prose note separated from the pattern by
-/// three or more spaces (the note runs to the end of the line). The pattern is ordinary match
-/// grammar; once the marker is seen, a malformed pattern is a hard error rather than a
-/// backtrack, since the text can no longer be anything else. Like a comment, the assertion
-/// terminates its line: code after the pattern is a hard error (smuggled out with the
-/// otherwise-unused `CrLf` code, which `parse` maps to `AssertionNotLineFinal`).
+/// A step-final assertion: `//= P`. The pattern is ordinary match grammar; once the marker is
+/// seen, a malformed pattern is a hard error rather than a backtrack, since the text can no
+/// longer be anything else.
+///
+/// The assertion ends at its pattern, and the only thing that may follow on the line is an
+/// ordinary `//` comment — which is how a prose note explaining the step is written, and which
+/// the enclosing whitespace consumes as the trivia it is. Code after the pattern is a hard error
+/// (smuggled out with the otherwise-unused `CrLf` code, which `parse` maps to
+/// `AssertionNotLineFinal`), and so is a second `//=`, which would otherwise be read as prose.
 fn assertion(input: Span) -> IResult<Span, Assertion> {
     let start = input;
     let (input, _) = tag("//=")(input)?;
     let (input, _) = space0(input)?;
     let (input, pattern) = cut(match_pattern)(input)?;
-    let (input, note) = opt(map(
-        pair(
-            verify(space1, |gap: &Span| gap.fragment().len() >= 3),
-            take_while1(|c| c != '\n' && c != '\r'),
-        ),
-        |(_, note): (_, Span)| note.fragment().trim_end().to_string(),
-    ))(input)?;
-    let (input, _) = space0(input)?;
-    if !input.fragment().is_empty() && !input.fragment().starts_with(['\n', '\r']) {
+    let span = span_between(start, input);
+    let (rest, _) = space0(input)?;
+    let remainder = rest.fragment();
+    let line_final = remainder.is_empty()
+        || remainder.starts_with(['\n', '\r'])
+        || (remainder.starts_with("//") && !remainder.starts_with("//="));
+    if !line_final {
         return Err(nom::Err::Failure(nom::error::Error::new(
-            input,
+            rest,
             nom::error::ErrorKind::CrLf,
         )));
     }
     Ok((
-        input,
+        rest,
         Assertion {
             pattern,
             after: 0,
-            note,
             own_line: false,
-            span: Spanned(Some(span_between(start, input))),
+            span: Spanned(Some(span)),
         },
     ))
 }

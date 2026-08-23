@@ -21,9 +21,9 @@ A range is a *description*, not a sequence. Nothing is walked until `iter` turns
 Four constructors, differing only in what they leave implicit.
 
 ```quiver
-%range.to 5                   //= Range[0, 5, 1]       0 up to 5
+%range.to 5                   //= Range[0, 5, 1] // 0 up to 5
 %range.between [3, 8]         //= Range[3, 8, 1]
-%range.from 10                //= Range[10, None, 1]   no upper bound
+%range.from 10                //= Range[10, None, 1] // no upper bound
 %range.new [0, 10, 2]         //= Range[0, 10, 2]
 ```
 
@@ -80,8 +80,8 @@ an ordinary empty walk rather than a failure, so it collects to `Nil` like any o
 ```quiver
 %range.new [5, 5, 1] ~> %range.iter ~ ~> %list.collect ~     //= Nil
 %range.to 0 ~> %range.iter ~ ~> %list.collect ~              //= Nil
-%range.between [8, 3] ~> %range.iter ~ ~> %list.collect ~    //= Nil   ascending, start past stop
-%range.new [5, 10, -1] ~> %range.iter ~ ~> %list.collect ~   //= Nil   descending, likewise
+%range.between [8, 3] ~> %range.iter ~ ~> %list.collect ~    //= Nil // ascending, start past stop
+%range.new [5, 10, -1] ~> %range.iter ~ ~> %list.collect ~   //= Nil // descending, likewise
 ```
 
 ## Unbounded ranges

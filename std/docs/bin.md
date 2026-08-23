@@ -68,9 +68,9 @@ implementation detail of `concat` alone.
 result is the difference, and an empty range is the empty binary. `<68656c6c6f>` is `"hello"`:
 
 ```quiver
-%bin.slice [<68656c6c6f>, 0, 3]   //= <68656c>   "hel"
-%bin.slice [<68656c6c6f>, 2, 5]   //= <6c6c6f>   "llo"
-%bin.slice [<68656c6c6f>, 1, 4]   //= <656c6c>   "ell"
+%bin.slice [<68656c6c6f>, 0, 3]   //= <68656c> // "hel"
+%bin.slice [<68656c6c6f>, 2, 5]   //= <6c6c6f> // "llo"
+%bin.slice [<68656c6c6f>, 1, 4]   //= <656c6c> // "ell"
 %bin.slice [<68656c6c6f>, 2, 2]   //= <>
 %bin.slice [<68656c6c6f>, 0, 5]   //= <68656c6c6f>
 ```
@@ -79,11 +79,11 @@ result is the difference, and an empty range is the empty binary. `<68656c6c6f>`
 is none — an ordinary "found nothing", so it ends the sequence like any other.
 
 ```quiver
-%bin.index [<68656c6c6f>, 108, 0]   //= 2    the first 'l'
-%bin.index [<68656c6c6f>, 108, 3]   //= 3    the offset skips it; the second 'l'
-%bin.index [<68656c6c6f>, 111, 0]   //= 4    'o'
-%bin.index [<68656c6c6f>, 122, 0]   //= []   no 'z'
-%bin.index [<68656c6c6f>, 104, 5]   //= []   the offset is past the end
+%bin.index [<68656c6c6f>, 108, 0]   //= 2 // the first 'l'
+%bin.index [<68656c6c6f>, 108, 3]   //= 3 // the offset skips it; the second 'l'
+%bin.index [<68656c6c6f>, 111, 0]   //= 4 // 'o'
+%bin.index [<68656c6c6f>, 122, 0]   //= [] // no 'z'
+%bin.index [<68656c6c6f>, 104, 5]   //= [] // the offset is past the end
 ```
 
 The search crosses a concatenation boundary, since the rope is invisible to it:
@@ -97,9 +97,9 @@ The search crosses a concatenation boundary, since the rope is invisible to it:
 `get_byte` and `set_byte` address whole bytes, with a value from 0 to 255.
 
 ```quiver
-%bin.get_byte [<68656c6c6f>, 0]      //= 104   <68>
-%bin.get_byte [<68656c6c6f>, 1]      //= 101   <65>
-%bin.get_byte [<68656c6c6f>, 4]      //= 111   <6f>
+%bin.get_byte [<68656c6c6f>, 0]      //= 104 // <68>
+%bin.get_byte [<68656c6c6f>, 1]      //= 101 // <65>
+%bin.get_byte [<68656c6c6f>, 4]      //= 111 // <6f>
 %bin.set_byte [<00000000>, 0, 255]   //= <ff000000>
 %bin.set_byte [<00000000>, 2, 170]   //= <0000aa00>
 ```
@@ -121,10 +121,10 @@ of byte 0, bit 7 the bottom bit of byte 0, bit 8 the top bit of byte 1. That is 
 a wire format uses, so a bitmap read this way matches the way it is written down.
 
 ```quiver
-%bin.get_bit [<80>, 0]         //= 1   <80> is 1000_0000
+%bin.get_bit [<80>, 0]         //= 1 // <80> is 1000_0000
 %bin.get_bit [<80>, 7]         //= 0
 %bin.get_bit [<ff>, 3]         //= 1
-%bin.get_bit [<ff00>, 8]       //= 0   the first bit of the second byte
+%bin.get_bit [<ff00>, 8]       //= 0 // the first bit of the second byte
 ```
 
 ```quiver
@@ -156,7 +156,7 @@ fields are laid down.
 
 ```quiver
 %bin.append [<68656c>, 108, 1]     //= <68656c6c>
-%bin.append [<>, 1751477356, 4]    //= <68656c6c>   the same four bytes, in one go
+%bin.append [<>, 1751477356, 4]    //= <68656c6c> // the same four bytes, in one go
 ```
 
 The width is stated, not inferred, so a small value still occupies its full field:
@@ -171,7 +171,7 @@ Encoding UTF-8 by hand shows the pattern — 'A' is one byte, 'é' two, '€' th
 ```quiver
 %bin.append [<>, 65, 1]
 ~> %bin.append [~, 50089, 2]
-~> %bin.append [~, 14844588, 3]   //= <41c3a9e282ac>   "Aé€"
+~> %bin.append [~, 14844588, 3]   //= <41c3a9e282ac> // "Aé€"
 ```
 
 A value that does not fit its stated width, or a negative one, is a runtime error:
@@ -227,7 +227,7 @@ significant, so a left shift moves bits toward the front.
 ```quiver
 %bin.shift [<0102>, 8]        //= <0200>
 %bin.shift [<0102>, -8]       //= <0001>
-%bin.shift [<ff>, 100]        //= <00>   shifted out entirely
+%bin.shift [<ff>, 100]        //= <00> // shifted out entirely
 ```
 
 Chained, the two families read as one expression — `¬(a ∧ b)`:
@@ -252,8 +252,8 @@ Text that is not hex is nil rather than an error — it is input, so failing to 
 value the caller can branch on.
 
 ```quiver
-%bin.from_hex "abc"           //= []   odd length
-%bin.from_hex "zz"            //= []   not hex digits
+%bin.from_hex "abc"           //= [] // odd length
+%bin.from_hex "zz"            //= [] // not hex digits
 ```
 
 This is the readable form of a digest, and is what a hash is usually compared in:
@@ -261,7 +261,7 @@ This is the readable form of a digest, and is what a hash is usually compared in
 ```quiver
 d = "abc" ~> .0 ~> %hash.sha256 ~
 %bin.to_hex d                           //= "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-%bin.to_hex d ~> %bin.from_hex ~ ~> =&d   //= Ok   the round trip is exact
+%bin.to_hex d ~> %bin.from_hex ~ ~> =&d   //= Ok // the round trip is exact
 ```
 
 ## Base64
@@ -292,7 +292,7 @@ Padding is required, and it may only appear in the final quantum — so a malfor
 nil, and a decoder cannot be talked into accepting two concatenated messages as one.
 
 ```quiver
-%bin.from_base64 "ba!d"       //= []   characters outside the alphabet
-%bin.from_base64 "abcde"      //= []   length not a multiple of four
-%bin.from_base64 "Zg==Zm9v"   //= []   padding before the final quantum
+%bin.from_base64 "ba!d"       //= [] // characters outside the alphabet
+%bin.from_base64 "abcde"      //= [] // length not a multiple of four
+%bin.from_base64 "Zg==Zm9v"   //= [] // padding before the final quantum
 ```

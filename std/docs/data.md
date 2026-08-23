@@ -91,7 +91,7 @@ Whitespace and a trailing comma are as free as they are in code.
 ```quiver
 %data.decode<P[x: 'int, y: 'int]> "P[x: 1, y: 2]"   //= P[x: 1, y: 2]
 %data.decode<P[x: 'int, y: 'int]> "P[ 1,\n  2, ]"   //= P[x: 1, y: 2]
-%data.decode<P[x: 'int]> "P[y: 1]"                  //= []   the label is not this shape's
+%data.decode<P[x: 'int]> "P[y: 1]"                  //= [] // the label is not this shape's
 ```
 
 ## Binaries
@@ -103,8 +103,8 @@ never emits grouping, so this only ever matters for text a person wrote.
 ```quiver
 %data.decode<'bin> "<6a09e667 bb67ae85>"   //= <6a09e667bb67ae85>
 %data.decode<'bin> "<>"                    //= <>
-%data.decode<'bin> "<0a1 b2c>"             //= []   groups are whole bytes
-%data.decode<'bin> "< 0a1b>"               //= []   a separator pads nothing
+%data.decode<'bin> "<0a1 b2c>"             //= [] // groups are whole bytes
+%data.decode<'bin> "< 0a1b>"               //= [] // a separator pads nothing
 %data.decode<'bin> "<0a1b >"               //= []
 ```
 
@@ -153,12 +153,12 @@ arity, malformed bytes, input left over at the end, a raw newline inside a strin
 expected type too partial to build a value from.
 
 ```quiver
-%data.decode<(A | B)> "C"          //= []   no such member
-%data.decode<P['int]> "P[1, 2]"    //= []   arity
-%data.decode<'bin> "<0a1>"         //= []   odd hex
-%data.decode<'int> "4 2"           //= []   trailing input
-%data.decode<Str['bin]> "\"a\nb\""   //= []   a string literal ends at the line
-%data.decode<(x: 'int)> "[x: 1]"   //= []   a partial type has no layout to construct
+%data.decode<(A | B)> "C"          //= [] // no such member
+%data.decode<P['int]> "P[1, 2]"    //= [] // arity
+%data.decode<'bin> "<0a1>"         //= [] // odd hex
+%data.decode<'int> "4 2"           //= [] // trailing input
+%data.decode<Str['bin]> "\"a\nb\""   //= [] // a string literal ends at the line
+%data.decode<(x: 'int)> "[x: 1]"   //= [] // a partial type has no layout to construct
 ```
 
 A nil *member* is the one case where success and failure are the same answer — by design, and
