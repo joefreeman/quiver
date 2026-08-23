@@ -78,6 +78,9 @@ pub enum ErrorKind {
     AssertionOnAlias,
     AssertionNotLineFinal,
 
+    // Nesting
+    NestingTooDeep,
+
     // Generic parser errors
     ParseError(String),
     UnexpectedToken { expected: String, found: String },
@@ -116,6 +119,12 @@ impl std::fmt::Display for ErrorKind {
             }
             ErrorKind::AssertionNotLineFinal => {
                 write!(f, "A '//=' assertion must end its line")
+            }
+            ErrorKind::NestingTooDeep => {
+                write!(
+                    f,
+                    "Expression nests more than {MAX_NESTING_DEPTH} levels deep"
+                )
             }
 
             ErrorKind::ParseError(msg) => write!(f, "Parse error: {}", msg),
@@ -159,6 +168,9 @@ impl ErrorKind {
             }
             ErrorKind::AssertionNotLineFinal => {
                 "An assertion runs to the end of its line, like a comment; move code after it to the next line"
+            }
+            ErrorKind::NestingTooDeep => {
+                "Break the expression up — bind an inner part to a name and refer to it"
             }
             ErrorKind::HexMalformed(_) => {
                 "Binary literals are an even number of hexadecimal digits between angle brackets: <0a1b>"
@@ -314,6 +326,11 @@ pub fn parse(source: &str) -> Result<Sequence, Error> {
                     if is_failure && e.code == nom::error::ErrorKind::CrLf {
                         return Err(Error::new(ErrorKind::AssertionNotLineFinal, span));
                     }
+                    // `primary` smuggles an exhausted nesting budget out as a hard failure
+                    // with the (otherwise unused) `TooLarge` code.
+                    if is_failure && e.code == nom::error::ErrorKind::TooLarge {
+                        return Err(Error::new(ErrorKind::NestingTooDeep, span));
+                    }
 
                     let kind = match e.code {
                         nom::error::ErrorKind::Eof => detect_error_kind(source, span.as_ref()),
@@ -363,9 +380,13 @@ pub fn parse_chain_exact(source: &str) -> Result<Chain, Error> {
         Err(e) => {
             let (span, kind) = match &e {
                 nom::Err::Error(e) | nom::Err::Failure(e) => {
+                    let span = Some(SourceSpan::from_span(e.input));
+                    if e.code == nom::error::ErrorKind::TooLarge {
+                        return Err(Error::new(ErrorKind::NestingTooDeep, span));
+                    }
                     let found = e.input.fragment().chars().take(10).collect::<String>();
                     (
-                        Some(SourceSpan::from_span(e.input)),
+                        span,
                         ErrorKind::UnexpectedToken {
                             expected: "an expression".to_string(),
                             found,
@@ -1333,6 +1354,14 @@ fn field_default(input: Span) -> IResult<Span, Chain> {
 }
 
 fn field_type(input: Span) -> IResult<Span, FieldType> {
+    // Types are the third recursion with its own functions, reached through a tuple type's
+    // field list; it draws on the same budget as terms and patterns.
+    let Some(_nesting) = NestingGuard::enter() else {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    };
     let start = input;
     let (rest, base) = field_type_base(input)?;
     // Spreads name no field, so they take no default.
@@ -2811,6 +2840,16 @@ fn as_pattern(input: Span) -> IResult<Span, Match> {
 }
 
 fn match_pattern(input: Span) -> IResult<Span, Match> {
+    // Patterns recur through their own functions rather than through `primary`, and a step
+    // tries the binding spelling (`P = value`) before anything else, so a deeply nested
+    // tuple is walked here as a pattern whether or not it turns out to be one. It needs
+    // its own share of the same budget.
+    let Some(_nesting) = NestingGuard::enter() else {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    };
     alt((
         // Pin with & prefix: a variable- or `$`-rooted access path to check the value against.
         pin_pattern,
@@ -2904,7 +2943,51 @@ fn process_ref_term(input: Span) -> IResult<Span, Term> {
     )(input)
 }
 
+/// How deeply terms may nest. Tuples, blocks and chains all recur through [`primary`], so
+/// a budget spent there bounds every nesting path at once. Source this deep is
+/// pathological rather than merely large — the limit sits several times above anything
+/// written by hand, and far enough below the depth that exhausts the native stack that the
+/// smallest stack the parser runs on (the wasm host's) still clears it. Without the bound
+/// the recursion aborts the process, which reports nothing and takes the whole host with
+/// it.
+pub(crate) const MAX_NESTING_DEPTH: usize = 64;
+
+thread_local! {
+    static NESTING_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Holds one level of the nesting budget, releasing it on drop — including when a parser
+/// backtracks out through an error, which is why this is a guard rather than a pair of
+/// adjustments around the recursive call.
+pub(crate) struct NestingGuard;
+
+impl NestingGuard {
+    pub(crate) fn enter() -> Option<Self> {
+        NESTING_DEPTH.with(|depth| {
+            let current = depth.get();
+            (current < MAX_NESTING_DEPTH).then(|| {
+                depth.set(current + 1);
+                NestingGuard
+            })
+        })
+    }
+}
+
+impl Drop for NestingGuard {
+    fn drop(&mut self) {
+        NESTING_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
 fn primary(input: Span) -> IResult<Span, Term> {
+    // Smuggled out as a hard failure with the (otherwise unused) `TooLarge` code, so it
+    // survives the surrounding `alt`s rather than reading as "this branch did not match".
+    let Some(_nesting) = NestingGuard::enter() else {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    };
     alt((
         // String terms (before literals to handle quotes)
         string_term,
@@ -3873,6 +3956,54 @@ mod tests {
         assert_ne!(
             parse("#{ ![Done] }").unwrap(),
             parse("#{ !#[Done] }").unwrap()
+        );
+    }
+
+    /// Deeply nested source must be a diagnostic, not a stack overflow: the recursive
+    /// descent aborts the process when it runs out of native stack, which reports nothing
+    /// and takes the host down with it. Terms, patterns and types each recur through their
+    /// own functions, so each needs the budget — a pattern in particular is walked for
+    /// every step, since a step tries the binding spelling (`P = value`) first.
+    fn nest(n: usize, wrap: impl Fn(&str) -> String, seed: &str) -> String {
+        let mut source = seed.to_string();
+        for _ in 0..n {
+            source = wrap(&source);
+        }
+        source
+    }
+
+    #[test]
+    fn deep_nesting_is_an_error_rather_than_a_stack_overflow() {
+        let cases = [
+            ("term", nest(3000, |s| format!("Cons[1, {s}]"), "Nil")),
+            (
+                "pattern",
+                format!("{} = x", nest(3000, |s| format!("Cons[1, {s}]"), "Nil")),
+            ),
+            (
+                "type",
+                format!("'deep = {}", nest(3000, |s| format!("[{s}]"), "'int")),
+            ),
+        ];
+        for (what, source) in cases {
+            let error = parse(&source).expect_err(what);
+            assert!(
+                matches!(error.kind, ErrorKind::NestingTooDeep),
+                "{what}: expected a nesting error, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_nesting_is_accepted() {
+        // Well inside the budget, and far deeper than anything written by hand.
+        assert!(parse(&nest(30, |s| format!("Cons[1, {s}]"), "Nil")).is_ok());
+        assert!(
+            parse(&format!(
+                "'deep = {}",
+                nest(30, |s| format!("[{s}]"), "'int")
+            ))
+            .is_ok()
         );
     }
 }
