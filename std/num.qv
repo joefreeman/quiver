@@ -1091,14 +1091,15 @@ round = #'opt {
 }
 
 // --- the `%num{ … }` dialect -------------------------------------------------------
-// Infix arithmetic over this module's own exports: `%num{ x + (y / 2) * ~ }`. Operands
-// are integers, parenthesized groups, and host *terms* — a variable, `~`, a field
-// access… — located by the host's `term` prefix-parser and spliced as an `Unquote`,
-// evaluated in the caller's scope with the dialect term's flowing value as input. A
-// term rather than a chain, so ` - 1` after an operand stays an operator, not a further
-// term. `+ - * /` map to `add`/`sub`/`mul`/`div` and unary `-` to `neg`, with the usual
-// precedence. Built from `%parse` combinators (`chainl` per precedence level) and the
-// `%meta` constructors.
+// Infix arithmetic over this module's own exports: `%num{ 2 * pi * r ^ 2 }`. Operands are
+// decimal literals, the constants `pi` (or `π`) and `e`, parenthesized groups, and host
+// *terms* — a variable, `~`, a field access… — located by the host's `term` prefix-parser
+// and spliced as an `Unquote`, evaluated in the caller's scope with the dialect term's
+// flowing value as input. A term rather than a chain, so ` - 1` after an operand stays an
+// operator, not a further term. `+ - * / ^` map to `add`/`sub`/`mul`/`div`/`pow` and unary
+// `-` to `neg`, with the usual precedence: `^` binds tightest and to the right, so
+// `-2 ^ 2` is `-4` and `2 ^ 3 ^ 2` is `2 ^ 9`. Built from `%parse` combinators (`chainl`
+// per precedence level) and the `%meta` constructors.
 
 'dexpr = '%meta.expr
 
@@ -1126,6 +1127,71 @@ d_mul_op = {
   %parse.right [%parse.ws, ops]
 }
 
+d_pow_op = %parse.right [%parse.ws, %parse.byte [94, "'^'"]]
+
+// `[n, k, end]` for the run of decimal digits in `data` from `pos` to `end`: `k` of them,
+// accumulated onto `n`.
+d_digits = #[(data): 'bin, (pos): 'int, (len): 'int, (n): 'int, (k): 'int] -> ['int, 'int, 'int] {
+  | __integer_compare__ [$pos, $len] ~> =-1
+    %bin.get_byte [$data, $pos] ~> =('int)b
+    __integer_compare__ [b, 48] ~> =(0 | 1)
+    __integer_compare__ [b, 57] ~> =(-1 | 0) => ^ [
+      $data,
+      __integer_add__ [$pos, 1],
+      $len,
+      __integer_multiply__ [$n, 10] ~> __integer_add__ [~, __integer_subtract__ [b, 48]],
+      __integer_add__ [$k, 1],
+    ]
+  | [$n, $k, $pos]
+}
+
+// An unsigned decimal literal: an integer, or with a fractional part the reduced rational, as
+// the host literal is — `1.5` is `3/2`, and `1.0` the rational `1/1`. A fraction is written
+// with `/`, so it is a division, and binds as one: `1/3 ^ 2` is `1/9`.
+d_number = #'%parse {
+  =st
+  d_digits [st.data, st.pos, st.len, 0, 0] ~> =[n, k, end]
+  {
+    | k ~> =0 => %parse.fail_in [st, "a number"]
+    | __integer_compare__ [end, st.len] ~> =-1
+      %bin.get_byte [st.data, end] ~> =46 => {
+      start = __integer_add__ [end, 1]
+      d_digits [st.data, start, st.len, n, 0] ~> =[m, j, end2]
+      {
+        | j ~> =0 => %parse.fail_in [st[..., pos: start], "a digit"]
+        | reduce Rational[m, ipow [10, j, 1]] ~> =Rational[p, q] => [
+            Tuple[name: "Rational", fields: Cons[p, Cons[q, Nil]]],
+            st[..., pos: end2],
+          ]
+      }
+    }
+    | [n, st[..., pos: end]]
+  }
+}
+
+// A generator's monomial `g¹`, as the literal `Tx[g, Cons[[1, 1], Nil]]`.
+d_tx = #'dexpr {
+  one = Tuple[name: Nil, fields: Cons[1, Cons[1, Nil]]]
+  Tuple[name: "Tx", fields: Cons[$, Cons[Tuple[name: "Cons", fields: Cons[one, Cons[Nil, Nil]]], Nil]]]
+}
+
+// The constants, as literals: `pi` or `π`, and `e`. A longer name, such as `pie` or `e2`, is
+// left to the host.
+d_constant = {
+  pi = Tuple[name: "Pi", fields: Nil] ~> d_tx ~
+  e = Tuple[name: "E", fields: Cons[1, Nil]] ~> d_tx ~
+  named = #'%parse {
+    =st
+    %parse.ident st ~> {
+      | =["pi", st2] => [pi, st2]
+      | =["e", st2] => [e, st2]
+      | %parse.fail_in [st, "a constant"]
+    }
+  }
+  symbol = %parse.map [%parse.literal ["π", "'π'"], #{ pi }]
+  %parse.alt2 [named, symbol]
+}
+
 // One host term as an operand: the host prefix-parser answers the exclusive end offset
 // of the term starting exactly at the state's position, and its span is spliced.
 d_term = #'%meta.cb {
@@ -1142,14 +1208,16 @@ d_term = #'%meta.cb {
   }
 }
 
-// The two precedence levels over a factor parser.
+// The two infix precedence levels over a factor parser.
 d_expr_of = #'%parse.p<'dexpr> {
   =factor; term = %parse.chainl [factor, d_mul_op]; %parse.chainl [term, d_add_op]
 }
 
-// The factor grammar, self-passed (together with the host-term operand parser) to tie
-// the factor↔parenthesized-expression recursion. Alternative order matters: the
-// dialect's own parens and number literals first, the host term last.
+// The factor grammar — unary `-` and `^` over an atom — self-passed (together with the
+// host-term operand parser) to tie the factor↔parenthesized-expression recursion. The
+// exponent is itself a factor, which makes `^` right-associative and admits `2 ^ -1`.
+// Alternative order matters: the dialect's own parens, literals and constants first, the
+// host term last.
 d_factor_step = #[
   (self): ^,
   (term): '%parse.p<'dexpr>,
@@ -1172,7 +1240,16 @@ d_factor_step = #[
 
   paren = %parse.left [p1, close]
 
-  core = %parse.alt4 [paren, %parse.int, neg, term]
+  atom = %parse.alt4 [paren, d_number, d_constant, term]
+
+  exponent = %parse.right [d_pow_op, factor] ~> %parse.opt ~
+
+  power = %parse.then [atom, exponent] ~> %parse.map [~, #{
+    | =[base, Some[x]] => %meta.call2 ["pow", base, x]
+    | $0
+  }]
+
+  core = %parse.alt2 [neg, power]
 
   core_ws = %parse.right [%parse.ws, core]
   core_ws $st
@@ -1428,6 +1505,80 @@ ln = #'opt {
   | =('coeff)c => ln_coeff c
   | =Tx[E[d], Cons[[k, c], Nil]] => add [ln_coeff c, Rational[k, d] ~> reduce ~ ~> lower ~]
   | =Surd[0, b, n] => add [ln_coeff b, mul [Rational[1, 2], ln_coeff n]]
+  | [] ~> { :error Unrepresentable }
+}
+
+// --- Powers ---
+
+// cⁿ for a coefficient and an integer `n ≥ 0`. A rational's terms stay coprime, and its
+// denominator positive, under a power.
+cpow_nat = #['coeff, 'int] {
+  | =[('int)a, n] => ipow [a, n, 1]
+  | =[Rational[a, b], n] => Rational[ipow [a, n, 1], ipow [b, n, 1]]
+}
+
+// cⁿ for a coefficient and any integer n; nil for zero to a negative power.
+cpow = #['coeff, 'int] {
+  | =[c, n]; __integer_compare__ [n, 0] ~> =-1 => rdiv [1, cpow_nat [c, __integer_multiply__ [n, -1]]]
+  | cpow_nat $
+}
+
+// xⁿ for an integer `n ≥ 0`, times `acc`, by repeated squaring through `mul`; nil once a
+// product leaves the representation, as `(ln 2)²` does.
+npow = #['opt, 'int, 'opt] -> 'opt {
+  | =[_, 0, acc] => acc
+  | =[x, 1, acc] => mul [acc, x]
+  | =[x, n, acc]; __integer_modulo__ [n, 2] ~> =1 => ^ [
+      mul [x, x],
+      __integer_divide__ [n, 2],
+      mul [acc, x],
+    ]
+  | =[x, n, acc] => ^ [mul [x, x], __integer_divide__ [n, 2], acc]
+}
+
+// c^(p/q) for a positive coefficient, through its logarithm: exact when every prime's
+// exponent comes out an integer or a half.
+cqpow = #['coeff, 'int, 'int] { =[c, p, q]; mul [Rational[p, q], ln_coeff c] ~> exp ~ }
+
+// x^(p/q), `q ≥ 2`, for a positive number: a coefficient, or a monomial in a generator whose
+// coefficient's power is rational and, for π, whose exponent stays an integer.
+qpow = #[', 'int, 'int] {
+  | =[('coeff)c, p, q] => cqpow [c, p, q]
+  | =[Tx[Pi, Cons[[k, c], Nil]], p, q]
+    kp = __integer_multiply__ [k, p]
+    __integer_modulo__ [kp, q] ~> =0
+    cqpow [c, p, q] ~> =('coeff)r => tx_build [Pi, Cons[[__integer_divide__ [kp, q], r], Nil]]
+  | =[Tx[E[d], Cons[[k, c], Nil]], p, q]; cqpow [c, p, q] ~> =('coeff)r => tx_build [
+      E[__integer_multiply__ [d, q]],
+      Cons[[__integer_multiply__ [k, p], r], Nil],
+    ]
+  | [] ~> { :error Unrepresentable }
+}
+
+pow = #['opt, 'opt] {
+  :doc "Raises a number to a power: exact for an integer power of any number whose products stay representable; for a rational power of a rational, or of a monomial in π or e, where the result is rational or a single surd (a negative base needs an odd denominator); and for any power of e that `exp` takes. Nil otherwise, and for zero to a negative power."
+  // Coefficients to integer powers first, the hot case.
+  | =[('coeff)x, ('int)n] => cpow [x, n]
+  | =[[], _] => $0
+  | =[_, []] => $1
+  | =[x, ('int)n] => {
+    | __integer_compare__ [n, 0] ~> =-1 => npow [x, __integer_multiply__ [n, -1], 1] ~> div [1, ~]
+    | npow [x, n, 1]
+  }
+  // A zero base with a non-integer power, which is never zero itself.
+  | sign $0 ~> =0 => { sign $1 ~> =1 => 0 | [] ~> { :error DivisionByZero } }
+  | =[x, Rational[p, q]] => {
+    | sign x ~> =1 => qpow [x, p, q]
+    | __integer_modulo__ [q, 2] ~> =0 => [] ~> { :error OutOfDomain }
+    // An odd root of a negative number is the negated root of its magnitude.
+    | r = qpow [neg x, p, q]
+      { __integer_modulo__ [p, 2] ~> =0 => r | neg r }
+  }
+  // An irrational power: of a negative number there is no real one, and of anything but 1 or
+  // a power of e there is no exact one.
+  | sign $0 ~> =-1 => [] ~> { :error OutOfDomain }
+  | compare [$0, 1] ~> =0 => 1
+  | =[Tx[E[d], Cons[[k, 1], Nil]], y] => mul [Rational[k, d] ~> reduce ~ ~> lower ~, y] ~> exp ~
   | [] ~> { :error Unrepresentable }
 }
 
@@ -1711,6 +1862,8 @@ approx = #[(value): 'opt, within: 'opt] {
   mul: mul,
 
   div: div,
+
+  pow: pow,
 
   neg: neg,
 

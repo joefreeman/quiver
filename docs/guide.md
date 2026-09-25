@@ -900,7 +900,7 @@ the value it exports:
 [
   area: #' {
     :doc "The shape's area."
-    | =Circle[radius: r] => r ~> %num.mul [~, ~] ~> %num.mul [%num.pi, ~]
+    | =Circle[radius: r] => r ~> %num.pow [~, 2] ~> %num.mul [%num.pi, ~]
     | =Rect[width: w, height: h] => %num.mul [w, h]
   },
 ]
@@ -1389,8 +1389,8 @@ name = "world"
 %html{ <p>hello {name}</p> } ~> %html.render ~   //= "<p>hello world</p>"
 ```
 
-The standard library ships `%list{ … }`, `%dict{ … }`, `%json{ … }`, `%html{ … }` and
-`%html/live{ … }`. A dialect is an ordinary exported function built from `%parse`
+The standard library ships `%num{ … }`, `%list{ … }`, `%dict{ … }`, `%json{ … }`,
+`%html{ … }` and `%html/live{ … }`. A dialect is an ordinary exported function built from `%parse`
 combinators, returning the code IR that `%meta` defines. `%html` exports its grammar seam
 so other modules can layer their own attribute policies over it.
 

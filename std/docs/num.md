@@ -427,6 +427,46 @@ rational term alongside, since e√2 would mix a surd with a power of e:
 %num.ln 2 ~> %num.mul [1/2, ~] ~> %num.add [1, ~] ~> %num.exp ~      //= [] // e√2
 ```
 
+### Powers
+
+`pow` raises a number to a power. An integer power is exact whenever the products are, so it
+takes rationals, surds and polynomials in π or e alike, and a negative power is the
+reciprocal:
+
+```quiver
+%num.pow [2, 10]                        //= 1024
+%num.pow [2/3, -2]                      //= 9/4
+%num.pow [%num.sqrt 2, 3]               //= Surd[0, 2, 2] // 2√2
+%num.pow [%num.add [1, %num.pi], 2]     //= Tx[Pi, Cons[[0, 1], Cons[[1, 2], Cons[[2, 1], Nil]]]] // 1 + 2π + π²
+%num.pow [%num.pi, -1]                  //= Tx[Pi, Cons[[-1, 1], Nil]] // 1/π
+%num.pow [%num.ln 2, 2]                 //= [] // a product of logarithms
+%num.pow [0, -1]                        //= []
+```
+
+A rational power of a rational is exact when the result is rational or a single surd: when,
+factorised, every prime's exponent comes out an integer or a half. A negative base takes only
+an odd denominator, whose root is real:
+
+```quiver
+%num.pow [8, 2/3]                       //= 4
+%num.pow [9/4, -1/2]                    //= 2/3
+%num.pow [4, 1/4]                       //= Surd[0, 1, 2] // √2
+%num.pow [2, 3/2]                       //= Surd[0, 2, 2] // 2√2
+%num.pow [-8, 1/3]                      //= -2
+%num.pow [-4, 1/2]                      //= []
+%num.pow [2, 1/3]                       //= [] // a cube root
+```
+
+A monomial in π or e follows its coefficient, as `sqrt` does, and a power of e takes any
+exponent `exp` does, logarithms included:
+
+```quiver
+%num.pow [%num.e, 1/2]                                     //= Tx[E[2], Cons[[1, 1], Nil]] // √e
+%num.mul [%num.pi, %num.pi] ~> %num.mul [4, ~] ~> %num.pow [~, 3/2]   //= Tx[Pi, Cons[[3, 8], Nil]] // 8π³
+%num.pow [%num.e, %num.ln 2]                               //= 2
+%num.pow [2, %num.pi]                                      //= []
+```
+
 ### Ordering across fields
 
 Every pair of numbers is ordered, exactly, whatever their kinds. Where the difference is
@@ -566,6 +606,39 @@ simplified the same way, which tidies one with an unwieldy denominator.
 %num.approx [pi, within: 0]                  //= []
 ```
 
+## The `%num{ … }` dialect
+
+`%num{ … }` writes arithmetic infix. `+`, `-`, `*`, `/` and `^` are `add`, `sub`, `mul`,
+`div` and `pow`, with the usual precedence: `^` binds tightest, and to the right.
+
+```quiver
+%num{ 1 + 2 * 3 }             //= 7
+%num{ 2 ^ 3 ^ 2 }             //= 512 // 2⁹
+%num{ -2 ^ 2 }                //= -4 // −(2²)
+%num{ 2 ^ -1 }                //= 1/2
+%num{ -(1 + 2) * 4 }          //= -12
+```
+
+A decimal literal is the same rational as outside the dialect, while `/` is always a
+division. So a fraction binds as one:
+
+```quiver
+%num{ 0.5 + 1 }               //= 3/2
+%num{ 1/3 ^ 2 }               //= 1/9 // 1/(3²)
+%num{ (1/3) ^ 2 }             //= 1/9
+%num{ 4 / 2 }                 //= 2/1 // `div` answers a rational
+```
+
+`pi` (or `π`) and `e` are the constants. Any other operand is a Quiver term, such as a
+variable, a field or `~`, evaluated in the surrounding scope:
+
+```quiver
+r = 3
+%num{ pi * r ^ 2 }            //= Tx[Pi, Cons[[1, 9], Nil]] // 9π
+%num{ e ^ (1/2) }             //= Tx[E[2], Cons[[1, 1], Nil]] // √e
+[x: 10, y: 4] ~> %num{ ~.x + ~.y / 2 }   //= 12/1
+```
+
 ## Failures
 
 A nil answered for a non-nil input carries its reason as an `:error` annotation, one of the
@@ -573,7 +646,7 @@ A nil answered for a non-nil input carries its reason as an `:error` annotation,
 
 | tag | when |
 | --- | --- |
-| `DivisionByZero` | a zero divisor |
+| `DivisionByZero` | a zero divisor, or zero to a negative power |
 | `OutOfDomain` | an input the function has no real answer for: `√−1`, `ln 0`, `tan` at a pole, `asin 2`, `atan2` at the origin, the numerator of π |
 | `Unrepresentable` | a result that exists, but not as one of the five kinds: `√2 · √3`, `π + e`, `sin 1` |
 

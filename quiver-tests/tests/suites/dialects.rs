@@ -319,6 +319,13 @@ fn test_num_dialect_flow_and_unary() {
 }
 
 #[test]
+fn test_dialect_call_with_literal_argument() {
+    // `-1` emits `Call[member: "neg", arg: 1]`: a plain-data argument splices as a literal.
+    quiver().evaluate("%num{ -1 }").expect("-1");
+    quiver().evaluate("%num{ 2 ^ -1 }").expect("1/2");
+}
+
+#[test]
 fn test_dict_dialect_generic_values() {
     // The `from` splice unifies dict.from's 'v across mixed 'int / Str values.
     quiver()

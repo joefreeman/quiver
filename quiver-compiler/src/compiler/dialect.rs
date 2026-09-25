@@ -612,6 +612,9 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
 
     /// The span of an `Unquote` value, or `None` for any other expression.
     fn as_unquote(&self, value: &Value) -> Result<Option<(usize, usize)>, Error> {
+        if !matches!(value, Value::Tuple(..)) {
+            return Ok(None);
+        }
         match self.expect_tuple(value)? {
             ("Unquote", _) => self.unquote_span(value).map(Some),
             _ => Ok(None),
