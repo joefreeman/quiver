@@ -820,15 +820,16 @@ fn subtract_one(a: usize, b: usize, stacks: &mut Walk, program: &mut Program) ->
     // already under way keeps the reference whole, which is sound.
     if let Type::Cycle(depth) = ta
         && !matches!(tb, Type::Cycle(_))
-        && let Some(rest) = stacks.resolve_a(depth, program, |walk, program, root| {
-            if !walk.subtracting.insert((root, b)) {
-                return None;
-            }
-            let rest = complement_in(root, b, walk, program);
-            walk.subtracting.remove(&(root, b));
-            Some(rest)
-        })
-        .flatten()
+        && let Some(rest) = stacks
+            .resolve_a(depth, program, |walk, program, root| {
+                if !walk.subtracting.insert((root, b)) {
+                    return None;
+                }
+                let rest = complement_in(root, b, walk, program);
+                walk.subtracting.remove(&(root, b));
+                Some(rest)
+            })
+            .flatten()
     {
         return get_type_variants(rest, program)
             .into_iter()

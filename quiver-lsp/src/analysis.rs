@@ -362,6 +362,26 @@ mod tests {
     }
 
     #[test]
+    fn hover_shows_the_type_an_inferred_parameter_settled_on() {
+        // `$0` starts as the initial `Nil`, and the folder's result widens it to a list; the
+        // body is compiled again, and hover shows the settled type, not the first attempt's.
+        let text = "%list.fold [%list{ 1, 2 }, Nil, #{ Cons[$1, $0] }]";
+        let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "should typecheck: {:?}",
+            analysis.diagnostics
+        );
+        let semantics = analysis.semantics.expect("semantics");
+        let program = analysis.program.expect("program");
+        let info = semantics
+            .at_offset(text.find("$0").unwrap())
+            .expect("parameter access recorded");
+        let shown = quiver_core::format::format_type_by_id(&program, info.type_id);
+        assert!(shown.contains("Cons"), "hover shows {shown}");
+    }
+
+    #[test]
     fn pattern_binding_site_is_hoverable() {
         // Hovering the binding identifier itself yields its type.
         let text = "[x, y] = [1, 2]\nx";

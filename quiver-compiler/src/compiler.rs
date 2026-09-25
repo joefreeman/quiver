@@ -1683,6 +1683,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 .as_ref()
                 .map(|efs| typing::substitute(efs[fields_compiled], &bindings, self.program));
             let field_start = self.codegen.instructions.len();
+            // What a retried field recorded for the language server goes with its instructions.
+            let record_mark = helpers::is_inferred_literal(&field.value)
+                .then(|| self.recorder.as_deref().map(|recorder| recorder.mark()))
+                .flatten();
             // An inferred-parameter literal can widen a variable its own parameter mentions —
             // a folder's result widening `'acc` beyond the initial `Nil` — in which case its body
             // was checked against too narrow a parameter, and is compiled again against the
@@ -1757,6 +1761,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 attempts += 1;
                 self.codegen.instructions.truncate(field_start);
+                if let (Some(recorder), Some(mark)) = (self.recorder.as_deref_mut(), &record_mark) {
+                    recorder.rewind(mark);
+                }
                 bindings = trial;
                 field_expected = Some(widened);
             };
@@ -3499,9 +3506,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 && !binding_sets.is_empty()
                 && !typing::contains_variables(value_type, &*self.program)
                 && {
-                let rest = narrowing::compute_complement(value_type, narrowed_type, self.program);
-                self.is_never(rest)
-            });
+                    let rest =
+                        narrowing::compute_complement(value_type, narrowed_type, self.program);
+                    self.is_never(rest)
+                });
         let final_type = if self.is_nil(result_type) && !self.contains_nil(value_type) {
             result_type
         } else if self.contains_nil(result_type) && !irrefutable {
@@ -6813,23 +6821,38 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         // The init is written, like a call's argument (`@f x`, `@f ~`, `@f []`),
                         // and the flowing value flows into it (`10 ~> @adder [~, 5]`). With none
                         // written, the spawned function is nilary and a value flowing in is
-                        // dropped.
+                        // dropped. A named function's init is elaborated as a call's argument
+                        // is: omitted fields filled from its `:defaults`, positional entries
+                        // given the labels it marked omittable, and a `#{ … }` in it inferring
+                        // its parameter from the function's.
                         let init_type = match argument {
-                            Some(argument) => Some(
-                                self.compile_term(
-                                    *argument,
-                                    FlowingValue {
-                                        ty: value_type,
-                                        provenance: value_provenance,
-                                    },
-                                    on_no_match,
-                                    ripple_context,
-                                    None,
-                                    None,
-                                    false,
-                                )?
-                                .0,
-                            ),
+                            Some(argument) => {
+                                let (argument, expected) = match &*function {
+                                    ast::Term::Access(access) => (
+                                        match self.elaborate_argument(access, &argument)? {
+                                            Some(tuple) => Box::new(ast::Term::Tuple(tuple)),
+                                            None => argument,
+                                        },
+                                        self.callee_parameter_type(access),
+                                    ),
+                                    _ => (argument, None),
+                                };
+                                Some(
+                                    self.compile_term(
+                                        *argument,
+                                        FlowingValue {
+                                            ty: value_type,
+                                            provenance: value_provenance,
+                                        },
+                                        on_no_match,
+                                        ripple_context,
+                                        None,
+                                        expected,
+                                        false,
+                                    )?
+                                    .0,
+                                )
+                            }
                             None => {
                                 if value_type.is_some() {
                                     self.codegen.add_instruction(Instruction::pop());

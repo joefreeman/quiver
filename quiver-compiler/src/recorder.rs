@@ -67,7 +67,32 @@ pub struct Recorder {
     import_member_refs: Vec<(SourceSpan, PathBuf, String)>,
 }
 
+/// A point in a recording (`Recorder::mark`), to rewind to.
+#[derive(Debug)]
+pub struct RecordMark {
+    entries: usize,
+    import_member_refs: usize,
+    definitions: HashMap<String, SourceSpan>,
+}
+
 impl Recorder {
+    /// The recording so far, for `rewind` to return to.
+    pub fn mark(&self) -> RecordMark {
+        RecordMark {
+            entries: self.entries.len(),
+            import_member_refs: self.import_member_refs.len(),
+            definitions: self.definitions.clone(),
+        }
+    }
+
+    /// Drop everything recorded since `mark`: the compile that recorded it was discarded, and
+    /// its facts (a type inferred from a parameter later widened) no longer hold.
+    pub fn rewind(&mut self, mark: &RecordMark) {
+        self.entries.truncate(mark.entries);
+        self.import_member_refs.truncate(mark.import_member_refs);
+        self.definitions.clone_from(&mark.definitions);
+    }
+
     /// Record that `name` is bound at `span` (a binding/definition site).
     pub fn record_definition(&mut self, name: &str, span: SourceSpan) {
         self.definitions.insert(name.to_string(), span);

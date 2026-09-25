@@ -443,3 +443,18 @@ fn test_pattern_reads_the_adopted_labels() {
         .evaluate("f = #[(x): 'int, (y): 'int] { $ ~> =[x: a, y: b]; %num.add [a, b] }; f [1, 2]")
         .expect("3");
 }
+
+#[test]
+fn test_spawn_elaborates_its_init_as_a_call_does() {
+    // A spawn's init is the root function's argument, so it is spelled as one: omittable
+    // labels adopted, defaulted fields filled, an inferred literal typed from the parameter.
+    quiver()
+        .evaluate("f = #[(x): 'int, (y): 'int] { %num.add [$x, $y] }; p = @f [5, 6]; !p")
+        .expect("11");
+    quiver()
+        .evaluate("g = #[(path): '%str, n: 'int = 3] { $n }; q = @g [\"a\"]; !q")
+        .expect("3");
+    quiver()
+        .evaluate("h = #['int, #'int -> 'int] { $1 $0 }; r = @h [4, #{ %num.mul [$, 2] }]; !r")
+        .expect("8");
+}
