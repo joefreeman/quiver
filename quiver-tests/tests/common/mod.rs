@@ -562,7 +562,7 @@ impl TestResult {
     pub fn expect_origin(self, expected: &str) -> Self {
         match self.result {
             Ok(Some(ref value)) => {
-                let actual = self.session.environment().describe_origin(value);
+                let actual = self.session.environment().describe_failure(value);
                 assert_eq!(
                     actual.as_deref(),
                     Some(expected),
@@ -582,7 +582,7 @@ impl TestResult {
     /// in a non-result position).
     pub fn expect_no_origin(self) -> Self {
         if let Ok(Some(ref value)) = self.result {
-            let actual = self.session.environment().describe_origin(value);
+            let actual = self.session.environment().describe_failure(value);
             assert_eq!(actual, None, "for source: {}", self.source);
         }
         self

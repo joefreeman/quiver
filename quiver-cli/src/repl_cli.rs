@@ -370,8 +370,8 @@ impl ReplCli {
                 origin,
                 ..
             }) => {
-                // Show type for functions, builtins, and processes; failure
-                // provenance for stamped nil results (debug builds).
+                // Show type for functions, builtins, and processes; why a nil
+                // result failed (its `:error`, and provenance in debug builds).
                 match type_rendered.or(origin) {
                     Some(note) => println!("{} {}", rendered, format!("({note})").bright_black()),
                     None => println!("{rendered}"),

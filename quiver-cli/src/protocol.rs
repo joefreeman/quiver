@@ -250,8 +250,8 @@ pub struct ProcessDetail {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Outcome {
     /// A value: its rendered form (data notation for data values); its rendered type
-    /// where the REPL shows one (functions, builtins, pids); its failure-provenance
-    /// origin for stamped nils; and whether it was nil (a run's exit code).
+    /// where the REPL shows one (functions, builtins, pids); why a nil failed (its
+    /// `:error` and origin stamp); and whether it was nil (a run's exit code).
     Value {
         rendered: String,
         type_rendered: Option<String>,

@@ -395,9 +395,10 @@ pub struct EvaluationResult {
     /// compiled expression behind it (a process's own result, say).
     #[serde(rename = "type")]
     pub result_type: Option<String>,
-    /// A nil result's failure provenance ("match failed at repl:1:3"), read from the
-    /// debug-build origin stamp the nil carries. `None` for a non-nil result, an
-    /// unstamped nil (nil used as data), or a release-mode compile.
+    /// Why a nil result failed ("error DivisionByZero at repl:1:3", or "match failed at
+    /// repl:1:3"): its `:error` payload and the debug-build origin stamp it carries. `None`
+    /// for a non-nil result, or a nil carrying neither (nil used as data, or a release-mode
+    /// compile).
     pub origin: Option<String>,
 }
 

@@ -511,6 +511,24 @@ enum UnionMode {
     Any,
 }
 
+/// The binders (unions and function types) each side of a type relation has entered, innermost
+/// last, which a `Cycle(n)` on that side counts back through. Contravariant positions swap the
+/// sides, so they swap the stacks with them.
+#[derive(Default)]
+struct BinderStacks {
+    left: Vec<usize>,
+    right: Vec<usize>,
+}
+
+impl BinderStacks {
+    fn swapped<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        std::mem::swap(&mut self.left, &mut self.right);
+        let result = f(self);
+        std::mem::swap(&mut self.left, &mut self.right);
+        result
+    }
+}
+
 /// Check if type `self_id` is compatible with (assignable to) type `pattern_id`.
 ///
 /// Uses ALL-variant semantics: for `A | B` to be compatible with `C`,
@@ -519,14 +537,14 @@ enum UnionMode {
 /// This is used for type checking (can I assign this value to this variable?).
 pub fn is_compatible<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &T) -> bool {
     let mut assumptions = HashSet::new();
-    let mut type_stack = Vec::new();
+    let mut stacks = BinderStacks::default();
     check_type_relation(
         self_id,
         pattern_id,
         lookup,
         UnionMode::All,
         &mut assumptions,
-        &mut type_stack,
+        &mut stacks,
     )
 }
 
@@ -538,14 +556,14 @@ pub fn is_compatible<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &
 /// This is used for pattern matching (could this value possibly match this pattern?).
 pub fn types_overlap<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &T) -> bool {
     let mut assumptions = HashSet::new();
-    let mut type_stack = Vec::new();
+    let mut stacks = BinderStacks::default();
     check_type_relation(
         self_id,
         pattern_id,
         lookup,
         UnionMode::Any,
         &mut assumptions,
-        &mut type_stack,
+        &mut stacks,
     )
 }
 
@@ -559,7 +577,7 @@ fn rows_compatible<T: TypeLookup>(
     lookup: &T,
     mode: UnionMode,
     assumptions: &mut HashSet<(usize, usize)>,
-    type_stack: &mut Vec<usize>,
+    stacks: &mut BinderStacks,
 ) -> bool {
     if target_exact && (!source_exact || source_entries.len() != target_entries.len()) {
         return false;
@@ -574,7 +592,7 @@ fn rows_compatible<T: TypeLookup>(
                     lookup,
                     mode,
                     assumptions,
-                    type_stack,
+                    stacks,
                 )
             })
     })
@@ -595,7 +613,7 @@ fn check_type_relation<T: TypeLookup>(
     lookup: &T,
     mode: UnionMode,
     assumptions: &mut HashSet<(usize, usize)>,
-    type_stack: &mut Vec<usize>,
+    stacks: &mut BinderStacks,
 ) -> bool {
     // Fast path: same ID always satisfies the relation
     if self_id == pattern_id {
@@ -645,42 +663,35 @@ fn check_type_relation<T: TypeLookup>(
         // arm re-enters it) is what keeps `Cycle(n)` counting the same binders the type was
         // written against — without it, a `^1` back-edge through a list's own knot shifted
         // every outer `^` by one per element.
+        //
+        // Each side resolves against its *own* binders: a `^` in `self` names a boundary of the
+        // type `self` came from, never one of the pattern's. (A single shared stack resolved a
+        // left-hand `^` against whatever union the right-hand side had last entered — so a
+        // declared `L['int, Nil | Cons[…, ^]]` failed to overlap a union holding an `L` value
+        // whenever that union had been entered first.)
         (Type::Cycle(depth), _) => {
-            if type_stack.len() < *depth {
+            if stacks.left.len() < *depth {
                 return true; // Coinductive reasoning
             }
-            let lookup_index = type_stack.len() - *depth;
-            if let Some(&stack_id) = type_stack.get(lookup_index) {
-                let tail = type_stack.split_off(lookup_index);
-                let result = check_type_relation(
-                    stack_id,
-                    pattern_id,
-                    lookup,
-                    mode,
-                    assumptions,
-                    type_stack,
-                );
-                type_stack.extend(tail);
-                result
-            } else {
-                true
-            }
+            let lookup_index = stacks.left.len() - *depth;
+            let stack_id = stacks.left[lookup_index];
+            let tail = stacks.left.split_off(lookup_index);
+            let result =
+                check_type_relation(stack_id, pattern_id, lookup, mode, assumptions, stacks);
+            stacks.left.extend(tail);
+            result
         }
 
         (_, Type::Cycle(depth)) => {
-            if type_stack.len() < *depth {
+            if stacks.right.len() < *depth {
                 return true;
             }
-            let lookup_index = type_stack.len() - *depth;
-            if let Some(&stack_id) = type_stack.get(lookup_index) {
-                let tail = type_stack.split_off(lookup_index);
-                let result =
-                    check_type_relation(self_id, stack_id, lookup, mode, assumptions, type_stack);
-                type_stack.extend(tail);
-                result
-            } else {
-                true
-            }
+            let lookup_index = stacks.right.len() - *depth;
+            let stack_id = stacks.right[lookup_index];
+            let tail = stacks.right.split_off(lookup_index);
+            let result = check_type_relation(self_id, stack_id, lookup, mode, assumptions, stacks);
+            stacks.right.extend(tail);
+            result
         }
 
         // Annotation rows. Overlap (`Any`) treats rows as transparent — pattern matching
@@ -699,7 +710,7 @@ fn check_type_relation<T: TypeLookup>(
                 entries: entries2,
             },
         ) => {
-            if !check_type_relation(*base1, *base2, lookup, mode, assumptions, type_stack) {
+            if !check_type_relation(*base1, *base2, lookup, mode, assumptions, stacks) {
                 return false;
             }
             if mode == UnionMode::Any {
@@ -711,14 +722,14 @@ fn check_type_relation<T: TypeLookup>(
                 lookup,
                 mode,
                 assumptions,
-                type_stack,
+                stacks,
             )
         }
         // Annotated on the left vs a non-union pattern: forget the row (any row `<=`
         // open-empty). Unions/cycles on the right are handled by their own arms so the
         // row can still match an annotated member inside them.
         (Type::Annotated { base, .. }, pattern) if !matches!(pattern, Type::Union(_)) => {
-            check_type_relation(*base, pattern_id, lookup, mode, assumptions, type_stack)
+            check_type_relation(*base, pattern_id, lookup, mode, assumptions, stacks)
         }
         // Plain (open-empty) on the left vs an annotated pattern: sound only when the
         // pattern demands nothing — but such rows are normalised away, so under `All`
@@ -726,7 +737,7 @@ fn check_type_relation<T: TypeLookup>(
         (self_type, Type::Annotated { base, .. }) if !matches!(self_type, Type::Union(_)) => {
             match mode {
                 UnionMode::Any => {
-                    check_type_relation(self_id, *base, lookup, mode, assumptions, type_stack)
+                    check_type_relation(self_id, *base, lookup, mode, assumptions, stacks)
                 }
                 UnionMode::All => false,
             }
@@ -737,28 +748,19 @@ fn check_type_relation<T: TypeLookup>(
             // Insert assumption for recursive types
             assumptions.insert(key);
 
-            match mode {
+            // A union is a binder its members' `^` count back to, on this side's stack (see the
+            // union-on-right arm for why the push is unconditional).
+            stacks.left.push(self_id);
+            let result = match mode {
                 UnionMode::All => variants.iter().all(|&variant_id| {
-                    check_type_relation(
-                        variant_id,
-                        pattern_id,
-                        lookup,
-                        mode,
-                        assumptions,
-                        type_stack,
-                    )
+                    check_type_relation(variant_id, pattern_id, lookup, mode, assumptions, stacks)
                 }),
                 UnionMode::Any => variants.iter().any(|&variant_id| {
-                    check_type_relation(
-                        variant_id,
-                        pattern_id,
-                        lookup,
-                        mode,
-                        assumptions,
-                        type_stack,
-                    )
+                    check_type_relation(variant_id, pattern_id, lookup, mode, assumptions, stacks)
                 }),
-            }
+            };
+            stacks.left.pop();
+            result
         }
 
         // Union on right side: self must match ANY variant (same for both modes)
@@ -777,11 +779,11 @@ fn check_type_relation<T: TypeLookup>(
             // *different* member's binder depth then resolved to the wrong ancestor: a JSON
             // array nested in an object was rejected while an object in an object was not.
             // Termination is the `assumptions` hypothesis above, not stack dedup.
-            type_stack.push(pattern_id);
+            stacks.right.push(pattern_id);
             let result = variants.iter().any(|&variant_id| {
-                check_type_relation(self_id, variant_id, lookup, mode, assumptions, type_stack)
+                check_type_relation(self_id, variant_id, lookup, mode, assumptions, stacks)
             });
-            type_stack.pop();
+            stacks.right.pop();
             result
         }
 
@@ -813,7 +815,7 @@ fn check_type_relation<T: TypeLookup>(
                                 lookup,
                                 mode,
                                 assumptions,
-                                type_stack,
+                                stacks,
                             )
                     },
                 )
@@ -851,7 +853,7 @@ fn check_type_relation<T: TypeLookup>(
                                 lookup,
                                 mode,
                                 assumptions,
-                                type_stack,
+                                stacks,
                             )
                     })
             })
@@ -877,14 +879,7 @@ fn check_type_relation<T: TypeLookup>(
             fields2.iter().all(|(fname2, ftype2)| {
                 fields1.iter().any(|(fname1, ftype1)| {
                     fname1 == fname2
-                        && check_type_relation(
-                            *ftype1,
-                            *ftype2,
-                            lookup,
-                            mode,
-                            assumptions,
-                            type_stack,
-                        )
+                        && check_type_relation(*ftype1, *ftype2, lookup, mode, assumptions, stacks)
                 })
             })
         }
@@ -914,7 +909,9 @@ fn check_type_relation<T: TypeLookup>(
             let send_ok = match (send1, send2) {
                 (Some(s1), Some(s2)) => {
                     lookup.lookup_type(*s1).is_some_and(|t| t.is_never())
-                        || check_type_relation(*s2, *s1, lookup, mode, assumptions, type_stack)
+                        || stacks.swapped(|stacks| {
+                            check_type_relation(*s2, *s1, lookup, mode, assumptions, stacks)
+                        })
                 }
                 (None, _) | (_, None) => true,
             };
@@ -922,7 +919,7 @@ fn check_type_relation<T: TypeLookup>(
             // Receive is the AWAIT RESULT (`-> 'r`), covariant like any result.
             let receive_ok = match (receive1, receive2) {
                 (Some(r1), Some(r2)) => {
-                    check_type_relation(*r1, *r2, lookup, mode, assumptions, type_stack)
+                    check_type_relation(*r1, *r2, lookup, mode, assumptions, stacks)
                 }
                 (None, _) | (_, None) => true,
             };
@@ -932,7 +929,7 @@ fn check_type_relation<T: TypeLookup>(
             // type that grants sampling. Dropping the grant (Some → None) is fine.
             let state_ok = match (state1, state2) {
                 (Some(s1), Some(s2)) => {
-                    check_type_relation(*s1, *s2, lookup, mode, assumptions, type_stack)
+                    check_type_relation(*s1, *s2, lookup, mode, assumptions, stacks)
                 }
                 (_, None) => true,
                 (None, Some(_)) => false,
@@ -961,16 +958,21 @@ fn check_type_relation<T: TypeLookup>(
                 ..
             },
         ) => {
-            let already_on_stack = type_stack.contains(&pattern_id);
-            if !already_on_stack {
-                type_stack.push(pattern_id);
+            // A function type is a binder too, on each side's own stack.
+            let left_pushed = !stacks.left.contains(&self_id);
+            if left_pushed {
+                stacks.left.push(self_id);
+            }
+            let right_pushed = !stacks.right.contains(&pattern_id);
+            if right_pushed {
+                stacks.right.push(pattern_id);
             }
 
             // States are covariant and strict against a stated expectation, exactly as a
             // process type's state component (a spawn of this function inherits it).
             let states_ok = match (states1, states2) {
                 (Some(s1), Some(s2)) => {
-                    check_type_relation(*s1, *s2, lookup, mode, assumptions, type_stack)
+                    check_type_relation(*s1, *s2, lookup, mode, assumptions, stacks)
                 }
                 (_, None) => true,
                 (None, Some(_)) => false,
@@ -978,12 +980,19 @@ fn check_type_relation<T: TypeLookup>(
 
             // Parameters are contravariant, results are covariant, receive is contravariant
             let result = states_ok
-                && check_type_relation(*param2, *param1, lookup, mode, assumptions, type_stack)
-                && check_type_relation(*result1, *result2, lookup, mode, assumptions, type_stack)
-                && check_type_relation(*receive2, *receive1, lookup, mode, assumptions, type_stack);
+                && stacks.swapped(|stacks| {
+                    check_type_relation(*param2, *param1, lookup, mode, assumptions, stacks)
+                })
+                && check_type_relation(*result1, *result2, lookup, mode, assumptions, stacks)
+                && stacks.swapped(|stacks| {
+                    check_type_relation(*receive2, *receive1, lookup, mode, assumptions, stacks)
+                });
 
-            if !already_on_stack {
-                type_stack.pop();
+            if left_pushed {
+                stacks.left.pop();
+            }
+            if right_pushed {
+                stacks.right.pop();
             }
             result
         }

@@ -4,7 +4,7 @@
 //!
 //! - **Arithmetic and math** (`integer_add`, `integer_subtract`, `integer_multiply`,
 //!   `integer_divide`, `integer_modulo`, `integer_gcd`, `integer_compare`, `integer_abs`,
-//!   `integer_sqrt`, `integer_sin`, `integer_cos`) are exact over arbitrary precision.
+//!   `integer_sqrt`, `integer_factor`, `integer_sin`, `integer_cos`) are exact over arbitrary precision.
 //!   Each takes the allocation-free machine-word path when both operands are small
 //!   (`Value::Int`), promoting to `BigInt` only on overflow or big operands.
 //! - **Bitwise** operations (`integer_and`, `integer_or`, `integer_xor`, `integer_not`,
@@ -130,6 +130,128 @@ pub fn builtin_integer_sqrt<E: Effect>(
         IntRef::Big(n) => Value::integer(n.sqrt()),
     };
     Ok(Completion::Value(value))
+}
+
+/// Builtin function: `__integer_factor__`
+/// Returns a prime factor of an integer `n ≥ 2` (`n` itself when it is prime), or nil when
+/// splitting `n` would exceed a fixed amount of work. Which factor is unspecified; callers
+/// wanting a full factorisation divide it out and repeat.
+///
+/// Small factors come from trial division; beyond that, primality is Miller–Rabin over the
+/// first twelve prime bases (deterministic below 3.3·10²⁴, and a vanishingly unlikely error
+/// above) and a composite is split with Pollard–Brent. Rho's cost grows with the square root of
+/// the smallest prime factor, so it gets [`RHO_BUDGET`] iterations — enough to find a factor
+/// up to about 10¹¹ — before giving up, which keeps a single call bounded.
+pub fn builtin_integer_factor<E: Effect>(
+    arg: &Value,
+    _ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    let n = extract_int(arg)?.to_bigint();
+    if n < BigInt::from(2) {
+        return Err(Error::InvalidArgument(format!(
+            "Cannot factor {n}: expected an integer of at least 2"
+        )));
+    }
+    Ok(Completion::Value(
+        prime_factor(n).map_or_else(Value::nil, Value::integer),
+    ))
+}
+
+const SMALL_PRIMES: [u32; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
+
+/// The polynomial steps Pollard–Brent may take over one `__integer_factor__` call.
+const RHO_BUDGET: u64 = 1 << 20;
+
+/// A prime factor of `n ≥ 2`, or `None` once the rho budget runs out.
+fn prime_factor(n: BigInt) -> Option<BigInt> {
+    for d in 2u32..1000 {
+        let d = BigInt::from(d);
+        if &d * &d > n {
+            return Some(n);
+        }
+        if n.is_multiple_of(&d) {
+            return Some(d);
+        }
+    }
+    let mut budget = RHO_BUDGET;
+    let mut n = n;
+    while !is_probable_prime(&n) {
+        n = pollard_brent(&n, &mut budget)?;
+    }
+    Some(n)
+}
+
+fn is_probable_prime(n: &BigInt) -> bool {
+    let one = BigInt::from(1);
+    let n_minus_one = n - &one;
+    let mut d = n_minus_one.clone();
+    let mut s = 0u32;
+    while d.is_even() {
+        d >>= 1;
+        s += 1;
+    }
+    SMALL_PRIMES.iter().all(|&a| {
+        let a = BigInt::from(a);
+        if a.is_multiple_of(n) {
+            return true;
+        }
+        let mut x = a.modpow(&d, n);
+        if x == one || x == n_minus_one {
+            return true;
+        }
+        (1..s).any(|_| {
+            x = x.modpow(&BigInt::from(2), n);
+            x == n_minus_one
+        })
+    })
+}
+
+/// A nontrivial factor of the odd composite `n`, by Brent's variant of Pollard's rho, retrying
+/// with the next polynomial constant when a cycle closes without one. Each polynomial step
+/// spends one unit of `budget`, and `None` means it ran out.
+fn pollard_brent(n: &BigInt, budget: &mut u64) -> Option<BigInt> {
+    let one = BigInt::from(1);
+    let mut c = one.clone();
+    loop {
+        let mut f = |x: &BigInt| {
+            *budget = budget.checked_sub(1)?;
+            Some((x * x + &c) % n)
+        };
+        let (mut y, mut r, mut q) = (BigInt::from(2), 1u64, one.clone());
+        let (mut x, mut ys);
+        let mut g = one.clone();
+        while g == one {
+            x = y.clone();
+            for _ in 0..r {
+                y = f(&y)?;
+            }
+            let mut k = 0;
+            while k < r && g == one {
+                ys = y.clone();
+                for _ in 0..r.min(128).min(r - k) {
+                    y = f(&y)?;
+                    q = (q * (&x - &y).abs()) % n;
+                }
+                g = q.gcd(n);
+                k += 128;
+                if g == *n {
+                    // The batched product overshot: step back one at a time from `ys`.
+                    loop {
+                        ys = f(&ys)?;
+                        g = (&x - &ys).abs().gcd(n);
+                        if g != one {
+                            break;
+                        }
+                    }
+                }
+            }
+            r *= 2;
+        }
+        if g != *n {
+            return Some(g);
+        }
+        c += 1;
+    }
 }
 
 /// Builtin function: `__integer_sin__`

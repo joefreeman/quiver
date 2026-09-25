@@ -1337,3 +1337,85 @@ fn test_field_scrutinee_two_step_destructure() {
         )
         .expect("7");
 }
+
+#[test]
+fn test_field_complement_keeps_recursive_tail_matchable() {
+    // Ruling `Nil` out of a *field* whose type is a recursive union leaves the `Cons` variant,
+    // whose `^` must still name the whole union: a later `Cons[x, Nil]` has a `Nil` tail.
+    quiver()
+        .evaluate(
+            r#"
+            'l = Nil | Cons['int, ^]
+            g = #['l] { | =[Nil] => Zero | =[Cons[x, Nil]] => Hit | Miss }
+            k = #['l, 'int] { | =[Nil, _] => Zero | =[Cons[x, Nil], _] => Hit | Miss }
+            [g [Cons[1, Nil]], k [Cons[1, Nil], 0], g [Cons[1, Cons[2, Nil]]]]
+            "#,
+        )
+        .expect("[Hit, Hit, Miss]");
+}
+
+#[test]
+fn test_same_shaped_complement_members_keep_their_field_checks() {
+    // `[(P | E), (P | E)]` minus `[P, P]` is `[E, P | E] | [P | E, E]`: two members one
+    // runtime tuple test can't tell apart, so a later pattern must still check each field —
+    // not skip the ones a single member would guarantee (which read a field of `P`).
+    quiver()
+        .evaluate(
+            r#"
+            f = #[(P | E['int]), (P | E['int])] { | =[P, P] => Both | =[E[a], E[b]] => [a, b] }
+            [f [E[1], P], f [P, E[1]], f [E[1], E[2]], f [P, P]]
+            "#,
+        )
+        .expect("[[], [], [1, 2], Both]");
+}
+
+#[test]
+fn test_binder_after_nil_branch_keeps_the_list_type() {
+    // `ts` after a failed `=Nil` is the `Cons` variant, whose tail is still the whole list type —
+    // not a `Cons` of `Cons`es with no end. A value built from it must stay matchable as a list.
+    quiver()
+        .evaluate(
+            r#"
+            'ts = Nil | Cons['int, ^]
+            'v = 'int | L['ts]
+            mk = #'ts { | =Nil => 0 | =ts => L[ts] }
+            last = #'v { | =L[Cons[x, Nil]] => x | Other }
+            mk Cons[1, Nil] ~> last ~
+            "#,
+        )
+        .expect("1");
+}
+
+#[test]
+fn test_recursive_member_overlaps_through_an_entered_union() {
+    // A declared `L['int, Nil | Cons[…, ^]]` guard must overlap a union holding an `L` value:
+    // the guard's `^` names its own list, not the union the argument's side entered.
+    quiver()
+        .evaluate(
+            r#"
+            'ts = Nil | Cons[['int, 'int], ^]
+            'v = 'int | L['int, 'ts]
+            t = #('v | []) { | =L[a, ts] => Hit }
+            z = { | =0 => [] | L[0, Cons[[2, 5], Nil]] }
+            t z
+            "#,
+        )
+        .expect("Hit")
+        .expect_type("Hit | []");
+}
+
+#[test]
+fn test_field_narrowing_in_a_union_keeps_recursive_tail_matchable() {
+    // Narrowing a union member's recursive field to `Cons` rebuilds that member; the field's `^`
+    // must still name the whole list, so a `Nil` tail stays reachable.
+    quiver()
+        .evaluate(
+            r#"
+            'l = Nil | Cons['int, ^]
+            'v = W['l, 'int] | Z['int]
+            g = #'v { | $.0 ~> =Cons(); $.0 ~> .1 ~> { =Nil => N | =Cons() => C | Neither } | Other }
+            [g W[Cons[1, Nil], 1], g W[Cons[1, Cons[2, Nil]], 1], g Z[1]]
+            "#,
+        )
+        .expect("[N, C, Other]");
+}

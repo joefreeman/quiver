@@ -109,11 +109,12 @@ fn test_num_neg_dispatch() {
 
 #[test]
 fn test_num_div_always_rational() {
-    // div is not a kind-preserving dispatch — it always returns a rational.
+    // div is not a kind-preserving dispatch — it always returns a rational, or nil carrying
+    // the zero divisor as its `:error`.
     quiver()
         .evaluate("[6, 3] ~> %num.div ~")
         .expect("2/1")
-        .expect_type("Rational['int, 'int] | []");
+        .expect_type("Rational['int, 'int] | [] { :error DivisionByZero }");
 }
 
 #[test]
@@ -147,4 +148,61 @@ fn test_dispatch_across_repl_entries() {
         .evaluate("f = #(A | B) { | =A => 1 | =B => <01> }; Ok")
         .then_evaluate("f A ~> %num.add [~, 1]")
         .expect("2");
+}
+
+#[test]
+fn test_dispatch_to_tail_call_branch_takes_the_function_result() {
+    // A branch whose value is a tail call types as `never` (inference gives up there), so a call
+    // dispatching to it — here because `ts` is known non-empty — must answer the function's
+    // result type instead, or binding the call reads as a match that can never succeed.
+    quiver()
+        .evaluate(
+            r#"
+            'l = Nil | Cons['int, ^]
+            len = #['l, 'int] -> 'int { | =[Nil, n] => n | =[Cons[_, rest], n] => ^ [rest, __integer_add__ [n, 1]] }
+            d = #'l { | =Nil => 0 | =ts => { n = len [ts, 0]; n } }
+            d Cons[1, Cons[2, Nil]]
+            "#,
+        )
+        .expect("2")
+        .expect_type("'int");
+}
+
+#[test]
+fn test_ascribed_fast_arm_guards_only_its_own_types() {
+    // An arm ascribing a field (`('int)a`) narrows its dispatch guard to that type even when the
+    // field's declared type has a recursive member, so it claims no other argument's result.
+    quiver()
+        .evaluate(
+            r#"
+            'ts = Nil | Cons['int, ^]
+            'v = 'int | R['int] | L['ts]
+            f = #['v, 'v] {
+              | =[('int)a, ('int)b] => __integer_add__ [a, b]
+              | =[L[t], y] => Lst
+              | =[x, L[t]] => Lst
+              | =[R[a], y] => R[a]
+              | =[x, R[a]] => R[a]
+              | =[a, b] => __integer_add__ [a, b]
+            }
+            f [R[1], 3]
+            "#,
+        )
+        .expect("R[1]")
+        .expect_type("R['int]");
+}
+
+#[test]
+fn test_nested_function_tail_call_leaves_the_branch_precise() {
+    // A `^` inside a function literal recurses into that literal, so the enclosing branch is no
+    // self tail call and a call dispatching to it keeps the branch's own result type.
+    quiver()
+        .evaluate(
+            r#"
+            f = #(A | B['int]) { | =A => None | =B[n] => { g = #'int { | =0 => Z | ^ 0 }; Some[n] } }
+            f B[5]
+            "#,
+        )
+        .expect("Some[5]")
+        .expect_type("Some['int]");
 }

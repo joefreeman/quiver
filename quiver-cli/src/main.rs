@@ -463,7 +463,7 @@ fn run_on_server(
             // Nil is the failing result: report it and exit non-zero, exactly as the
             // in-process runner did. The nil itself is always printed — a release build
             // carries no provenance, and exiting 1 with nothing said reads as a silent
-            // failure — with the site appended when a debug build stamped one.
+            // failure — with its `:error` and the site a debug build stamped appended.
             if is_nil {
                 if !quiet {
                     match origin {

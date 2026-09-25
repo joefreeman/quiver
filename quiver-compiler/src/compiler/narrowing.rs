@@ -327,6 +327,22 @@ pub fn close_cycles(type_id: usize, boundary: usize, program: &mut Program) -> u
     }
 }
 
+/// Re-root a lone member kept from a recursive union. Its `Cycle` references count from
+/// `declared`'s root, so separated from it they would name whatever encloses the member next
+/// (`Nil | Cons['t, ^]` narrowed to `Cons` would read its own `^` as `Cons`, so no tail could be
+/// `Nil`); they are closed against `declared`.
+///
+/// A narrowing that is still a union keeps its own root: unions intern flattened, so `'l | []`
+/// is one union whose `^` already admits `[]`, and closing against it would widen every tail —
+/// whereas the narrower union is what such a `^` was written to mean.
+pub fn reroot_narrowed(narrowed: usize, declared: usize, program: &mut Program) -> usize {
+    let is_union = |id: usize| matches!(program.lookup_type(id), Some(Type::Union(_)));
+    if narrowed == declared || !is_union(declared) || is_union(narrowed) {
+        return narrowed;
+    }
+    close_cycles_at(narrowed, &[declared], 0, program)
+}
+
 fn close_cycles_at(
     type_id: usize,
     enclosing: &[usize],
@@ -466,16 +482,29 @@ pub fn intersect_types(a_id: usize, b_id: usize, program: &mut Program) -> usize
     let b_variants = get_type_variants(b_id, program);
     let never = program.never();
 
+    // Each piece, with the operand whose structure it keeps: `a`'s, except where a partial in
+    // `a` meets a concrete tuple in `b`.
     let mut pieces = Vec::new();
     for &av in &a_variants {
         for &bv in &b_variants {
             let piece = intersect_pair(av, bv, program);
             if piece != never {
-                pieces.push(piece);
+                let from_b = matches!(program.lookup_type(av), Some(Type::Partial { .. }))
+                    && matches!(program.lookup_type(bv), Some(Type::Tuple(_)));
+                pieces.push((piece, if from_b { b_id } else { a_id }));
             }
         }
     }
-    union_type_ids(program, pieces)
+    // A lone member kept from a recursive union has left its root behind, so its `Cycle`
+    // references to that root would name whatever encloses it next (`Nil | Cons['t, ^]` narrowed
+    // to `Cons` would read its own `^` as `Cons`): close them against the root.
+    if let [(piece, root)] = pieces[..] {
+        return reroot_narrowed(piece, root, program);
+    }
+    union_type_ids(
+        program,
+        pieces.into_iter().map(|(piece, _)| piece).collect(),
+    )
 }
 
 /// Intersect two single (non-union) types. Returns the never type when provably disjoint.
@@ -598,7 +627,14 @@ fn intersect_pair(a: usize, b: usize, program: &mut Program) -> usize {
     }
 }
 
-/// Filter parent type to variants where a specific field is compatible with a given type.
+/// Narrow a union's variants by one field: each tuple variant keeps only the part of that field
+/// that `field_must_be_id` admits, and a variant left with no possible value there drops out.
+///
+/// Intersecting per variant, rather than keeping only the variants whose field lies wholly
+/// inside the narrowing, is what keeps this sound on a union of same-shaped tuples: the
+/// complement of `[('int), ('int)]` over `['v, 'v]` is `['v ∖ 'int, 'v] | ['v, 'v ∖ 'int]`, and a
+/// later narrowing of field 0 must refine both members, not drop the second because its field 0
+/// also admits values outside the narrowing.
 pub fn filter_variants_by_field(
     parent_type_id: usize,
     field_idx: usize,
@@ -607,17 +643,40 @@ pub fn filter_variants_by_field(
 ) -> usize {
     let variants = get_type_variants(parent_type_id, program);
 
-    // A for-loop rather than `.filter`, since `get_field_type` now borrows `&mut program`.
-    let mut filtered = Vec::new();
+    let mut narrowed = Vec::new();
     for variant_id in variants {
-        if let Some(field_type_id) = get_field_type(variant_id, field_idx, program)
-            && is_compatible(field_type_id, field_must_be_id, program)
+        let Some(field_type_id) = get_field_type(variant_id, field_idx, program) else {
+            continue;
+        };
+        let field_narrowed = intersect_types(field_type_id, field_must_be_id, program);
+        if field_narrowed == field_type_id {
+            narrowed.push(variant_id);
+            continue;
+        }
+        if program
+            .lookup_type(field_narrowed)
+            .is_some_and(|t| t.is_never())
         {
-            filtered.push(variant_id);
+            continue;
+        }
+        // Rebuild a plain tuple variant with the narrowed field; anything else (a partial, an
+        // annotated tuple) is kept whole, which is sound.
+        match program.lookup_type(variant_id).cloned() {
+            Some(Type::Tuple(tuple_id)) => {
+                let Some(info) = program.lookup_tuple(tuple_id).cloned() else {
+                    narrowed.push(variant_id);
+                    continue;
+                };
+                let mut fields = info.fields;
+                fields[field_idx].1 = field_narrowed;
+                let rebuilt = program.register_tuple(info.name, fields);
+                narrowed.push(program.register_type(Type::Tuple(rebuilt)));
+            }
+            _ => narrowed.push(variant_id),
         }
     }
 
-    union_type_ids(program, filtered)
+    union_type_ids(program, narrowed)
 }
 
 /// Compute the complement type: the values of `original` that are NOT in `narrowed`.

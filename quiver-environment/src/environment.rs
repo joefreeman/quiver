@@ -2612,15 +2612,15 @@ impl<E: Effect> Environment<E> {
         quiver_core::format::format_value(&value, &self.program, &binary_lookup)
     }
 
-    /// Describe a nil result's failure provenance (debug builds): the `origin`
-    /// annotation's site, rendered as e.g. `no branch matched at shapes:12:9`.
-    pub fn describe_origin(&self, value: &WireValue) -> Option<String> {
+    /// Describe why a nil result failed: its `:error` payload and failure provenance (debug
+    /// builds), rendered as e.g. `error DivisionByZero at num:12:9`.
+    pub fn describe_failure(&self, value: &WireValue) -> Option<String> {
         let (value, heap) = value.for_display();
         let binary_lookup = quiver_core::format::HeapAndProgramLookup {
             heap: &heap,
             program: &self.program,
         };
-        quiver_core::format::describe_origin(
+        quiver_core::format::describe_failure(
             &value,
             self.program.get_annotation_keys(),
             &self.program,

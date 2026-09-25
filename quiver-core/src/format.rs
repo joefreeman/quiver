@@ -365,17 +365,39 @@ impl BinaryLookup for BytecodeBinaryLookup<'_> {
     }
 }
 
-/// Describe a nil result's failure provenance (debug builds): reads the `origin`
-/// annotation stamped on the value and renders it as e.g. `no branch matched at
-/// shapes:12:9`. `None` when the value carries no origin (release builds, or nil data).
-pub fn describe_origin<T: TypeLookup, B: BinaryLookup>(
+/// Describe why a nil result failed: its `:error` payload where it carries one, else the kind of
+/// failure its provenance stamp records, followed by the stamped site (debug builds) — e.g.
+/// `error DivisionByZero at num:12:9`, or `no branch matched at shapes:12:9`. `None` when the
+/// value carries neither (release builds without an error, or nil data).
+pub fn describe_failure<T: TypeLookup, B: BinaryLookup>(
     value: &Value,
     annotation_keys: &[String],
     type_lookup: &T,
     binary_lookup: &B,
 ) -> Option<String> {
-    let origin_key = annotation_keys.iter().position(|name| name == "origin")?;
-    let site = value.get_annotation(origin_key)?;
+    let annotation = |name: &str| {
+        let key = annotation_keys.iter().position(|key| key == name)?;
+        value.get_annotation(key)
+    };
+    let error = annotation("error")
+        .map(|error| format!("error {}", format_value(error, type_lookup, binary_lookup)));
+    let origin =
+        annotation("origin").and_then(|site| describe_origin(site, type_lookup, binary_lookup));
+    match (error, origin) {
+        (Some(error), Some((_, site))) => Some(format!("{error} at {site}")),
+        (Some(error), None) => Some(error),
+        (None, Some((kind, site))) => Some(format!("{kind} at {site}")),
+        (None, None) => None,
+    }
+}
+
+/// Read an `origin` stamp as the kind of failure it records and its site, e.g.
+/// `("no branch matched", "shapes:12:9")`.
+fn describe_origin<T: TypeLookup, B: BinaryLookup>(
+    site: &Value,
+    type_lookup: &T,
+    binary_lookup: &B,
+) -> Option<(&'static str, String)> {
     let Value::Tuple(_, fields) = site else {
         return None;
     };
@@ -405,7 +427,7 @@ pub fn describe_origin<T: TypeLookup, B: BinaryLookup>(
         },
         _ => "nil result",
     };
-    Some(format!("{describe_kind} at {module}:{line}:{column}"))
+    Some((describe_kind, format!("{module}:{line}:{column}")))
 }
 
 /// One step of an iterative value render: a value still to format, or literal text to emit.
@@ -503,6 +525,23 @@ fn format_step<'a, T: TypeLookup, B: BinaryLookup>(
                 return;
             }
 
+            if tuple_info.name.as_deref() == Some("Tx")
+                && let [generator, terms] = &elements[..]
+                && let Some(generator) = transcendental_generator(generator, type_lookup)
+                && let Some(terms) = term_list(terms, type_lookup)
+            {
+                out.push_str(&format_tx(&generator, &terms));
+                return;
+            }
+            if tuple_info.name.as_deref() == Some("Log")
+                && let [constant, terms] = &elements[..]
+                && let Some(constant) = coeff_ratio(constant, type_lookup)
+                && let Some(terms) = term_list(terms, type_lookup)
+            {
+                out.push_str(&format_log(&constant, &terms));
+                return;
+            }
+
             let name = tuple_info.name.as_deref();
             if elements.is_empty() {
                 out.push_str(name.unwrap_or("[]"));
@@ -559,6 +598,152 @@ fn coeff_ratio<T: TypeLookup>(value: &Value, lookup: &T) -> Option<(BigInt, BigI
         }
         _ => None,
     }
+}
+
+/// The generator of a `%num` transcendental polynomial: π, or e^(1/d).
+enum Generator {
+    Pi,
+    E(BigInt),
+}
+
+fn transcendental_generator<T: TypeLookup>(value: &Value, lookup: &T) -> Option<Generator> {
+    let Value::Tuple(tuple_id, elements) = value else {
+        return None;
+    };
+    match (
+        lookup.lookup_tuple(*tuple_id)?.name.as_deref(),
+        &elements[..],
+    ) {
+        (Some("Pi"), []) => Some(Generator::Pi),
+        (Some("E"), [d]) => Some(Generator::E(d.as_int()?.to_bigint())),
+        _ => None,
+    }
+}
+
+/// A `%num` term list — `Cons[[key, coeff], …]` ending in `Nil` — as `(key, (n, d))` pairs.
+fn term_list<T: TypeLookup>(value: &Value, lookup: &T) -> Option<Vec<(BigInt, (BigInt, BigInt))>> {
+    let mut terms = Vec::new();
+    let mut current = value;
+    loop {
+        let Value::Tuple(tuple_id, elements) = current else {
+            return None;
+        };
+        match (
+            lookup.lookup_tuple(*tuple_id)?.name.as_deref(),
+            &elements[..],
+        ) {
+            (Some("Nil"), []) => return Some(terms),
+            (Some("Cons"), [Value::Tuple(_, pair), rest]) => {
+                let [key, coeff] = &pair[..] else {
+                    return None;
+                };
+                terms.push((key.as_int()?.to_bigint(), coeff_ratio(coeff, lookup)?));
+                current = rest;
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn superscript(n: &BigInt) -> String {
+    n.to_string()
+        .chars()
+        .map(|c| match c {
+            '-' => '⁻',
+            '0' => '⁰',
+            '1' => '¹',
+            '2' => '²',
+            '3' => '³',
+            '4' => '⁴',
+            '5' => '⁵',
+            '6' => '⁶',
+            '7' => '⁷',
+            '8' => '⁸',
+            '9' => '⁹',
+            c => unreachable!("integer rendered with non-digit {c:?}"),
+        })
+        .collect()
+}
+
+/// Join signed terms as a sum: the first carries its own sign, later ones a ` + `/` - `
+/// connector. Each term is given as (negative, magnitude text).
+fn join_terms(terms: impl IntoIterator<Item = (bool, String)>) -> String {
+    let mut out = String::new();
+    for (i, (negative, magnitude)) in terms.into_iter().enumerate() {
+        match (i, negative) {
+            (0, true) => out.push('-'),
+            (0, false) => {}
+            (_, true) => out.push_str(" - "),
+            (_, false) => out.push_str(" + "),
+        }
+        out.push_str(&magnitude);
+    }
+    out
+}
+
+/// A rational's magnitude on its own: `3`, `1/2`.
+fn magnitude_of(n: &BigInt, d: &BigInt) -> String {
+    if d.is_one() {
+        n.abs().to_string()
+    } else {
+        format!("{}/{d}", n.abs())
+    }
+}
+
+/// A coefficient's magnitude in front of a symbol, in the surd style: omitted when one, bare
+/// when integral (`2π`), parenthesised when a fraction (`(1/2)π`).
+fn coefficient_of(n: &BigInt, d: &BigInt, symbol: &str) -> String {
+    let n = n.abs();
+    if n.is_one() && d.is_one() {
+        symbol.to_string()
+    } else if d.is_one() {
+        format!("{n}{symbol}")
+    } else {
+        format!("({n}/{d}){symbol}")
+    }
+}
+
+/// Render a transcendental polynomial `Σ c·gᵏ`, ascending: `2π`, `(1/4)π²`, `180π⁻¹`,
+/// `1 + π`, `e^(1/2)`.
+fn format_tx(generator: &Generator, terms: &[(BigInt, (BigInt, BigInt))]) -> String {
+    join_terms(terms.iter().map(|(k, (n, d))| {
+        let power = match generator {
+            Generator::Pi => match k {
+                k if k.is_one() => "π".to_string(),
+                k => format!("π{}", superscript(k)),
+            },
+            Generator::E(root) => {
+                let g = num_integer::Integer::gcd(k, root);
+                let (num, den) = (k / &g, root / &g);
+                match (num, den) {
+                    (num, den) if den.is_one() && num.is_one() => "e".to_string(),
+                    (num, den) if den.is_one() => format!("e{}", superscript(&num)),
+                    (num, den) => format!("e^({num}/{den})"),
+                }
+            }
+        };
+        let magnitude = if k.is_zero() {
+            magnitude_of(n, d)
+        } else {
+            coefficient_of(n, d, &power)
+        };
+        (n.is_negative(), magnitude)
+    }))
+}
+
+/// Render a logarithmic form `a + Σ c·ln p`: `ln 2`, `2 ln 2 + ln 3`, `1 - (1/2) ln 3`.
+fn format_log(constant: &(BigInt, BigInt), terms: &[(BigInt, (BigInt, BigInt))]) -> String {
+    let (an, ad) = constant;
+    let head = (!an.is_zero()).then(|| (an.is_negative(), magnitude_of(an, ad)));
+    join_terms(head.into_iter().chain(terms.iter().map(|(p, (n, d))| {
+        let symbol = format!("ln {p}");
+        let magnitude = if n.abs().is_one() && d.is_one() {
+            symbol
+        } else {
+            format!("{} {symbol}", coefficient_of(n, d, ""))
+        };
+        (n.is_negative(), magnitude)
+    })))
 }
 
 /// Render a single-radical surd `(an/ad) + (bn/bd)·√radicand` as e.g. `√2`, `2√2`, `(1/2)√2`,

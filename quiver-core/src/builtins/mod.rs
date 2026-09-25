@@ -826,6 +826,7 @@ pub fn register_integer_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     // Unary math functions
     register_builtin!(registry, "integer_abs", integer::builtin_integer_abs, TypeSpec::Integer => TypeSpec::Integer);
     register_builtin!(registry, "integer_sqrt", integer::builtin_integer_sqrt, TypeSpec::Integer => TypeSpec::Integer);
+    register_builtin!(registry, "integer_factor", integer::builtin_integer_factor, TypeSpec::Integer => TypeSpec::Union(vec![TypeSpec::Integer, TypeSpec::Tuple(None, vec![])]));
     register_builtin!(registry, "integer_sin", integer::builtin_integer_sin, TypeSpec::Integer => TypeSpec::Integer);
     register_builtin!(registry, "integer_cos", integer::builtin_integer_cos, TypeSpec::Integer => TypeSpec::Integer);
 

@@ -870,7 +870,7 @@ the value it exports:
 [
   area: #' {
     :doc "The shape's area."
-    | =Circle[radius: r] => %num.mul [r, r]
+    | =Circle[radius: r] => r ~> %num.mul [~, ~] ~> %num.mul [%num.pi, ~]
     | =Rect[width: w, height: h] => %num.mul [w, h]
   },
 ]
@@ -1381,7 +1381,7 @@ __integer_add__ [3, 4]                       //= 7
 
 | module | |
 | --- | --- |
-| `%num` | arithmetic over integers, exact rationals and single-radical surds |
+| `%num` | exact arithmetic over integers, rationals, single-radical surds, π, e and logarithms, with exact trigonometry |
 | `%int` | integer-only operations: quotient, modulo, isqrt, bitwise |
 | `%bin` | binary data |
 | `%str` | strings: the `Str` type, splitting, joining, slicing, parsing |

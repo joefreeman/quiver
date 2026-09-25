@@ -734,7 +734,7 @@ fn render_value(env: &mut Environment<NativeEffect>, value: &WireValue) -> Outco
         _ => None,
     };
     let origin = if value.is_nil() {
-        env.describe_origin(value)
+        env.describe_failure(value)
     } else {
         None
     };

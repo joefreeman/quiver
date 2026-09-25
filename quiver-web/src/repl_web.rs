@@ -715,10 +715,10 @@ impl Environment {
     ) {
         match result {
             RequestResult::Result(Ok(value)) => {
-                // A stamped nil's failure provenance, surfaced alongside the value the
-                // way the native REPL prints it.
+                // Why a nil failed (its `:error` and provenance), surfaced alongside the
+                // value the way the native REPL prints it.
                 let origin = if value.is_nil() {
-                    env.describe_origin(&value)
+                    env.describe_failure(&value)
                 } else {
                     None
                 };
@@ -767,7 +767,7 @@ impl Environment {
                         Ok(value) => crate::types::Result::Ok {
                             value: {
                                 let origin = if value.is_nil() {
-                                    env.describe_origin(&value)
+                                    env.describe_failure(&value)
                                 } else {
                                     None
                                 };

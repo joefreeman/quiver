@@ -409,7 +409,22 @@ fn analyze_match_pattern(
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     match pattern {
         ast::Match::Identifier(name, _) => {
-            analyze_identifier_pattern(name.clone(), value_type_id, path, identifiers)
+            // A binder of the whole scrutinee takes its (possibly complement-narrowed) type,
+            // re-rooted against the declared one: `ts` after `=Nil` fails is a lone `Cons` whose
+            // `^` would otherwise read as that `Cons`, a list with no end.
+            let binding_type_id = if path.is_empty() {
+                super::narrowing::get_declared_type_for_provenance(
+                    scopes,
+                    value_provenance,
+                    program,
+                )
+                .map_or(value_type_id, |declared| {
+                    super::narrowing::reroot_narrowed(value_type_id, declared, program)
+                })
+            } else {
+                value_type_id
+            };
+            analyze_identifier_pattern(name.clone(), binding_type_id, path, identifiers)
         }
         ast::Match::Literal(literal) => {
             analyze_literal_pattern(literal.clone(), path, value_type_id, program)
@@ -755,8 +770,24 @@ fn analyze_match_tuple_pattern(
     // Find matching tuple types
     let matching_types = find_matching_match_tuples(program, tuple, value_type_id)?;
 
+    // Each member's runtime tuple test, when one is needed: the *declared* scrutinee's
+    // same-shaped member where one exists, since a complement-narrowed member's field types
+    // would wrongly reject a value whose tuple id carries the declared (wider) field type (see
+    // `declared_shape_witness`), and the member itself otherwise.
+    let needs_tuple_check = is_union(value_type_id, program) || matching_types.len() > 1;
+    let mut witnesses = Vec::new();
+    for (tuple_id, _) in &matching_types {
+        let witness = if needs_tuple_check {
+            super::narrowing::declared_shape_witness(scopes, value_provenance, *tuple_id, program)
+                .unwrap_or(*tuple_id)
+        } else {
+            *tuple_id
+        };
+        witnesses.push(witness);
+    }
+
     // For each matching type, create binding sets
-    for (tuple_id, field_mappings) in &matching_types {
+    for (member, (tuple_id, field_mappings)) in matching_types.iter().enumerate() {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
         // For a single variant, use the parent's identifiers directly
         let mut variant_identifiers_scope =
@@ -782,22 +813,36 @@ fn analyze_match_tuple_pattern(
 
         // Start with a binding set for this type
         let mut base_requirements = vec![];
+        // The field types the sub-patterns are checked against. A test against the declared
+        // shape passes a value of *any* member sharing that shape — `[E, P | E]` and
+        // `[P | E, E]`, the complement of `[P, P]`, are indistinguishable by it — so each field
+        // must be checked as that whole group types it, not as this member alone does.
+        let check_tuple_id = witnesses[member];
+        let siblings: Vec<usize> = matching_types
+            .iter()
+            .zip(&witnesses)
+            .filter(|((other, _), witness)| **witness == check_tuple_id && other != tuple_id)
+            .map(|((other, _), _)| *other)
+            .collect();
+        let check_fields: Option<Vec<usize>> = if siblings.is_empty() {
+            None
+        } else {
+            let mut fields = tuple_fields.clone();
+            for sibling in siblings {
+                let sibling_fields: Vec<usize> = program
+                    .lookup_tuple(sibling)
+                    .map(|info| info.fields.iter().map(|(_, t)| *t).collect())
+                    .unwrap_or_default();
+                for (field, other) in fields.iter_mut().zip(sibling_fields) {
+                    *field = union_type_ids(program, vec![*field, other]);
+                }
+            }
+            Some(fields)
+        };
         // Add runtime check if needed
         // We need a runtime check if value_type is a union (even if it contains only one tuple type)
         // because the value could be a non-tuple type (like int or bin)
-        if is_union(value_type_id, program) || matching_types.len() > 1 {
-            // Need to check the type at runtime since value could be one of multiple
-            // types. Test against the *declared* scrutinee's same-shaped member where
-            // one exists: a complement-narrowed member's field types would wrongly
-            // reject a value whose tuple id carries the declared (wider) field type
-            // (see `declared_shape_witness`).
-            let check_tuple_id = super::narrowing::declared_shape_witness(
-                scopes,
-                value_provenance,
-                *tuple_id,
-                program,
-            )
-            .unwrap_or(*tuple_id);
+        if needs_tuple_check {
             let tuple_type_id = program.register_type(Type::Tuple(check_tuple_id));
             base_requirements.push(Requirement {
                 path: path.clone(),
@@ -813,7 +858,10 @@ fn analyze_match_tuple_pattern(
         // Process each field pattern
         for (pattern_idx, actual_idx) in field_mappings {
             let field = &tuple.fields[*pattern_idx];
-            let raw_field_type_id = tuple_fields[*actual_idx];
+            let member_field_type_id = tuple_fields[*actual_idx];
+            let raw_field_type_id = check_fields
+                .as_ref()
+                .map_or(member_field_type_id, |fields| fields[*actual_idx]);
 
             // Close the field type's `Cycle` references against the scrutinee boundary,
             // so a binding (or sub-pattern) taken from a recursive position carries a
@@ -858,7 +906,8 @@ fn analyze_match_tuple_pattern(
                 && let Some(narrowed_id) =
                     super::narrowing::get_field_narrowing(scopes, value_provenance, *actual_idx)
             {
-                // Intersect with the narrowed type
+                // Intersect with the narrowed type (which re-roots a recursive field's kept
+                // variants, so `Nil | Cons['t, ^]` narrowed to `Cons` still ends in `Nil`).
                 field_type_id = intersect_types(field_type_id, narrowed_id, program);
             }
 
@@ -886,9 +935,19 @@ fn analyze_match_tuple_pattern(
             // type: the reconstructed type feeds coverage/complement computation, which
             // must recognize the branch as covering the original member — a closed
             // field would read as a *different* recursive type and break exhaustiveness
-            // (and a direct `Cycle(1)` would materialize an infinite type).
-            if !super::narrowing::has_cycles(raw_field_type_id, program) {
-                narrowed_fields[*actual_idx].1 = field_narrowed_type_id;
+            // (and a direct `Cycle(1)` would materialize an infinite type). A narrowing that
+            // leaves no cycle behind (`('int)a` against a union with a recursive member) is
+            // exact on its own, and is kept.
+            if !super::narrowing::has_cycles(raw_field_type_id, program)
+                || !super::narrowing::has_cycles(field_narrowed_type_id, program)
+            {
+                narrowed_fields[*actual_idx].1 = if check_fields.is_some() {
+                    // Checked against the declared shape; this member's own field type is
+                    // still what a value reaching this binding set as *this* member holds.
+                    intersect_types(field_narrowed_type_id, member_field_type_id, program)
+                } else {
+                    field_narrowed_type_id
+                };
             }
 
             // Combine field binding sets with current binding sets (cartesian product)

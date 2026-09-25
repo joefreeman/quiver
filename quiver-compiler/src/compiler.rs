@@ -689,7 +689,8 @@ struct FlowingValue {
 /// parameter values that reach it) with that branch's inferred result type. `valid` is cleared
 /// if any branch is not a pure parameter dispatch, in which case no case table is recorded.
 struct DispatchCollection {
-    branches: Vec<(usize, usize)>,
+    /// Each branch's (parameter guard, result type, whether it self tail-calls).
+    branches: Vec<(usize, usize, bool)>,
     valid: bool,
 }
 
@@ -798,6 +799,10 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // Consulted by the return-type check to name unhandled cases. `None` if exhaustive or not an
     // enumeration.
     last_uncovered: Option<usize>,
+
+    // Self tail calls (`^ […]`) compiled so far; a block branch compares it before and after to
+    // tell whether it tail-calls, which makes its own result type incomplete.
+    self_tail_calls: usize,
 
     // Case tables for functions that dispatch on their parameter: a list of (parameter guard
     // type, branch result type), consulted at call sites to compute a result type from the
@@ -982,6 +987,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             current_omittable: Vec::new(),
             collected_dispatch: None,
             last_uncovered: None,
+            self_tail_calls: 0,
             fn_case_tables: tables.fn_case_tables,
             case_tables: tables.case_tables,
             callable_type_params: tables.callable_type_params,
@@ -2884,6 +2890,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             branches: Vec::new(),
             valid: true,
         });
+        // Likewise the self-tail-call count: a nested function's `^` recurses into *it*, and must
+        // not mark the enclosing branch as recursive.
+        let saved_tail_calls = self.self_tail_calls;
         let body_type = match function.body {
             Some(body) => {
                 // Function parameters have Provenance::Parameter since they come from callers
@@ -2907,6 +2916,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         };
         let dispatch = std::mem::replace(&mut self.collected_dispatch, saved_dispatch);
+        self.self_tail_calls = saved_tail_calls;
 
         // Validate return type if specified
         if let Some(return_type_ast) = &function.return_type {
@@ -2990,9 +3000,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // If every branch of the body was a pure parameter dispatch, record its case table so
         // calls can specialize the result type to the concrete argument (return-type dispatch).
+        //
+        // A branch that tail-calls itself has an incomplete result type: the tail call types as
+        // `never` (inference gives up there), so whatever the recursion goes on to answer is
+        // missing from it — and a branch that is *only* a tail call types as `never` outright,
+        // or as nil where it can also fall through. Such a branch answers the function's whole
+        // result type instead. Keeping its own would type a call dispatching to it wrongly —
+        // `n = len [xs, 0]` with `xs` known non-empty as a match that can never succeed.
         let dispatch_table = dispatch
             .filter(|d| d.valid && !d.branches.is_empty())
-            .map(|d| d.branches);
+            .map(|d| {
+                d.branches
+                    .into_iter()
+                    .map(|(guard, result, recursive)| {
+                        (guard, if recursive { body_type } else { result })
+                    })
+                    .collect::<Vec<_>>()
+            });
 
         // Create type information for the function. The receive type is the final
         // `current_receive_type_id`: the body pre-pass seed (line above the save), widened
@@ -3505,6 +3529,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
 
             branch_starts.push(self.codegen.instructions.len());
+            let tail_calls_before = self.self_tail_calls;
 
             if i > 0 {
                 self.codegen.add_instruction(Instruction::pop());
@@ -3720,7 +3745,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             if let Some(d) = &mut dispatch {
                 match branch_guard {
                     Some(guard) if branch_types.len() == branch_types_before + 1 => {
-                        d.branches.push((guard, branch_types[branch_types_before]));
+                        d.branches.push((
+                            guard,
+                            branch_types[branch_types_before],
+                            self.self_tail_calls > tail_calls_before,
+                        ));
                     }
                     _ => d.valid = false,
                 }
@@ -3895,7 +3924,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         .as_mut()
                         .unwrap()
                         .branches
-                        .push((uncovered, nil_type));
+                        .push((uncovered, nil_type, false));
                 }
             } else if let Some(d) = &mut dispatch {
                 d.valid = false;
@@ -7753,6 +7782,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 });
             }
             self.codegen.add_instruction(Instruction::recurse());
+            self.self_tail_calls += 1;
             Ok(self.program.never())
         } else {
             // Tail call to identifier with accessors
