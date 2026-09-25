@@ -409,22 +409,7 @@ fn analyze_match_pattern(
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     match pattern {
         ast::Match::Identifier(name, _) => {
-            // A binder of the whole scrutinee takes its (possibly complement-narrowed) type,
-            // re-rooted against the declared one: `ts` after `=Nil` fails is a lone `Cons` whose
-            // `^` would otherwise read as that `Cons`, a list with no end.
-            let binding_type_id = if path.is_empty() {
-                super::narrowing::get_declared_type_for_provenance(
-                    scopes,
-                    value_provenance,
-                    program,
-                )
-                .map_or(value_type_id, |declared| {
-                    super::narrowing::reroot_narrowed(value_type_id, declared, program)
-                })
-            } else {
-                value_type_id
-            };
-            analyze_identifier_pattern(name.clone(), binding_type_id, path, identifiers)
+            analyze_identifier_pattern(name.clone(), value_type_id, path, identifiers)
         }
         ast::Match::Literal(literal) => {
             analyze_literal_pattern(literal.clone(), path, value_type_id, program)

@@ -211,6 +211,13 @@ pub enum Error {
     /// callable type is available to infer it from. The form means "infer from context"
     /// and there is no context here — a nilary function is written `#[] { … }`.
     ParameterNotInferable,
+    /// A function literal's inferred parameter never settles: each compile of its body widens
+    /// the type variable the parameter is drawn from (a folder building a list from a `Nil`
+    /// start nests one level deeper every time), so no finite parameter type fits every call.
+    ParameterNotSettled {
+        /// The widest parameter type tried, for the message.
+        parameter: String,
+    },
     /// A chain term other than the head ignores the value flowing into it, silently
     /// dropping everything the chain computed before it. A chain threads a value through
     /// its terms; a term that wants a fresh start is a step (`;`), which is also what
@@ -491,6 +498,16 @@ impl std::fmt::Display for Error {
                      type (`#'t {{ ... }}`), or `#[] {{ ... }}` for a function that takes \
                      nil. Inference needs a known callee: `f [..., #{{...}}]`, or piped \
                      directly as `[..., #{{...}}] ~> f ~`"
+                )
+            }
+            Error::ParameterNotSettled { parameter } => {
+                write!(
+                    f,
+                    "`#{{...}}` infers its parameter from the type expected where it is \
+                     written, but its own result keeps widening that type (last tried: \
+                     {parameter}) — building a recursive value, such as a list folded up \
+                     from `Nil`. Write the parameter type, naming the recursive type \
+                     (`#['%list<'int>, 'int] {{ ... }}`)"
                 )
             }
             Error::DiscardedChainValue => {
@@ -1650,49 +1667,87 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let build_start = self.codegen.instructions.len();
         for (fields_compiled, field) in order.iter().map(|&i| &fields[i]).enumerate() {
             // This field's expected type, with the variables solved so far substituted in.
-            let field_expected = expected_fields
+            let mut field_expected = expected_fields
                 .as_ref()
                 .map(|efs| typing::substitute(efs[fields_compiled], &bindings, self.program));
-            let (field_type, field_prov) = match &field.value {
-                ast::FieldValue::Chain(chain) => {
-                    // Each field chain receives a copy of the enclosing (piped) value as its
-                    // input, which it reads by naming `~`. The original value remains lower on
-                    // the stack for nested `~` references and is cleaned up below if owned.
-                    let input = ripple_context.map(|ctx| {
-                        // Duplicate the piped value to the top of the stack as the input.
-                        self.codegen
-                            .add_instruction(Instruction::pick(ctx.stack_offset + fields_compiled));
-                        (ctx.value_type_id, ctx.provenance.clone())
-                    });
-                    // The input value carries the piped value (and its provenance); nested
-                    // tuples re-derive their own ripple context from it, so we pass no parent
-                    // ripple_context here (which would otherwise have a stale stack offset).
-                    self.compile_chain_with_input(
-                        chain.clone(),
-                        None,
-                        None,
-                        input,
-                        None,
-                        false,
-                        field_expected,
-                        false, // a field's value is data; nothing gates on it
-                    )?
-                }
-                ast::FieldValue::Spread(_) => {
-                    unreachable!("Spread should be handled by compile_tuple_with_spread")
-                }
-            };
-            // Grow the bindings by unifying the expected field type against the compiled type, so a
-            // later field's expected type sees the variables this field pinned. Best-effort: a
-            // mismatch here is reported properly later, when the whole tuple is applied to the
-            // callee, so only commit bindings on success.
-            if let Some(efs) = &expected_fields {
+            let field_start = self.codegen.instructions.len();
+            // An inferred-parameter literal can widen a variable its own parameter mentions —
+            // a folder's result widening `'acc` beyond the initial `Nil` — in which case its body
+            // was checked against too narrow a parameter, and is compiled again against the
+            // widened one until the parameter stops changing.
+            let mut attempts = 0;
+            let (field_type, field_prov) = loop {
+                let (field_type, field_prov) = match &field.value {
+                    ast::FieldValue::Chain(chain) => {
+                        // Each field chain receives a copy of the enclosing (piped) value as its
+                        // input, which it reads by naming `~`. The original value remains lower on
+                        // the stack for nested `~` references and is cleaned up below if owned.
+                        let input = ripple_context.map(|ctx| {
+                            // Duplicate the piped value to the top of the stack as the input.
+                            self.codegen.add_instruction(Instruction::pick(
+                                ctx.stack_offset + fields_compiled,
+                            ));
+                            (ctx.value_type_id, ctx.provenance.clone())
+                        });
+                        // The input value carries the piped value (and its provenance); nested
+                        // tuples re-derive their own ripple context from it, so we pass no parent
+                        // ripple_context here (which would otherwise have a stale stack offset).
+                        self.compile_chain_with_input(
+                            chain.clone(),
+                            None,
+                            None,
+                            input,
+                            None,
+                            false,
+                            field_expected,
+                            false, // a field's value is data; nothing gates on it
+                        )?
+                    }
+                    ast::FieldValue::Spread(_) => {
+                        unreachable!("Spread should be handled by compile_tuple_with_spread")
+                    }
+                };
+                // Grow the bindings by unifying the expected field type against the compiled type, so a
+                // later field's expected type sees the variables this field pinned. Best-effort: a
+                // mismatch here is reported properly later, when the whole tuple is applied to the
+                // callee, so only commit bindings on success.
+                let Some(efs) = &expected_fields else {
+                    break (field_type, field_prov);
+                };
                 let mut trial = bindings.clone();
-                if typing::unify(&mut trial, efs[fields_compiled], field_type, self.program).is_ok()
+                if typing::unify(&mut trial, efs[fields_compiled], field_type, self.program)
+                    .is_err()
                 {
-                    bindings = trial;
+                    break (field_type, field_prov);
                 }
-            }
+                // A second round still widening is growth, not a missing member: generalize it
+                // to the recursive type it converges to (see `generalize_growth`).
+                if attempts > 0 {
+                    for (name, &grown) in trial.clone().iter() {
+                        if let Some(&previous) = bindings.get(name)
+                            && previous != grown
+                            && let Some(general) =
+                                typing::generalize_growth(grown, previous, self.program)
+                        {
+                            trial.insert(name.clone(), general);
+                        }
+                    }
+                }
+                let widened = typing::substitute(efs[fields_compiled], &trial, self.program);
+                if !helpers::is_inferred_literal(&field.value) || Some(widened) == field_expected {
+                    bindings = trial;
+                    break (field_type, field_prov);
+                }
+                if attempts == helpers::INFERENCE_ATTEMPTS {
+                    return Err(Error::ParameterNotSettled {
+                        parameter: quiver_core::format::format_type_by_id(&*self.program, widened),
+                    });
+                }
+                attempts += 1;
+                self.codegen.instructions.truncate(field_start);
+                bindings = trial;
+                field_expected = Some(widened);
+            };
             // Record the field label's type for hover (named source fields only) — e.g. a
             // module's `[ double: #..., triple: #... ]` exposes each member's signature.
             if let (Some(name), Some(span)) = (&field.name, field.name_span.get()) {
@@ -3414,8 +3469,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         //
         // Nil in `result_type` is not by itself fallibility: a bare binder (`=x`) on a
         // nil-typed value *matches* the nil and binds it. A pattern is irrefutable when
-        // some binding set has no runtime requirements — it types as plain `Ok`.
-        let irrefutable = pattern::is_irrefutable(&binding_sets);
+        // some binding set has no runtime requirements, or when its sets together cover the
+        // value's type — `[x, y]` against `[A, B] | [A, C]` tests which member it has, but
+        // matches either — and it then types as plain `Ok`. Coverage is the complement's
+        // verdict, which is exact only for pure type tests on non-recursive positions (what
+        // `prevents` rules out); otherwise only a requirement-free set counts.
+        let irrefutable = pattern::is_irrefutable(&binding_sets)
+            || (!prevents && !binding_sets.is_empty() && {
+                let rest = narrowing::compute_complement(value_type, narrowed_type, self.program);
+                self.is_never(rest)
+            });
         let final_type = if self.is_nil(result_type) && !self.contains_nil(value_type) {
             result_type
         } else if self.contains_nil(result_type) && !irrefutable {
@@ -7572,6 +7635,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let mut bindings = HashMap::new();
 
                 typing::unify(&mut bindings, param_id, arg_type, self.program)?;
+                self.check_argument_fits(arg_type, param_id, &bindings, value_type)?;
 
                 // Substitute bindings in the result type, closing unpinned parameters
                 // to the empty union (see close_unpinned_result).
@@ -7584,15 +7648,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 typing::substitute(result_id, &bindings, self.program)
             } else {
                 // No type variables - just check compatibility
-                if !quiver_core::types::is_compatible(arg_type, param_id, &*self.program) {
-                    return Err(Error::TypeMismatch {
-                        expected: format!(
-                            "function parameter compatible with {}",
-                            quiver_core::format::format_type_by_id(&*self.program, param_id)
-                        ),
-                        found: quiver_core::format::format_type_by_id(&*self.program, value_type),
-                    });
-                }
+                self.check_argument_fits(arg_type, param_id, &HashMap::new(), value_type)?;
                 // If this function dispatches on its parameter, specialize the result type to
                 // the concrete argument; otherwise fall back to its single frozen result.
                 self.dispatch_result(target_type_id, callee_fn, arg_type)
@@ -7709,6 +7765,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let result_type = if has_vars {
             let mut bindings = HashMap::new();
             typing::unify(&mut bindings, param_id, arg_type, self.program)?;
+            self.check_argument_fits(arg_type, param_id, &bindings, arg_type)?;
             typing::close_unpinned_result(
                 result_id,
                 &mut bindings,
@@ -7717,21 +7774,53 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             );
             typing::substitute(result_id, &bindings, self.program)
         } else {
-            if !quiver_core::types::is_compatible(arg_type, param_id, &*self.program) {
-                return Err(Error::TypeMismatch {
-                    expected: format!(
-                        "function parameter compatible with {}",
-                        quiver_core::format::format_type_by_id(&*self.program, param_id)
-                    ),
-                    found: quiver_core::format::format_type_by_id(&*self.program, arg_type),
-                });
-            }
+            self.check_argument_fits(arg_type, param_id, &HashMap::new(), arg_type)?;
             result_id
         };
 
         self.widen_receive_type(receive_id);
         self.widen_states(states_id);
         Ok(result_type)
+    }
+
+    /// Check a call's argument against the parameter, instantiated by the bindings unification
+    /// found. Unification only binds: widening a variable from one occurrence (a folder's result
+    /// widening `'acc` to `'int | []`) never re-checks the others it now fails (the folder's
+    /// own `'int` parameter no longer accepts every `'acc`), so the instantiated parameter is
+    /// checked as a whole. A parameter still mentioning an unbound variable has nothing the
+    /// argument pinned there, so only what unification checked applies.
+    fn check_argument_fits(
+        &mut self,
+        arg_type: usize,
+        param_id: usize,
+        bindings: &HashMap<String, usize>,
+        shown: usize,
+    ) -> Result<(), Error> {
+        let param = typing::substitute(param_id, bindings, self.program);
+        if typing::contains_variables(param, &*self.program) {
+            return Ok(());
+        }
+        // Rows are transparent to unification, which may bind a variable where the argument
+        // carried one (a fresh literal's exact-empty row) and meet it row-less elsewhere, so
+        // an instantiated parameter is compared with rows erased on both sides. A declared
+        // parameter is compared as written.
+        let fits = if bindings.is_empty() {
+            quiver_core::types::is_compatible(arg_type, param, &*self.program)
+        } else {
+            let arg = typing::erase_rows(arg_type, self.program);
+            let param = typing::erase_rows(param, self.program);
+            quiver_core::types::is_compatible(arg, param, &*self.program)
+        };
+        if fits {
+            return Ok(());
+        }
+        Err(Error::TypeMismatch {
+            expected: format!(
+                "function parameter compatible with {}",
+                quiver_core::format::format_type_by_id(&*self.program, param)
+            ),
+            found: quiver_core::format::format_type_by_id(&*self.program, shown),
+        })
     }
 
     fn compile_tail_call(

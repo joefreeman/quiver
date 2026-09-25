@@ -230,7 +230,13 @@ v ~> %vec.scale ~   //= 1/6 // 1/lcm(2, 3)
 v ~> %vec.sum ~     //= 5/6
 ```
 
-A scale that fine can push a lane past the dtype, which is nil like any other overflow.
+A scale that fine can push a lane past the dtype, which is nil like any other overflow. An
+irrational value has no denominator at all, so no scale holds it: that is nil too, carrying the
+`:error` from `%num.denom`.
+
+```quiver
+%vec.of_values [I32, %list{ %num.pi, 1 }] ~> :('%num.error)error   //= OutOfDomain
+```
 
 ## Comparison and filtering
 

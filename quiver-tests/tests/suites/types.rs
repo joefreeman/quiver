@@ -1823,3 +1823,24 @@ fn test_process_type_arrow_form_is_gone() {
         .evaluate("'bad = @'int -> 'int")
         .expect_parse_failure();
 }
+
+#[test]
+fn test_recursive_alias_keeps_its_meaning_inside_a_union() {
+    // Joining `'l` into a larger union must not let the larger union into its tails: `^` in
+    // `Cons['int, ^]` means `'l`, wherever `'l` is written.
+    let prelude = "'l = Nil | Cons['int, ^]; 'm = Leaf | Node['bin, ^]";
+    for (param, arg) in [
+        ("'l | []", "Cons[1, []]"),
+        ("'l | 'bin", "Cons[1, Cons[2, <01>]]"),
+        ("'l | 'm", "Cons[1, Node[<01>, Leaf]]"),
+    ] {
+        quiver()
+            .evaluate(&format!("{prelude}; g = #({param}) {{ $ }}; g {arg}"))
+            .expect_error_containing("Type mismatch");
+    }
+    quiver()
+        .evaluate(&format!(
+            "{prelude}; g = #('l | 'm) {{ $ }}; [g Cons[1, Nil], g Node[<01>, Leaf], g Nil]"
+        ))
+        .expect("[Cons[1, Nil], Node[<01>, Leaf], Nil]");
+}

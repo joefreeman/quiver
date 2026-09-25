@@ -276,8 +276,9 @@ fn test_pointer_events_carry_element_relative_positions() {
                comp = [
                  mount: #'%http { "" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   $event:('%html/live.event)event ~> =MouseMove(x: x, y: y)
-                   %str.from_int x ~> %str.concat [~, ","] ~> %str.concat [~, %str.from_int y]
+                   | $event:('%html/live.event)event ~> =MouseMove(x: x, y: y)
+                     %str.from_int x ~> %str.concat [~, ","] ~> %str.concat [~, %str.from_int y]
+                   | $state
                  },
                  view: #Str['bin] { %html/live{ <p on:mousemove[throttle: 40]={Move}>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
@@ -636,8 +637,9 @@ fn test_submit_fields_reach_update_as_event_metadata() {
                comp = [
                  mount: #'%http { "" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   $event:('%html/live.event)event ~> =Submit(fields: f)
-                   %http.get [f, "v"]
+                   | $event:('%html/live.event)event ~> =Submit(fields: f)
+                     %http.get [f, "v"]
+                   | $state
                  },
                  view: #Str['bin] { %html{ <p>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
@@ -682,8 +684,9 @@ fn test_change_metadata_carries_checked_state() {
                comp = [
                  mount: #'%http { "" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   $event:('%html/live.event)event ~> =Change(value: v, checked?: c)
-                   c ~> { | =Ok => %str.concat ["on:", v] | %str.concat ["off:", v] }
+                   | $event:('%html/live.event)event ~> =Change(value: v, checked?: c)
+                     c ~> { | =Ok => %str.concat ["on:", v] | %str.concat ["off:", v] }
+                   | $state
                  },
                  view: #Str['bin] { %html{ <p>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
@@ -707,8 +710,9 @@ fn test_input_and_change_share_one_shape() {
                comp = [
                  mount: #'%http { "" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   $event:('%html/live.event)event ~> =(value: v)
-                   v
+                   | $event:('%html/live.event)event ~> =(value: v)
+                     v
+                   | $state
                  },
                  view: #Str['bin] { %html{ <p>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
@@ -732,9 +736,10 @@ fn test_keydown_metadata_carries_key_and_modifiers() {
                comp = [
                  mount: #'%http { "" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   $event:('%html/live.event)event ~> =KeyDown(key: k, mods: m)
-                   m ~> =(ctrl?: Ok)
-                   k
+                   | $event:('%html/live.event)event ~> =KeyDown(key: k, mods: m)
+                     m ~> =(ctrl?: Ok)
+                     k
+                   | $state
                  },
                  view: #Str['bin] { %html{ <p>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
@@ -757,9 +762,10 @@ fn test_click_metadata_carries_coordinates_and_modifiers() {
                comp = [
                  mount: #'%http { "" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   $event:('%html/live.event)event ~> =Click(x: x, y: y, mods: m)
-                   m ~> =(shift?: Ok)
-                   %str.concat [%str.from_int x, %str.concat [",", %str.from_int y]]
+                   | $event:('%html/live.event)event ~> =Click(x: x, y: y, mods: m)
+                     m ~> =(shift?: Ok)
+                     %str.concat [%str.from_int x, %str.concat [",", %str.from_int y]]
+                   | $state
                  },
                  view: #Str['bin] { %html{ <p>{$}</p> } },
                  decode: %data.decode<Ev['ev]>,
@@ -880,13 +886,14 @@ fn test_one_event_union_folds_markers_and_payloads_together() {
                comp = [
                  mount: #[] { "start" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   $event ~> {
-                     | =Del[_] => "deleted"
-                     | =Submit => {
-                       $event:('%html/live.event)event ~> =Submit(fields: f)
-                       %http.get [f, "t"]
+                   | $event ~> {
+                       | =Del[_] => "deleted"
+                       | =Submit => {
+                         $event:('%html/live.event)event ~> =Submit(fields: f)
+                         %http.get [f, "t"]
+                       }
                      }
-                   }
+                   | $state
                  },
                  view: #Str['bin] { %html/live{ <form on:submit={Submit}><b>{$}</b></form> } },
                  decode: %data.decode<Ev['ev]>,

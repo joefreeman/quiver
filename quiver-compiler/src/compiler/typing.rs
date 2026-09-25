@@ -26,44 +26,94 @@ pub enum TupleAccessor {
     Position(usize),
 }
 
-/// Create a union type from a list of type IDs
+/// Create a union type from a list of type IDs, flattening any unions among them.
+///
+/// A union that already holds every resulting member is the result itself. Otherwise each
+/// union is spliced with its references to its own root closed (`splice_union_members`), so a
+/// recursive member keeps meaning the union it was written in.
 pub fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
-    // Flatten any unions and deduplicate
-    let mut flattened = Vec::new();
-    for type_id in type_ids {
-        if let Some(Type::Union(variants)) = program.lookup_type(type_id) {
-            flattened.extend(variants.iter().cloned());
-        } else {
-            flattened.push(type_id);
+    let is_union = |id: &usize| matches!(program.lookup_type(*id), Some(Type::Union(_)));
+    if type_ids.iter().any(is_union) {
+        let plain = distinct_members(
+            program,
+            type_ids
+                .iter()
+                .flat_map(|&id| match program.lookup_type(id) {
+                    Some(Type::Union(members)) => members.clone(),
+                    _ => vec![id],
+                }),
+        );
+        if plain.len() <= 1 {
+            return plain.first().copied().unwrap_or_else(|| program.never());
+        }
+        if let Some(&whole) = type_ids.iter().find(|&&id| match program.lookup_type(id) {
+            Some(Type::Union(members)) => {
+                members.len() >= plain.len() && plain.iter().all(|m| members.contains(m))
+            }
+            _ => false,
+        }) {
+            return whole;
         }
     }
 
-    // Deduplicate
-    let mut seen = std::collections::HashSet::new();
-    let unique: Vec<usize> = flattened
-        .into_iter()
-        .filter(|id| seen.insert(*id))
-        .collect();
+    let mut spliced = Vec::new();
+    for type_id in type_ids {
+        if matches!(program.lookup_type(type_id), Some(Type::Union(_))) {
+            spliced.extend(splice_union_members(type_id, 1, program));
+        } else {
+            spliced.push(type_id);
+        }
+    }
+    let unique = distinct_members(program, spliced);
+    match unique.len() {
+        0 => program.never(),
+        1 => unique[0],
+        _ => refold(&unique, program).unwrap_or_else(|| program.register_type(Type::Union(unique))),
+    }
+}
 
-    // Fold members that differ only by an annotation row: when both `T` and
-    // `Annotated { base: T }` are present (e.g. an alias-typed `Nil` alongside a freshly
-    // built literal `Nil` carrying an exact-empty row), keep the open `T` — retrieval on
-    // a union is already governed by its weakest member, so dropping the rowed twin loses
-    // nothing, while keeping it bloats unions and displays as duplicates (`Nil | Nil`).
-    let unique: Vec<usize> = unique
+/// The recursive union these members are exactly one unrolling of, if any: `Nil | Cons['t,
+/// 'l<'t>]` is `'l<'t>` spliced, and is `'l<'t>` — so a union that lost and regained members
+/// (`'l | []` less `[]`) reads as the alias again, not as an equal but distinct twin. The
+/// candidates are the unions a member's fields name.
+fn refold(members: &[usize], program: &mut Program) -> Option<usize> {
+    let mut candidates = Vec::new();
+    for &member in members {
+        if let Some(Type::Tuple(tuple_id)) = program.lookup_type(member)
+            && let Some(info) = program.lookup_tuple(*tuple_id)
+        {
+            for &(_, field) in &info.fields {
+                let is_union = matches!(program.lookup_type(field), Some(Type::Union(u)) if u.len() == members.len());
+                if is_union && !candidates.contains(&field) {
+                    candidates.push(field);
+                }
+            }
+        }
+    }
+    candidates.into_iter().find(|&candidate| {
+        let unrolled = splice_union_members(candidate, 1, program);
+        unrolled.len() == members.len() && unrolled.iter().all(|m| members.contains(m))
+    })
+}
+
+/// Deduplicate union members, in order.
+///
+/// Members that differ only by an annotation row fold: when both `T` and `Annotated { base:
+/// T }` are present (e.g. an alias-typed `Nil` alongside a freshly built literal `Nil` carrying
+/// an exact-empty row), keep the open `T` — retrieval on a union is already governed by its
+/// weakest member, so dropping the rowed twin loses nothing, while keeping it bloats unions and
+/// displays as duplicates (`Nil | Nil`).
+fn distinct_members(program: &Program, members: impl IntoIterator<Item = usize>) -> Vec<usize> {
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<usize> = members.into_iter().filter(|id| seen.insert(*id)).collect();
+    unique
         .iter()
         .copied()
         .filter(|id| match program.lookup_type(*id) {
             Some(Type::Annotated { base, .. }) => !unique.contains(base),
             _ => true,
         })
-        .collect();
-
-    match unique.len() {
-        0 => program.never(),
-        1 => unique[0],
-        _ => program.register_type(Type::Union(unique)),
-    }
+        .collect()
 }
 
 /// Type alias definition - a pre-resolved type ID with type parameters.
@@ -1041,19 +1091,13 @@ fn resolve_ast_type_impl(
                     program,
                     type_bindings,
                 )?;
-                // Flatten nested unions. Flattening strips one binder from the path of
-                // any cycle inside a union member that reaches through that member's own
-                // root (a parenthesised `(B[^] | C)` member counted both unions), so
-                // shorten those references first; a member whose cycles are
-                // self-contained (an alias-typed member) is untouched, and non-union
-                // members keep their references to the union being built.
+                // Flatten nested unions, written inside the one being built (so it gains no
+                // binder): an alias-typed `'l` member keeps meaning `'l` in its own tails, and
+                // a parenthesised `(B[^] | C)` member's reach through both unions shortens by
+                // the one flattening removes. Non-union members keep their references to the
+                // union being built.
                 if matches!(program.lookup_type(member_type_id), Some(Type::Union(_))) {
-                    let shifted = shift_free_cycles_at(member_type_id, -1, 0, program);
-                    if let Some(Type::Union(variants)) = program.lookup_type(shifted) {
-                        resolved_type_ids.extend(variants.iter().cloned());
-                    } else {
-                        resolved_type_ids.push(shifted);
-                    }
+                    resolved_type_ids.extend(splice_union_members(member_type_id, 0, program));
                 } else {
                     resolved_type_ids.push(member_type_id);
                 }
@@ -1513,8 +1557,7 @@ pub fn close_unpinned_result(
 /// unions and callables, mirroring written-type resolution's `recursion_depth`.
 ///
 /// This is the hygiene step for splicing a type under binders: `substitute` lengthens a
-/// type argument's outward references by the depth of the `Variable` it replaces, and
-/// union flattening (which strips one binder) shortens them by one.
+/// type argument's outward references by the depth of the `Variable` it replaces.
 fn shift_free_cycles_at(
     type_id: usize,
     shift: isize,
@@ -1524,6 +1567,323 @@ fn shift_free_cycles_at(
     if shift == 0 {
         return type_id;
     }
+    rewrite_free_cycles(type_id, cutoff, program, &mut |depth, _, program| {
+        let shifted = usize::try_from(depth as isize + shift)
+            .expect("cycle shift must keep the reference within its binders");
+        program.register_type(Type::Cycle(shifted))
+    })
+}
+
+/// The members of `union_id`, rewritten to stand directly in a union that replaces it —
+/// the flattening step, which removes `union_id` as a binder (see `close_root_references`).
+/// `gained` is 1 when the new union takes `union_id`'s place (a union of types at the same
+/// position), and 0 when `union_id` was already written inside it (a parenthesised member of
+/// a written union).
+pub fn splice_union_members(union_id: usize, gained: usize, program: &mut Program) -> Vec<usize> {
+    let Some(Type::Union(members)) = program.lookup_type(union_id).cloned() else {
+        panic!("splice_union_members on a non-union type");
+    };
+    members
+        .into_iter()
+        .map(|member| close_root_references(member, union_id, gained, program))
+        .collect()
+}
+
+/// Rewrite a member of the union `root` to stand outside it, `gained` binders (0 or 1) now
+/// enclosing it where `root` did.
+///
+/// The member's references to `root` itself would otherwise be captured by whatever binder
+/// encloses it next and mean *that* (`'l | []` spliced as `Nil | Cons['int, ^] | []` would
+/// admit a `[]` tail), so they are closed: replaced by `root`, with `root`'s own outward
+/// references lengthened for the deeper position. References reaching past `root` are
+/// adjusted by the binders the move adds and removes.
+pub fn close_root_references(
+    member: usize,
+    root: usize,
+    gained: usize,
+    program: &mut Program,
+) -> usize {
+    rewrite_free_cycles(member, 0, program, &mut |depth, cutoff, program| {
+        if depth == cutoff + 1 {
+            shift_free_cycles_at(root, (gained + cutoff) as isize, 0, program)
+        } else {
+            program.register_type(Type::Cycle(depth + gained - 1))
+        }
+    })
+}
+
+/// `type_id` with every annotation row removed, at any depth: the data shape alone.
+pub fn erase_rows(type_id: usize, program: &mut Program) -> usize {
+    fn erase(type_id: usize, program: &mut Program, memo: &mut HashMap<usize, usize>) -> usize {
+        if let Some(&erased) = memo.get(&type_id) {
+            return erased;
+        }
+        let Some(typ) = program.lookup_type(type_id).cloned() else {
+            return type_id;
+        };
+        let erased = match typ {
+            Type::Annotated { base, .. } => erase(base, program, memo),
+            Type::Union(members) => {
+                let erased: Vec<usize> = members.iter().map(|&m| erase(m, program, memo)).collect();
+                if erased == members {
+                    type_id
+                } else {
+                    // Structurally: nested unions are boundaries.
+                    program.register_type(Type::Union(erased))
+                }
+            }
+            Type::Tuple(tuple_id) => match program.lookup_tuple(tuple_id).cloned() {
+                Some(info) => {
+                    let fields: Vec<(Option<String>, usize)> = info
+                        .fields
+                        .iter()
+                        .map(|(label, field)| (label.clone(), erase(*field, program, memo)))
+                        .collect();
+                    if fields == info.fields {
+                        type_id
+                    } else {
+                        let tuple = program.register_tuple(info.name, fields);
+                        program.register_type(Type::Tuple(tuple))
+                    }
+                }
+                None => type_id,
+            },
+            Type::Partial { name, fields } => {
+                let erased: Vec<(String, usize)> = fields
+                    .iter()
+                    .map(|(label, field)| (label.clone(), erase(*field, program, memo)))
+                    .collect();
+                if erased == fields {
+                    type_id
+                } else {
+                    program.register_type(Type::Partial {
+                        name,
+                        fields: erased,
+                    })
+                }
+            }
+            Type::Callable {
+                parameter,
+                result,
+                receive,
+                states,
+                omittable,
+            } => {
+                let new = Type::Callable {
+                    parameter: erase(parameter, program, memo),
+                    result: erase(result, program, memo),
+                    receive: erase(receive, program, memo),
+                    states: states.map(|s| erase(s, program, memo)),
+                    omittable,
+                };
+                program.register_type(new)
+            }
+            Type::Process {
+                send,
+                receive,
+                state,
+            } => {
+                let new = Type::Process {
+                    send: send.map(|t| erase(t, program, memo)),
+                    receive: receive.map(|t| erase(t, program, memo)),
+                    state: state.map(|t| erase(t, program, memo)),
+                };
+                program.register_type(new)
+            }
+            Type::Cycle(_)
+            | Type::Variable(_)
+            | Type::Integer
+            | Type::Binary
+            | Type::Reference
+            | Type::Resource(_) => type_id,
+        };
+        memo.insert(type_id, erased);
+        erased
+    }
+    erase(type_id, program, &mut HashMap::new())
+}
+
+/// Widen a type that grew by embedding its previous self — `new` holding `old` inside its
+/// members, as a folder's accumulator does when each round wraps the last (`Nil` grows to
+/// `Nil | Cons['int, Nil]`, then to `… | Cons['int, Nil | Cons['int, Nil]]`) — into the recursive
+/// type that growth converges to: each embedded `old` becomes a reference to `new`'s root.
+/// Members that were only an earlier round's (cycle-free, and inside the rest) are dropped,
+/// which leaves the set of values unchanged. `None` when `new` does not embed `old`.
+pub fn generalize_growth(new: usize, old: usize, program: &mut Program) -> Option<usize> {
+    fn embed(
+        type_id: usize,
+        old: usize,
+        depth: usize,
+        program: &mut Program,
+        found: &mut bool,
+    ) -> usize {
+        if type_id == old {
+            *found = true;
+            return program.register_type(Type::Cycle(depth));
+        }
+        let Some(typ) = program.lookup_type(type_id).cloned() else {
+            return type_id;
+        };
+        match typ {
+            Type::Union(members) => {
+                let rewritten: Vec<usize> = members
+                    .iter()
+                    .map(|&m| embed(m, old, depth + 1, program, found))
+                    .collect();
+                if rewritten == members {
+                    type_id
+                } else {
+                    program.register_type(Type::Union(rewritten))
+                }
+            }
+            Type::Tuple(tuple_id) => match program.lookup_tuple(tuple_id).cloned() {
+                Some(info) => {
+                    let fields: Vec<(Option<String>, usize)> = info
+                        .fields
+                        .iter()
+                        .map(|(label, f)| (label.clone(), embed(*f, old, depth, program, found)))
+                        .collect();
+                    if fields == info.fields {
+                        type_id
+                    } else {
+                        let tuple = program.register_tuple(info.name, fields);
+                        program.register_type(Type::Tuple(tuple))
+                    }
+                }
+                None => type_id,
+            },
+            Type::Annotated {
+                base,
+                exact,
+                entries,
+            } => {
+                let new_base = embed(base, old, depth, program, found);
+                if new_base == base {
+                    type_id
+                } else {
+                    program.annotate_type(new_base, exact, entries)
+                }
+            }
+            _ => type_id,
+        }
+    }
+
+    let Some(Type::Union(members)) = program.lookup_type(new).cloned() else {
+        return None;
+    };
+    if has_free_cycles(old, program) {
+        return None;
+    }
+    let mut found = false;
+    // The members themselves stay: `old`'s own members are values `new` still holds.
+    let members: Vec<usize> = members
+        .iter()
+        .map(|&m| {
+            if m == old {
+                m
+            } else {
+                embed(m, old, 1, program, &mut found)
+            }
+        })
+        .collect();
+    if !found {
+        return None;
+    }
+    let mut generalized = program.register_type(Type::Union(members.clone()));
+    // A cycle-free member the rest already covers adds no values: without it, the root still
+    // means the same set, so the references keep their meaning.
+    for member in members {
+        let Some(Type::Union(current)) = program.lookup_type(generalized).cloned() else {
+            break;
+        };
+        if current.len() < 2 || has_free_cycles(member, program) || !current.contains(&member) {
+            continue;
+        }
+        let rest: Vec<usize> = current.iter().copied().filter(|&m| m != member).collect();
+        let candidate = match rest[..] {
+            [only] => only,
+            _ => program.register_type(Type::Union(rest)),
+        };
+        if quiver_core::types::is_compatible(member, candidate, &*program)
+            && matches!(program.lookup_type(candidate), Some(Type::Union(_)))
+        {
+            generalized = candidate;
+        }
+    }
+    Some(generalized)
+}
+
+/// Whether `type_id` has a `Cycle` reaching above its own root — one whose meaning depends on
+/// where the type sits.
+pub fn has_free_cycles(type_id: usize, program: &Program) -> bool {
+    fn walk(
+        type_id: usize,
+        cutoff: usize,
+        program: &Program,
+        seen: &mut HashSet<(usize, usize)>,
+    ) -> bool {
+        if !seen.insert((type_id, cutoff)) {
+            return false;
+        }
+        let Some(typ) = program.lookup_type(type_id) else {
+            return false;
+        };
+        let children: Vec<(usize, usize)> = match typ {
+            Type::Cycle(depth) => return *depth > cutoff,
+            Type::Union(variants) => variants.iter().map(|&v| (v, cutoff + 1)).collect(),
+            Type::Callable {
+                parameter,
+                result,
+                receive,
+                states,
+                ..
+            } => [Some(*parameter), Some(*result), Some(*receive), *states]
+                .into_iter()
+                .flatten()
+                .map(|t| (t, cutoff + 1))
+                .collect(),
+            Type::Tuple(tuple_id) => program
+                .lookup_tuple(*tuple_id)
+                .map(|info| info.fields.iter().map(|&(_, t)| (t, cutoff)).collect())
+                .unwrap_or_default(),
+            Type::Partial { fields, .. } => fields.iter().map(|&(_, t)| (t, cutoff)).collect(),
+            Type::Process {
+                send,
+                receive,
+                state,
+            } => [*send, *receive, *state]
+                .into_iter()
+                .flatten()
+                .map(|t| (t, cutoff))
+                .collect(),
+            Type::Annotated { base, entries, .. } => std::iter::once(*base)
+                .chain(entries.iter().map(|&(_, t)| t))
+                .map(|t| (t, cutoff))
+                .collect(),
+            Type::Variable(_)
+            | Type::Integer
+            | Type::Binary
+            | Type::Reference
+            | Type::Resource(_) => {
+                return false;
+            }
+        };
+        children
+            .into_iter()
+            .any(|(child, cutoff)| walk(child, cutoff, program, seen))
+    }
+    walk(type_id, 0, program, &mut HashSet::new())
+}
+
+/// Rebuild `type_id` with each *free* `Cycle` — one reaching above the walked fragment's
+/// root, `Cycle(k)` with `k > cutoff` at `cutoff` binders deep — replaced by
+/// `rewrite(k, cutoff)`. Binders are unions and callables, as in `shift_free_cycles_at`.
+fn rewrite_free_cycles(
+    type_id: usize,
+    cutoff: usize,
+    program: &mut Program,
+    rewrite: &mut dyn FnMut(usize, usize, &mut Program) -> usize,
+) -> usize {
     let Some(typ) = program.lookup_type(type_id).cloned() else {
         return type_id;
     };
@@ -1531,9 +1891,7 @@ fn shift_free_cycles_at(
     match typ {
         Type::Cycle(depth) => {
             if depth > cutoff {
-                let shifted = usize::try_from(depth as isize + shift)
-                    .expect("cycle shift must keep the reference within its binders");
-                program.register_type(Type::Cycle(shifted))
+                rewrite(depth, cutoff, program)
             } else {
                 type_id
             }
@@ -1541,7 +1899,7 @@ fn shift_free_cycles_at(
         Type::Union(variants) => {
             let new_variants: Vec<usize> = variants
                 .iter()
-                .map(|&v| shift_free_cycles_at(v, shift, cutoff + 1, program))
+                .map(|&v| rewrite_free_cycles(v, cutoff + 1, program, rewrite))
                 .collect();
             if new_variants == variants {
                 type_id
@@ -1556,10 +1914,10 @@ fn shift_free_cycles_at(
             states,
             omittable,
         } => {
-            let new_param = shift_free_cycles_at(parameter, shift, cutoff + 1, program);
-            let new_result = shift_free_cycles_at(result, shift, cutoff + 1, program);
-            let new_receive = shift_free_cycles_at(receive, shift, cutoff + 1, program);
-            let new_states = states.map(|s| shift_free_cycles_at(s, shift, cutoff + 1, program));
+            let new_param = rewrite_free_cycles(parameter, cutoff + 1, program, rewrite);
+            let new_result = rewrite_free_cycles(result, cutoff + 1, program, rewrite);
+            let new_receive = rewrite_free_cycles(receive, cutoff + 1, program, rewrite);
+            let new_states = states.map(|s| rewrite_free_cycles(s, cutoff + 1, program, rewrite));
             if new_param == parameter
                 && new_result == result
                 && new_receive == receive
@@ -1585,7 +1943,7 @@ fn shift_free_cycles_at(
                     .iter()
                     .map(|(name, field_type_id)| {
                         let new_type_id =
-                            shift_free_cycles_at(*field_type_id, shift, cutoff, program);
+                            rewrite_free_cycles(*field_type_id, cutoff, program, rewrite);
                         any_changed = any_changed || new_type_id != *field_type_id;
                         (name.clone(), new_type_id)
                     })
@@ -1605,7 +1963,7 @@ fn shift_free_cycles_at(
             let new_fields: Vec<(String, usize)> = fields
                 .iter()
                 .map(|(fname, field_type_id)| {
-                    let new_type_id = shift_free_cycles_at(*field_type_id, shift, cutoff, program);
+                    let new_type_id = rewrite_free_cycles(*field_type_id, cutoff, program, rewrite);
                     any_changed = any_changed || new_type_id != *field_type_id;
                     (fname.clone(), new_type_id)
                 })
@@ -1624,9 +1982,9 @@ fn shift_free_cycles_at(
             receive,
             state,
         } => {
-            let new_send = send.map(|s| shift_free_cycles_at(s, shift, cutoff, program));
-            let new_receive = receive.map(|r| shift_free_cycles_at(r, shift, cutoff, program));
-            let new_state = state.map(|s| shift_free_cycles_at(s, shift, cutoff, program));
+            let new_send = send.map(|s| rewrite_free_cycles(s, cutoff, program, rewrite));
+            let new_receive = receive.map(|r| rewrite_free_cycles(r, cutoff, program, rewrite));
+            let new_state = state.map(|s| rewrite_free_cycles(s, cutoff, program, rewrite));
             if new_send == send && new_receive == receive && new_state == state {
                 type_id
             } else {
@@ -1642,12 +2000,12 @@ fn shift_free_cycles_at(
             exact,
             entries,
         } => {
-            let new_base = shift_free_cycles_at(base, shift, cutoff, program);
+            let new_base = rewrite_free_cycles(base, cutoff, program, rewrite);
             let mut any_changed = new_base != base;
             let new_entries: Vec<(usize, usize)> = entries
                 .iter()
                 .map(|(key, value_type)| {
-                    let new_value = shift_free_cycles_at(*value_type, shift, cutoff, program);
+                    let new_value = rewrite_free_cycles(*value_type, cutoff, program, rewrite);
                     any_changed = any_changed || new_value != *value_type;
                     (*key, new_value)
                 })
@@ -1925,10 +2283,9 @@ pub fn unify(
     concrete_id: usize,
     program: &mut Program,
 ) -> Result<(), Error> {
-    let mut upper = HashSet::new();
     unify_bounded(
         bindings,
-        &mut upper,
+        &mut Unifier::default(),
         false,
         pattern_id,
         concrete_id,
@@ -1946,9 +2303,55 @@ pub fn unify(
 /// the value does not have — `%proc.send`'s `[@'m, 'm]` binds `'m` to what the target
 /// accepts, so a message that is not already covered is a mismatch, not a reason to
 /// grow `'m`.
+/// Unification state threaded through one `unify`: the variables bound as upper bounds (see
+/// `unify_step`), the pattern-side binders (unions and callables) entered, innermost last, which a
+/// pattern `Cycle(n)` counts back through, and the (pattern union, concrete) pairs already being
+/// unified, which a recursive type revisits.
+#[derive(Default)]
+struct Unifier {
+    upper: HashSet<String>,
+    binders: Vec<usize>,
+    visiting: HashSet<(usize, usize)>,
+}
+
+impl Unifier {
+    /// A trial unification's state: no upper bounds of its own, but the same binders.
+    fn fresh(&self) -> Self {
+        Unifier {
+            upper: HashSet::new(),
+            binders: self.binders.clone(),
+            visiting: self.visiting.clone(),
+        }
+    }
+}
+
 fn unify_bounded(
     bindings: &mut HashMap<String, usize>,
-    upper: &mut HashSet<String>,
+    ctx: &mut Unifier,
+    contra: bool,
+    pattern_id: usize,
+    concrete_id: usize,
+    program: &mut Program,
+) -> Result<(), Error> {
+    // An arm that recurses with the same pattern (splitting a concrete union, peeling a row)
+    // has not entered it again.
+    let binder = matches!(
+        program.lookup_type(pattern_id),
+        Some(Type::Union(_) | Type::Callable { .. })
+    ) && ctx.binders.last() != Some(&pattern_id);
+    if binder {
+        ctx.binders.push(pattern_id);
+    }
+    let result = unify_step(bindings, ctx, contra, pattern_id, concrete_id, program);
+    if binder {
+        ctx.binders.pop();
+    }
+    result
+}
+
+fn unify_step(
+    bindings: &mut HashMap<String, usize>,
+    ctx: &mut Unifier,
     contra: bool,
     pattern_id: usize,
     concrete_id: usize,
@@ -1973,7 +2376,7 @@ fn unify_bounded(
 
             if let Some(existing_id) = bindings.get(name).copied() {
                 if existing_id != resolved_concrete_id {
-                    if upper.contains(name) {
+                    if ctx.upper.contains(name) {
                         // The binding is an upper bound (see `unify_bounded`): this
                         // occurrence must fit inside it. Widening would hand the
                         // caller a capability the value never had.
@@ -2009,7 +2412,7 @@ fn unify_bounded(
                 }
                 bindings.insert(name.clone(), resolved_concrete_id);
                 if contra {
-                    upper.insert(name.clone());
+                    ctx.upper.insert(name.clone());
                 }
             }
             Ok(())
@@ -2020,17 +2423,17 @@ fn unify_bounded(
         // pattern (tuple/callable/...) unifies against the row's base. A row in pattern
         // position is likewise peeled.
         (_, Type::Annotated { base, .. }) => {
-            unify_bounded(bindings, upper, contra, pattern_id, *base, program)
+            unify_bounded(bindings, ctx, contra, pattern_id, *base, program)
         }
         (Type::Annotated { base, .. }, _) => {
-            unify_bounded(bindings, upper, contra, *base, concrete_id, program)
+            unify_bounded(bindings, ctx, contra, *base, concrete_id, program)
         }
 
         // When concrete is a variable, resolve it and try unifying with the resolved type
         (_, Type::Variable(name)) => {
             if let Some(&resolved_id) = bindings.get(name) {
                 // Concrete variable is bound - unify with its binding
-                unify_bounded(bindings, upper, contra, pattern_id, resolved_id, program)
+                unify_bounded(bindings, ctx, contra, pattern_id, resolved_id, program)
             } else {
                 // An unbound concrete-side variable is a *rigid* variable from an
                 // enclosing generic context (e.g. a captured value whose type mentions
@@ -2044,7 +2447,7 @@ fn unify_bounded(
                         if let Some(Type::Variable(_)) = program.lookup_type(member) {
                             return unify_bounded(
                                 bindings,
-                                upper,
+                                ctx,
                                 contra,
                                 member,
                                 concrete_id,
@@ -2083,7 +2486,7 @@ fn unify_bounded(
             // Unify state types when both are stated; a missing side imposes no
             // constraint here (the strict direction is subtyping's job, not unification's)
             if let (Some(st1), Some(st2)) = (state1, state2) {
-                unify_bounded(bindings, upper, contra, *st1, *st2, program)?;
+                unify_bounded(bindings, ctx, contra, *st1, *st2, program)?;
             }
             // Send and receive likewise: unify only when both are stated. A generic
             // param like `@!'r` accepts any pid whose receive pins 'r — the
@@ -2096,10 +2499,10 @@ fn unify_bounded(
             // this target accepts, and a later occurrence must fit inside it rather
             // than widen it.
             if let (Some(s1), Some(s2)) = (send1, send2) {
-                unify_bounded(bindings, upper, true, *s1, *s2, program)?;
+                unify_bounded(bindings, ctx, true, *s1, *s2, program)?;
             }
             if let (Some(ret1), Some(ret2)) = (receive1, receive2) {
-                unify_bounded(bindings, upper, contra, *ret1, *ret2, program)?;
+                unify_bounded(bindings, ctx, contra, *ret1, *ret2, program)?;
             }
             Ok(())
         }
@@ -2147,7 +2550,7 @@ fn unify_bounded(
                         "Tuple fields have different names".to_string(),
                     ));
                 }
-                unify_bounded(bindings, upper, contra, *ftype1_id, *ftype2_id, program).map_err(
+                unify_bounded(bindings, ctx, contra, *ftype1_id, *ftype2_id, program).map_err(
                     |e| match e {
                         Error::TypeUnresolved(message) => {
                             let field = fname1.clone().unwrap_or_else(|| index.to_string());
@@ -2201,7 +2604,7 @@ fn unify_bounded(
 
                 unify_bounded(
                     bindings,
-                    upper,
+                    ctx,
                     contra,
                     *pattern_ftype_id,
                     *concrete_ftype_id,
@@ -2247,7 +2650,7 @@ fn unify_bounded(
 
                 unify_bounded(
                     bindings,
-                    upper,
+                    ctx,
                     contra,
                     *pattern_ftype_id,
                     *concrete_ftype_id,
@@ -2276,15 +2679,15 @@ fn unify_bounded(
             },
         ) => {
             // Unify parameters (contravariant - swap order)
-            unify_bounded(bindings, upper, contra, *param1, *param2, program)?;
+            unify_bounded(bindings, ctx, contra, *param1, *param2, program)?;
             // Unify results (covariant)
-            unify_bounded(bindings, upper, contra, *result1, *result2, program)?;
+            unify_bounded(bindings, ctx, contra, *result1, *result2, program)?;
             // Unify receive types (contravariant - swap order)
-            unify_bounded(bindings, upper, contra, *receive1, *receive2, program)?;
+            unify_bounded(bindings, ctx, contra, *receive1, *receive2, program)?;
             // States unify only when both are known: a `#'t -> 'u` parameter (states
             // unknown) accepts any literal without constraining its states.
             if let (Some(st1), Some(st2)) = (states1, states2) {
-                unify_bounded(bindings, upper, contra, *st1, *st2, program)?;
+                unify_bounded(bindings, ctx, contra, *st1, *st2, program)?;
             }
             Ok(())
         }
@@ -2296,6 +2699,31 @@ fn unify_bounded(
         // so a cycle unifies with whatever stands at the same position on the other side.
         // This is sound because the recursive structure is checked at every non-cyclic
         // position; the back-edge carries no additional constraint to verify here.
+        //
+        // A pattern's reference meeting a concrete type is the exception: it names a pattern
+        // union whose variables the concrete type must still bind (`Cons['t, ^]` against
+        // `Cons[A, '%list<B>]` makes `'t` `A | B`, not `A`), so it unifies against that union —
+        // once per pair, which is what ends the recursion.
+        (Type::Cycle(depth), _) if !matches!(concrete, Type::Cycle(_)) => {
+            let Some(index) = ctx.binders.len().checked_sub(*depth) else {
+                return Ok(());
+            };
+            let root = ctx.binders[index];
+            // Only outside function types: references within one (`#^ -> …`, a thunk's
+            // `#[] -> (['t, ^] | [])`) are numbered from function boundaries this walk does not
+            // model, so those keep the old leniency.
+            let through_unions = ctx
+                .binders
+                .iter()
+                .all(|&binder| matches!(program.lookup_type(binder), Some(Type::Union(_))));
+            if !through_unions || !ctx.visiting.insert((root, concrete_id)) {
+                return Ok(());
+            }
+            let outer = ctx.binders.split_off(index);
+            let result = unify_bounded(bindings, ctx, contra, root, concrete_id, program);
+            ctx.binders.extend(outer);
+            result
+        }
         (Type::Cycle(_depth), _) | (_, Type::Cycle(_depth)) => Ok(()),
 
         // Never type (empty union) unifies with anything
@@ -2332,8 +2760,10 @@ fn unify_bounded(
                 let mut found_match = false;
                 for &pattern_variant in &pattern_variants {
                     let mut temp_bindings = bindings.clone();
-                    if unify(
+                    if unify_bounded(
                         &mut temp_bindings,
+                        &mut ctx.fresh(),
+                        false,
                         pattern_variant,
                         concrete_variant,
                         program,
@@ -2352,7 +2782,7 @@ fn unify_bounded(
                     // compact shapes) far better than a canned line.
                     return unify_bounded(
                         bindings,
-                        upper,
+                        ctx,
                         contra,
                         pattern_id,
                         concrete_variant,
@@ -2385,7 +2815,14 @@ fn unify_bounded(
             let concrete_signature = tuple_signature(program, concrete_id);
             for &variant in variants.iter() {
                 let mut temp_bindings = bindings.clone();
-                match unify(&mut temp_bindings, variant, concrete_id, program) {
+                match unify_bounded(
+                    &mut temp_bindings,
+                    &mut ctx.fresh(),
+                    false,
+                    variant,
+                    concrete_id,
+                    program,
+                ) {
                     Ok(()) => {
                         *bindings = temp_bindings;
                         return Ok(());
@@ -2459,16 +2896,19 @@ fn unify_bounded(
             // is not all pids.
             if let Type::Process { .. } = pattern {
                 for &variant in &variants {
-                    unify_bounded(bindings, upper, contra, pattern_id, variant, program)?;
+                    unify_bounded(bindings, ctx, contra, pattern_id, variant, program)?;
                 }
                 return Ok(());
             }
             for &variant in &variants {
                 let mut temp_bindings = bindings.clone();
-                let mut temp_upper = upper.clone();
+                let mut temp_ctx = Unifier {
+                    upper: ctx.upper.clone(),
+                    ..ctx.fresh()
+                };
                 if unify_bounded(
                     &mut temp_bindings,
-                    &mut temp_upper,
+                    &mut temp_ctx,
                     contra,
                     pattern_id,
                     variant,
@@ -2476,7 +2916,7 @@ fn unify_bounded(
                 )
                 .is_ok()
                 {
-                    *upper = temp_upper;
+                    ctx.upper = temp_ctx.upper;
                     merged = Some(match merged {
                         None => temp_bindings,
                         Some(accumulated) => merge_bindings(accumulated, temp_bindings, program),

@@ -536,3 +536,64 @@ fn test_type_consuming_builtin_answers_its_type_argument_or_nil() {
         .evaluate(r#"%data.decode<'int> "5""#)
         .expect_type("'int | []");
 }
+
+#[test]
+fn test_argument_is_checked_against_the_instantiated_parameter() {
+    // The folder's result widens `'acc` to `'int | []`, which its own `'int` parameter then no
+    // longer accepts: a nil accumulator would reach `__integer_multiply__` at runtime.
+    quiver()
+        .evaluate(
+            "%list.fold [%list{ 1, 2 }, 1, #['int, 'int] { $1 ~> =2; __integer_multiply__ [$0, 3] }]",
+        )
+        .expect_error_containing("Type mismatch");
+    quiver()
+        .evaluate("%list.fold [%list{ 1, 2 }, 0, %num.add]")
+        .expect("3");
+}
+
+#[test]
+fn test_inferred_parameter_recompiles_against_its_widened_type() {
+    // `$0` starts as the initial `Nil`, and the folder's result widens it to a list: the body is
+    // checked again against the list, so `%list.count $0` is well-typed.
+    quiver()
+        .evaluate(
+            "'l = '%list<'int>
+             g = #'int -> 'l { Cons[$, Nil] }
+             %list.fold [%list{ 1, 2 }, Nil, #{ %list.count $0 ~> g ~ }]",
+        )
+        .expect("Cons[1, Nil]");
+}
+
+#[test]
+fn test_inferred_parameter_generalizes_recursive_growth() {
+    // Each round wraps the last accumulator, so `$0` generalizes to the list it converges to.
+    quiver()
+        .evaluate("%list.fold [%list{ 1, 2, 3 }, Nil, #{ Cons[$1, $0] }]")
+        .expect("Cons[3, Cons[2, Cons[1, Nil]]]")
+        .expect_type("Cons['int, (Cons['int, μ1] | Nil)] | Nil");
+}
+
+#[test]
+fn test_inferred_parameter_that_never_settles_is_an_error() {
+    // Growth through a function type has no recursive generalization, so no parameter fits.
+    quiver()
+        .evaluate("%list.fold [%list{ 1, 2 }, Nil, #{ #[] { $$0 } }]")
+        .expect_error_containing("its own result keeps widening that type");
+}
+
+#[test]
+fn test_recursive_pattern_binds_through_its_tail() {
+    // `'t` is bound from the tail as well as the head, so the list's element type covers both.
+    quiver()
+        .evaluate("xs = Cons[B, Nil]; %list.reverse Cons[A, xs]")
+        .expect("Cons[B, Cons[A, Nil]]")
+        .expect_type("Cons[(A | B), μ1] | Nil");
+}
+
+#[test]
+fn test_predicate_result_does_not_widen_the_element_type() {
+    quiver()
+        .evaluate("%list.filter [%list{ 1, 2 }, #{ %num.gt? [$, 1] }]")
+        .expect("Cons[2, Nil]")
+        .expect_type("Cons['int, μ1] | Nil");
+}

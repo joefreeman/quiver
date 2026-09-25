@@ -7,7 +7,11 @@
 
 lookup_step = #'lookup {
   | =(\DnsResolver)r => __dns_next__ r ~> {
-    | =('bin)b => __binary_length__ b ~> { =4 => IPv4[b] | =16 => IPv6[b] } ~> [~, r]
+    | =('bin)b => __binary_length__ b ~> {
+      | =4 => [IPv4[b], r]
+      | =16 => [IPv6[b], r]
+      | __panic__ "resolver returned an address of unexpected length"
+    }
     // Any terminator ends the lookup — exhaustion, or a failure carrying `:error`. Passing
     // it through unchanged is what lets `%list.try_collect` tell the two apart.
     | =e => { __dns_close__ r; e }

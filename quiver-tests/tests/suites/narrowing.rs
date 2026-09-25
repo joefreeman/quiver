@@ -1419,3 +1419,18 @@ fn test_field_narrowing_in_a_union_keeps_recursive_tail_matchable() {
         )
         .expect("[N, C, Other]");
 }
+
+#[test]
+fn test_binder_after_complement_keeps_every_tail_variant() {
+    // After `=B` fails, `ts` is `A | Cons[^]` — but its `^` still names the whole `A | B | Cons[^]`,
+    // so a `B` in the tail stays matchable.
+    quiver()
+        .evaluate(
+            r#"
+            'l = A | B | Cons[^]
+            f = #'l { | =B => IsB | =ts => ts ~> { =Cons[B] => Hit | Miss } }
+            [f Cons[B], f Cons[A], f B]
+            "#,
+        )
+        .expect("[Hit, Miss, IsB]");
+}

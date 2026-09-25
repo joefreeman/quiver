@@ -4,12 +4,14 @@
 //! field access patterns, and computing complement types for branch conditions.
 //! All type references use type IDs into the Program's type registry.
 
+use std::collections::HashMap;
+
 use quiver_core::program::Program;
 use quiver_core::types::{Type, TypeLookup, is_compatible, types_overlap};
 
 use super::provenance::Provenance;
 use super::scopes::{Scope, lookup_variable};
-use super::typing::union_type_ids;
+use super::typing::{close_root_references, has_free_cycles, union_type_ids};
 
 /// Narrowing information recorded during condition compilation.
 /// Used to compute complement types for subsequent branches.
@@ -327,22 +329,6 @@ pub fn close_cycles(type_id: usize, boundary: usize, program: &mut Program) -> u
     }
 }
 
-/// Re-root a lone member kept from a recursive union. Its `Cycle` references count from
-/// `declared`'s root, so separated from it they would name whatever encloses the member next
-/// (`Nil | Cons['t, ^]` narrowed to `Cons` would read its own `^` as `Cons`, so no tail could be
-/// `Nil`); they are closed against `declared`.
-///
-/// A narrowing that is still a union keeps its own root: unions intern flattened, so `'l | []`
-/// is one union whose `^` already admits `[]`, and closing against it would widen every tail —
-/// whereas the narrower union is what such a `^` was written to mean.
-pub fn reroot_narrowed(narrowed: usize, declared: usize, program: &mut Program) -> usize {
-    let is_union = |id: usize| matches!(program.lookup_type(id), Some(Type::Union(_)));
-    if narrowed == declared || !is_union(declared) || is_union(narrowed) {
-        return narrowed;
-    }
-    close_cycles_at(narrowed, &[declared], 0, program)
-}
-
 fn close_cycles_at(
     type_id: usize,
     enclosing: &[usize],
@@ -478,6 +464,151 @@ fn contains_cycle(type_id: usize, program: &Program, seen: &mut Vec<usize>) -> b
 /// types (and shapes not modelled precisely) keep the left operand when the two could overlap —
 /// a wider intersection never excludes a valid value, so it is sound for narrowing.
 pub fn intersect_types(a_id: usize, b_id: usize, program: &mut Program) -> usize {
+    intersect_in(a_id, b_id, &mut BinderStacks::default(), program)
+}
+
+/// The unions each operand of an intersection has entered, innermost last, which a `Cycle(n)`
+/// on that side counts back through.
+#[derive(Default)]
+struct BinderStacks {
+    a: Vec<usize>,
+    b: Vec<usize>,
+    /// Whether each type is self-contained (no `has_free_cycles`), so means the same anywhere.
+    self_contained: HashMap<usize, bool>,
+    /// Intersections and differences against resolved unions, of self-contained operands.
+    resolved: HashMap<(Operation, usize, usize), usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Operation {
+    Intersect,
+    Subtract,
+}
+
+impl BinderStacks {
+    fn swap(&mut self) {
+        std::mem::swap(&mut self.a, &mut self.b);
+    }
+
+    fn self_contained(&mut self, type_id: usize, program: &Program) -> bool {
+        *self
+            .self_contained
+            .entry(type_id)
+            .or_insert_with(|| !has_free_cycles(type_id, program))
+    }
+
+    /// `op` of `x` against `root`, the union a reference resolved to. A self-contained `x` means
+    /// the same anywhere, so its result is memoised, and one lying wholly inside `root` needs no
+    /// walk: `x ∩ root` is `x`, and `x ∖ root` is nothing.
+    fn against_root(
+        &mut self,
+        op: Operation,
+        x: usize,
+        root: usize,
+        program: &mut Program,
+    ) -> usize {
+        if !self.self_contained(x, program) {
+            return match op {
+                Operation::Intersect => intersect_in(x, root, self, program),
+                Operation::Subtract => complement_in(x, root, self, program),
+            };
+        }
+        if let Some(&result) = self.resolved.get(&(op, x, root)) {
+            return result;
+        }
+        let result = match (op, is_compatible(x, root, program)) {
+            (Operation::Intersect, true) => x,
+            (Operation::Subtract, true) => program.never(),
+            (Operation::Intersect, false) => intersect_in(x, root, self, program),
+            (Operation::Subtract, false) => complement_in(x, root, self, program),
+        };
+        self.resolved.insert((op, x, root), result);
+        result
+    }
+
+    /// Run `f` with each operand entered, if it is a union.
+    fn enter<R>(
+        &mut self,
+        a_id: usize,
+        b_id: usize,
+        program: &mut Program,
+        f: impl FnOnce(&mut Self, &mut Program) -> R,
+    ) -> R {
+        let is_union = |id: usize| matches!(program.lookup_type(id), Some(Type::Union(_)));
+        let (a_binder, b_binder) = (is_union(a_id), is_union(b_id));
+        if a_binder {
+            self.a.push(a_id);
+        }
+        if b_binder {
+            self.b.push(b_id);
+        }
+        let result = f(self, program);
+        if a_binder {
+            self.a.pop();
+        }
+        if b_binder {
+            self.b.pop();
+        }
+        result
+    }
+
+    /// The union `b`'s `Cycle(depth)` names, if it is self-contained (and so means the same
+    /// wherever it is used), with `b`'s stack cut back to below it while `f` runs.
+    fn resolve_b<R>(
+        &mut self,
+        depth: usize,
+        program: &mut Program,
+        f: impl FnOnce(&mut Self, &mut Program, usize) -> R,
+    ) -> Option<R> {
+        let root = *self.b.get(self.b.len().checked_sub(depth)?)?;
+        if !self.self_contained(root, program) {
+            return None;
+        }
+        let tail = self.b.split_off(self.b.len() - depth);
+        let result = f(self, program, root);
+        self.b.extend(tail);
+        Some(result)
+    }
+
+    /// `resolve_b`, for `a`'s side.
+    fn resolve_a<R>(
+        &mut self,
+        depth: usize,
+        program: &mut Program,
+        f: impl FnOnce(&mut Self, &mut Program, usize) -> R,
+    ) -> Option<R> {
+        self.swap();
+        let result = self.resolve_b(depth, program, |stacks, program, root| {
+            stacks.swap();
+            let result = f(stacks, program, root);
+            stacks.swap();
+            result
+        });
+        self.swap();
+        result
+    }
+}
+
+fn intersect_in(
+    a_id: usize,
+    b_id: usize,
+    stacks: &mut BinderStacks,
+    program: &mut Program,
+) -> usize {
+    if a_id == b_id {
+        return a_id;
+    }
+    stacks.enter(a_id, b_id, program, |stacks, program| {
+        intersect_variants(a_id, b_id, stacks, program)
+    })
+}
+
+fn intersect_variants(
+    a_id: usize,
+    b_id: usize,
+    stacks: &mut BinderStacks,
+    program: &mut Program,
+) -> usize {
     let a_variants = get_type_variants(a_id, program);
     let b_variants = get_type_variants(b_id, program);
     let never = program.never();
@@ -487,7 +618,7 @@ pub fn intersect_types(a_id: usize, b_id: usize, program: &mut Program) -> usize
     let mut pieces = Vec::new();
     for &av in &a_variants {
         for &bv in &b_variants {
-            let piece = intersect_pair(av, bv, program);
+            let piece = intersect_pair(av, bv, stacks, program);
             if piece != never {
                 let from_b = matches!(program.lookup_type(av), Some(Type::Partial { .. }))
                     && matches!(program.lookup_type(bv), Some(Type::Tuple(_)));
@@ -495,11 +626,12 @@ pub fn intersect_types(a_id: usize, b_id: usize, program: &mut Program) -> usize
             }
         }
     }
-    // A lone member kept from a recursive union has left its root behind, so its `Cycle`
-    // references to that root would name whatever encloses it next (`Nil | Cons['t, ^]` narrowed
-    // to `Cons` would read its own `^` as `Cons`): close them against the root.
+    // A lone member kept from a recursive union has left its root behind, so its references
+    // to that root would name whatever encloses it next: close them (see `close_subset`). The
+    // references several pieces keep are the intersection's own recursion — each side's `^`
+    // met the other's — and rightly name the union they form.
     if let [(piece, root)] = pieces[..] {
-        return reroot_narrowed(piece, root, program);
+        return close_subset(vec![piece], root, program);
     }
     union_type_ids(
         program,
@@ -508,7 +640,7 @@ pub fn intersect_types(a_id: usize, b_id: usize, program: &mut Program) -> usize
 }
 
 /// Intersect two single (non-union) types. Returns the never type when provably disjoint.
-fn intersect_pair(a: usize, b: usize, program: &mut Program) -> usize {
+fn intersect_pair(a: usize, b: usize, stacks: &mut BinderStacks, program: &mut Program) -> usize {
     if a == b {
         return a;
     }
@@ -524,8 +656,30 @@ fn intersect_pair(a: usize, b: usize, program: &mut Program) -> usize {
     match (&ta, &tb) {
         // A type variable is opaque; keep the value's own type rather than discard genericity.
         (Type::Variable(_), _) | (_, Type::Variable(_)) => a,
-        // A bare recursive reference can't be compared soundly without its enclosing context;
-        // keep `a` (sound, `a ∩ b ⊆ a`). This keeps recursive *fields* whole when recursing.
+        // A concrete type meeting `b`'s recursive reference meets the union it names — keeping
+        // `a` would leave `a`'s (wider) type where the intersection's own recursion belongs:
+        // `('l<'t | []> | []) ∩ 'l<'t>`, flattened with its tail closed as `'l<'t | []>`, keeps
+        // a `Cons['t, 'l<'t | []>]` otherwise. The named union is resolved only when it is
+        // self-contained, so it means the same at this depth.
+        (_, Type::Cycle(depth)) if !matches!(ta, Type::Cycle(_)) => stacks
+            .resolve_b(*depth, program, |stacks, program, root| {
+                stacks.against_root(Operation::Intersect, a, root, program)
+            })
+            .unwrap_or(a),
+        // Likewise `a`'s reference meeting a concrete type: keeping it would name the
+        // intersection's own union, which admits only what both sides do at the root.
+        (Type::Cycle(depth), _) if !matches!(tb, Type::Cycle(_)) => stacks
+            .resolve_a(*depth, program, |stacks, program, root| {
+                // Swapped back, so `b` is resolved against `root` on its own side.
+                stacks.swap();
+                let result = stacks.against_root(Operation::Intersect, b, root, program);
+                stacks.swap();
+                result
+            })
+            .unwrap_or(a),
+        // Otherwise a bare recursive reference can't be compared soundly without its enclosing
+        // context; keep `a` (sound, `a ∩ b ⊆ a`). This keeps recursive *fields* whole when
+        // recursing, and two references to the unions being intersected meet as the result's.
         (Type::Cycle(_), _) | (_, Type::Cycle(_)) => a,
         (Type::Integer, Type::Integer)
         | (Type::Binary, Type::Binary)
@@ -552,7 +706,7 @@ fn intersect_pair(a: usize, b: usize, program: &mut Program) -> usize {
             for (name, bty) in f2 {
                 match fields.iter_mut().find(|(n, _)| n == name) {
                     Some((_, aty)) => {
-                        let intersected = intersect_types(*aty, *bty, program);
+                        let intersected = intersect_in(*aty, *bty, stacks, program);
                         if intersected == program.never() {
                             return never;
                         }
@@ -587,7 +741,7 @@ fn intersect_pair(a: usize, b: usize, program: &mut Program) -> usize {
                 else {
                     return never;
                 };
-                let intersected = intersect_types(*field, *constraint, program);
+                let intersected = intersect_in(*field, *constraint, stacks, program);
                 if intersected == program.never() {
                     return never;
                 }
@@ -608,7 +762,7 @@ fn intersect_pair(a: usize, b: usize, program: &mut Program) -> usize {
             }
             let mut fields = Vec::with_capacity(i1.fields.len());
             for ((name, f1), (_, f2)) in i1.fields.iter().zip(i2.fields.iter()) {
-                let fi = intersect_types(*f1, *f2, program);
+                let fi = intersect_in(*f1, *f2, stacks, program);
                 if fi == program.never() {
                     return never;
                 }
@@ -676,7 +830,7 @@ pub fn filter_variants_by_field(
         }
     }
 
-    union_type_ids(program, narrowed)
+    close_subset(narrowed, parent_type_id, program)
 }
 
 /// Compute the complement type: the values of `original` that are NOT in `narrowed`.
@@ -687,20 +841,66 @@ pub fn filter_variants_by_field(
 /// to keeping the original whole (sound: an over-large remainder only makes a block look *less*
 /// exhaustive, never more — and never narrows a later branch to exclude a valid value).
 pub fn compute_complement(original_id: usize, narrowed_id: usize, program: &mut Program) -> usize {
-    let narrowed_variants = get_type_variants(narrowed_id, program);
-    let mut pieces = get_type_variants(original_id, program);
-    for nv in narrowed_variants {
-        let mut next = Vec::new();
-        for piece in pieces {
-            next.extend(subtract_one(piece, nv, program));
-        }
-        pieces = next;
+    complement_in(
+        original_id,
+        narrowed_id,
+        &mut BinderStacks::default(),
+        program,
+    )
+}
+
+fn complement_in(
+    original_id: usize,
+    narrowed_id: usize,
+    stacks: &mut BinderStacks,
+    program: &mut Program,
+) -> usize {
+    if original_id == narrowed_id {
+        return program.never();
     }
-    union_type_ids(program, pieces)
+    stacks.enter(original_id, narrowed_id, program, |stacks, program| {
+        let narrowed_variants = get_type_variants(narrowed_id, program);
+        let mut pieces = get_type_variants(original_id, program);
+        for nv in narrowed_variants {
+            let mut next = Vec::new();
+            for piece in pieces {
+                next.extend(subtract_one(piece, nv, stacks, program));
+            }
+            pieces = next;
+        }
+        close_subset(pieces, original_id, program)
+    })
+}
+
+/// The union of `pieces`, members (or parts of members) of the union `root`. A strict part of a
+/// recursive union has left its root behind, so the pieces' references to that root are closed
+/// (`close_root_references`) — they would otherwise mean the smaller union (`A | B | Cons[^]`
+/// less `B` would admit no `B` in a tail), or, for a lone member, whatever encloses it next
+/// (`Nil | Cons['t, ^]` less `Nil` would read its own `^` as `Cons`, a list with no end).
+fn close_subset(mut pieces: Vec<usize>, root: usize, program: &mut Program) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    pieces.retain(|piece| seen.insert(*piece));
+    let Some(Type::Union(members)) = program.lookup_type(root) else {
+        return union_type_ids(program, pieces);
+    };
+    if pieces.len() == members.len() && pieces.iter().all(|piece| members.contains(piece)) {
+        return root;
+    }
+    let gained = usize::from(pieces.len() > 1);
+    let closed = pieces
+        .into_iter()
+        .map(|piece| close_root_references(piece, root, gained, program))
+        .collect();
+    union_type_ids(program, closed)
 }
 
 /// Subtract single type `b` from single type `a`, returning the variants whose union is `a ∖ b`.
-fn subtract_one(a: usize, b: usize, program: &mut Program) -> Vec<usize> {
+fn subtract_one(
+    a: usize,
+    b: usize,
+    stacks: &mut BinderStacks,
+    program: &mut Program,
+) -> Vec<usize> {
     if a == b {
         return vec![];
     }
@@ -712,9 +912,45 @@ fn subtract_one(a: usize, b: usize, program: &mut Program) -> Vec<usize> {
         return vec![a];
     };
 
-    // A bare recursive reference can't be subtracted soundly without its enclosing context;
-    // keep it whole (`a ∖ b ⊆ a`). This is what lets a `Node[^, ^]` survive a subtraction:
-    // when a recursive field reaches here, the field's difference is the field unchanged.
+    // Rows are metadata, not membership: subtract the shapes beneath them. What remains of an
+    // annotated `a` keeps its row.
+    if let Type::Annotated { base, .. } = tb {
+        return subtract_one(a, base, stacks, program);
+    }
+    if let Type::Annotated {
+        base,
+        exact,
+        entries,
+    } = ta
+    {
+        let rest = subtract_one(base, b, stacks, program);
+        if rest == [base] {
+            return vec![a];
+        }
+        return rest
+            .into_iter()
+            .map(|piece| program.annotate_type(piece, exact, entries.clone()))
+            .collect();
+    }
+
+    // A concrete type less `b`'s recursive reference is less the union it names (when that is
+    // self-contained): `Node['int, '%list<'d>]` less the declared `Node['int, '%list<^>]` is
+    // nothing.
+    if let Type::Cycle(depth) = tb
+        && !matches!(ta, Type::Cycle(_))
+        && let Some(rest) = stacks.resolve_b(depth, program, |stacks, program, root| {
+            stacks.against_root(Operation::Subtract, a, root, program)
+        })
+    {
+        return get_type_variants(rest, program)
+            .into_iter()
+            .filter(|&v| v != program.never())
+            .collect();
+    }
+    // Otherwise a bare recursive reference can't be subtracted soundly without its enclosing
+    // context; keep it whole (`a ∖ b ⊆ a`). This is what lets a `Node[^, ^]` survive a
+    // subtraction: when a recursive field reaches here, the field's difference is the field
+    // unchanged.
     if matches!(ta, Type::Cycle(_)) || matches!(tb, Type::Cycle(_)) {
         return vec![a];
     }
@@ -749,7 +985,7 @@ fn subtract_one(a: usize, b: usize, program: &mut Program) -> Vec<usize> {
             // `[A] ∖ [b]` = union over i of `[A₀, …, Aᵢ∖bᵢ, …, Aₙ]`.
             let mut out = Vec::new();
             for (i, ((_, f1), (_, f2))) in i1.fields.iter().zip(i2.fields.iter()).enumerate() {
-                let field_complement = compute_complement(*f1, *f2, program);
+                let field_complement = complement_in(*f1, *f2, stacks, program);
                 if field_complement == never {
                     continue;
                 }

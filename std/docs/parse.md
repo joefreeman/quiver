@@ -302,10 +302,12 @@ recursion finite.
 ### A worked example: arithmetic
 
 Parentheses, `+` and `-`, evaluated as it parses — `rec` for the nesting, `chainl` for the
-associativity, and `map` to turn each operator byte into the function that applies it.
+associativity, and `map` to turn each operator byte into the function that applies it. The
+parser's value type is `%num.add`'s result, `'%num | []`: as a function value it covers every
+`'%num`, including the sums it refuses with an `:error`.
 
 ```quiver
-expr = #['%parse.p<'int>, '%parse] {
+expr = #['%parse.p<('%num | [])>, '%parse] {
   =[expr, st]
   parens = %parse.between [%parse.byte [40, "'('"], expr, %parse.byte [41, "')'"]]
   atom = %parse.alt2 [%parse.int, parens]

@@ -19,6 +19,21 @@ pub fn tuple_contains_spread(fields: &[ast::TupleField]) -> bool {
         .any(|field| matches!(field.value, ast::FieldValue::Spread(_)))
 }
 
+/// Whether a tuple field is exactly an inferred-parameter function literal (`#{ … }`), whose
+/// parameter comes from the type the field is expected to have.
+pub fn is_inferred_literal(value: &ast::FieldValue) -> bool {
+    matches!(
+        value,
+        ast::FieldValue::Chain(chain)
+            if chain.binding.is_none()
+                && matches!(&chain.terms[..], [ast::Term::Function(f)] if f.parameter_type.is_none())
+    )
+}
+
+/// How many times an inferred-parameter literal is recompiled against a parameter its own result
+/// widened before inference gives up (`Error::ParameterNotSettled`).
+pub const INFERENCE_ATTEMPTS: usize = 4;
+
 /// Create a capture variable name from a base name and accessor path
 /// Example: "foo" with [Field("bar"), Index(0)] becomes "foo.bar.0"
 pub fn make_capture_name(base: &str, accessors: &[ast::AccessPath]) -> String {

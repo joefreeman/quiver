@@ -127,7 +127,11 @@ peek_at = #'%parse { %num.lt? [$pos, $len]; %bin.get_byte [$data, $pos] }
 // where `M` is the integer- and fractional-part digits read as one integer — an `'int` when
 // that power is non-negative (a whole number), otherwise a reduced `'rational`.
 build_number = #[(sign): 'int, (int_b): 'bin, (frac_b): 'bin, (exp): 'int] {
-  %bin.concat [$int_b, $frac_b] ~> %str.parse_int Str[~] ~> =('int)mag
+  // The digits were scanned as a non-empty run of digits, so they always parse.
+  mag = %bin.concat [$int_b, $frac_b] ~> %str.parse_int Str[~] ~> {
+    | =('int)n => n
+    | __panic__ "scanned number digits did not parse"
+  }
 
   m = __integer_multiply__ [$sign, mag]
   total_exp = __integer_subtract__ [$exp, %bin.length $frac_b]
@@ -139,8 +143,11 @@ build_number = #[(sign): 'int, (int_b): 'bin, (frac_b): 'bin, (exp): 'int] {
     | {
       den = pow10 [1, __integer_subtract__ [0, total_exp]]
 
-      %num.div [m, den] ~> =('%num.coeff)r
-      lower_num r
+      // `den` is a positive power of ten, so the division is always a rational.
+      %num.div [m, den] ~> {
+        | =('%num.coeff)r => lower_num r
+        | __panic__ "dividing by a power of ten failed"
+      }
     }
   }
 }
@@ -185,8 +192,13 @@ number = #'%parse {
       digits est2 ~> =[ebb, st4a]
       {
         | %bin.length ebb ~> =0 => %parse.fail_in [st3, "digits in the exponent"]
-        | ebb ~> %str.parse_int Str[~] ~> =('int)emag
+        | {
+          emag = ebb ~> %str.parse_int Str[~] ~> {
+            | =('int)n => n
+            | __panic__ "scanned exponent digits did not parse"
+          }
           [exponent: __integer_multiply__ [esign, emag], st: st4a]
+        }
       }
     }
     | [exponent: 0, st: st3]

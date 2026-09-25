@@ -120,7 +120,7 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
     to_iter $list ~> %iter.map [~, $f] ~> from_iter ~
   },
 
-  filter: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
+  filter: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
     :doc "The elements for which the predicate is non-nil."
     to_iter $list ~> %iter.filter [~, $pred] ~> from_iter ~
   },
@@ -135,12 +135,12 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
     to_iter $list ~> %iter.drop [~, $n] ~> from_iter ~
   },
 
-  take_while: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
+  take_while: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
     :doc "The leading elements for which the predicate is non-nil."
     to_iter $list ~> %iter.take_while [~, $pred] ~> from_iter ~
   },
 
-  drop_while: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
+  drop_while: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
     :doc "The list without its leading elements for which the predicate is non-nil."
     to_iter $list ~> %iter.drop_while [~, $pred] ~> from_iter ~
   },
@@ -191,22 +191,22 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
     to_iter $list ~> %iter.nth [~, $n]
   },
 
-  find: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
+  find: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
     :doc "The first element for which the predicate is non-nil, or nil when none matches."
     to_iter $list ~> %iter.find [~, $pred]
   },
 
-  find_index: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
+  find_index: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
     :doc "The zero-based index of the first matching element, or nil when none matches."
     to_iter $list ~> %iter.find_index [~, $pred]
   },
 
-  any?: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
+  any?: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
     :doc "Whether any element satisfies the predicate."
     to_iter $list ~> %iter.any? [~, $pred]
   },
 
-  all?: #<'t>[(list): '<'t>, (pred): #'t -> ('t | [])] {
+  all?: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
     :doc "Whether every element satisfies the predicate."
     to_iter $list ~> %iter.all? [~, $pred]
   },

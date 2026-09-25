@@ -59,16 +59,14 @@ of = #['opt, '%list<'int>] {
 }
 
 // lcm of the denominators of a list of numbers. The finest scale `1/lcm` represents
-// every value exactly.
+// every value exactly. Nil (carrying `%num.denom`'s :error) at the first value with no
+// denominator — an irrational one — since no fixed-point scale holds it.
 lcm_denoms = #[(acc): 'int, (nums): '%list<'%num>] {
-  %list.fold [
-    $nums,
-    $acc,
-    #{
-      %num.denom $1 ~> =('int)dx
-      __integer_divide__ [__integer_multiply__ [$0, dx], __integer_gcd__ [$0, dx]]
-    },
-  ]
+  | $nums ~> =Nil => $acc
+  | $nums ~> =Cons[n, rest] => {
+    %num.denom n ~> =('int)dx
+    ^ [__integer_divide__ [__integer_multiply__ [$acc, dx], __integer_gcd__ [$acc, dx]], rest]
+  }
 }
 
 // Fold a list of *values* onto a vector, mapping each through `f` to its stored lane. A
@@ -165,9 +163,9 @@ align = #['vec, 'vec] {
 
   // Build from a list of values alone, inferring the finest scale (`1/lcm` of all
   // denominators) that represents every value exactly. Nil on overflow (a very fine inferred
-  // scale can make a lane exceed the dtype).
+  // scale can make a lane exceed the dtype), or for an irrational value, which has no scale.
   of_values: #[(dtype): 'dtype, (values): ('%list<'%num> | [])] {
-    :doc "A vector built from values, inferring the finest exact scale; nil on overflow."
+    :doc "A vector built from values, inferring the finest exact scale; nil on overflow, or (carrying :error) for an irrational value."
     $values ~> =('%list<'%num>)values
     lcm_denoms [1, values] ~> =('int)cap
     norm Rational[1, cap] ~> =s

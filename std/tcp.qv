@@ -43,7 +43,7 @@ try_each = #[(addrs): '%list<'%dns.ip>, (port): 'int, (last): []] {
   $addrs ~> {
     | =Nil => $last
     | =Cons[addr, rest] => {
-      addr ~> { =IPv4[b] => b | =IPv6[b] => b } ~> =('bin)ip
+      ip = addr ~> { =IPv4[b] => b | =IPv6[b] => b }
 
       outcome = __tcp_connect__ [ip, $port]
       outcome ~> {

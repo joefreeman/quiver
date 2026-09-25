@@ -694,15 +694,12 @@ serialize_request = #' {
 
 request = #[(method): 'method, (target): '%str, headers: 'pairs = Nil, body: 'bin = <>] {
   :doc "Builds an HTTP/1.1 request, deriving `path` and `query` from the target the way the server's parser would — so a client-built request and a parsed one are the same value."
-  // Positional access rather than `=[path, query]`: `split_target` answers a union of two
-  // tuple shapes, and a destructure of that is not seen as total, which would make this
-  // constructor spuriously fallible.
-  split = split_target $target
+  [path, query] = split_target $target
   Request[
     method: $method,
     target: $target,
-    path: split.0,
-    query: split.1,
+    path: path,
+    query: query,
     version: "HTTP/1.1",
     headers: $headers,
     body: $body,

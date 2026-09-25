@@ -804,3 +804,59 @@ fn test_ascription_stays_name_strict() {
         .evaluate("{ [1] ~> =(['int])v => v | No }")
         .expect("[1]");
 }
+
+#[test]
+fn test_destructure_covering_a_union_is_total() {
+    // Both members are pairs, so `[x, y]` matches either: the step can't fail, and a match that
+    // can't fail may continue its chain.
+    quiver()
+        .evaluate(
+            "f = #'int { | =0 => [A, B] | [A, C] }
+             g = #'int { [x, y] = f $; y }
+             [g 0, g 1]",
+        )
+        .expect("[B, C]");
+    quiver()
+        .evaluate(
+            "f = #'int { | =0 => [A, B] | [A, C] }
+             g = #'int { [x, y] = f $; y }
+             g",
+        )
+        .expect_type("#'int -> (B | C)");
+    quiver()
+        .evaluate(
+            "f = #'int { | =0 => [A, B] | [A, C] }
+             g = #'int { f $ ~> =[x, y] ~> [~, x] }
+             g 0",
+        )
+        .expect("[Ok, A]");
+}
+
+#[test]
+fn test_destructure_covering_a_union_with_a_recursive_field_is_total() {
+    // The fresh `[A, $1]` literal carries a row the matched member does not; rows are metadata,
+    // so the members still cancel.
+    quiver()
+        .evaluate(
+            "'l = Nil | Cons['int, ^]
+             f = #['int, 'l] { | $0 ~> =0 => [A, $1] | [A, Nil] }
+             g = #['int, 'l] { [x, y] = f $; y }
+             g",
+        )
+        .expect_type("#['int, (Cons['int, μ1] | Nil)] -> (Cons['int, μ1] | Nil)");
+}
+
+#[test]
+fn test_destructure_testing_a_member_stays_fallible() {
+    quiver()
+        .evaluate(
+            "f = #'int { | =0 => [A, B] | [A, C] }
+             g = #'int { f $ ~> =[x, C] }
+             g",
+        )
+        .expect_type("#'int -> (Ok | [])");
+    // A recursive field constrained more deeply than the narrowed type records is not covered.
+    quiver()
+        .evaluate("'l = Nil | Cons['int, ^]; f = #'l { $ ~> =Cons[x, Cons[y, z]] }; f")
+        .expect_type("#(Cons['int, μ1] | Nil) -> (Ok | [])");
+}

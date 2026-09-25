@@ -23,7 +23,7 @@ map = #<'t, 'u>[(self): #^ -> 'thunk<'u>, (it): 'thunk<'t>, (f): #'t -> 'u] {
   #[] { it [] ~> =[value, next]; f value ~> [~, self [self, next, f]] }
 }
 
-filter = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (pred): #'t -> ('t | [])] {
+filter = #<'t, 'r>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (pred): #'t -> 'r] {
   self = $self
   it = $it
   pred = $pred
@@ -60,14 +60,14 @@ drop = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (n): 'int] {
   }
 }
 
-take_while = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (pred): #'t -> ('t | [])] {
+take_while = #<'t, 'r>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (pred): #'t -> 'r] {
   self = $self
   it = $it
   pred = $pred
   #[] { it [] ~> =[value, next]; pred value; self [self, next, pred] ~> [value, ~] }
 }
 
-drop_while = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (pred): #'t -> ('t | [])] {
+drop_while = #<'t, 'r>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (pred): #'t -> 'r] {
   self = $self
   it = $it
   pred = $pred
@@ -161,11 +161,11 @@ try_fold = #<'t, 'acc>[(it): 'thunk<'t>, (acc): 'acc, (f): #['acc, 't] -> 'acc] 
   }
 }
 
-find = #<'t>[(it): 'thunk<'t>, (pred): #'t -> ('t | [])] {
+find = #<'t, 'r>[(it): 'thunk<'t>, (pred): #'t -> 'r] {
   $it [] ~> =[value, next]; { $pred value => value | ^ [next, $pred] }
 }
 
-find_index = #<'t>[(it): 'thunk<'t>, (pred): #'t -> ('t | []), (index): 'int] {
+find_index = #<'t, 'r>[(it): 'thunk<'t>, (pred): #'t -> 'r, (index): 'int] {
   $it [] ~> =[value, next]
   {
     | $pred value => $index
@@ -173,11 +173,11 @@ find_index = #<'t>[(it): 'thunk<'t>, (pred): #'t -> ('t | []), (index): 'int] {
   }
 }
 
-any = #<'t>[(it): 'thunk<'t>, (pred): #'t -> ('t | [])] {
+any = #<'t, 'r>[(it): 'thunk<'t>, (pred): #'t -> 'r] {
   $it [] ~> =[value, next]; { $pred value => Ok | ^ [next, $pred] }
 }
 
-all = #<'t>[(it): 'thunk<'t>, (pred): #'t -> ('t | [])] {
+all = #<'t, 'r>[(it): 'thunk<'t>, (pred): #'t -> 'r] {
   $it [] ~> {
     | =[] => Ok
     | =[value, next]; $pred value => ^ [next, $pred]
@@ -208,7 +208,7 @@ intersperse = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (sep): 't] {
     $iter ~> =Iter[r]; map [map, r, $f] ~> Iter[~]
   },
 
-  filter: #<'t>[(iter): '<'t>, (pred): #'t -> ('t | [])] {
+  filter: #<'t, 'r>[(iter): '<'t>, (pred): #'t -> 'r] {
     :doc "Keeps only the elements for which the predicate is non-nil, lazily."
     $iter ~> =Iter[r]; filter [filter, r, $pred] ~> Iter[~]
   },
@@ -223,12 +223,12 @@ intersperse = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (sep): 't] {
     $iter ~> =Iter[r]; drop [drop, r, $n] ~> Iter[~]
   },
 
-  take_while: #<'t>[(iter): '<'t>, (pred): #'t -> ('t | [])] {
+  take_while: #<'t, 'r>[(iter): '<'t>, (pred): #'t -> 'r] {
     :doc "Yields elements while the predicate is non-nil, then ends."
     $iter ~> =Iter[r]; take_while [take_while, r, $pred] ~> Iter[~]
   },
 
-  drop_while: #<'t>[(iter): '<'t>, (pred): #'t -> ('t | [])] {
+  drop_while: #<'t, 'r>[(iter): '<'t>, (pred): #'t -> 'r] {
     :doc "Skips elements while the predicate is non-nil, yielding the rest."
     $iter ~> =Iter[r]; drop_while [drop_while, r, $pred] ~> Iter[~]
   },
@@ -273,22 +273,22 @@ intersperse = #<'t>[(self): #^ -> 'thunk<'t>, (it): 'thunk<'t>, (sep): 't] {
     $iter ~> =Iter[r]; try_fold [r, $init, $f]
   },
 
-  find: #<'t>[(iter): '<'t>, (pred): #'t -> ('t | [])] {
+  find: #<'t, 'r>[(iter): '<'t>, (pred): #'t -> 'r] {
     :doc "The first element for which the predicate is non-nil, or nil when none matches."
     $iter ~> =Iter[r]; find [r, $pred]
   },
 
-  find_index: #<'t>[(iter): '<'t>, (pred): #'t -> ('t | [])] {
+  find_index: #<'t, 'r>[(iter): '<'t>, (pred): #'t -> 'r] {
     :doc "The zero-based index of the first matching element, or nil when none matches."
     $iter ~> =Iter[r]; find_index [r, $pred, 0]
   },
 
-  any?: #<'t>[(iter): '<'t>, (pred): #'t -> ('t | [])] {
+  any?: #<'t, 'r>[(iter): '<'t>, (pred): #'t -> 'r] {
     :doc "Whether any element satisfies the predicate."
     $iter ~> =Iter[r]; any [r, $pred]
   },
 
-  all?: #<'t>[(iter): '<'t>, (pred): #'t -> ('t | [])] {
+  all?: #<'t, 'r>[(iter): '<'t>, (pred): #'t -> 'r] {
     :doc "Whether every element satisfies the predicate."
     $iter ~> =Iter[r]; all [r, $pred]
   },

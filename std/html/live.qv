@@ -822,20 +822,20 @@ keydown_of = #'jsons {
 // shape per event name: `["click" | "mousedown" | "mouseup" | "mousemove", x, y, button,
 // [alt, ctrl, shift, meta]]`, `["submit", [[name, value], …]]`, `["input", value,
 // checked]`, `["change", value, checked]`, `["keydown", key, [alt, ctrl, shift, meta]]`.
-// Answers nil for anything else,
-// which drops the whole envelope: metadata the server cannot read is an event it cannot
-// faithfully fold.
+// Answers nil for anything else, or for a malformed shape (each reader's nil ends its arm,
+// rather than spreading into a bare tag), which drops the whole envelope: metadata the
+// server cannot read is an event it cannot faithfully fold.
 event_of = #'%json {
   =Array[Cons[tagj, rest]]
   tagj ~> jval ~ ~> =Str[tb]
   Str[tb] ~> {
-    | ="click" => pointer_of rest ~> Click[...]
-    | ="mousedown" => pointer_of rest ~> MouseDown[...]
-    | ="mouseup" => pointer_of rest ~> MouseUp[...]
-    | ="mousemove" => pointer_of rest ~> MouseMove[...]
+    | ="click" => { pointer_of rest ~> =('pointer)m; Click[...m] }
+    | ="mousedown" => { pointer_of rest ~> =('pointer)m; MouseDown[...m] }
+    | ="mouseup" => { pointer_of rest ~> =('pointer)m; MouseUp[...m] }
+    | ="mousemove" => { pointer_of rest ~> =('pointer)m; MouseMove[...m] }
     | ="submit" => submit_of rest
-    | ="input" => field_of rest ~> Input[...]
-    | ="change" => field_of rest ~> Change[...]
+    | ="input" => { field_of rest ~> =('field)m; Input[...m] }
+    | ="change" => { field_of rest ~> =('field)m; Change[...m] }
     | ="keydown" => keydown_of rest
   }
 }
@@ -1030,12 +1030,15 @@ assign_bounds = #[(bs): 'bounds, (kids): 'kids, (vid): '%str, (n): 'int, (acc): 
   }
 }
 
-// The assigned vid for a key, or nil for a boundary the assignment somehow missed.
+// The assigned vid for a key. Every boundary key was assigned from this same frame, so a miss
+// is a broken invariant.
 assigned_vid = #[(items): 'assigns, (k): '%str] {
   // The pin below needs a variable, so bind the field locally.
   k = $k
-  %list.find [$items, #{ =(key: ak); ak ~> =&k; $ }] ~> =(vid: av)
-  Str[av ~> .0]
+  %list.find [$items, #{ =(key: ak); ak ~> =&k; $ }] ~> {
+    | =(vid: av) => Str[av ~> .0]
+    | __panic__ "boundary key missing from its assignment"
+  }
 }
 
 // Rebuild a frame with its boundary vids assigned; other nodes pass through.
