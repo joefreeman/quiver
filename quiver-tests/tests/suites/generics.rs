@@ -574,10 +574,25 @@ fn test_inferred_parameter_generalizes_recursive_growth() {
 }
 
 #[test]
-fn test_inferred_parameter_that_never_settles_is_an_error() {
-    // Growth through a function type has no recursive generalization, so no parameter fits.
+fn test_inferred_parameter_generalizes_growth_through_a_function_type() {
+    // Each round wraps the last accumulator in a thunk; a function type is a binder like a
+    // union, so the growth generalizes to `Nil | #[] -> ^`.
     quiver()
-        .evaluate("%list.fold [%list{ 1, 2 }, Nil, #{ #[] { $$0 } }]")
+        .evaluate(
+            "%list.fold [%list{ 1, 2 }, Nil, #{ #[] { $$0 } }]
+             ~> { =Nil => Short | ~ [] ~> { =Nil => Short | ~ [] } }",
+        )
+        .expect("Nil");
+}
+
+#[test]
+fn test_inferred_parameter_that_never_settles_is_an_error() {
+    // Each round nests the last round's field rather than the last accumulator itself, so the
+    // growth embeds no earlier self to generalize, and no parameter fits.
+    quiver()
+        .evaluate(
+            "%list.fold [%list{ 1, 2, 3 }, Nil, #{ $0 ~> { =Nil => [n: 1] | =(n: m) => [n: [m]] } }]",
+        )
         .expect_error_containing("its own result keeps widening that type");
 }
 
@@ -596,4 +611,40 @@ fn test_predicate_result_does_not_widen_the_element_type() {
         .evaluate("%list.filter [%list{ 1, 2 }, #{ %num.gt? [$, 1] }]")
         .expect("Cons[2, Nil]")
         .expect_type("Cons['int, μ1] | Nil");
+}
+
+#[test]
+fn test_declared_generic_result_holds_its_parameters_rigid() {
+    // A body fits a declared result by compatibility, with each type parameter opaque: `'t`
+    // fits `'t | []`, but neither a concrete type nor another parameter stands in for `'t`.
+    quiver()
+        .evaluate("h = #<'t>'t -> ('t | []) { $ }; h 3")
+        .expect("3");
+    quiver()
+        .evaluate("f = #<'t>'t -> 't { 5 }")
+        .expect_error_containing("Type mismatch");
+    quiver()
+        .evaluate("g = #<'t, 'u>['t, 'u] -> 't { $1 }")
+        .expect_error_containing("Type mismatch");
+}
+
+#[test]
+fn test_type_test_on_a_type_variable_is_checked_at_runtime() {
+    // A `'t` value may be anything, so `('int)y` must test it, and the match can fail.
+    quiver()
+        .evaluate(
+            "g = #<'t>['t, 't] { [x, ('int)y] = $; __integer_add__ [y, 1] }
+             [g [<01>, <02>], g [1, 2]]",
+        )
+        .expect("[[], 3]");
+    quiver()
+        .evaluate("f = #<'t>['t, 't] { $ ~> =[x, ('int)y] }; f")
+        .expect_type("#['t, 't] -> (Ok | [])");
+    quiver()
+        .evaluate("f = #<'t>['t, 't] { $ ~> =[x, ('int)y] ~> [~, y] }")
+        .expect_error_containing("must be the last term of its chain");
+    // Binding alone still can't fail.
+    quiver()
+        .evaluate("k = #<'t>['t, 't] { $ ~> =[x, y] ~> [~, y] }; k [1, 2]")
+        .expect("[Ok, 2]");
 }

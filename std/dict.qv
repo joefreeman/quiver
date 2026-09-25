@@ -148,7 +148,7 @@ get = #<'k, 'v>[(node): '<'k, 'v>, (key): 'k, (hash): 'int, (shift): 'int] {
 
 // split two single entries (differing keys) into a fresh subtree at `shift`.
 split_pair = #<'k, 'v>[
-  (self): #^ -> '<'k, 'v>,
+  (self): ^,
   (h1): 'int,
   (k1): 'k,
   (v1): 'v,
@@ -156,7 +156,7 @@ split_pair = #<'k, 'v>[
   (k2): 'k,
   (v2): 'v,
   (shift): 'int,
-] {
+] -> '<'k, 'v> {
   // A pattern `&` can only reference a variable, not a parameter field, so bind the
   // second hash locally for the equality check.
   h2 = $h2
@@ -193,14 +193,14 @@ split_pair = #<'k, 'v>[
 
 // split an existing node (a collision) against a new entry whose hash differs from it.
 split_node = #<'k, 'v>[
-  (self): #^ -> '<'k, 'v>,
+  (self): ^,
   (cnode): '<'k, 'v>,
   (chash): 'int,
   (hash): 'int,
   (key): 'k,
   (value): 'v,
   (shift): 'int,
-] {
+] -> '<'k, 'v> {
   fc = fragment [$chash, $shift]
   fh = fragment [$hash, $shift]
   {
@@ -221,13 +221,13 @@ split_node = #<'k, 'v>[
 }
 
 put = #<'k, 'v>[
-  (self): #^ -> '<'k, 'v>,
+  (self): ^,
   (node): '<'k, 'v>,
   (key): 'k,
   (value): 'v,
   (hash): 'int,
   (shift): 'int,
-] {
+] -> '<'k, 'v> {
   $node ~> {
     | =Empty => Leaf[$hash, $key, $value]
     | =Leaf[lhash, lkey, lvalue] => {
@@ -278,12 +278,12 @@ remove_slot = #<'k, 'v>[(bitmap): 'int, (bit): 'int, (children): 'list<'<'k, 'v>
 }
 
 remove = #<'k, 'v>[
-  (self): #^ -> '<'k, 'v>,
+  (self): ^,
   (node): '<'k, 'v>,
   (key): 'k,
   (hash): 'int,
   (shift): 'int,
-] {
+] -> '<'k, 'v> {
   $node ~> {
     | =Empty => Empty
     | =Leaf[lhash, k, v] => {
@@ -326,7 +326,7 @@ entries = #<'k, 'v>[(worklist): 'list<'<'k, 'v>>, (acc): 'list<['k, 'v]>] {
   }
 }
 
-from = #<'k, 'v>[(self): #^ -> '<'k, 'v>, (d): '<'k, 'v>, (pairs): 'list<['k, 'v]>] {
+from = #<'k, 'v>[(self): ^, (d): '<'k, 'v>, (pairs): 'list<['k, 'v]>] -> '<'k, 'v> {
   $pairs ~> {
     | =Nil => $d
     | =Cons[[k, val], t] => put [put, $d, k, val, hash k, 0] ~> $self [$self, ~, t]

@@ -133,7 +133,7 @@ fn test_cycle_ref_nested_depth() {
     quiver()
         .evaluate(
             r#"
-            'json = True | False | Array[(Nil | Cons[^0, ^1])];
+            'json = True | False | Array[(Nil | Cons[^1, ^0])];
             f = #'json { =Array[Cons[a, Cons[b, Nil]]] => [a, b] };
             Array[Cons[False, Cons[True, Nil]]] ~> f ~
             "#,
@@ -148,7 +148,7 @@ fn test_cycle_ref_across_members_of_differing_depth() {
     // directly in `Cons`, `Object`'s one tuple deeper. Following a `^` re-enters the binder
     // it names rather than nesting past it, so an array inside an object (and vice versa)
     // fits, and a longer list doesn't shift the outer `^` per element.
-    let json = "'json = 'int | Array[(Nil | Cons[^, ^1])] | Object[(Nil | Cons[['%str, ^], ^1])];\n\
+    let json = "'json = 'int | Array[(Nil | Cons[^1, ^])] | Object[(Nil | Cons[['%str, ^1], ^])];\n\
                 f = #'json { Ok };\n";
     quiver()
         .evaluate(&format!(
@@ -1302,12 +1302,12 @@ fn test_generic_type_parameters_do_not_collide_across_definitions() {
 
 #[test]
 fn test_enclosing_generic_variable_in_callee_argument() {
-    // The closure captures a `#^`-typed self whose type mentions the enclosing
+    // The closure captures a `^`-typed self whose type mentions the enclosing
     // function's 't; applying it must treat that variable as rigid, not unbound.
     quiver()
         .evaluate(
             r#"
-            f = #<'t>[#^ -> ('t | []), 't] {
+            f = #<'t>[^, 't] -> ('t | []) {
               =[self, n]
               me = #'int { [self, $] ~> self ~ }
               n
@@ -1480,7 +1480,7 @@ fn test_recursive_argument_deep_fold() {
         .evaluate(
             r#"
             'tree = Leaf['int] | Node['%list<^>]
-            sum = #[#^ -> 'int, 'tree, 'int] {
+            sum = #[^, 'tree, 'int] -> 'int {
               | =[_, Leaf[n], acc] => __integer_add__ [n, acc]
               | =[self, Node[kids], acc] => %list.fold [kids, acc, #{ self [self, $1, $0] }]
             }
@@ -1528,7 +1528,7 @@ fn test_nested_union_member_cycle_flattening() {
     quiver()
         .evaluate(
             r#"
-            'x = A | (B[^] | C)
+            'x = A | (B[^1] | C)
             f = #'x { | =B[inner] => inner | =A => A | =C => C }
             f B[A] ~> %data.encode ~
             "#,
@@ -1843,4 +1843,100 @@ fn test_recursive_alias_keeps_its_meaning_inside_a_union() {
             "{prelude}; g = #('l | 'm) {{ $ }}; [g Cons[1, Nil], g Node[<01>, Leaf], g Nil]"
         ))
         .expect("[Cons[1, Nil], Node[<01>, Leaf], Nil]");
+}
+
+#[test]
+fn test_self_typed_parameter_is_checked() {
+    // `^` in a declared parameter names the function itself, so `self` must be that function —
+    // not merely something callable.
+    let f =
+        "f = #[(self): ^, (n): 'int] -> 'int { | $n ~> =0 => 0 | $self [$self, %num.sub [$n, 1]] }";
+    quiver().evaluate(&format!("{f}; f [f, 3]")).expect("0");
+    quiver()
+        .evaluate(&format!("{f}; f [#'int {{ 1 }}, 3]"))
+        .expect_error_containing("Type mismatch");
+}
+
+#[test]
+fn test_self_typed_parameter_needs_a_declared_result() {
+    // The body sees `self` at the function's type, whose result it is still inferring.
+    for parameter in ["(self): ^", "(self): #^1 -> 'int"] {
+        quiver()
+            .evaluate(&format!("f = #[{parameter}, (n): 'int] {{ $n }}"))
+            .expect_error_containing("needs the function's result written");
+    }
+}
+
+#[test]
+fn test_declared_result_naming_the_function() {
+    // A thunk declared to answer a pair whose tail is another such thunk.
+    quiver()
+        .evaluate("t = #[] -> (['int, ^1] | []) { [1, #[] { [] }] }; t [] ~> =[v, n]; [v, n []]")
+        .expect("[1, []]");
+}
+
+#[test]
+fn test_function_type_in_recursive_union_keeps_its_reference() {
+    // `f` is bound out of `More`, and its result's `^1` still names `'s`: the result can be
+    // matched as `'s` again.
+    quiver()
+        .evaluate(
+            "'s = Done | More[#'int -> ^1]
+             g = #'s { | =More[f] => f 1 ~> { | =More[h] => h 2 ~> { =Done => Two | Other } | =Done => One } | Zero }
+             g More[#'int { More[#'int { Done }] }]",
+        )
+        .expect("Two");
+}
+
+#[test]
+fn test_self_typed_process_state_is_self_contained() {
+    // The state is the parameter as the body sees it: `self` is the function's own type, not
+    // a `^` left naming nothing inside the process type.
+    quiver()
+        .evaluate(
+            "step = #[(self): ^, (n): 'int] -> 'int { | $n ~> =0 => 0 | ^ [self: $self, n: %num.sub [$n, 1]] }
+             @step [self: step, n: 3]",
+        )
+        .expect_type("@never !'int ?[self: (#[(self): μ1, (n): 'int] -> 'int), n: 'int]");
+}
+
+#[test]
+fn test_cycle_ref_counts_outward_from_the_reference() {
+    // `^` is the nearest enclosing union or function type, and `^N` N more beyond it: inside a
+    // parenthesised union, `^` is that union.
+    let prelude = "'x = A | (B[^] | C); f = #'x { $ }";
+    quiver()
+        .evaluate(&format!("{prelude}; [f B[C], f B[B[C]]]"))
+        .expect("[B[C], B[B[C]]]");
+    quiver()
+        .evaluate(&format!("{prelude}; f B[A]"))
+        .expect_error_containing("Type mismatch");
+}
+
+#[test]
+fn test_inline_recursive_parameter_names_its_own_union() {
+    // Written inline in a literal's parameter, the list's `^` is the list, not the function.
+    quiver()
+        .evaluate(
+            "count = #[(xs): (Nil | Cons['int, ^]), (n): 'int] {
+               | $xs ~> =Cons[_, rest] => ^ [rest, %num.add [$n, 1]]
+               | $n
+             }
+             count [Cons[1, Cons[2, Nil]], 0]",
+        )
+        .expect("2");
+}
+
+#[test]
+fn test_cycle_ref_as_its_own_union_member_is_an_error() {
+    // A member naming the union it belongs to adds nothing; the enclosing type is `^1`.
+    quiver()
+        .evaluate("'t = Leaf | Node[left: (^ | []), right: (^ | [])]; f = #'t { $ }; f Leaf")
+        .expect_error_containing("names that union itself");
+    quiver()
+        .evaluate(
+            "'t = Leaf | Node[left: (^1 | []), right: (^1 | [])]; f = #'t { $ }
+             f Node[left: Leaf, right: []]",
+        )
+        .expect("Node[left: Leaf, right: []]");
 }

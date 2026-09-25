@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast;
 use crate::resolver::{ModuleResolver, PackageId};
 use quiver_core::{
+    binders::{BinderStack, is_binder},
     program::Program,
     types::{Type, TypeLookup},
 };
@@ -233,7 +234,7 @@ fn validate_productive(root: usize, program: &Program) -> Result<(), Error> {
         productivity_pass(
             root,
             program,
-            &mut Vec::new(),
+            &mut BinderStack::default(),
             &mut productive,
             &mut changed,
             &mut all_productive,
@@ -259,7 +260,7 @@ fn validate_productive(root: usize, program: &Program) -> Result<(), Error> {
 fn productivity_pass(
     type_id: usize,
     program: &Program,
-    stack: &mut Vec<usize>,
+    stack: &mut BinderStack,
     productive: &mut std::collections::HashSet<usize>,
     changed: &mut bool,
     all_productive: &mut bool,
@@ -301,11 +302,11 @@ fn productivity_pass(
         // Empty union: `never` — unproductive by nature, but deliberate; don't flag it.
         Some(Type::Union(variants)) if variants.is_empty() => false,
         Some(Type::Union(variants)) => {
-            if stack.contains(&type_id) {
+            if stack.as_slice().contains(&type_id) {
                 // In progress: answer with the current assumption (least fixpoint).
                 return productive.contains(&type_id);
             }
-            stack.push(type_id);
+            stack.enter(type_id);
             let mut any = false;
             for &variant_id in variants {
                 if productivity_pass(
@@ -319,7 +320,7 @@ fn productivity_pass(
                     any = true;
                 }
             }
-            stack.pop();
+            stack.leave(type_id);
             if any {
                 if productive.insert(type_id) {
                     *changed = true;
@@ -329,15 +330,11 @@ fn productivity_pass(
             }
             any || productive.contains(&type_id)
         }
-        Some(Type::Cycle(depth)) => {
-            if *depth > stack.len() {
-                // Targets a boundary above the walked fragment — an enclosing function
-                // (parameter types start at depth 1) — which is guarded.
-                true
-            } else {
-                productive.contains(&stack[stack.len() - depth])
-            }
-        }
+        // A reference past the walked fragment names an enclosing function (a literal's
+        // parameter is resolved inside it), which is guarded.
+        Some(Type::Cycle(depth)) => stack
+            .resolve(*depth)
+            .is_none_or(|binder| productive.contains(&binder)),
     }
 }
 
@@ -1080,6 +1077,20 @@ fn resolve_ast_type_impl(
             // Increment recursion depth for union boundary
             *recursion_depth += 1;
 
+            // A member that is the nearest reference names this very union, which adds no
+            // values: the author meant a boundary further out.
+            if union
+                .types
+                .iter()
+                .any(|member| matches!(member, ast::Type::Cycle(None | Some(0))))
+            {
+                return Err(Error::TypeUnresolved(
+                    "`^` as a union member names that union itself, which adds nothing: count \
+                     outward to the type enclosing it, starting from `^1`"
+                        .to_string(),
+                ));
+            }
+
             // Resolve all union member types
             let mut resolved_type_ids = Vec::new();
             for member_type in union.types {
@@ -1142,20 +1153,17 @@ fn resolve_ast_type_impl(
                 ));
             }
 
-            // Validate: target_depth must be < recursion_depth
+            // `^N` counts N boundaries outward from the reference (`^` is `^0`, the nearest), so
+            // it needs N + 1 of them around it.
             if target_depth >= *recursion_depth {
                 return Err(Error::TypeUnresolved(format!(
-                    "Invalid cycle reference ^{}: only {} recursion level(s) deep",
+                    "Invalid cycle reference ^{}: only {} enclosing union or function type(s)",
                     target_depth, *recursion_depth
                 )));
             }
 
-            // Calculate actual depth for Cycle(depth)
-            // target_depth is downward from root (0 = root, 1 = first nested boundary)
-            // Cycle(depth) is upward from current position
-            let cycle_depth = *recursion_depth - target_depth;
-
-            Ok(program.register_type(Type::Cycle(cycle_depth)))
+            // `Cycle(n)` is the n-th enclosing binder, counting from 1.
+            Ok(program.register_type(Type::Cycle(target_depth + 1)))
         }
         ast::Type::Process(process) => {
             let receive_id = process
@@ -1589,10 +1597,10 @@ pub fn splice_union_members(union_id: usize, gained: usize, program: &mut Progra
         .collect()
 }
 
-/// Rewrite a member of the union `root` to stand outside it, `gained` binders (0 or 1) now
-/// enclosing it where `root` did.
+/// Rewrite a part of the binder `root` — a union's member, or a function type's parameter or
+/// result — to stand outside it, `gained` binders (0 or 1) now enclosing it where `root` did.
 ///
-/// The member's references to `root` itself would otherwise be captured by whatever binder
+/// The part's references to `root` itself would otherwise be captured by whatever binder
 /// encloses it next and mean *that* (`'l | []` spliced as `Nil | Cons['int, ^] | []` would
 /// admit a `[]` tail), so they are closed: replaced by `root`, with `root`'s own outward
 /// references lengthened for the deeper position. References reaching past `root` are
@@ -1612,6 +1620,89 @@ pub fn close_root_references(
     })
 }
 
+/// `type_id`, standing inside the binders `enclosing` (outermost first), with every free
+/// reference replaced by the binder it names, itself closed against the binders enclosing it.
+/// The result means the same wherever it is used. A reference reaching past the outermost
+/// binder has nothing to be closed with, and is kept.
+pub fn close_against(type_id: usize, enclosing: &[usize], program: &mut Program) -> usize {
+    rewrite_free_cycles(
+        type_id,
+        0,
+        program,
+        &mut |depth, cutoff, program| match enclosing.len().checked_sub(depth - cutoff) {
+            Some(index) => close_against(enclosing[index], &enclosing[..index], program),
+            None => program.register_type(Type::Cycle(depth)),
+        },
+    )
+}
+
+/// `type_id` with any union among its members spliced in, so that none is itself a union.
+/// Closing a reference that stood as a member (`(^1 | [])`, closed with the union it named)
+/// leaves one there. Each spliced union was written inside this one, and its members'
+/// references to it are closed so they keep their meaning (`splice_union_members`). Their
+/// fields may hold such a union again, a level down, flattened when that level is read.
+pub fn flatten_union_members(type_id: usize, program: &mut Program) -> usize {
+    let is_union =
+        |id: usize, program: &Program| matches!(program.lookup_type(id), Some(Type::Union(_)));
+    let Some(Type::Union(members)) = program.lookup_type(type_id).cloned() else {
+        return type_id;
+    };
+    if !members.iter().any(|&m| is_union(m, program)) {
+        return type_id;
+    }
+    let mut flat = Vec::with_capacity(members.len());
+    for member in members {
+        let spliced = if is_union(member, program) {
+            splice_union_members(member, 0, program)
+        } else {
+            vec![member]
+        };
+        for piece in spliced {
+            if !flat.contains(&piece) {
+                flat.push(piece);
+            }
+        }
+    }
+    // Structurally: this union stays the binder its other members' references count.
+    let flattened = program.register_type(Type::Union(flat));
+    flatten_union_members(flattened, program)
+}
+
+/// The parts of a function type, each taken out of it to stand on its own (see
+/// `open_callable`).
+#[derive(Clone, Copy, Debug)]
+pub struct CallableParts {
+    pub parameter: usize,
+    pub result: usize,
+    pub receive: usize,
+    pub states: Option<usize>,
+}
+
+/// The parts of the function type `type_id` (under any annotation rows), for use outside it: a
+/// call's argument check, the parameter a body sees, a received message. A function type is the
+/// binder of every part, so a `^` naming it (`#[(self): ^, …] -> 'r`) is closed with the
+/// function type itself. `None` when `type_id` is not a function type.
+pub fn open_callable(type_id: usize, program: &mut Program) -> Option<CallableParts> {
+    let callable = Type::strip_annotations(type_id, &*program);
+    let Some(Type::Callable {
+        parameter,
+        result,
+        receive,
+        states,
+        ..
+    }) = program.lookup_type(callable).cloned()
+    else {
+        return None;
+    };
+    let mut open = |part| close_root_references(part, callable, 0, program);
+    Some(CallableParts {
+        parameter: open(parameter),
+        result: open(result),
+        receive: open(receive),
+        states: states.map(open),
+    })
+}
+
 /// `type_id` with every annotation row removed, at any depth: the data shape alone.
 pub fn erase_rows(type_id: usize, program: &mut Program) -> usize {
     fn erase(type_id: usize, program: &mut Program, memo: &mut HashMap<usize, usize>) -> usize {
@@ -1623,79 +1714,14 @@ pub fn erase_rows(type_id: usize, program: &mut Program) -> usize {
         };
         let erased = match typ {
             Type::Annotated { base, .. } => erase(base, program, memo),
-            Type::Union(members) => {
-                let erased: Vec<usize> = members.iter().map(|&m| erase(m, program, memo)).collect();
-                if erased == members {
-                    type_id
-                } else {
-                    // Structurally: nested unions are boundaries.
-                    program.register_type(Type::Union(erased))
-                }
-            }
-            Type::Tuple(tuple_id) => match program.lookup_tuple(tuple_id).cloned() {
-                Some(info) => {
-                    let fields: Vec<(Option<String>, usize)> = info
-                        .fields
-                        .iter()
-                        .map(|(label, field)| (label.clone(), erase(*field, program, memo)))
-                        .collect();
-                    if fields == info.fields {
-                        type_id
-                    } else {
-                        let tuple = program.register_tuple(info.name, fields);
-                        program.register_type(Type::Tuple(tuple))
-                    }
-                }
-                None => type_id,
-            },
-            Type::Partial { name, fields } => {
-                let erased: Vec<(String, usize)> = fields
-                    .iter()
-                    .map(|(label, field)| (label.clone(), erase(*field, program, memo)))
+            _ => {
+                let parts: Vec<usize> = typ
+                    .parts(&*program)
+                    .into_iter()
+                    .map(|part| erase(part, program, memo))
                     .collect();
-                if erased == fields {
-                    type_id
-                } else {
-                    program.register_type(Type::Partial {
-                        name,
-                        fields: erased,
-                    })
-                }
+                program.with_parts(type_id, &parts)
             }
-            Type::Callable {
-                parameter,
-                result,
-                receive,
-                states,
-                omittable,
-            } => {
-                let new = Type::Callable {
-                    parameter: erase(parameter, program, memo),
-                    result: erase(result, program, memo),
-                    receive: erase(receive, program, memo),
-                    states: states.map(|s| erase(s, program, memo)),
-                    omittable,
-                };
-                program.register_type(new)
-            }
-            Type::Process {
-                send,
-                receive,
-                state,
-            } => {
-                let new = Type::Process {
-                    send: send.map(|t| erase(t, program, memo)),
-                    receive: receive.map(|t| erase(t, program, memo)),
-                    state: state.map(|t| erase(t, program, memo)),
-                };
-                program.register_type(new)
-            }
-            Type::Cycle(_)
-            | Type::Variable(_)
-            | Type::Integer
-            | Type::Binary
-            | Type::Reference
-            | Type::Resource(_) => type_id,
         };
         memo.insert(type_id, erased);
         erased
@@ -1724,48 +1750,13 @@ pub fn generalize_growth(new: usize, old: usize, program: &mut Program) -> Optio
         let Some(typ) = program.lookup_type(type_id).cloned() else {
             return type_id;
         };
-        match typ {
-            Type::Union(members) => {
-                let rewritten: Vec<usize> = members
-                    .iter()
-                    .map(|&m| embed(m, old, depth + 1, program, found))
-                    .collect();
-                if rewritten == members {
-                    type_id
-                } else {
-                    program.register_type(Type::Union(rewritten))
-                }
-            }
-            Type::Tuple(tuple_id) => match program.lookup_tuple(tuple_id).cloned() {
-                Some(info) => {
-                    let fields: Vec<(Option<String>, usize)> = info
-                        .fields
-                        .iter()
-                        .map(|(label, f)| (label.clone(), embed(*f, old, depth, program, found)))
-                        .collect();
-                    if fields == info.fields {
-                        type_id
-                    } else {
-                        let tuple = program.register_tuple(info.name, fields);
-                        program.register_type(Type::Tuple(tuple))
-                    }
-                }
-                None => type_id,
-            },
-            Type::Annotated {
-                base,
-                exact,
-                entries,
-            } => {
-                let new_base = embed(base, old, depth, program, found);
-                if new_base == base {
-                    type_id
-                } else {
-                    program.annotate_type(new_base, exact, entries)
-                }
-            }
-            _ => type_id,
-        }
+        let inner = depth + usize::from(is_binder(&typ));
+        let parts: Vec<usize> = typ
+            .parts(&*program)
+            .into_iter()
+            .map(|part| embed(part, old, inner, program, found))
+            .collect();
+        program.with_parts(type_id, &parts)
     }
 
     let Some(Type::Union(members)) = program.lookup_type(new).cloned() else {
@@ -1828,56 +1819,20 @@ pub fn has_free_cycles(type_id: usize, program: &Program) -> bool {
         let Some(typ) = program.lookup_type(type_id) else {
             return false;
         };
-        let children: Vec<(usize, usize)> = match typ {
-            Type::Cycle(depth) => return *depth > cutoff,
-            Type::Union(variants) => variants.iter().map(|&v| (v, cutoff + 1)).collect(),
-            Type::Callable {
-                parameter,
-                result,
-                receive,
-                states,
-                ..
-            } => [Some(*parameter), Some(*result), Some(*receive), *states]
-                .into_iter()
-                .flatten()
-                .map(|t| (t, cutoff + 1))
-                .collect(),
-            Type::Tuple(tuple_id) => program
-                .lookup_tuple(*tuple_id)
-                .map(|info| info.fields.iter().map(|&(_, t)| (t, cutoff)).collect())
-                .unwrap_or_default(),
-            Type::Partial { fields, .. } => fields.iter().map(|&(_, t)| (t, cutoff)).collect(),
-            Type::Process {
-                send,
-                receive,
-                state,
-            } => [*send, *receive, *state]
-                .into_iter()
-                .flatten()
-                .map(|t| (t, cutoff))
-                .collect(),
-            Type::Annotated { base, entries, .. } => std::iter::once(*base)
-                .chain(entries.iter().map(|&(_, t)| t))
-                .map(|t| (t, cutoff))
-                .collect(),
-            Type::Variable(_)
-            | Type::Integer
-            | Type::Binary
-            | Type::Reference
-            | Type::Resource(_) => {
-                return false;
-            }
-        };
-        children
+        if let Type::Cycle(depth) = typ {
+            return *depth > cutoff;
+        }
+        let inner = cutoff + usize::from(is_binder(typ));
+        typ.parts(program)
             .into_iter()
-            .any(|(child, cutoff)| walk(child, cutoff, program, seen))
+            .any(|part| walk(part, inner, program, seen))
     }
     walk(type_id, 0, program, &mut HashSet::new())
 }
 
 /// Rebuild `type_id` with each *free* `Cycle` — one reaching above the walked fragment's
 /// root, `Cycle(k)` with `k > cutoff` at `cutoff` binders deep — replaced by
-/// `rewrite(k, cutoff)`. Binders are unions and callables, as in `shift_free_cycles_at`.
+/// `rewrite(k, cutoff)`.
 fn rewrite_free_cycles(
     type_id: usize,
     cutoff: usize,
@@ -1887,139 +1842,20 @@ fn rewrite_free_cycles(
     let Some(typ) = program.lookup_type(type_id).cloned() else {
         return type_id;
     };
-
-    match typ {
-        Type::Cycle(depth) => {
-            if depth > cutoff {
-                rewrite(depth, cutoff, program)
-            } else {
-                type_id
-            }
-        }
-        Type::Union(variants) => {
-            let new_variants: Vec<usize> = variants
-                .iter()
-                .map(|&v| rewrite_free_cycles(v, cutoff + 1, program, rewrite))
-                .collect();
-            if new_variants == variants {
-                type_id
-            } else {
-                program.register_type(Type::Union(new_variants))
-            }
-        }
-        Type::Callable {
-            parameter,
-            result,
-            receive,
-            states,
-            omittable,
-        } => {
-            let new_param = rewrite_free_cycles(parameter, cutoff + 1, program, rewrite);
-            let new_result = rewrite_free_cycles(result, cutoff + 1, program, rewrite);
-            let new_receive = rewrite_free_cycles(receive, cutoff + 1, program, rewrite);
-            let new_states = states.map(|s| rewrite_free_cycles(s, cutoff + 1, program, rewrite));
-            if new_param == parameter
-                && new_result == result
-                && new_receive == receive
-                && new_states == states
-            {
-                type_id
-            } else {
-                program.register_type(Type::Callable {
-                    parameter: new_param,
-                    result: new_result,
-                    receive: new_receive,
-                    states: new_states,
-                    // Field positions, not ids — the rewrite doesn't touch them.
-                    omittable,
-                })
-            }
-        }
-        Type::Tuple(tuple_id) => {
-            if let Some(type_info) = program.lookup_tuple(tuple_id).cloned() {
-                let mut any_changed = false;
-                let new_fields: Vec<(Option<String>, usize)> = type_info
-                    .fields
-                    .iter()
-                    .map(|(name, field_type_id)| {
-                        let new_type_id =
-                            rewrite_free_cycles(*field_type_id, cutoff, program, rewrite);
-                        any_changed = any_changed || new_type_id != *field_type_id;
-                        (name.clone(), new_type_id)
-                    })
-                    .collect();
-                if any_changed {
-                    let new_tuple_id = program.register_tuple(type_info.name.clone(), new_fields);
-                    program.register_type(Type::Tuple(new_tuple_id))
-                } else {
-                    type_id
-                }
-            } else {
-                type_id
-            }
-        }
-        Type::Partial { name, fields } => {
-            let mut any_changed = false;
-            let new_fields: Vec<(String, usize)> = fields
-                .iter()
-                .map(|(fname, field_type_id)| {
-                    let new_type_id = rewrite_free_cycles(*field_type_id, cutoff, program, rewrite);
-                    any_changed = any_changed || new_type_id != *field_type_id;
-                    (fname.clone(), new_type_id)
-                })
-                .collect();
-            if any_changed {
-                program.register_type(Type::Partial {
-                    name,
-                    fields: new_fields,
-                })
-            } else {
-                type_id
-            }
-        }
-        Type::Process {
-            send,
-            receive,
-            state,
-        } => {
-            let new_send = send.map(|s| rewrite_free_cycles(s, cutoff, program, rewrite));
-            let new_receive = receive.map(|r| rewrite_free_cycles(r, cutoff, program, rewrite));
-            let new_state = state.map(|s| rewrite_free_cycles(s, cutoff, program, rewrite));
-            if new_send == send && new_receive == receive && new_state == state {
-                type_id
-            } else {
-                program.register_type(Type::Process {
-                    send: new_send,
-                    receive: new_receive,
-                    state: new_state,
-                })
-            }
-        }
-        Type::Annotated {
-            base,
-            exact,
-            entries,
-        } => {
-            let new_base = rewrite_free_cycles(base, cutoff, program, rewrite);
-            let mut any_changed = new_base != base;
-            let new_entries: Vec<(usize, usize)> = entries
-                .iter()
-                .map(|(key, value_type)| {
-                    let new_value = rewrite_free_cycles(*value_type, cutoff, program, rewrite);
-                    any_changed = any_changed || new_value != *value_type;
-                    (*key, new_value)
-                })
-                .collect();
-            if any_changed {
-                program.annotate_type(new_base, exact, new_entries)
-            } else {
-                type_id
-            }
-        }
-        Type::Variable(_) | Type::Integer | Type::Binary | Type::Reference | Type::Resource(_) => {
+    if let Type::Cycle(depth) = typ {
+        return if depth > cutoff {
+            rewrite(depth, cutoff, program)
+        } else {
             type_id
-        }
+        };
     }
+    let inner = cutoff + usize::from(is_binder(&typ));
+    let parts: Vec<usize> = typ
+        .parts(&*program)
+        .into_iter()
+        .map(|part| rewrite_free_cycles(part, inner, program, rewrite))
+        .collect();
+    program.with_parts(type_id, &parts)
 }
 
 pub fn substitute(
@@ -2071,109 +1907,6 @@ fn substitute_at(
                 .collect();
             union_type_ids(program, new_variants)
         }
-        Type::Tuple(tuple_id) => {
-            // Look up the tuple's fields and clone to avoid borrow issues
-            if let Some(type_info) = program.lookup_tuple(tuple_id).cloned() {
-                // Substitute within each field type
-                let mut any_changed = false;
-                let new_fields: Vec<(Option<String>, usize)> = type_info
-                    .fields
-                    .iter()
-                    .map(|(name, field_type_id)| {
-                        let new_type_id = substitute_at(*field_type_id, bindings, depth, program);
-                        if !any_changed && new_type_id != *field_type_id {
-                            any_changed = true;
-                        }
-                        (name.clone(), new_type_id)
-                    })
-                    .collect();
-
-                // If any field changed, register a new tuple type
-                if any_changed {
-                    let new_tuple_id = program.register_tuple(type_info.name.clone(), new_fields);
-                    program.register_type(Type::Tuple(new_tuple_id))
-                } else {
-                    type_id
-                }
-            } else {
-                // Type not found in registry, just return original
-                type_id
-            }
-        }
-        Type::Partial { name, fields } => {
-            // Substitute within each field type
-            let mut any_changed = false;
-            let new_fields: Vec<(String, usize)> = fields
-                .iter()
-                .map(|(fname, field_type_id)| {
-                    let new_type_id = substitute_at(*field_type_id, bindings, depth, program);
-                    if !any_changed && new_type_id != *field_type_id {
-                        any_changed = true;
-                    }
-                    (fname.clone(), new_type_id)
-                })
-                .collect();
-
-            // If any field changed, register a new partial type
-            if any_changed {
-                program.register_type(Type::Partial {
-                    name: name.clone(),
-                    fields: new_fields,
-                })
-            } else {
-                type_id
-            }
-        }
-        Type::Integer | Type::Binary | Type::Reference | Type::Cycle(_) | Type::Resource(_) => {
-            type_id
-        }
-        Type::Callable {
-            parameter,
-            result,
-            receive,
-            states,
-            omittable,
-        } => {
-            let new_param = substitute_at(parameter, bindings, depth + 1, program);
-            let new_result = substitute_at(result, bindings, depth + 1, program);
-            let new_receive = substitute_at(receive, bindings, depth + 1, program);
-            let new_states = states.map(|s| substitute_at(s, bindings, depth + 1, program));
-            if new_param == parameter
-                && new_result == result
-                && new_receive == receive
-                && new_states == states
-            {
-                type_id
-            } else {
-                program.register_type(Type::Callable {
-                    parameter: new_param,
-                    result: new_result,
-                    receive: new_receive,
-                    states: new_states,
-                    // Omittable-label marks survive instantiation, exactly as the
-                    // tuple-side markers above do.
-                    omittable,
-                })
-            }
-        }
-        Type::Process {
-            send,
-            receive,
-            state,
-        } => {
-            let new_send = send.map(|s| substitute_at(s, bindings, depth, program));
-            let new_receive = receive.map(|r| substitute_at(r, bindings, depth, program));
-            let new_state = state.map(|s| substitute_at(s, bindings, depth, program));
-            if new_send == send && new_receive == receive && new_state == state {
-                type_id
-            } else {
-                program.register_type(Type::Process {
-                    send: new_send,
-                    receive: new_receive,
-                    state: new_state,
-                })
-            }
-        }
         Type::Annotated {
             base,
             exact,
@@ -2194,6 +1927,16 @@ fn substitute_at(
             } else {
                 type_id
             }
+        }
+        // The rest only carry the substitution into their parts, a binder's one deeper.
+        _ => {
+            let inner = depth + usize::from(is_binder(&typ));
+            let parts: Vec<usize> = typ
+                .parts(&*program)
+                .into_iter()
+                .map(|part| substitute_at(part, bindings, inner, program))
+                .collect();
+            program.with_parts(type_id, &parts)
         }
     }
 }
@@ -2304,13 +2047,13 @@ pub fn unify(
 /// accepts, so a message that is not already covered is a mismatch, not a reason to
 /// grow `'m`.
 /// Unification state threaded through one `unify`: the variables bound as upper bounds (see
-/// `unify_step`), the pattern-side binders (unions and callables) entered, innermost last, which a
+/// `unify_bounded`), the pattern-side binders (unions and callables) entered, innermost last, which a
 /// pattern `Cycle(n)` counts back through, and the (pattern union, concrete) pairs already being
 /// unified, which a recursive type revisits.
 #[derive(Default)]
 struct Unifier {
     upper: HashSet<String>,
-    binders: Vec<usize>,
+    binders: BinderStack,
     visiting: HashSet<(usize, usize)>,
 }
 
@@ -2323,33 +2066,17 @@ impl Unifier {
             visiting: self.visiting.clone(),
         }
     }
+
+    /// A trial of one of the pattern union `pattern_id`'s members: `fresh`, with the union
+    /// entered.
+    fn member_trial(&self, pattern_id: usize) -> Self {
+        let mut trial = self.fresh();
+        trial.binders.enter(pattern_id);
+        trial
+    }
 }
 
 fn unify_bounded(
-    bindings: &mut HashMap<String, usize>,
-    ctx: &mut Unifier,
-    contra: bool,
-    pattern_id: usize,
-    concrete_id: usize,
-    program: &mut Program,
-) -> Result<(), Error> {
-    // An arm that recurses with the same pattern (splitting a concrete union, peeling a row)
-    // has not entered it again.
-    let binder = matches!(
-        program.lookup_type(pattern_id),
-        Some(Type::Union(_) | Type::Callable { .. })
-    ) && ctx.binders.last() != Some(&pattern_id);
-    if binder {
-        ctx.binders.push(pattern_id);
-    }
-    let result = unify_step(bindings, ctx, contra, pattern_id, concrete_id, program);
-    if binder {
-        ctx.binders.pop();
-    }
-    result
-}
-
-fn unify_step(
     bindings: &mut HashMap<String, usize>,
     ctx: &mut Unifier,
     contra: bool,
@@ -2363,6 +2090,13 @@ fn unify_step(
     let (Some(pattern), Some(concrete)) = (pattern, concrete) else {
         return Ok(()); // If we can't look up either type, assume compatible
     };
+
+    // A type unifies with itself without constraint: a generic function passed where its own
+    // type is expected (`map [map, …]`, for a `(self): ^` parameter) fits every instance. A
+    // bare variable still binds, so a result it pins stays pinned.
+    if pattern_id == concrete_id && !matches!(pattern, Type::Variable(_)) {
+        return Ok(());
+    }
 
     match (&pattern, &concrete) {
         // When pattern is a variable, bind it or check consistency
@@ -2678,18 +2412,24 @@ fn unify_step(
                 ..
             },
         ) => {
-            // Unify parameters (contravariant - swap order)
-            unify_bounded(bindings, ctx, contra, *param1, *param2, program)?;
-            // Unify results (covariant)
-            unify_bounded(bindings, ctx, contra, *result1, *result2, program)?;
-            // Unify receive types (contravariant - swap order)
-            unify_bounded(bindings, ctx, contra, *receive1, *receive2, program)?;
-            // States unify only when both are known: a `#'t -> 'u` parameter (states
-            // unknown) accepts any literal without constraining its states.
-            if let (Some(st1), Some(st2)) = (states1, states2) {
-                unify_bounded(bindings, ctx, contra, *st1, *st2, program)?;
-            }
-            Ok(())
+            // A function type is a binder over every part.
+            ctx.binders.enter(pattern_id);
+            let parts = [
+                Some((*param1, *param2)),
+                Some((*result1, *result2)),
+                Some((*receive1, *receive2)),
+                // States unify only when both are known: a `#'t -> 'u` parameter (states
+                // unknown) accepts any literal without constraining its states.
+                (*states1).zip(*states2),
+            ];
+            let result = parts
+                .into_iter()
+                .flatten()
+                .try_for_each(|(pattern_part, part)| {
+                    unify_bounded(bindings, ctx, contra, pattern_part, part, program)
+                });
+            ctx.binders.leave(pattern_id);
+            result
         }
 
         // Handle cycles on either side - for recursive types like list<t>.
@@ -2701,27 +2441,29 @@ fn unify_step(
         // position; the back-edge carries no additional constraint to verify here.
         //
         // A pattern's reference meeting a concrete type is the exception: it names a pattern
-        // union whose variables the concrete type must still bind (`Cons['t, ^]` against
-        // `Cons[A, '%list<B>]` makes `'t` `A | B`, not `A`), so it unifies against that union —
+        // binder whose variables the concrete type must still bind (`Cons['t, ^]` against
+        // `Cons[A, '%list<B>]` makes `'t` `A | B`, not `A`), so it unifies against that binder —
         // once per pair, which is what ends the recursion.
         (Type::Cycle(depth), _) if !matches!(concrete, Type::Cycle(_)) => {
-            let Some(index) = ctx.binders.len().checked_sub(*depth) else {
-                return Ok(());
+            // Every binder a reference can name is on the stack: a function type's parts are
+            // opened before they reach unification (`open_callable`), so none arrives free.
+            let Some(root) = ctx.binders.resolve(*depth) else {
+                return Err(Error::InternalError {
+                    message: format!(
+                        "unification met a free recursive reference in {}",
+                        quiver_core::format::format_type_by_id(&*program, pattern_id)
+                    ),
+                });
             };
-            let root = ctx.binders[index];
-            // Only outside function types: references within one (`#^ -> …`, a thunk's
-            // `#[] -> (['t, ^] | [])`) are numbered from function boundaries this walk does not
-            // model, so those keep the old leniency.
-            let through_unions = ctx
-                .binders
-                .iter()
-                .all(|&binder| matches!(program.lookup_type(binder), Some(Type::Union(_))));
-            if !through_unions || !ctx.visiting.insert((root, concrete_id)) {
+            if !ctx.visiting.insert((root, concrete_id)) {
                 return Ok(());
             }
-            let outer = ctx.binders.split_off(index);
+            let (root, cut) = ctx
+                .binders
+                .follow(*depth)
+                .expect("the binder was just resolved");
             let result = unify_bounded(bindings, ctx, contra, root, concrete_id, program);
-            ctx.binders.extend(outer);
+            ctx.binders.restore(cut);
             result
         }
         (Type::Cycle(_depth), _) | (_, Type::Cycle(_depth)) => Ok(()),
@@ -2762,7 +2504,7 @@ fn unify_step(
                     let mut temp_bindings = bindings.clone();
                     if unify_bounded(
                         &mut temp_bindings,
-                        &mut ctx.fresh(),
+                        &mut ctx.member_trial(pattern_id),
                         false,
                         pattern_variant,
                         concrete_variant,
@@ -2817,7 +2559,7 @@ fn unify_step(
                 let mut temp_bindings = bindings.clone();
                 match unify_bounded(
                     &mut temp_bindings,
-                    &mut ctx.fresh(),
+                    &mut ctx.member_trial(pattern_id),
                     false,
                     variant,
                     concrete_id,

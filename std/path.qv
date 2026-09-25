@@ -1,6 +1,6 @@
 ' = Root | Relative['int] | Path['%str, ^]
 
-join = #[(self): #^ -> (' | []), (path): ', (with): '] {
+join = #[(self): ^, (path): ', (with): '] -> (' | []) {
   [$path, $with] ~> {
     | =[_, Root] => []
     | =[_, Relative[0]] => $path

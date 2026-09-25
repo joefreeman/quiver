@@ -54,7 +54,7 @@ word_p = #'%parse {
 }
 
 // The value grammar, self-passed to tie the value↔array/object recursion.
-value_step = #[#^ -> (['expr, '%parse] | []), '%parse] {
+value_step = #[^, '%parse] -> (['expr, '%parse] | []) {
   =[self, st]
   value = #'%parse { self [self, $] }
 
@@ -361,7 +361,7 @@ format_rational = #[(n): 'int, (d): 'int] {
 }
 
 // Serialize a `'%json` value to its compact string form, self-passed to recurse.
-str_step = #[#^ -> '%str, '] -> '%str {
+str_step = #[^, '] -> '%str {
   =[self, v]
   go = #' { self [self, $] }
   v ~> {
@@ -482,7 +482,7 @@ set1 = #[(value): 'opt, (key): ('%str | 'int), (new): '] -> 'opt {
 
 // A path set: recurse to the leaf, then rebuild each level on the way back out. A missing
 // intermediate makes the inner set nil, which propagates. Self-passed to recurse.
-set_step = #[#^ -> 'opt, 'opt, '%list<('%str | 'int)>, '] -> 'opt {
+set_step = #[^, 'opt, '%list<('%str | 'int)>, '] -> 'opt {
   =[self, value, path, new]
   path ~> {
     | =Nil => new
@@ -537,7 +537,7 @@ delete1 = #[(value): 'opt, (key): ('%str | 'int)] -> 'opt {
 
 // A path delete: a missing intermediate means the target is already absent, so the value
 // answers unchanged. Self-passed to recurse.
-delete_step = #[#^ -> 'opt, 'opt, '%list<('%str | 'int)>] -> 'opt {
+delete_step = #[^, 'opt, '%list<('%str | 'int)>] -> 'opt {
   =[self, value, path]
   path ~> {
     | =Nil => []

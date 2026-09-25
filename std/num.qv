@@ -1151,10 +1151,10 @@ d_expr_of = #'%parse.p<'dexpr> {
 // the factor↔parenthesized-expression recursion. Alternative order matters: the
 // dialect's own parens and number literals first, the host term last.
 d_factor_step = #[
-  (self): #^ -> (['dexpr, '%parse] | []),
+  (self): ^,
   (term): '%parse.p<'dexpr>,
   (st): '%parse,
-] {
+] -> (['dexpr, '%parse] | []) {
   // The nested factor literal closes over `self` and `term` (an inner `$` would be its
   // own parameter), so bind the fields locally — by reference, as callables.
   self = $self

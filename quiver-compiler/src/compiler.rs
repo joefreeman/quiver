@@ -218,6 +218,10 @@ pub enum Error {
         /// The widest parameter type tried, for the message.
         parameter: String,
     },
+    /// A function literal's parameter names the function itself (`#[(self): ^, …] { … }`), but
+    /// the function's result is left to inference. The body sees its parameter at the function's
+    /// type, which isn't known until the body has been compiled, so the result must be written.
+    SelfTypedParameterNeedsResult,
     /// A chain term other than the head ignores the value flowing into it, silently
     /// dropping everything the chain computed before it. A chain threads a value through
     /// its terms; a term that wants a fresh start is a step (`;`), which is also what
@@ -508,6 +512,14 @@ impl std::fmt::Display for Error {
                      {parameter}) — building a recursive value, such as a list folded up \
                      from `Nil`. Write the parameter type, naming the recursive type \
                      (`#['%list<'int>, 'int] {{ ... }}`)"
+                )
+            }
+            Error::SelfTypedParameterNeedsResult => {
+                write!(
+                    f,
+                    "a parameter naming its own function (`^`) needs the function's result \
+                     written, since the body sees the parameter at the function's type: \
+                     `#[(self): ^, …] -> 'r {{ … }}`"
                 )
             }
             Error::DiscardedChainValue => {
@@ -1388,7 +1400,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // `:defaults` has no single expected type — it names a *subset* of the
             // parameter's fields — so it is checked against the carrier after the fact.
             if is_defaults {
-                annotations::check_defaults(&*self.program, carrier_type, value_type)?;
+                annotations::check_defaults(self.program, carrier_type, value_type)?;
             }
             self.codegen.add_instruction(Instruction::annotate(key_id));
             entries.push((key_id, value_type));
@@ -1951,11 +1963,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let callable = self
             .instantiate_type_arguments(callable, &access.type_arguments)
             .ok()?;
-        let callable = Type::strip_annotations(callable, &*self.program);
-        match self.program.lookup_type(callable)? {
-            Type::Callable { parameter, .. } => Some(*parameter),
-            _ => None,
-        }
+        typing::open_callable(callable, self.program).map(|parts| parts.parameter)
     }
 
     /// The type of annotation `key` on `type_id`, when the row makes it definitely visible.
@@ -2379,10 +2387,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // In this case, extract receive type from the chained value
                     None => {
                         if let Some(chained) = chained_type
-                            && let Some(Type::Callable { parameter, .. }) =
-                                self.program.lookup_base(chained)
+                            && let Some(parts) = typing::open_callable(chained, self.program)
                         {
-                            select_sources.push(*parameter);
+                            select_sources.push(parts.parameter);
                         }
                     }
                     // Explicit empty `![]` - no receive types
@@ -2480,10 +2487,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 term if term.is_bare_ripple() => {
                     // Ripple refers to the chained value - extract its receive type
                     if let Some(chained_type_id) = chained_type
-                        && let Some(Type::Callable { parameter, .. }) =
-                            self.program.lookup_base(*chained_type_id)
+                        && let Some(parts) = typing::open_callable(*chained_type_id, self.program)
                     {
-                        receive_types.push(*parameter);
+                        receive_types.push(parts.parameter);
                     }
                 }
                 ast::Term::Function(func) => {
@@ -2535,10 +2541,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     };
 
                     if let Some(type_id) = receiver_type
-                        && let Some(Type::Callable { parameter, .. }) =
-                            self.program.lookup_base(type_id)
+                        && let Some(parts) = typing::open_callable(type_id, self.program)
                     {
-                        receive_types.push(*parameter);
+                        receive_types.push(parts.parameter);
                     }
                 }
                 _ => {
@@ -2764,9 +2769,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.codegen.instructions = Vec::new();
         self.local_count = 0;
         self.current_receive_type_id = receive_type;
-        // Seed the states union with the parameter (the spawn init / bare-`^` argument);
-        // tail calls widen it during body compilation.
-        self.current_states = Some(parameter_type);
         self.current_omittable = parameter_omittable;
 
         // Define captures as first locals in function body scope
@@ -2912,33 +2914,54 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             )?;
         }
 
-        let mut parameter_fields = HashMap::new();
-        if let Some(ast::Type::Tuple(tuple_type)) = &function.parameter_type {
-            for (field_index, field) in tuple_type.fields.iter().enumerate() {
-                // A decorator entry states no type of its own (the spread supplies it), and
-                // a spread's own fields aren't enumerated here either, so this map covers
-                // the written, typed entries only.
-                if let ast::FieldType::Field {
-                    name: Some(field_name),
-                    type_def: Some(type_def),
-                    ..
-                } = field
-                {
-                    let mut env = typing::TypeEnv {
-                        resolver: self.resolver,
-                        module_cache: &mut *self.module_cache,
-                        package: &self.current_package,
-                    };
-                    let field_type = typing::resolve_ast_type(
-                        &mut env,
-                        &self.scopes,
-                        type_def.clone(),
-                        self.program,
-                    )?;
-                    parameter_fields.insert(field_name.clone(), (field_index, field_type));
-                }
+        // The declared result, resolved ahead of the body. A written parameter or result naming
+        // the function itself (`#[(self): ^, …] -> 'r`) is seen by the body at the function's
+        // type, which is built from the declared parts (states are the body's to find, so they
+        // are left unknown here).
+        let declared_result = match &function.return_type {
+            Some(return_type_ast) => {
+                let mut env = typing::TypeEnv {
+                    resolver: self.resolver,
+                    module_cache: &mut *self.module_cache,
+                    package: &self.current_package,
+                };
+                // A result position grants no calling convention, so any marks are discarded
+                // here; `validate_type_ast` rejects one written where it could never fire.
+                let (result, _) = typing::resolve_function_parameter_type(
+                    &mut env,
+                    &self.scopes,
+                    return_type_ast.clone(),
+                    &function.type_parameters,
+                    type_param_suffix,
+                    self.program,
+                )?;
+                Some(result)
             }
-        }
+            None => None,
+        };
+        let self_typed = function.parameter_type.is_some()
+            && typing::has_free_cycles(parameter_type, &*self.program);
+        let (body_parameter_type, declared_result) = if self_typed
+            || declared_result.is_some_and(|r| typing::has_free_cycles(r, &*self.program))
+        {
+            let result = declared_result.ok_or(Error::SelfTypedParameterNeedsResult)?;
+            let declared = self.program.register_type(Type::Callable {
+                parameter: parameter_type,
+                result,
+                receive: receive_type,
+                states: None,
+                omittable: self.current_omittable.clone(),
+            });
+            let parts = typing::open_callable(declared, self.program)
+                .expect("a registered function type opens");
+            (parts.parameter, Some(parts.result))
+        } else {
+            (parameter_type, declared_result)
+        };
+        // Seed the states union with the parameter (the spawn init / bare-`^` argument) as the
+        // body sees it, which is how the tail calls widening it type their arguments too.
+        self.current_states = Some(body_parameter_type);
+
         // Start a fresh dispatch collection for this body (saving any outer one, so a function
         // nested inside another function's body collects independently).
         let saved_dispatch = self.collected_dispatch.replace(DispatchCollection {
@@ -2954,7 +2977,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.function_depth += 1;
                 let body_type = self.compile_scoped_block(
                     body,
-                    parameter_type,
+                    body_parameter_type,
                     Provenance::Parameter,
                     None,
                     ScopeKind::Function,
@@ -2967,39 +2990,33 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Identity function: just return the parameter
                 // The calling convention puts the parameter on the stack,
                 // so we don't need any instructions - just leave it there
-                parameter_type
+                body_parameter_type
             }
         };
         let dispatch = std::mem::replace(&mut self.collected_dispatch, saved_dispatch);
         self.self_tail_calls = saved_tail_calls;
 
         // Validate return type if specified
-        if let Some(return_type_ast) = &function.return_type {
-            let mut env = typing::TypeEnv {
-                resolver: self.resolver,
-                module_cache: &mut *self.module_cache,
-                package: &self.current_package,
-            };
-            // A result position grants no calling convention, so any marks are discarded
-            // here; `validate_type_ast` rejects one written where it could never fire.
-            let expected_return_type = typing::resolve_function_parameter_type(
-                &mut env,
-                &self.scopes,
-                return_type_ast.clone(),
-                &function.type_parameters,
-                type_param_suffix,
-                self.program,
-            )?
-            .0;
-
-            // For generic functions, we need strict type equality (not just compatibility)
-            // because type variables should match exactly, not be compatible with concrete types
-            let types_match = if !function.type_parameters.is_empty() {
-                // For generic functions: require exact type equality
-                body_type == expected_return_type
-            } else {
-                // For non-generic functions: use compatibility check
-                quiver_core::types::is_compatible(body_type, expected_return_type, &*self.program)
+        if let Some(expected_return_type) = declared_result {
+            // Compatibility treats a type variable as matching anything, so a generic function's
+            // own type parameters are held rigid first: each stands in as a distinct opaque type
+            // (a field-less tuple whose name no program can spell), which a body only fits by keeping
+            // it where the declaration has it — whatever the parameter is instantiated to.
+            let rigid: HashMap<String, usize> = function
+                .type_parameters
+                .iter()
+                .map(|param| {
+                    let variable = format!("{param}#{type_param_suffix}");
+                    let opaque = self
+                        .program
+                        .register_tuple(Some(format!("'{variable}")), Vec::new());
+                    (variable, self.program.register_type(Type::Tuple(opaque)))
+                })
+                .collect();
+            let types_match = body_type == expected_return_type || {
+                let body = typing::substitute(body_type, &rigid, self.program);
+                let expected = typing::substitute(expected_return_type, &rigid, self.program);
+                quiver_core::types::is_compatible(body, expected, &*self.program)
             };
 
             if !types_match {
@@ -3331,16 +3348,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             return Ok(carried.unwrap_or_else(|| self.program.register_type(Type::nil())));
         }
 
+        // A binder of the whole scrutinee (`=x`, `=(P)x`) is the scrutinee, so it keeps its
+        // provenance and later reads see its narrowings. A binding taken from inside it is
+        // not, however few bindings the pattern makes: `=A[Cons[x, _]]` binds only `x`.
+        let whole_value = matches!(pattern, ast::Match::Identifier(..) | ast::Match::As(..));
+
         // Register locals for all bindings (indices needed for Load)
         for (variable_name, variable_type) in &bindings {
             let local_index = self.local_count;
             self.local_count += 1;
 
-            // Register in scope
-            // For simple identifier bindings (single binding), preserve the value's provenance
-            // so tuple field provenance is preserved. For complex patterns (destructuring),
-            // use Unknown since path resolution is complex.
-            let var_provenance = if bindings.len() == 1 {
+            let var_provenance = if whole_value {
                 value_provenance.clone()
             } else {
                 Provenance::Unknown
@@ -3473,9 +3491,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // value's type — `[x, y]` against `[A, B] | [A, C]` tests which member it has, but
         // matches either — and it then types as plain `Ok`. Coverage is the complement's
         // verdict, which is exact only for pure type tests on non-recursive positions (what
-        // `prevents` rules out); otherwise only a requirement-free set counts.
+        // `prevents` rules out), and on a value without type variables — narrowing keeps a
+        // variable whole, so `=[x, ('int)y]` would seem to cover `['t, 't]`. Otherwise only
+        // a requirement-free set counts.
         let irrefutable = pattern::is_irrefutable(&binding_sets)
-            || (!prevents && !binding_sets.is_empty() && {
+            || (!prevents
+                && !binding_sets.is_empty()
+                && !typing::contains_variables(value_type, &*self.program)
+                && {
                 let rest = narrowing::compute_complement(value_type, narrowed_type, self.program);
                 self.is_never(rest)
             });
@@ -5192,7 +5215,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // below), so the interned constant naming the function is valid there.
         let function_constant = self.intern_value(&function)?;
         let function_type = self.value_type(&function)?;
-        let Some((parameter, result)) = self.callable_signature(function_type) else {
+        let Some((parameter, result)) = annotations::single_callable(self.program, function_type)
+        else {
             return Err(Error::DialectFailed {
                 module: module_name,
                 message: format!(
@@ -5418,19 +5442,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             | ast::Term::State(..) => {}
         }
         Ok(())
-    }
-
-    /// The parameter and result of a callable type, looking through annotation rows and
-    /// single-member unions.
-    fn callable_signature(&self, type_id: usize) -> Option<(usize, usize)> {
-        match self.program.lookup_type(type_id)? {
-            Type::Callable {
-                parameter, result, ..
-            } => Some((*parameter, *result)),
-            Type::Annotated { base, .. } => self.callable_signature(*base),
-            Type::Union(members) if members.len() == 1 => self.callable_signature(members[0]),
-            _ => None,
-        }
     }
 
     /// Describe a dialect function's nil result: fold an `Expected[offset: 'int,
@@ -5767,19 +5778,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// Emit spawn with argument (case 2)
     /// Stack before: [argument, function]
     fn emit_arg_spawn(&mut self, fn_type_id: usize, arg_type: usize) -> Result<usize, Error> {
-        let Some(Type::Callable {
-            parameter,
-            result,
-            receive,
-            states,
-            ..
-        }) = self.program.lookup_base(fn_type_id)
-        else {
+        let Some(parts) = typing::open_callable(fn_type_id, self.program) else {
             return Err(Error::FeatureUnsupported(
                 "Can only spawn functions".to_string(),
             ));
         };
-        let (parameter, result, receive, states) = (*parameter, *result, *receive, *states);
+        let (parameter, result, receive, states) =
+            (parts.parameter, parts.result, parts.receive, parts.states);
 
         if !quiver_core::types::is_compatible(arg_type, parameter, &*self.program) {
             return Err(Error::TypeMismatch {
@@ -6420,9 +6425,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         found: "process without receive type (cannot select)".to_string(),
                     });
                 }
-                Type::Callable { parameter, .. } => {
+                Type::Callable { .. } => {
                     // Receive function - use its parameter type (the message type being received)
-                    result_types.push(*parameter);
+                    let parts = typing::open_callable(source_type_id, self.program)
+                        .expect("a function type opens");
+                    result_types.push(parts.parameter);
                 }
                 Type::Integer => {
                     // Timeout source: nil, stamped `:timeout` at runtime (row-invisible,
@@ -6710,10 +6717,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     .is_none()
                     .then_some(expected)
                     .flatten()
-                    .and_then(|exp| match self.program.lookup_type(exp) {
-                        Some(Type::Callable { parameter, .. }) => Some(*parameter),
-                        _ => None,
-                    });
+                    .and_then(|exp| typing::open_callable(exp, self.program))
+                    .map(|parts| parts.parameter);
                 let function_type = self.compile_function(func, expected_parameter)?;
                 // Hover on `#` shows the inferred function type.
                 self.record_typed(span, function_type, SymbolKind::Expression, None);
@@ -7030,164 +7035,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.record_typed(span.get(), result, SymbolKind::Expression, None);
                 Ok((result, Provenance::Unknown))
             }
-        }
-    }
-
-    /// Resolve cycles in a function's result type after a call
-    ///
-    /// When a function is called, its result may contain Cycle(n) references.
-    /// A Cycle(n) means "go up n boundaries from here".
-    ///
-    /// This function traverses the result type, tracking depth (boundaries crossed).
-    /// When it encounters Cycle(n) at depth D from the function:
-    /// - To reach the function boundary from depth D requires going up (D+1) boundaries
-    /// - If n == D+1, the cycle points to the function itself → resolve it
-    /// - Otherwise, keep the cycle as-is
-    fn resolve_function_cycles(
-        &mut self,
-        type_id: usize,
-        function_type_id: usize,
-        depth_from_function: usize,
-    ) -> usize {
-        let typ = match self.program.lookup_type(type_id) {
-            Some(t) => t,
-            None => return type_id,
-        };
-
-        match typ {
-            Type::Cycle(n) => {
-                // Cycle(n) means "n boundaries upward from here"
-                // We're at depth_from_function boundaries inside the result
-                // To reach the function: need to go up (depth_from_function + 1) boundaries
-                //   - depth_from_function to exit the result's boundaries
-                //   - +1 to exit the function boundary itself
-                if *n == depth_from_function + 1 {
-                    function_type_id
-                } else {
-                    // Cycle points elsewhere (could be to a boundary inside the result,
-                    // or to something even further out)
-                    type_id
-                }
-            }
-            Type::Union(variants) => {
-                // Union is a boundary - increment depth
-                let variants_clone = variants.clone();
-                let mut resolved_variants = Vec::new();
-                for v in variants_clone {
-                    let resolved =
-                        self.resolve_function_cycles(v, function_type_id, depth_from_function + 1);
-                    resolved_variants.push(resolved);
-                }
-                typing::union_type_ids(self.program, resolved_variants)
-            }
-            Type::Callable {
-                parameter,
-                result,
-                receive,
-                states,
-                omittable,
-            } => {
-                // Nested function is a boundary - increment depth
-                let param_id = *parameter;
-                let result_id = *result;
-                let receive_id = *receive;
-                let states_id = *states;
-                // Field positions, not ids — re-rooting doesn't touch them, but they are
-                // part of the rebuilt type's identity.
-                let omittable = omittable.clone();
-                let resolved_param = self.resolve_function_cycles(
-                    param_id,
-                    function_type_id,
-                    depth_from_function + 1,
-                );
-                let resolved_result = self.resolve_function_cycles(
-                    result_id,
-                    function_type_id,
-                    depth_from_function + 1,
-                );
-                let resolved_receive = self.resolve_function_cycles(
-                    receive_id,
-                    function_type_id,
-                    depth_from_function + 1,
-                );
-                let resolved_states = states_id.map(|s| {
-                    self.resolve_function_cycles(s, function_type_id, depth_from_function + 1)
-                });
-                self.program.register_type(Type::Callable {
-                    parameter: resolved_param,
-                    result: resolved_result,
-                    receive: resolved_receive,
-                    states: resolved_states,
-                    omittable,
-                })
-            }
-            Type::Tuple(tuple_id) => {
-                // Tuples are not boundaries - maintain depth
-                if let Some(type_info) = self.program.lookup_tuple(*tuple_id).cloned() {
-                    let new_fields: Vec<_> = type_info
-                        .fields
-                        .into_iter()
-                        .map(|(name, field_type_id)| {
-                            let resolved_field_type = self.resolve_function_cycles(
-                                field_type_id,
-                                function_type_id,
-                                depth_from_function,
-                            );
-                            (name, resolved_field_type)
-                        })
-                        .collect();
-                    let new_tuple_id = self.program.register_tuple(type_info.name, new_fields);
-                    self.program.register_type(Type::Tuple(new_tuple_id))
-                } else {
-                    type_id
-                }
-            }
-            Type::Partial { name, fields } => {
-                // Partials are not boundaries - maintain depth
-                // Clone upfront to avoid borrow issues with self.resolve_function_cycles
-                let partial_name = name.clone();
-                let partial_fields = fields.clone();
-                let new_fields: Vec<_> = partial_fields
-                    .into_iter()
-                    .map(|(fname, field_type_id)| {
-                        let resolved_field_type = self.resolve_function_cycles(
-                            field_type_id,
-                            function_type_id,
-                            depth_from_function,
-                        );
-                        (fname, resolved_field_type)
-                    })
-                    .collect();
-                self.program.register_type(Type::Partial {
-                    name: partial_name,
-                    fields: new_fields,
-                })
-            }
-            Type::Process {
-                send,
-                receive,
-                state,
-            } => {
-                // Process types don't create boundaries but may contain types with cycles
-                let send_id = *send;
-                let receive_id = *receive;
-                let state_id = *state;
-                let resolved_send = send_id.map(|t| {
-                    self.resolve_function_cycles(t, function_type_id, depth_from_function)
-                });
-                let resolved_receive = receive_id.map(|t| {
-                    self.resolve_function_cycles(t, function_type_id, depth_from_function)
-                });
-                let resolved_state = state_id.map(|t| {
-                    self.resolve_function_cycles(t, function_type_id, depth_from_function)
-                });
-                self.program.register_type(Type::Process {
-                    send: resolved_send,
-                    state: resolved_state,
-                    receive: resolved_receive,
-                })
-            }
-            _ => type_id, // Integer, Binary, Variable, Resource don't contain nested types
         }
     }
 
@@ -7608,19 +7455,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     message: format!("Type ID {} not found", target_type_id),
                 })?;
 
-        if let Type::Callable {
-            parameter,
-            result,
-            receive,
-            states: _,
-            omittable: _,
-        } = target_type
-        {
+        if matches!(target_type, Type::Callable { .. }) {
             // Function call (a normal call is not a state transition — only tail calls
             // widen the states union)
-            let param_id = *parameter;
-            let result_id = *result;
-            let receive_id = *receive;
+            let parts =
+                typing::open_callable(target_type_id, self.program).expect("a function type opens");
+            let (param_id, result_id, receive_id) = (parts.parameter, parts.result, parts.receive);
 
             // Every call is written, so its argument is always type-checked: a nilary
             // callable takes `f []` and rejects anything else.
@@ -7654,10 +7494,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.dispatch_result(target_type_id, callee_fn, arg_type)
                     .unwrap_or(result_id)
             };
-
-            // Resolve cycles in result type that refer to the function itself
-            // Start at depth 0 since we haven't descended into any boundaries yet
-            let result_type = self.resolve_function_cycles(result_type, target_type_id, 0);
 
             // Calling a function executes its receives in this process, so its receive
             // type widens the current context's.
@@ -7745,20 +7581,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         callable_type_id: usize,
         arg_type: usize,
     ) -> Result<usize, Error> {
-        let Some(Type::Callable {
-            parameter,
-            result,
-            receive,
-            states,
-            ..
-        }) = self.program.lookup_base(callable_type_id)
-        else {
+        let Some(parts) = typing::open_callable(callable_type_id, self.program) else {
             return Err(Error::TypeMismatch {
                 expected: "function".to_string(),
                 found: quiver_core::format::format_type_by_id(&*self.program, callable_type_id),
             });
         };
-        let (param_id, result_id, receive_id, states_id) = (*parameter, *result, *receive, *states);
+        let (param_id, result_id, receive_id, states_id) =
+            (parts.parameter, parts.result, parts.receive, parts.states);
 
         let has_vars = typing::contains_variables(param_id, &*self.program)
             || typing::contains_variables(result_id, &*self.program);
@@ -7920,20 +7750,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let fn_type = value_type.ok_or_else(|| {
             Error::FeatureUnsupported("`^~` tail call requires a piped function".to_string())
         })?;
-        let Some(Type::Callable {
-            parameter,
-            result,
-            receive,
-            states,
-            ..
-        }) = self.program.lookup_base(fn_type)
-        else {
+        let Some(parts) = typing::open_callable(fn_type, self.program) else {
             return Err(Error::TypeMismatch {
                 expected: "function".to_string(),
                 found: quiver_core::format::format_type_by_id(&*self.program, fn_type),
             });
         };
-        let (parameter, result, receive, states) = (*parameter, *result, *receive, *states);
+        let (parameter, result, receive, states) =
+            (parts.parameter, parts.result, parts.receive, parts.states);
         self.widen_receive_type(receive);
         self.widen_states(states);
 

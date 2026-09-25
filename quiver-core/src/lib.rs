@@ -1,4 +1,5 @@
 pub mod binary;
+pub mod binders;
 pub mod builtins;
 pub mod bytecode;
 pub mod compatibility;

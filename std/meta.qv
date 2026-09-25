@@ -45,7 +45,7 @@
   | Call[module: Str['bin], member: Str['bin], arg: ^]
   | Tuple[
       name: (Nil | Str['bin]),
-      fields: (Nil | Cons[(^ | Labeled[label: Str['bin], value: ^]), ^1]),
+      fields: (Nil | Cons[(^2 | Labeled[label: Str['bin], value: ^2]), ^]),
     ]
 
 // The context record a dialect function receives: the unescaped brace content, and the

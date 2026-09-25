@@ -407,6 +407,8 @@ fn analyze_match_pattern(
     scopes: &[super::scopes::Scope],
     value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, usize), Error> {
+    // Each shape below reads a union's members directly, so none may itself be a union.
+    let value_type_id = super::typing::flatten_union_members(value_type_id, program);
     match pattern {
         ast::Match::Identifier(name, _) => {
             analyze_identifier_pattern(name.clone(), value_type_id, path, identifiers)
@@ -653,9 +655,12 @@ fn type_check_requirements(
         // recursive scrutinee elided load-bearing checks (an `=(I['int])s` ascription
         // on a `(^ | Lb['int])`-typed binding matched an `Lb`). The emitted `IsType`'s
         // runtime set is computed with the full cycle-aware machinery, so keeping the
-        // check is exact, merely occasionally redundant.
+        // check is exact, merely occasionally redundant. A type variable vouches for nothing
+        // either: it stands for any type, and compatibility (and intersection) treat it as
+        // fitting whatever it meets, so a `'t`-typed value would skip an `='int` test it fails.
         let provable = narrowed == resolved
-            || (!super::narrowing::has_cycles(narrowed, program)
+            || (!super::typing::contains_variables(narrowed, &*program)
+                && !super::narrowing::has_cycles(narrowed, program)
                 && !super::narrowing::has_cycles(resolved, program)
                 && is_compatible(narrowed, resolved, program)
                 && next == narrowed);
@@ -848,14 +853,11 @@ fn analyze_match_tuple_pattern(
                 .as_ref()
                 .map_or(member_field_type_id, |fields| fields[*actual_idx]);
 
-            // Close the field type's `Cycle` references against the scrutinee boundary,
-            // so a binding (or sub-pattern) taken from a recursive position carries a
-            // self-contained type: `Cycle(1)` is the scrutinee's own union, and deeper
-            // references *through* a nested union field (e.g. a list element's `^`
-            // reaching the enclosing definition's root) close one boundary further out.
-            // A dangling cycle would make every later match on the binding statically
-            // dead — the recorded inner-recursive-union bug. Cycles beyond the known
-            // context (enclosing function boundaries) are kept as-is.
+            // Close the field type's references to the scrutinee boundary, so a binding (or
+            // sub-pattern) taken from a recursive position carries a self-contained type — a
+            // `^` in the field, at whatever depth (a list element's, a function type's result),
+            // names the scrutinee's own union. A dangling reference would make every later
+            // match on the binding statically dead.
             //
             // Resolve against the scrutinee's *declared* type rather than `value_type_id`: the
             // field's type is the recursion boundary fixed by the type definition, but
@@ -973,10 +975,12 @@ fn analyze_match_tuple_pattern(
     }
 
     // `successful_tuple_ids` already holds reconstructed `Type::Tuple` ids (narrowed per field).
+    // They are members of the scrutinee, so a strict subset of them closes its references to it
+    // (`close_subset`): gathered into a smaller union, a `Cons[^]` would otherwise name that.
     let narrowed_type_id = if successful_tuple_ids.is_empty() {
         program.never()
     } else {
-        union_type_ids(program, successful_tuple_ids)
+        super::narrowing::close_subset(successful_tuple_ids, value_type_id, program)
     };
 
     Ok((binding_sets, narrowed_type_id))

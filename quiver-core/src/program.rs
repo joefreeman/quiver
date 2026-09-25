@@ -631,6 +631,68 @@ impl Program {
         self.register_type(Type::Union(vec![]))
     }
 
+    /// `type_id` with its parts replaced by `parts`, given in `Type::parts` order, or
+    /// `type_id` itself when none changed. The rebuild is structural: a union is not
+    /// re-flattened, nor a row re-normalised, since a walk rewriting parts keeps the shape.
+    pub fn with_parts(&mut self, type_id: usize, parts: &[usize]) -> usize {
+        let typ = self.types[type_id].clone();
+        if typ.parts(&*self) == parts {
+            return type_id;
+        }
+        let mut parts = parts.iter().copied();
+        let mut next = || parts.next().expect("a part for every part of the type");
+        let rebuilt = match typ {
+            Type::Union(members) => Type::Union(members.iter().map(|_| next()).collect()),
+            Type::Tuple(tuple_id) => {
+                let info = self.tuples[tuple_id].clone();
+                let fields = info
+                    .fields
+                    .into_iter()
+                    .map(|(label, _)| (label, next()))
+                    .collect();
+                Type::Tuple(self.register_tuple(info.name, fields))
+            }
+            Type::Partial { name, fields } => Type::Partial {
+                name,
+                fields: fields
+                    .into_iter()
+                    .map(|(label, _)| (label, next()))
+                    .collect(),
+            },
+            Type::Callable {
+                states, omittable, ..
+            } => Type::Callable {
+                parameter: next(),
+                result: next(),
+                receive: next(),
+                states: states.map(|_| next()),
+                omittable,
+            },
+            Type::Process {
+                send,
+                receive,
+                state,
+            } => Type::Process {
+                send: send.map(|_| next()),
+                receive: receive.map(|_| next()),
+                state: state.map(|_| next()),
+            },
+            Type::Annotated { exact, entries, .. } => Type::Annotated {
+                base: next(),
+                exact,
+                entries: entries.into_iter().map(|(key, _)| (key, next())).collect(),
+            },
+            Type::Cycle(_)
+            | Type::Variable(_)
+            | Type::Integer
+            | Type::Binary
+            | Type::Reference
+            | Type::Resource(_) => unreachable!("a type without parts is unchanged"),
+        };
+        assert!(parts.next().is_none(), "more parts than the type has");
+        self.register_type(rebuilt)
+    }
+
     /// Intern an annotated type, normalising: entries sorted and unique by key; an
     /// open-empty row is the plain base and is never interned; annotating an already
     /// annotated base folds into its row (later entries replace); annotating a union

@@ -274,8 +274,8 @@ key_opts = #[
   | Leaf['%str]
   | ALeaf[elem: 'int, name: '%str, value: 'attr_val]
   | Opaque['%str]
-  | Tmpl[statics: 'statics, slots: (Nil | Cons[^, ^1])]
-  | Many[(Nil | Cons[[key: ('%str | []), row: ^], ^1])]
+  | Tmpl[statics: 'statics, slots: (Nil | Cons[^1, ^])]
+  | Many[(Nil | Cons[[key: ('%str | []), row: ^1], ^])]
   | Boundary[key: '%str, vid: ('%str | []), start: 'vstart]
 
 'frames = '%list<'frame>
@@ -306,7 +306,7 @@ enc_attr = #<'e>'%html.attr_val<'e> {
 }
 
 // A node's frame; self-passed to recurse into template slots.
-frame_of = #<'e>[(self): #^ -> 'frame, (node): '%html<'e>] {
+frame_of = #<'e>[(self): ^, (node): '%html<'e>] -> 'frame {
   | $node:('bnd)boundary ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: st]
   | $node:('%html.tmpl<'e>)template ~> =(statics: s, holes: h) => {
     slots = %list.map [
@@ -336,7 +336,7 @@ frame = #<'e>'%html<'e> {
 }
 
 // Render a frame onto `acc`; self-passed to recurse into template slots.
-render_of = #[(self): #^ -> 'bin, (f): 'frame, (acc): 'bin] {
+render_of = #[(self): ^, (f): 'frame, (acc): 'bin] -> 'bin {
   $f ~> {
     | =Leaf[s] => { et = %html.escape_text s ~> .0; %bin.concat [$acc, et] }
     | =ALeaf[elem: _, name: Str[n], value: v] => v ~> {
@@ -490,12 +490,12 @@ prune_rows = #[
 // The patches turning `prev` into `next` at one slot, prepended (reversed) onto `acc`.
 // `rpath` is the reversed path to the slot. Self-passed to recurse into template slots.
 diff_of = #[
-  (self): #^ -> 'patches,
+  (self): ^,
   (prev): 'frame,
   (next): 'frame,
   (rpath): 'path,
   (acc): 'patches,
-] {
+] -> 'patches {
   // The nested literals close over `self` and `rpath` (an inner `$` would be their
   // own parameter), so bind the fields locally — `self` by reference, as a bare
   // `$self` term would call it.
@@ -966,7 +966,7 @@ settle_quiet = 100
 settle_deadline = 3000
 
 // The boundaries of a frame; self-passed to recurse into slots and rows.
-collect_of = #[(self): #^ -> 'bounds, (f): 'frame, (acc): 'bounds] {
+collect_of = #[(self): ^, (f): 'frame, (acc): 'bounds] -> 'bounds {
   // The nested literals close over `self` (an inner `$` would be their own parameter),
   // so bind the field locally — by reference, as a bare `$self` term would call it.
   self = $self
@@ -1042,7 +1042,7 @@ assigned_vid = #[(items): 'assigns, (k): '%str] {
 }
 
 // Rebuild a frame with its boundary vids assigned; other nodes pass through.
-resolve_of = #[(self): #^ -> 'frame, (f): 'frame, (assigns): 'assigns] {
+resolve_of = #[(self): ^, (f): 'frame, (assigns): 'assigns] -> 'frame {
   // The nested literals close over `self` and `assigns` (an inner `$` would be their
   // own parameter), so bind the fields locally — `self` by reference, as a bare
   // `$self` term would call it.

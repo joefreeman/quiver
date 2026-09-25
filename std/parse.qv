@@ -428,7 +428,7 @@ chainl = #<'t>['p<'t>, 'p<#['t, 't] -> 't>] {
   =[p, op]; #' { p $ ~> =[v, st]; chain_run [p, op, st, v] }
 }
 
-rec_run = #<'t>[#^ -> (['t, '] | []), 'builder<'t>, '] {
+rec_run = #<'t>[^, 'builder<'t>, '] -> (['t, '] | []) {
   =[self, builder, st]; me = #' { self [self, builder, $] }; builder [me, st]
 }
 

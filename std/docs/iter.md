@@ -4,7 +4,7 @@ A lazy sequence. An iterator wraps a thunk: pull it and you get `[value, next]` 
 and the iterator that follows it — or nil when there is nothing left.
 
 ```quiver ignore
-'thunk<'t> = #[] -> (['t, ^] | [])
+'thunk<'t> = #[] -> (['t, ^1] | [])
 '<'t> = Iter['thunk<'t>]
 ```
 

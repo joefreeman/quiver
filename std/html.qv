@@ -59,10 +59,10 @@
   | Text['%str]
   | Element[
       tag: '%str,
-      attrs: (Nil | Cons[['%str, 'attr_val<'d>], ^1]),
-      children: (Nil | Cons[^, ^1]),
+      attrs: (Nil | Cons[['%str, 'attr_val<'d>], ^]),
+      children: (Nil | Cons[^1, ^]),
     ]
-  | Fragment[(Nil | Cons[^, ^1])]
+  | Fragment[(Nil | Cons[^1, ^])]
 
 '<'d> = 'node<'d>
 
@@ -94,7 +94,7 @@
 'pnode =
   | PText['bin]
   | PHole[offset: 'int, length: 'int]
-  | PElem[tag: '%str, attrs: 'pattrs, children: (Nil | Cons[^, ^1])]
+  | PElem[tag: '%str, attrs: 'pattrs, children: (Nil | Cons[^1, ^])]
 'pnodes = '%list<'pnode>
 
 // Root-level parsed nodes carry a whitespace-only flag (computed at construction), so
@@ -357,11 +357,11 @@ strip = #'pfxs { %list.map [~, #{ $0 }] }
 // The node-list loop: elements, holes, and text runs, in source order, stopping before a
 // close tag (`</`) or end of input. Self-passed to tie the element↔children recursion.
 nodes_loop = #[
-  (self): #^ -> (['pfxs, '%parse] | []),
+  (self): ^,
   (cb): '%meta.cb,
   (state): '%parse,
   (acc): 'pfxs,
-] {
+] -> (['pfxs, '%parse] | []) {
   {
     | peek_at $state ~> =('int)b => {
       | b ~> =60 => {
@@ -481,7 +481,7 @@ emit_attrs = #'pattrs {
 }
 
 // Node-list expressions, in order; self-passed to recurse into element children.
-emit_list = #[(self): #^ -> 'xs, (items): 'pnodes, (acc): 'xs] {
+emit_list = #[(self): ^, (items): 'pnodes, (acc): 'xs] -> 'xs {
   $items ~> {
     | =Nil => %list.reverse $acc
     | =Cons[node, rest] => {
@@ -579,7 +579,7 @@ instrument_attrs = #[(items): 'pattrs, (ist): 'ist, (elem): 'int] {
 }
 
 // Instrument a node list; self-passed to recurse into element children.
-instrument_list = #[(self): #^ -> 'ist, (items): 'pnodes, (ist): 'ist] {
+instrument_list = #[(self): ^, (items): 'pnodes, (ist): 'ist] -> 'ist {
   $items ~> {
     | =Nil => $ist
     | =Cons[node, rest] => {
@@ -662,7 +662,7 @@ rewrite_attr_list = #[(items): 'pattrs, (f): 'apolicy, (acc): 'pattrs] {
 
 // Apply an attribute policy to every element of a node list; self-passed to recurse into
 // children.
-rewrite_list = #[(self): #^ -> ('pnodes | []), (items): 'pnodes, (f): 'apolicy, (acc): 'pnodes] {
+rewrite_list = #[(self): ^, (items): 'pnodes, (f): 'apolicy, (acc): 'pnodes] -> ('pnodes | []) {
   $items ~> {
     | =Nil => %list.reverse $acc
     | =Cons[node, rest] => {
@@ -770,7 +770,7 @@ render_attrs = #<'d>[(items): 'attrs<'d>, (acc): 'bin] {
 }
 
 // Render a list of nodes onto `acc`, self-passed to recurse into children.
-render_list = #<'e>[(self): #^ -> 'bin, (items): 'nodes<'e>, (acc): 'bin] {
+render_list = #<'e>[(self): ^, (items): 'nodes<'e>, (acc): 'bin] -> 'bin {
   $items ~> {
     | =Nil => $acc
     | =Cons[node, rest] => {

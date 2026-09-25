@@ -353,14 +353,18 @@ pub fn contract_type(program: &mut Program, name: &str, parameter: usize, result
 }
 
 /// If `type_id` is a callable (or a single-member union of one, or an annotated one),
-/// its `(parameter, result)`.
-pub fn single_callable(program: &Program, type_id: usize) -> Option<(usize, usize)> {
+/// its `(parameter, result)`, opened to stand on their own (`typing::open_callable`).
+pub fn single_callable(program: &mut Program, type_id: usize) -> Option<(usize, usize)> {
     match program.lookup_type(type_id)? {
-        Type::Callable {
-            parameter, result, ..
-        } => Some((*parameter, *result)),
-        Type::Annotated { base, .. } => single_callable(program, *base),
-        Type::Union(members) if members.len() == 1 => single_callable(program, members[0]),
+        Type::Callable { .. } => {
+            let parts = super::typing::open_callable(type_id, program)?;
+            Some((parts.parameter, parts.result))
+        }
+        &Type::Annotated { base, .. } => single_callable(program, base),
+        Type::Union(members) if members.len() == 1 => {
+            let member = members[0];
+            single_callable(program, member)
+        }
         _ => None,
     }
 }
@@ -382,16 +386,17 @@ pub fn single_tuple(program: &Program, type_id: usize) -> Option<usize> {
 /// default that could never fire — a non-function carrier, a parameter that is not a
 /// single tuple, a label naming nothing — is rejected rather than left inert.
 pub fn check_defaults(
-    program: &Program,
+    program: &mut Program,
     carrier_type: usize,
     value_type: usize,
 ) -> Result<(), Error> {
-    let describe = |id| quiver_core::format::format_type_by_id(program, id);
     let (parameter, _) = single_callable(program, carrier_type).ok_or_else(|| {
         Error::TypeUnresolved(format!(
             "Annotation :{DEFAULTS} can only be attached to a function"
         ))
     })?;
+    let program = &*program;
+    let describe = |id| quiver_core::format::format_type_by_id(program, id);
     let parameter_fields = single_tuple(program, parameter)
         .and_then(|id| program.lookup_tuple(id))
         .map(|info| info.fields.clone())

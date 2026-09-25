@@ -20,6 +20,7 @@
 //! value is a runtime error, like `%data.encode`'s.
 
 use super::{BuiltinContext, Completion, TypeSpec};
+use crate::binders::BinderStack;
 use crate::effects::Effect;
 use crate::error::Error;
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
@@ -201,18 +202,18 @@ pub fn builtin_json_decode<E: Effect>(
                 .to_string(),
         )
     })?;
-    let mut stack = Vec::new();
+    let mut stack = BinderStack::default();
     let value = decode(ctx, expected, arg, &mut stack)?;
     Ok(Completion::Value(value.unwrap_or_else(Value::nil)))
 }
 
 /// Type-directed descent over a `'%json` value. Unions are ordered choice; recursive
-/// types resolve through the same union-boundary stack the compatibility checker uses.
+/// types resolve through a binder stack, as the compatibility checker's do.
 fn decode<E: Effect>(
     ctx: &mut BuiltinContext<E>,
     type_id: usize,
     value: &Value,
-    stack: &mut Vec<usize>,
+    stack: &mut BinderStack,
 ) -> Result<Option<Value>, Error> {
     if let Some(decoded) = decode_direct(ctx, type_id, value, stack)? {
         return Ok(Some(decoded));
@@ -229,7 +230,7 @@ fn decode_direct<E: Effect>(
     ctx: &mut BuiltinContext<E>,
     type_id: usize,
     value: &Value,
-    stack: &mut Vec<usize>,
+    stack: &mut BinderStack,
 ) -> Result<Option<Value>, Error> {
     let Some(typ) = TypeLookup::lookup_type(&*ctx.executor, type_id).cloned() else {
         return Ok(None);
@@ -238,10 +239,7 @@ fn decode_direct<E: Effect>(
         // Rows are invisible to the data plane: decode as the base shape.
         Type::Annotated { base, .. } => decode_direct(ctx, base, value, stack),
         Type::Union(members) => {
-            let already = stack.contains(&type_id);
-            if !already {
-                stack.push(type_id);
-            }
+            stack.enter(type_id);
             let mut result = None;
             for member in &members {
                 if let Some(decoded) = decode(ctx, *member, value, stack)? {
@@ -257,22 +255,17 @@ fn decode_direct<E: Effect>(
             {
                 result = Some(Value::nil());
             }
-            if !already {
-                stack.pop();
-            }
+            stack.leave(type_id);
             Ok(result)
         }
         Type::Cycle(depth) => {
-            if stack.len() < depth {
+            // Re-enter the target at its own depth, so the references inside it count the
+            // binders they were written under.
+            let Some((target, cut)) = stack.follow(depth) else {
                 return Ok(None);
-            }
-            // Re-enter the target at its own depth: boundaries pushed since it
-            // (sibling branches of this walk) would otherwise skew the depths of
-            // cycles resolved inside the target, so they are set aside and restored.
-            let saved = stack.split_off(stack.len() - depth + 1);
-            let target = *stack.last().expect("cycle target on the stack");
+            };
             let result = decode(ctx, target, value, stack);
-            stack.extend(saved);
+            stack.restore(cut);
             result
         }
         Type::Integer => Ok(match value {
@@ -296,7 +289,7 @@ fn decode_tuple<E: Effect>(
     ctx: &mut BuiltinContext<E>,
     expected_id: usize,
     value: &Value,
-    stack: &mut Vec<usize>,
+    stack: &mut BinderStack,
 ) -> Result<Option<Value>, Error> {
     let Value::Tuple(input_id, payload) = value else {
         return Ok(None);
@@ -494,7 +487,7 @@ pub fn builtin_json_encode<E: Effect>(
         )
     })?;
     let ids = JsonIds::resolve(ctx, result_type)?;
-    let mut stack = Vec::new();
+    let mut stack = BinderStack::default();
     let value = encode(ctx, &ids, source, arg, &mut stack)?.ok_or_else(|| {
         Error::InvalidArgument(
             "cannot encode as JSON: the value does not fit the stated type's mapping \
@@ -512,7 +505,7 @@ fn encode<E: Effect>(
     ids: &JsonIds,
     type_id: usize,
     value: &Value,
-    stack: &mut Vec<usize>,
+    stack: &mut BinderStack,
 ) -> Result<Option<Value>, Error> {
     let Some(typ) = TypeLookup::lookup_type(&*ctx.executor, type_id).cloned() else {
         return Ok(None);
@@ -520,10 +513,7 @@ fn encode<E: Effect>(
     match typ {
         Type::Annotated { base, .. } => encode(ctx, ids, base, value, stack),
         Type::Union(members) => {
-            let already = stack.contains(&type_id);
-            if !already {
-                stack.push(type_id);
-            }
+            stack.enter(type_id);
             let mut result = None;
             // A nil value under a nil-admitting union is JSON `null` (its field-level
             // twin — key omission — is handled by the object encoder before recursing).
@@ -541,20 +531,16 @@ fn encode<E: Effect>(
                     }
                 }
             }
-            if !already {
-                stack.pop();
-            }
+            stack.leave(type_id);
             Ok(result)
         }
         Type::Cycle(depth) => {
-            if stack.len() < depth {
-                return Ok(None);
-            }
             // Same re-entry rule as decode's: cycles resolve at the target's own depth.
-            let saved = stack.split_off(stack.len() - depth + 1);
-            let target = *stack.last().expect("cycle target on the stack");
+            let Some((target, cut)) = stack.follow(depth) else {
+                return Ok(None);
+            };
             let result = encode(ctx, ids, target, value, stack);
-            stack.extend(saved);
+            stack.restore(cut);
             result
         }
         Type::Integer => Ok(match value {
@@ -577,7 +563,7 @@ fn encode_tuple<E: Effect>(
     ids: &JsonIds,
     expected_id: usize,
     value: &Value,
-    stack: &mut Vec<usize>,
+    stack: &mut BinderStack,
 ) -> Result<Option<Value>, Error> {
     let Value::Tuple(input_id, payload) = value else {
         return Ok(None);
@@ -612,7 +598,7 @@ fn encode_tuple<E: Effect>(
         && expected.fields[0].0.is_none()
         && tuple_info(ctx, value).is_some_and(|(_, input)| input.name == expected.name)
     {
-        return decode(ctx, ids.json_type, value, &mut Vec::new());
+        return decode(ctx, ids.json_type, value, &mut BinderStack::default());
     }
 
     // Object mapping: a tuple whose fields are all labelled becomes a JSON object. A
@@ -677,7 +663,7 @@ fn encode_list<E: Effect>(
     ids: &JsonIds,
     element_type: usize,
     value: &Value,
-    stack: &mut Vec<usize>,
+    stack: &mut BinderStack,
 ) -> Result<Option<Value>, Error> {
     let mut elements = Vec::new();
     let mut node = value.clone();

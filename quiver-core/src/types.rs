@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+use crate::binders::BinderPair;
+
 /// Index of the NIL tuple type (always at index 0)
 pub const NIL: usize = 0;
 
@@ -385,6 +387,46 @@ impl Type {
         matches!(self, Type::Tuple(id) if *id == OK)
     }
 
+    /// This type's parts, in a fixed order: a union's members, a tuple's or partial type's field
+    /// types, a function type's parameter, result, receive and (when known) states, a process
+    /// type's stated send, receive and state, an annotated type's base and entry types. A
+    /// binder's parts sit one binder deeper than it (`binders::is_binder`).
+    /// `Program::with_parts` rebuilds a type from replacements in the same order.
+    pub fn parts(&self, lookup: &impl TypeLookup) -> Vec<usize> {
+        match self {
+            Type::Union(members) => members.clone(),
+            Type::Tuple(tuple_id) => lookup
+                .lookup_tuple(*tuple_id)
+                .map(|info| info.fields.iter().map(|&(_, field)| field).collect())
+                .unwrap_or_default(),
+            Type::Partial { fields, .. } => fields.iter().map(|&(_, field)| field).collect(),
+            Type::Callable {
+                parameter,
+                result,
+                receive,
+                states,
+                ..
+            } => [Some(*parameter), Some(*result), Some(*receive), *states]
+                .into_iter()
+                .flatten()
+                .collect(),
+            Type::Process {
+                send,
+                receive,
+                state,
+            } => [*send, *receive, *state].into_iter().flatten().collect(),
+            Type::Annotated { base, entries, .. } => std::iter::once(*base)
+                .chain(entries.iter().map(|&(_, value)| value))
+                .collect(),
+            Type::Cycle(_)
+            | Type::Variable(_)
+            | Type::Integer
+            | Type::Binary
+            | Type::Reference
+            | Type::Resource(_) => Vec::new(),
+        }
+    }
+
     /// The base type once any annotation row is peeled: `T @ ρ` → `T`, anything else →
     /// itself. Returns the type id.
     pub fn strip_annotations<T: TypeLookup>(type_id: usize, lookup: &T) -> usize {
@@ -511,24 +553,6 @@ enum UnionMode {
     Any,
 }
 
-/// The binders (unions and function types) each side of a type relation has entered, innermost
-/// last, which a `Cycle(n)` on that side counts back through. Contravariant positions swap the
-/// sides, so they swap the stacks with them.
-#[derive(Default)]
-struct BinderStacks {
-    left: Vec<usize>,
-    right: Vec<usize>,
-}
-
-impl BinderStacks {
-    fn swapped<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        std::mem::swap(&mut self.left, &mut self.right);
-        let result = f(self);
-        std::mem::swap(&mut self.left, &mut self.right);
-        result
-    }
-}
-
 /// Check if type `self_id` is compatible with (assignable to) type `pattern_id`.
 ///
 /// Uses ALL-variant semantics: for `A | B` to be compatible with `C`,
@@ -537,7 +561,7 @@ impl BinderStacks {
 /// This is used for type checking (can I assign this value to this variable?).
 pub fn is_compatible<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &T) -> bool {
     let mut assumptions = HashSet::new();
-    let mut stacks = BinderStacks::default();
+    let mut stacks = BinderPair::default();
     check_type_relation(
         self_id,
         pattern_id,
@@ -556,7 +580,7 @@ pub fn is_compatible<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &
 /// This is used for pattern matching (could this value possibly match this pattern?).
 pub fn types_overlap<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &T) -> bool {
     let mut assumptions = HashSet::new();
-    let mut stacks = BinderStacks::default();
+    let mut stacks = BinderPair::default();
     check_type_relation(
         self_id,
         pattern_id,
@@ -577,7 +601,7 @@ fn rows_compatible<T: TypeLookup>(
     lookup: &T,
     mode: UnionMode,
     assumptions: &mut HashSet<(usize, usize)>,
-    stacks: &mut BinderStacks,
+    stacks: &mut BinderPair,
 ) -> bool {
     if target_exact && (!source_exact || source_entries.len() != target_entries.len()) {
         return false;
@@ -613,7 +637,7 @@ fn check_type_relation<T: TypeLookup>(
     lookup: &T,
     mode: UnionMode,
     assumptions: &mut HashSet<(usize, usize)>,
-    stacks: &mut BinderStacks,
+    stacks: &mut BinderPair,
 ) -> bool {
     // Fast path: same ID always satisfies the relation
     if self_id == pattern_id {
@@ -670,27 +694,20 @@ fn check_type_relation<T: TypeLookup>(
         // declared `L['int, Nil | Cons[…, ^]]` failed to overlap a union holding an `L` value
         // whenever that union had been entered first.)
         (Type::Cycle(depth), _) => {
-            if stacks.left.len() < *depth {
+            let Some((binder, cut)) = stacks.left.follow(*depth) else {
                 return true; // Coinductive reasoning
-            }
-            let lookup_index = stacks.left.len() - *depth;
-            let stack_id = stacks.left[lookup_index];
-            let tail = stacks.left.split_off(lookup_index);
-            let result =
-                check_type_relation(stack_id, pattern_id, lookup, mode, assumptions, stacks);
-            stacks.left.extend(tail);
+            };
+            let result = check_type_relation(binder, pattern_id, lookup, mode, assumptions, stacks);
+            stacks.left.restore(cut);
             result
         }
 
         (_, Type::Cycle(depth)) => {
-            if stacks.right.len() < *depth {
+            let Some((binder, cut)) = stacks.right.follow(*depth) else {
                 return true;
-            }
-            let lookup_index = stacks.right.len() - *depth;
-            let stack_id = stacks.right[lookup_index];
-            let tail = stacks.right.split_off(lookup_index);
-            let result = check_type_relation(self_id, stack_id, lookup, mode, assumptions, stacks);
-            stacks.right.extend(tail);
+            };
+            let result = check_type_relation(self_id, binder, lookup, mode, assumptions, stacks);
+            stacks.right.restore(cut);
             result
         }
 
@@ -750,7 +767,7 @@ fn check_type_relation<T: TypeLookup>(
 
             // A union is a binder its members' `^` count back to, on this side's stack (see the
             // union-on-right arm for why the push is unconditional).
-            stacks.left.push(self_id);
+            stacks.left.enter(self_id);
             let result = match mode {
                 UnionMode::All => variants.iter().all(|&variant_id| {
                     check_type_relation(variant_id, pattern_id, lookup, mode, assumptions, stacks)
@@ -759,7 +776,7 @@ fn check_type_relation<T: TypeLookup>(
                     check_type_relation(variant_id, pattern_id, lookup, mode, assumptions, stacks)
                 }),
             };
-            stacks.left.pop();
+            stacks.left.leave(self_id);
             result
         }
 
@@ -779,11 +796,11 @@ fn check_type_relation<T: TypeLookup>(
             // *different* member's binder depth then resolved to the wrong ancestor: a JSON
             // array nested in an object was rejected while an object in an object was not.
             // Termination is the `assumptions` hypothesis above, not stack dedup.
-            stacks.right.push(pattern_id);
+            stacks.right.enter(pattern_id);
             let result = variants.iter().any(|&variant_id| {
                 check_type_relation(self_id, variant_id, lookup, mode, assumptions, stacks)
             });
-            stacks.right.pop();
+            stacks.right.leave(pattern_id);
             result
         }
 
@@ -959,14 +976,8 @@ fn check_type_relation<T: TypeLookup>(
             },
         ) => {
             // A function type is a binder too, on each side's own stack.
-            let left_pushed = !stacks.left.contains(&self_id);
-            if left_pushed {
-                stacks.left.push(self_id);
-            }
-            let right_pushed = !stacks.right.contains(&pattern_id);
-            if right_pushed {
-                stacks.right.push(pattern_id);
-            }
+            stacks.left.enter(self_id);
+            stacks.right.enter(pattern_id);
 
             // States are covariant and strict against a stated expectation, exactly as a
             // process type's state component (a spawn of this function inherits it).
@@ -988,12 +999,8 @@ fn check_type_relation<T: TypeLookup>(
                     check_type_relation(*receive2, *receive1, lookup, mode, assumptions, stacks)
                 });
 
-            if left_pushed {
-                stacks.left.pop();
-            }
-            if right_pushed {
-                stacks.right.pop();
-            }
+            stacks.right.leave(pattern_id);
+            stacks.left.leave(self_id);
             result
         }
 

@@ -692,26 +692,56 @@ nudge Point[x: 1, y: 2, z: 3]   //= 2
 
 ### Recursive types
 
-`^` refers back to the type's **outermost boundary** — a union or a function type; a
-tuple is not one. `^1`, `^2` and so on name successively *inner* boundaries, counting in
-from that root.
+`^` refers back to the nearest enclosing **boundary**, a union or a function type (a tuple is
+not one). `^1`, `^2` and so on count further outward from there, so `^` is `^0`.
 
 ```quiver
 'list<'t> = Nil | Cons['t, ^]
 'tree<'t> = Leaf['t] | Node[^, ^]
 ```
 
-So in a nested type, `^` reaches the whole thing and `^1` the union it is written inside:
+In a nested type, a reference counts the boundaries around it where it is written:
 
 ```quiver
-'json = Null | 'int | Array[(Nil | Cons[^, ^1])]
+'json = Null | 'int | Array[(Nil | Cons[^1, ^])]
 render = #'json { Ok }
 Array[Cons[1, Cons[Null, Nil]]] ~> render ~   //= Ok
 ```
 
-Here `^` is `'json`, so a list element may be any JSON value, and `^1` is the list's own
-`Nil | Cons[…]`, which is what makes the tail a list. Naming a boundary the type does not
-have is a compile error.
+Here the list's own `Nil | Cons[…]` is nearest, so `^` makes the tail a list. `^1` is one
+further out, `'json`, so an element may be any JSON value. Because a reference counts from
+where it stands, a type keeps its meaning when it is moved or pulled out into an alias of its
+own. Naming a boundary the type does not have is a compile error.
+
+A function type counts too: the thunk below answers a pair whose tail is another thunk, with
+the result's union nearest and the function one further out.
+
+```quiver
+'thunk = #[] -> (['int, ^1] | [])
+```
+
+A union member that is `^` itself would name its own union, adding nothing, so it is a
+compile error. An optional recursive field reaches past its `( … | [])`:
+
+```quiver
+'bintree = Leaf | Node[left: (^1 | []), right: (^1 | [])]
+f = #'bintree { $ }
+f Node[left: Leaf, right: []]   //= Node[left: Leaf, right: []]
+```
+
+A function literal's written parameter and result sit inside its own function type, so a
+`^` in a parameter's field names the function being defined. That is how a function is handed
+itself: it cannot name its own binding, and `^` in a body is only ever a tail call, so
+recursion elsewhere passes the function along. The body sees the parameter at the function's
+type, so the result must be written.
+
+```quiver
+countdown = #[(self): ^, (n): 'int] -> '%list<'int> {
+  | $n ~> =0 => Nil
+  | Cons[$n, $self [$self, %num.sub [$n, 1]]]
+}
+countdown [countdown, 3]   //= Cons[3, Cons[2, Cons[1, Nil]]]
+```
 
 ### Generics
 

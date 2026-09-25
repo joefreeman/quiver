@@ -1206,13 +1206,13 @@ fn test_nil_bearing_wrapped_union_dispatch_without_empty_member() {
 #[test]
 fn test_ascription_through_recursive_union_is_checked() {
     // The checked ascription `=(T)s` on a binding typed by an inner recursive union
-    // (`^ | Lb['int]`) must keep its runtime test: `is_compatible` traverses a `Cycle`
+    // (`^2 | Lb['int]`) must keep its runtime test: `is_compatible` traverses a `Cycle`
     // optimistically, and eliding on its verdict matched an `Lb` value against
     // `I['int]` (and bound `s`, typed `I['int]`, to it — the recorded over-match).
     quiver()
         .evaluate(
             r#"
-            'e = I['int] | T[(Nil | Cons[(^ | Lb['int]), ^1])]
+            'e = I['int] | T[(Nil | Cons[(^2 | Lb['int]), ^])]
             f = #'e { $ ~> =T[fs]; fs ~> =Cons[h, _]; h ~> { =(I['int])s => Matched[s] | Failed } }
             [f T[Cons[Lb[5], Nil]], f T[Cons[I[9], Nil]]]
             "#,
@@ -1222,7 +1222,7 @@ fn test_ascription_through_recursive_union_is_checked() {
     quiver()
         .evaluate(
             r#"
-            'e = I['int] | T[(Nil | Cons[(^ | Lb['int]), ^1])]
+            'e = I['int] | T[(Nil | Cons[(^2 | Lb['int]), ^])]
             g = #'e { $ ~> =T[fs]; fs ~> =Cons[h, _]; h ~> =(I['int])s; Reached[s] }
             [g T[Cons[Lb[5], Nil]], g T[Cons[I[9], Nil]]]
             "#,
@@ -1238,7 +1238,7 @@ fn test_patterns_on_bindings_from_recursive_positions() {
     quiver()
         .evaluate(
             r#"
-            'j = N | S[Str['bin]] | A[(Nil | Cons[^, ^1])]
+            'j = N | S[Str['bin]] | A[(Nil | Cons[^1, ^])]
             f = #'j {
               $ ~> =A[es]
               es ~> =Cons[el, _]
@@ -1252,7 +1252,7 @@ fn test_patterns_on_bindings_from_recursive_positions() {
     quiver()
         .evaluate(
             r#"
-            'j = N | S[Str['bin]] | A[(Nil | Cons[^, ^1])]
+            'j = N | S[Str['bin]] | A[(Nil | Cons[^1, ^])]
             f = #'j { $ ~> { =A[Cons[S[s], Nil]] => Got[s] | Other } }
             [f A[Cons[S["x"], Nil]], f A[Cons[N, Nil]], f N]
             "#,
@@ -1433,4 +1433,52 @@ fn test_binder_after_complement_keeps_every_tail_variant() {
             "#,
         )
         .expect("[Hit, Miss, IsB]");
+}
+
+#[test]
+fn test_single_binding_inside_a_pattern_is_not_the_scrutinee() {
+    // `x` is the only binding, but it is a list element, not the whole value: it keeps its
+    // own type rather than reading the scrutinee's narrowing (`A[…]`).
+    quiver()
+        .evaluate(
+            "'j = N | S | A[(Nil | Cons[^1, ^])]
+             h = #'j { | =A[Cons[x, _]] => x ~> { =N => GotN | =S => GotS | Other } | O }
+             [h A[Cons[N, Nil]], h A[Cons[S, Nil]], h N]",
+        )
+        .expect("[GotN, GotS, O]");
+}
+
+#[test]
+fn test_pattern_into_an_optional_recursive_field() {
+    // `left` is `'b | []`: closing its `^1` puts the union `'b` among its members, which the
+    // pattern must still see through, at any depth.
+    let b = "'b = Leaf | Node[left: (^1 | []), right: (^1 | [])]";
+    quiver()
+        .evaluate(&format!(
+            "{b}; g = #'b {{ $ ~> {{ =Node[left: Leaf, right: _] => Left | Other }} }}
+             [g Node[left: Leaf, right: []], g Node[left: [], right: []], g Leaf]"
+        ))
+        .expect("[Left, Other, Other]");
+    quiver()
+        .evaluate(&format!(
+            "{b}; e = #'b {{ $ ~> {{ =Node[left: Node[left: Leaf, right: _], right: _] => Deep | Shallow }} }}
+             [e Node[left: Node[left: Leaf, right: []], right: Leaf], e Node[left: Leaf, right: Leaf]]"
+        ))
+        .expect("[Deep, Shallow]");
+}
+
+#[test]
+fn test_alternation_over_recursive_members_keeps_every_tail_variant() {
+    // `v` is `A | Cons[…]`, but a `Cons`'s tail is still any `'l`, `B` included.
+    quiver()
+        .evaluate(
+            "'l = A | B | Cons[^]
+             f = #'l { | =(A | Cons[_])v => v ~> { =Cons[B] => Hit | Miss } | No }
+             [f Cons[B], f Cons[A], f B]",
+        )
+        .expect("[Hit, Miss, No]");
+    // The members it closes out still cover theirs, so the block stays exhaustive.
+    quiver()
+        .evaluate("'l = A | B | Cons[^]; e = #'l { | =(A | Cons[_]) => Y | =B => Z }; e")
+        .expect_type("#(A | B | Cons[μ1]) -> (Y | Z)");
 }
