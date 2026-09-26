@@ -166,9 +166,11 @@ event_value = #<'t>'t { Ev[$] ~> %html.data_value ~ }
 'nodes<'e> = '%html.nodes<Ev['e]>
 
 live_dialect = #(content: '%str, term: '%meta.cb) {
-  %html.parse [$content, $term] ~> =('%html.pnodes)nodes
-  %html.rewrite_attrs [nodes, live_policy] ~> =('%html.pnodes)rewritten
-  %html.expand rewritten
+  %html.parse [$content, $term]
+  ~> ='%html.pnodes
+  ~> %html.rewrite_attrs [~, live_policy]
+  ~> ='%html.pnodes
+  ~> %html.expand ~
 }
 
 // === Binding options ====================================================================
@@ -419,13 +421,9 @@ render_row = #'frame { "<!--r-->" ~> %str.concat [~, render $] ~> %str.concat [~
 // keys are safe but suboptimal (first match wins; content still converges).
 
 // Whether every row carries a key.
-keyed_rows? = #'rows { %list.all? [~, #{ =(key: Str[_]); $ }] }
+keyed_rows? = #'rows { %list.all? [~, #{ =(key: Str[_]) }] }
 
-key_in? = #[(rs): 'rows, (k): '%str] {
-  // The pin below needs a variable, so bind the field locally.
-  k = $k
-  %list.any? [$rs, #{ =(key: rk); rk ~> =&k; $ }]
-}
+key_in? = #[(rs): 'rows, (k): '%str] { %list.any? [$rs, #{ =(key: &$$k) }] }
 
 // The first list's elements (which arrive reversed) onto the front of the second.
 cat_rows = #[(a): 'rows, (b): 'rows] { %list.chain [%list.reverse $a, $b] }
@@ -513,9 +511,7 @@ diff_of = #[
       | Cons[SetHtml[path: %list.reverse $rpath, html: b], $acc]
     }
     // Matching statics recurse slot-by-slot; mismatched statics fall through to the
-    // final replacement arm. The statics test is a guard *step* (`;`): a chain never
-    // short-circuits on a failed match, so a `~>`-joined guard would run
-    // unconditionally, reading nil-filled bindings.
+    // final replacement arm.
     | =[Tmpl[statics: s1, slots: sl1], Tmpl[statics: s2, slots: sl2]]
       s2 ~> =&s1 => {
         walk = #[(prev): 'frames, (next): 'frames, (i): 'int, (a): 'patches] {
@@ -796,10 +792,12 @@ mods_of = #'%json {
 // their tag.
 pointer_of = #'jsons {
   =Cons[xj, Cons[yj, Cons[bj, Cons[mj, Nil]]]]
-  xj ~> jval ~ ~> =('int)x
-  yj ~> jval ~ ~> =('int)y
-  bj ~> jval ~ ~> =('int)b
-  [x: x, y: y, button: b, mods: mj ~> jval ~ ~> mods_of ~]
+  [
+    x: xj ~> jval ~ ~> ='int,
+    y: yj ~> jval ~ ~> ='int,
+    button: bj ~> jval ~ ~> ='int,
+    mods: mj ~> jval ~ ~> mods_of ~,
+  ]
 }
 
 submit_of = #'jsons { =Cons[fj, Nil]; fj ~> jval ~ ~> =Array[fs]; Submit[fields: pairs_of fs] }
@@ -807,15 +805,11 @@ submit_of = #'jsons { =Cons[fj, Nil]; fj ~> jval ~ ~> =Array[fs]; Submit[fields:
 // `input` and `change` report the same thing — the control's value and, for a checkbox or
 // radio, whether it is ticked — so they share a reader and differ only in their tag.
 field_of = #'jsons {
-  =Cons[vj, Cons[cj, Nil]]
-  vj ~> jval ~ ~> =Str[vb]
-  [value: Str[vb], checked?: cj ~> jval ~ ~> flag_of ~]
+  =Cons[vj, Cons[cj, Nil]]; [value: vj ~> jval ~ ~> ='%str, checked?: cj ~> jval ~ ~> flag_of ~]
 }
 
 keydown_of = #'jsons {
-  =Cons[kj, Cons[mj, Nil]]
-  kj ~> jval ~ ~> =Str[kb]
-  KeyDown[key: Str[kb], mods: mj ~> jval ~ ~> mods_of ~]
+  =Cons[kj, Cons[mj, Nil]]; KeyDown[key: kj ~> jval ~ ~> ='%str, mods: mj ~> jval ~ ~> mods_of ~]
 }
 
 // The browser metadata beside a payload, from its wire form — a tagged JSON array, one
@@ -829,13 +823,13 @@ event_of = #'%json {
   =Array[Cons[tagj, rest]]
   tagj ~> jval ~ ~> =Str[tb]
   Str[tb] ~> {
-    | ="click" => { pointer_of rest ~> =('pointer)m; Click[...m] }
-    | ="mousedown" => { pointer_of rest ~> =('pointer)m; MouseDown[...m] }
-    | ="mouseup" => { pointer_of rest ~> =('pointer)m; MouseUp[...m] }
-    | ="mousemove" => { pointer_of rest ~> =('pointer)m; MouseMove[...m] }
+    | ="click" => pointer_of rest ~> ='pointer ~> Click[...~]
+    | ="mousedown" => pointer_of rest ~> ='pointer ~> MouseDown[...~]
+    | ="mouseup" => pointer_of rest ~> ='pointer ~> MouseUp[...~]
+    | ="mousemove" => pointer_of rest ~> ='pointer ~> MouseMove[...~]
     | ="submit" => submit_of rest
-    | ="input" => { field_of rest ~> =('field)m; Input[...m] }
-    | ="change" => { field_of rest ~> =('field)m; Change[...m] }
+    | ="input" => field_of rest ~> ='field ~> Input[...~]
+    | ="change" => field_of rest ~> ='field ~> Change[...~]
     | ="keydown" => keydown_of rest
   }
 }
@@ -845,28 +839,20 @@ event_of = #'%json {
 // browser metadata for the event that fired. Answers `[vid, payload, event]`, or nil
 // for anything malformed.
 env_of = #'%str {
-  %json.parse $ ~> =('%json)env
-  env ~> =Array[es]
-  es ~> =Cons[vidj, r1]
-  vidj ~> jval ~ ~> =Str[vb]
-  r1 ~> =Cons[payloadj, r2]
-  payloadj ~> jval ~ ~> =Str[pb]
-  r2 ~> =Cons[evj, Nil]
-  evj ~> jval ~ ~> event_of ~ ~> =('event)ev
-  [Str[vb], Str[pb], ev]
+  %json.parse $
+  ~> ='%json
+  ~> =Array[Cons[vidj, Cons[payloadj, Cons[evj, Nil]]]]
+
+  [vidj ~> jval ~ ~> ='%str, payloadj ~> jval ~ ~> ='%str, evj ~> jval ~ ~> event_of ~ ~> ='event]
 }
 
 // A live-navigation message is `["nav", "/path?query"]` — the two-element shape the
 // client sends for a live link or a back/forward step. Answers the target string, or
 // nil for anything else (a three-element event envelope naturally fails to match).
 nav_of = #'%str {
-  %json.parse $ ~> =('%json)env
-  env ~> =Array[es]
-  es ~> =Cons[tagj, r1]
+  %json.parse $ ~> ='%json ~> =Array[Cons[tagj, Cons[targetj, Nil]]]
   tagj ~> jval ~ ~> ="nav"
-  r1 ~> =Cons[targetj, Nil]
-  targetj ~> jval ~ ~> =Str[tb]
-  Str[tb]
+  targetj ~> jval ~ ~> ='%str
 }
 
 // Decode and fold one client event through `update`: a decode answering nil drops
@@ -980,29 +966,21 @@ collect_of = #[(self): ^, (f): 'frame, (acc): 'bounds] -> 'bounds {
 
 // Whether a key is already assigned (duplicate keys: first wins; the duplicate
 // boundary shares the vid, which the client resolves to the first marker).
-key_assigned? = #[(items): 'assigns, (k): '%str] {
-  // The pin below needs a variable, so bind the field locally.
-  k = $k
-  %list.any? [$items, #{ =(key: ak); ak ~> =&k; $ }]
-}
+key_assigned? = #[(items): 'assigns, (k): '%str] { %list.any? [$items, #{ =(key: &$$k) }] }
 
 'kid_hit = KFound['kid] | KMissing
 
 // A kid by key (reconcile) or by vid (crash reports).
 kid_of = #[(items): 'kids, (k): '%str] -> 'kid_hit {
-  // The pin below needs a variable, so bind the field locally.
-  k = $k
   {
-    | %list.find [$items, #{ =(key: kk); kk ~> =&k; $ }] ~> =('kid)kd => KFound[kd]
+    | %list.find [$items, #{ =(key: &$$k) }] ~> =('kid)kd => KFound[kd]
     | KMissing
   }
 }
 
 kid_by_vid = #[(items): 'kids, (v): '%str] -> 'kid_hit {
-  // The pin below needs a variable, so bind the field locally.
-  v = $v
   {
-    | %list.find [$items, #{ =(vid: kv); kv ~> =&v; $ }] ~> =('kid)kd => KFound[kd]
+    | %list.find [$items, #{ =(vid: &$$v) }] ~> =('kid)kd => KFound[kd]
     | KMissing
   }
 }
@@ -1033,9 +1011,7 @@ assign_bounds = #[(bs): 'bounds, (kids): 'kids, (vid): '%str, (n): 'int, (acc): 
 // The assigned vid for a key. Every boundary key was assigned from this same frame, so a miss
 // is a broken invariant.
 assigned_vid = #[(items): 'assigns, (k): '%str] {
-  // The pin below needs a variable, so bind the field locally.
-  k = $k
-  %list.find [$items, #{ =(key: ak); ak ~> =&k; $ }] ~> {
+  %list.find [$items, #{ =(key: &$$k) }] ~> {
     | =(vid: av) => Str[av ~> .0]
     | __panic__ "boundary key missing from its assignment"
   }
@@ -1068,7 +1044,7 @@ resolve_of = #[(self): ^, (f): 'frame, (assigns): 'assigns] -> 'frame {
 // The previous kids whose keys the new render dropped.
 dropped_kids = #[(kids): 'kids, (assigns): 'assigns] {
   assigns = $assigns
-  %list.filter [$kids, #{ =(key: k); { key_assigned? [assigns, k] => [] | $ } }]
+  %list.filter [$kids, #{ =(key: k); key_assigned? [assigns, k] ~> =[]; $ }]
 }
 
 // Execute a reconcile: kill dropped children's supervisors (ownership tears down
@@ -1418,21 +1394,16 @@ flush_frames = #[(items): 'strs, (conn): '%http/websocket] {
 'route_hit = RFound[@'view_msg] | RMissing
 
 route_of = #[(rs): 'routes, (v): '%str] -> 'route_hit {
-  // The pin below needs a variable, so bind the field locally. The route's pid is
-  // extracted by *pattern* and passed by reference — a pid reached through an access
-  // in flow position, or bare in a field, would be *sent* the flowing value.
-  v = $v
+  // The route's pid is extracted by *pattern* and passed by reference — a pid reached
+  // through an access in flow position, or bare in a field, would be *sent* the flowing
+  // value.
   {
-    | %list.find [$rs, #{ =(vid: rv); rv ~> =&v; $ }] ~> =(pid: rp) => RFound[rp]
+    | %list.find [$rs, #{ =(vid: &$$v) }] ~> =(pid: rp) => RFound[rp]
     | RMissing
   }
 }
 
-del_route = #[(rs): 'routes, (v): '%str] {
-  // The pin below needs a variable, so bind the field locally.
-  v = $v
-  %list.filter [$rs, #{ =(vid: rv); { rv ~> =&v => [] | $ } }]
-}
+del_route = #[(rs): 'routes, (v): '%str] { %list.filter [$rs, #{ =(vid: \&$$v) }] }
 
 // Fan a park/wake signal out to every routed view.
 tell_views = #[(routes): 'routes, (m): (Park | Wake)] {
@@ -1566,26 +1537,16 @@ alife = #[
 'fclass = FirstFrame[vid: '%str, html: '%str] | OtherFrame
 
 classify_frame = #'%str -> 'fclass {
-  fs = $
-  {
-    | {
-      %json.parse fs ~> =('%json)env
-      env ~> =Array[es]
-      es ~> =Cons[_, r1]
-      r1 ~> =Cons[vidj, r2]
-      vidj ~> jval ~ ~> =Str[vb]
-      r2 ~> =Cons[patchesj, Nil]
-      patchesj ~> jval ~ ~> =Array[Cons[pj, Nil]]
+  | %json.parse $
+  ~> ='%json
+  ~> =Array[Cons[_, Cons[vidj, Cons[patchesj, Nil]]]]
 
-      pj ~> jval ~ ~> =Array[Cons[tagj, Cons[pathj, Cons[htmlj, Nil]]]]
-
-      tagj ~> jval ~ ~> ="h"
-      pathj ~> jval ~ ~> =Array[Nil]
-      htmlj ~> jval ~ ~> =Str[hb]
-      FirstFrame[vid: Str[vb], html: Str[hb]]
-    }
-    | OtherFrame
-  }
+    patchesj ~> jval ~ ~> =Array[Cons[pj, Nil]]
+    pj ~> jval ~ ~> =Array[Cons[tagj, Cons[pathj, Cons[htmlj, Nil]]]]
+    tagj ~> jval ~ ~> ="h"
+    pathj ~> jval ~ ~> =Array[Nil]
+    FirstFrame[vid: vidj ~> jval ~ ~> ='%str, html: htmlj ~> jval ~ ~> ='%str]
+  | OtherFrame
 }
 
 // Insert a view's HTML between its empty boundary markers; a page without the
@@ -1643,10 +1604,7 @@ unfilled? = #'%str { unfilled_from [$, 0] }
 
 // Whether the composed page is complete: the root announced, and no empty
 // boundary pair remains.
-composed? = #('%str | []) {
-  | =Str[pb]; { unfilled? Str[pb] => [] | Ok } => Ok
-  | []
-}
+composed? = #('%str | []) { ='%str ~> unfilled? ~ ~> =[]; Ok }
 
 // Reclassify frames that raced ahead of the root's `Region` (cross-process
 // delivery order is not guaranteed): walk the pending frames oldest-first,

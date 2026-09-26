@@ -474,9 +474,7 @@ set1 = #[(value): 'opt, (key): ('%str | 'int), (new): '] -> 'opt {
   $value ~> =(')v
   $key ~> {
     | =('%str)k => { v ~> =Object[pairs]; obj_set [pairs, k, $new, Nil, []] ~> Object[~] }
-    | =('int)i => {
-      v ~> =Array[items]; arr_set [items, i, $new, Nil] ~> =('%list<'>)updated; Array[updated]
-    }
+    | =('int)i => { v ~> =Array[items]; Array[arr_set [items, i, $new, Nil] ~> ='%list<'>] }
   }
 }
 
@@ -487,7 +485,7 @@ set_step = #[^, 'opt, '%list<('%str | 'int)>, '] -> 'opt {
   path ~> {
     | =Nil => new
     | =Cons[k, Nil] => set1 [value, k, new]
-    | =Cons[k, rest] => { self [self, get1 [value, k], rest, new] ~> =(')sub; set1 [value, k, sub] }
+    | =Cons[k, rest] => set1 [value, k, self [self, get1 [value, k], rest, new] ~> =']
   }
 }
 
@@ -502,7 +500,7 @@ set = #[(value): 'opt, (key): 'key, (new): 'opt] -> 'opt {
 
 update = #[(value): 'opt, (key): 'key, (f): #' -> 'opt] -> 'opt {
   :doc "The value with `f` applied to what a key or path names. Nil when the target is absent, or when `f` answers nil."
-  get [$value, $key] ~> =(')current; set [$value, $key, $f current]
+  set [$value, $key, get [$value, $key] ~> =' ~> $f ~]
 }
 
 // Remove every binding of `key` from a pair list.
@@ -543,7 +541,7 @@ delete_step = #[^, 'opt, '%list<('%str | 'int)>] -> 'opt {
     | =Nil => []
     | =Cons[k, Nil] => delete1 [value, k]
     | =Cons[k, rest] => get1 [value, k] ~> {
-      | =(')child => { self [self, child, rest] ~> =(')sub; set1 [value, k, sub] }
+      | =(')child => set1 [value, k, self [self, child, rest] ~> =']
       | value
     }
   }
@@ -559,18 +557,16 @@ delete = #[(value): 'opt, (key): 'key] -> 'opt {
 
 merge = #[(value): 'opt, (with): 'opt] -> 'opt {
   :doc "A shallow merge of two objects: the first's pairs in their order with the second's values winning per key, then the second's remaining pairs in its order. Nil unless both are objects."
-  $value ~> =(')av
-  $with ~> =(')bv
-  av ~> =Object[a]
-  bv ~> =Object[b]
+  $value ~> =' ~> =Object[a]
+  $with ~> =' ~> =Object[b]
   merged = %list.map [a, #{ [k, v] = $; obj_get [b, k, []] ~> { =(')bv => [k, bv] | [k, v] } }]
-  extra = %list.filter [b, #{ [k, _] = $; { obj_get [a, k, []] => [] | $ } }]
+  extra = %list.filter [b, #{ [k, _] = $; obj_get [a, k, []] ~> =[]; $ }]
   %list.chain [merged, extra] ~> Object[~]
 }
 
 to_dict = #'opt {
   :doc "An object's pairs as a %dict (later duplicates win, matching `get`); order is not preserved. Nil for anything but an object."
-  =(')v; v ~> =Object[pairs]; %dict.from pairs
+  =' ~> =Object[pairs]; %dict.from pairs
 }
 
 object = #('%dict<'%str, '> | 'pairs) -> ' {

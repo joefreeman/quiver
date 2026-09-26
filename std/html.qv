@@ -231,7 +231,7 @@ ws_only_from = #[(data): 'bin, (pos): 'int] {
 tag_name = #'%parse {
   =st
   {
-    | peek_at st ~> =('int)b; lower? b => { tag_rest st ~> =[bytes, st2]; [Str[bytes], st2] }
+    | peek_at st ~> ='int ~> lower? ~ => { tag_rest st ~> =[bytes, st2]; [Str[bytes], st2] }
     | peek_at st ~> =('int)b
       __integer_compare__ [b, 65] ~> =(0 | 1)
       __integer_compare__ [b, 90] ~> =(-1 | 0) => %parse.fail_in [
@@ -243,11 +243,7 @@ tag_name = #'%parse {
 }
 
 // Whether an attribute name already occurs in the accumulated list.
-seen? = #[(attrs): 'pattrs, (name): '%str] {
-  // The pin below needs a variable, so bind the field locally.
-  name = $name
-  %list.any? [$attrs, #{ =(name: n); n ~> =&name; $ }]
-}
+seen? = #[(attrs): 'pattrs, (name): '%str] { %list.any? [$attrs, #{ =(name: &$$name) }] }
 
 // Whether an attribute name starts with `data-q` — reserved for template instrumentation.
 reserved? = #'%str {
@@ -302,7 +298,7 @@ attr_mods_p = #[(cb): '%meta.cb, (state): '%parse] {
 attrs_loop = #[(cb): '%meta.cb, (state): '%parse, (acc): 'pattrs] {
   %parse.ws $state ~> =[_, st]
   {
-    | peek_at st ~> =('int)b; letter? b => {
+    | peek_at st ~> ='int ~> letter? ~ => {
       attr_rest st ~> =[nb, st2]
       name = Str[nb]
       {
@@ -346,7 +342,7 @@ void? = #'%str {
 }
 
 // Drop leading whitespace-only text nodes.
-drop_ws = #'pfxs { %list.drop_while [~, #{ =[_, Ok]; $ }] }
+drop_ws = #'pfxs { %list.drop_while [~, #{ =[_, Ok] }] }
 
 // Trim whitespace-only text nodes from both ends of the root node list.
 trim_root = #'pfxs { drop_ws ~ ~> %list.reverse ~ ~> drop_ws ~ ~> %list.reverse ~ }
@@ -648,15 +644,13 @@ statics_exprs = #'bins { %list.reverse ~ ~> %list.map [~, #{ Str[~] }] }
 // splits, or re-values them; anything it doesn't claim passes through.
 
 // Apply `f` to one element's attributes, concatenating what it answers, in document
-// order. A nil from `f` is a policy failure: it is the step's own value, so the step
-// boundary short-circuits on it and the failure — `:error` payload and all — propagates
-// out of the whole walk, exactly as a parse failure does.
+// order. A nil from `f` is a policy failure: its match fails the step with that same nil,
+// so the failure — `:error` payload and all — propagates out of the whole walk, exactly
+// as a parse failure does.
 rewrite_attr_list = #[(items): 'pattrs, (f): 'apolicy, (acc): 'pattrs] {
   $items ~> {
     | =Nil => %list.reverse $acc
-    | =Cons[attr, rest] => {
-      $f attr ~> =('pattrs)as; ^ [rest, $f, %list.fold [as, $acc, #{ Cons[$1, $0] }]]
-    }
+    | =Cons[attr, rest] => ^ [rest, $f, %list.fold [$f attr ~> ='pattrs, $acc, #{ Cons[$1, $0] }]]
   }
 }
 
@@ -668,15 +662,16 @@ rewrite_list = #[(self): ^, (items): 'pnodes, (f): 'apolicy, (acc): 'pnodes] -> 
     | =Cons[node, rest] => {
       node ~> {
         | =PElem[tag: t, attrs: alist, children: kids] => {
-          rewrite_attr_list [alist, $f, Nil] ~> =('pattrs)alist2
-          $self [$self, kids, $f, Nil] ~> =('pnodes)kids2
-          PElem[tag: t, attrs: alist2, children: kids2]
+          PElem[
+            tag: t,
+            attrs: rewrite_attr_list [alist, $f, Nil] ~> ='pattrs,
+            children: $self [$self, kids, $f, Nil] ~> ='pnodes,
+          ]
         }
         | node
       }
-      ~> =('pnode)node2
-
-      ^ [$self, rest, $f, Cons[node2, $acc]]
+      ~> ='pnode
+      ~> ^ [$self, rest, $f, Cons[~, $acc]]
     }
   }
 }
@@ -729,13 +724,15 @@ expand = #'pnodes {
   ]
 }
 
-// The dialect entry point: the compiler calls this with the dialect context record. Each
-// stage is its own step, so a failure is the step's value and short-circuits carrying its
-// own `:error` payload — which is what positions the compile error.
+// The dialect entry point: the compiler calls this with the dialect context record. A
+// stage's failure fails its match, which fails the chain with that stage's own nil —
+// `:error` payload and all — which is what positions the compile error.
 html_dialect = #(content: '%str, term: '%meta.cb) {
-  parse [$content, $term] ~> =('pnodes)nodes
-  rewrite_attrs [nodes, plain_policy] ~> =('pnodes)rewritten
-  expand rewritten
+  parse [$content, $term]
+  ~> ='pnodes
+  ~> rewrite_attrs [~, plain_policy]
+  ~> ='pnodes
+  ~> expand ~
 }
 
 // === Rendering ==========================================================================

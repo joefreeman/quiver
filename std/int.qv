@@ -17,7 +17,7 @@
 
           __integer_compare__ [__integer_abs__ rem, __integer_abs__ b] ~> =-1
 
-          __integer_multiply__ [a, rem] ~> __integer_compare__ [~, 0] ~> { =-1 => [] | Ok }
+          __integer_multiply__ [a, rem] ~> __integer_compare__ [~, 0] ~> =\-1
         }
       }
     }
@@ -36,7 +36,7 @@
         | =r => {
           __integer_compare__ [__integer_abs__ r, __integer_abs__ b] ~> =-1
 
-          __integer_multiply__ [a, r] ~> __integer_compare__ [~, 0] ~> { =-1 => [] | Ok }
+          __integer_multiply__ [a, r] ~> __integer_compare__ [~, 0] ~> =\-1
         }
       }
     }

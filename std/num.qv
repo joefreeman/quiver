@@ -64,7 +64,7 @@
 reduce = #'rational {
   // The caller must supply a non-zero denominator; the result is always canonical form,
   // whose denominator is positive.
-  :pre #{ $ ~> =Rational[_, ('int)d]; __integer_compare__ [d, 0] ~> { =0 => [] | Ok } }
+  :pre #{ $ ~> =Rational[_, ('int)d]; __integer_compare__ [d, 0] ~> =\0 }
   :post #{ $ ~> =(out: Rational[_, ('int)d]); __integer_compare__ [d, 0] ~> =1 }
   =Rational[n, d]
   {
@@ -241,7 +241,7 @@ fdiv = #['int, 'int] {
   q = __integer_divide__ $
   {
     | __integer_compare__ [$0, 0] ~> =-1
-      __integer_modulo__ $ ~> { =0 => [] | Ok } => __integer_subtract__ [q, 1]
+      __integer_modulo__ $ ~> =\0 => __integer_subtract__ [q, 1]
     | q
   }
 }
@@ -634,8 +634,7 @@ log_mul = #['opt, 'opt] {
 }
 // Divided by a non-zero coefficient, or by a proportional form (`ln 8 / ln 2` is `3`).
 log_div = #['opt, 'opt] {
-  | =[Log[a, ts], ('coeff)r]
-    to_rational r ~> rsign ~ ~> { =0 => [] | Ok } => log_scale [
+  | =[Log[a, ts], ('coeff)r]; to_rational r ~> rsign ~ ~> =\0 => log_scale [
       a,
       ts,
       rquot [Rational[1, 1], to_rational r],
@@ -1411,7 +1410,7 @@ abs = #'opt {
     $ ~> =(out: o)
     o ~> {
       | =[] => Ok
-      | sign ~ ~> { =-1 => [] | Ok }
+      | sign ~ ~> =\-1; Ok
     }
   }
   | =Surd[a, b, n] => {

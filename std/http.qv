@@ -55,10 +55,7 @@ lower = #'%str {
 
 // The first value whose name matches case-insensitively, or nil.
 header_find = #[(pairs): 'pairs, (target): 'bin] {
-  // The pin below needs a variable, so bind the field locally.
-  target = $target
-
-  %list.find [$pairs, #{ =[n, _]; lower n ~> =Str[nb]; nb ~> =&target; $ }]
+  %list.find [$pairs, #{ =[n, _]; lower n ~> =Str[&$$target] }]
   ~> =[_, v]
 
   v
@@ -71,10 +68,7 @@ header = #[(pairs): 'pairs, (name): '%str] {
 
 get = #[(pairs): 'pairs, (name): '%str] {
   :doc "The first value for an exact name (query or form pairs), or nil when absent."
-  // The pin below needs a variable, so bind the field locally.
-  name = $name
-  %list.find [$pairs, #{ =[n, _]; n ~> =&name; $ }] ~> =[_, v]
-  v
+  %list.find [$pairs, #{ =[&$$name, _] }] ~> =[_, v]; v
 }
 
 // The numeric value of an ASCII hex digit, or nil.
@@ -265,7 +259,7 @@ trim_end = #[(data): 'bin, (pos): 'int, (end): 'int] {
 parse_header_line = #'bin {
   =line
   %bin.index [line, 58, 0] ~> =('int)c
-  { c ~> =0 => [] | Ok }
+  c ~> =\0
 
   vs = trim_start [line, __integer_add__ [c, 1], %bin.length line]
 
@@ -306,12 +300,12 @@ method_of = #'%str {
 parse_request_line = #'bin {
   =line
   %bin.index [line, 32, 0] ~> =('int)a
-  { a ~> =0 => [] | Ok }
+  a ~> =\0
 
   %bin.index [line, 32, __integer_add__ [a, 1]] ~> =('int)b
 
   target = %bin.slice [line, __integer_add__ [a, 1], b]
-  { %bin.length target ~> =0 => [] | Ok }
+  %bin.length target ~> =\0
   [
     method: %bin.slice [line, 0, a] ~> method_of Str[~],
     target: Str[target],
