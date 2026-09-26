@@ -158,19 +158,25 @@ impl Type {
             } => Type::Annotated {
                 base: ty(base),
                 exact: *exact,
-                entries: entries
-                    .iter()
-                    .map(|(key, value)| {
-                        (
-                            crate::bytecode::IdRemaps::map(
-                                &remaps.annotation_keys,
-                                "annotation key",
-                                *key,
-                            ),
-                            ty(value),
-                        )
-                    })
-                    .collect(),
+                // Key ids are remapped, so the sort that lookups binary-search on (and that
+                // keeps interning canonical) has to be re-established, not assumed to survive.
+                entries: {
+                    let mut entries: Vec<(usize, usize)> = entries
+                        .iter()
+                        .map(|(key, value)| {
+                            (
+                                crate::bytecode::IdRemaps::map(
+                                    &remaps.annotation_keys,
+                                    "annotation key",
+                                    *key,
+                                ),
+                                ty(value),
+                            )
+                        })
+                        .collect();
+                    entries.sort_by_key(|(key, _)| *key);
+                    entries
+                },
             },
             Type::Process {
                 send,
@@ -1036,6 +1042,28 @@ fn check_type_relation<T: TypeLookup>(
 mod annotation_row_tests {
     use super::*;
     use crate::program::Program;
+
+    /// Annotation lookups binary-search a row by key id, so when linking renumbers the keys,
+    /// the row must be re-sorted under the new ids rather than keep its old order.
+    #[test]
+    fn annotated_entries_resort_after_remap() {
+        let mut remaps = crate::bytecode::IdRemaps::default();
+        remaps.types.extend([(0, 10), (3, 30), (4, 40)]);
+        remaps.annotation_keys.extend([(1, 9), (2, 8)]);
+        let row = Type::Annotated {
+            base: 0,
+            exact: false,
+            entries: vec![(1, 3), (2, 4)],
+        };
+        assert_eq!(
+            row.remap_ids(&remaps),
+            Type::Annotated {
+                base: 10,
+                exact: false,
+                entries: vec![(8, 40), (9, 30)],
+            }
+        );
+    }
 
     fn setup() -> (Program, usize, usize, usize, usize) {
         let mut p = Program::new();

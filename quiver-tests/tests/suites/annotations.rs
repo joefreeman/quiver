@@ -193,6 +193,29 @@ fn test_pre_contract_violation_aborts() {
 }
 
 #[test]
+fn test_imported_contract_is_enforced_wherever_the_call_stands() {
+    // A module member's contracts are found on its linked type, whose annotation keys were
+    // renumbered into the session; the row must stay sorted for the lookup to find them, in a
+    // tuple field as much as in tail position.
+    quiver()
+        .debug()
+        .evaluate("[%num.clamp [5, 1, 10], %num.clamp [0, 1, 10], %num.clamp [[], 1, 10]]")
+        .expect("[5, 1, []]");
+    quiver()
+        .debug()
+        .evaluate("[%num.clamp [5, 10, 1]]")
+        .expect_runtime_error(quiver_core::error::Error::Panic(
+            "Precondition violated at test:1:2".to_string(),
+        ));
+    quiver()
+        .debug()
+        .evaluate("%num.clamp [5, 10, 1]")
+        .expect_runtime_error(quiver_core::error::Error::Panic(
+            "Precondition violated at test:1:1".to_string(),
+        ));
+}
+
+#[test]
 fn test_post_contract_violation_aborts() {
     // The post-contract receives `[in: arg, out: result]`; a broken result aborts.
     quiver()

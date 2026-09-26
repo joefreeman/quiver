@@ -1030,12 +1030,11 @@ clamp = #[(value): 'opt, (min): 'opt, (max): 'opt] {
   // The caller must give a non-empty range (`lo ≤ hi`); the result then lies within it.
   // Comparisons that are nil (a nil operand, or incompatible surds) can't witness a
   // breach, so they pass — the checks only fire on a definite ordering violation.
-  :pre #{ $ ~> =[_, lo, hi]; compare [lo, hi] ~> { =1 => [] | Ok } }
+  :pre #{ compare [$min, $max] ~> =\1; Ok }
   :post #{
-    $ ~> =[in: [_, lo, hi], out: o]
-    o ~> {
+    $out ~> {
       | =[] => Ok
-      | =v => { compare [lo, v] ~> { =1 => [] | Ok }; compare [v, hi] ~> { =1 => [] | Ok } }
+      | =v => { compare [$in.min, v] ~> =\1; compare [v, $in.max] ~> =\1; Ok }
     }
   }
   | $value ~> =([])n => n
