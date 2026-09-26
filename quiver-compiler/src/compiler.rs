@@ -7111,7 +7111,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             ast::Term::Self_ => {
                 // `@` names the current process; sending to it is `%proc.send [@, x]`.
                 self.drop_flowing_value(value_type);
-                self.codegen.add_instruction(Instruction::nil());
+                self.codegen.add_instruction(Instruction::tuple(NIL));
                 self.emit_builtin_call("process_self");
                 // Return a process type with the current function's receive type.
                 // Return type is None since a process can't know its own return type;
@@ -8219,7 +8219,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.codegen.add_instruction(Instruction::is_type(type_id));
                     let fits = self.codegen.emit_jump_if_placeholder();
                     self.codegen.add_instruction(Instruction::pop());
-                    self.codegen.add_instruction(Instruction::nil());
+                    self.codegen.add_instruction(Instruction::tuple(NIL));
                     self.codegen.patch_jump_to_here(fits);
                 }
                 last_type = result_type;

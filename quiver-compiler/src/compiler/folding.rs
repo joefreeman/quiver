@@ -18,7 +18,7 @@
 
 use quiver_core::bytecode::{Constant, Instruction, Opcode};
 use quiver_core::program::Program;
-use quiver_core::types::{NIL, OK, TypeLookup};
+use quiver_core::types::TypeLookup;
 
 /// A symbolic stack entry.
 #[derive(Clone, Copy, PartialEq)]
@@ -52,8 +52,6 @@ pub fn constant_of_range(program: &mut Program, instructions: &[Instruction]) ->
         let operand = instruction.operand() as usize;
         match instruction.opcode() {
             Opcode::Constant => stack.push(Sym::Const(operand)),
-            Opcode::Nil => stack.push(Sym::Const(empty_tuple(program, NIL))),
-            Opcode::Ok => stack.push(Sym::Const(empty_tuple(program, OK))),
             // A copy, never a consume: reaching past what the range itself pushed reads a
             // value from below, which stays opaque but is not disturbed.
             Opcode::Pick => stack.push(pick(&stack, operand)),
@@ -100,13 +98,4 @@ fn pick(stack: &[Sym], depth: usize) -> Sym {
         Some(index) => stack[index],
         None => Sym::Outer,
     }
-}
-
-/// The constant for a field-less tuple. `Nil` and `Ok` carry no operand — they are the
-/// normalised spellings of `Tuple(NIL)` and `Tuple(OK)` — so their ids are named here.
-fn empty_tuple(program: &mut Program, id: usize) -> usize {
-    program.register_constant(Constant::Tuple {
-        id,
-        fields: Vec::new(),
-    })
 }

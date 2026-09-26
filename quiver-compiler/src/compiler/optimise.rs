@@ -379,7 +379,8 @@ fn trace_dead_value(
         }
         // The instruction produced the value.
         dead.producers.push(index);
-        if pushes_purely(opcode) {
+        // A field-less tuple (nil, `Ok`, a bare name) is built from nothing.
+        if pushes_purely(opcode) || (opcode == Opcode::Tuple && pops == 0) {
             return Some(dead);
         }
         if !transforms_purely(opcode) {
@@ -391,10 +392,7 @@ fn trace_dead_value(
 
 /// Opcodes that push one value, read nothing beneath it, and have no other effect.
 fn pushes_purely(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::Constant | Opcode::Nil | Opcode::Ok | Opcode::Load | Opcode::Pick
-    )
+    matches!(opcode, Opcode::Constant | Opcode::Load | Opcode::Pick)
 }
 
 /// Opcodes that replace the top value with one computed from it, with no other effect.
@@ -408,6 +406,7 @@ fn transforms_purely(opcode: Opcode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quiver_core::types::NIL;
 
     fn run(instructions: Vec<Instruction>) -> Vec<Instruction> {
         body(instructions, &Program::new())
@@ -431,12 +430,12 @@ mod tests {
     fn cascades_through_transforms() {
         assert_eq!(
             run(vec![
-                Instruction::nil(),
+                Instruction::tuple(NIL),
                 Instruction::load(0),
                 Instruction::get_positional(1),
                 Instruction::pop(),
             ]),
-            vec![Instruction::nil()]
+            vec![Instruction::tuple(NIL)]
         );
     }
 
@@ -510,16 +509,16 @@ mod tests {
             run(vec![
                 Instruction::load(0),
                 Instruction::jump_if(2), // → 4, itself a jump → 6
-                Instruction::nil(),
-                Instruction::jump(2), // → 6
-                Instruction::jump(1), // → 6, unreachable once the first is threaded
-                Instruction::nil(),   // unreachable
+                Instruction::tuple(NIL),
+                Instruction::jump(2),    // → 6
+                Instruction::jump(1),    // → 6, unreachable once the first is threaded
+                Instruction::tuple(NIL), // unreachable
                 Instruction::load(1),
             ]),
             vec![
                 Instruction::load(0),
                 Instruction::jump_if(1),
-                Instruction::nil(),
+                Instruction::tuple(NIL),
                 Instruction::load(1),
             ]
         );

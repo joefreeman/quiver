@@ -1,4 +1,4 @@
-use crate::types::{BuiltinInfo, NIL, OK, TupleTypeInfo, Type, TypeLookup};
+use crate::types::{BuiltinInfo, TupleTypeInfo, Type, TypeLookup};
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
@@ -631,14 +631,6 @@ mod tests {
             assert_eq!(function.instructions[0].offset(), offset);
         }
     }
-
-    /// The normalising constructor is what keeps the encoding canonical.
-    #[test]
-    fn constructors_normalise() {
-        assert_eq!(Instruction::tuple(super::NIL), Instruction::nil());
-        assert_eq!(Instruction::tuple(super::OK), Instruction::ok());
-        assert_eq!(Instruction::tuple(2).opcode(), Opcode::Tuple);
-    }
 }
 
 impl TypeLookup for Bytecode {
@@ -689,8 +681,6 @@ pub enum Opcode {
     Load,
     Store,
     Tuple,
-    Nil,
-    Ok,
     GetPositional,
     GetNamed,
     IsType,
@@ -728,8 +718,6 @@ impl Opcode {
         match self {
             Opcode::Jump | Opcode::JumpIf | Opcode::JumpUnless => OperandKind::Offset,
             Opcode::Pop
-            | Opcode::Nil
-            | Opcode::Ok
             | Opcode::Call
             | Opcode::TailCall
             | Opcode::Recurse
@@ -742,7 +730,7 @@ impl Opcode {
 
     /// Every opcode, in discriminant order — `ALL[op as usize] == op` (asserted in tests),
     /// which is what makes the decode below a single indexed load.
-    pub const ALL: [Opcode; 28] = [
+    pub const ALL: [Opcode; 26] = [
         Opcode::Constant,
         Opcode::Pop,
         Opcode::Pick,
@@ -752,8 +740,6 @@ impl Opcode {
         Opcode::Load,
         Opcode::Store,
         Opcode::Tuple,
-        Opcode::Nil,
-        Opcode::Ok,
         Opcode::GetPositional,
         Opcode::GetNamed,
         Opcode::IsType,
@@ -780,8 +766,8 @@ impl Opcode {
 /// unit or a module artifact into a session — rewrites operands in place, which a
 /// variable-length encoding would turn into a re-assembly of the whole stream.
 ///
-/// Build one through the named constructors, never by hand: [`Instruction::tuple`]
-/// normalises its operand, and the rest keep the range check in one place.
+/// Build one through the named constructors, never by hand: they keep the range check in
+/// one place.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Instruction(u32);
@@ -894,25 +880,10 @@ impl Instruction {
     }
 
     /// Pop this tuple type's arity worth of fields (the topmost is its last field) and
-    /// push the tuple. Nil and `Ok` are specialised to [`Instruction::nil`] and
-    /// [`Instruction::ok`]: together they are the majority of all tuple construction, and
-    /// neither pops anything.
+    /// push the tuple. Nil and `Ok` are tuples 0 and 1 ([`crate::types::NIL`] and
+    /// [`crate::types::OK`]) in every program, so `Tuple(0)` builds nil.
     pub fn tuple(tuple_id: usize) -> Instruction {
-        match tuple_id {
-            NIL => Instruction::nil(),
-            OK => Instruction::ok(),
-            other => Instruction::with_id(Opcode::Tuple, other),
-        }
-    }
-
-    /// Push nil.
-    pub fn nil() -> Instruction {
-        Instruction::bare(Opcode::Nil)
-    }
-
-    /// Push `Ok`.
-    pub fn ok() -> Instruction {
-        Instruction::bare(Opcode::Ok)
+        Instruction::with_id(Opcode::Tuple, tuple_id)
     }
 
     /// Pop a tuple; push the field at this position. Emitted where the static type pins

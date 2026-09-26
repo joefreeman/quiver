@@ -35,7 +35,7 @@ impl CodeTables for Program {
 pub fn stack_effect(instruction: Instruction, tables: &impl CodeTables) -> Option<(usize, usize)> {
     let operand = instruction.operand() as usize;
     Some(match instruction.opcode() {
-        Opcode::Constant | Opcode::Pick | Opcode::Load | Opcode::Nil | Opcode::Ok => (0, 1),
+        Opcode::Constant | Opcode::Pick | Opcode::Load => (0, 1),
         Opcode::Pop | Opcode::Store | Opcode::JumpIf | Opcode::JumpUnless | Opcode::Recurse => {
             (1, 0)
         }
@@ -211,13 +211,15 @@ pub fn function(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quiver_core::types::{NIL, OK};
 
-    /// Tables where every tuple is a pair and every function captures one value.
+    /// Tables where nil and `Ok` are empty, every other tuple is a pair, and every function
+    /// captures one value.
     struct Pairs;
 
     impl CodeTables for Pairs {
-        fn tuple_arity(&self, _: usize) -> Option<usize> {
-            Some(2)
+        fn tuple_arity(&self, tuple: usize) -> Option<usize> {
+            Some(if tuple == NIL || tuple == OK { 0 } else { 2 })
         }
 
         fn function_captures(&self, _: usize) -> Option<usize> {
@@ -240,7 +242,7 @@ mod tests {
             Instruction::load(0),
             Instruction::tuple(2),
             Instruction::jump(1),
-            Instruction::nil(),
+            Instruction::tuple(NIL),
         ];
         assert_eq!(verify(&body, Locals::Filled(0)), Ok(()));
     }
@@ -250,7 +252,7 @@ mod tests {
         let body = [
             Instruction::pick(0),
             Instruction::jump_if(1),
-            Instruction::nil(),
+            Instruction::tuple(NIL),
             Instruction::pop(),
         ];
         assert!(verify(&body, Locals::Filled(0)).is_err());

@@ -1709,8 +1709,6 @@ impl<E: Effect> Executor<E> {
             Opcode::Load => self.handle_load(proc, operand),
             Opcode::Store => self.handle_store(proc, operand),
             Opcode::Tuple => self.handle_tuple(proc, operand),
-            Opcode::Nil => self.handle_push(proc, Value::nil()),
-            Opcode::Ok => self.handle_push(proc, Value::ok()),
             Opcode::GetPositional => self.handle_get_positional(proc, operand),
             Opcode::GetNamed => self.handle_get_named(proc, operand),
             Opcode::IsType => self.handle_is_type(proc, operand),
@@ -1849,17 +1847,6 @@ impl<E: Effect> Executor<E> {
         index: usize,
     ) -> Result<Option<Action<E>>, Error> {
         let value = self.materialize_constant(index)?;
-        self.push_value(proc, value);
-
-        Ok(None)
-    }
-
-    /// Push a value that needs no operands off the stack (`Nil`, `Ok`).
-    fn handle_push(
-        &mut self,
-        proc: &mut Process,
-        value: Value,
-    ) -> Result<Option<Action<E>>, Error> {
         self.push_value(proc, value);
 
         Ok(None)
