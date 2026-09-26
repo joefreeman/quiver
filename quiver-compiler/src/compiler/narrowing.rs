@@ -958,7 +958,7 @@ pub fn pattern_constrains_recursive_field(
     for (idx, field) in tuple.fields.iter().enumerate() {
         let constraining = !matches!(
             field.pattern,
-            ast::Match::Identifier(_, _) | ast::Match::Placeholder
+            ast::Match::Identifier(_, _) | ast::Match::Placeholder | ast::Match::Ripple
         );
         if !constraining {
             continue;
@@ -992,7 +992,7 @@ pub fn pattern_constrains_variable(
             .any(|member| matches!(program.lookup_type(member), Some(Type::Variable(_))))
     };
     match pattern {
-        ast::Match::Identifier(..) | ast::Match::Placeholder => false,
+        ast::Match::Identifier(..) | ast::Match::Placeholder | ast::Match::Ripple => false,
         ast::Match::Or(parts) | ast::Match::And(parts) => parts
             .iter()
             .any(|part| pattern_constrains_variable(part, value_type, program)),
@@ -1042,13 +1042,15 @@ fn classify_field_pattern(
     program: &Program,
 ) -> FieldPatternKind {
     match pattern {
-        ast::Match::Identifier(_, _) | ast::Match::Placeholder => FieldPatternKind::AlwaysBinds,
+        ast::Match::Identifier(_, _) | ast::Match::Placeholder | ast::Match::Ripple => {
+            FieldPatternKind::AlwaysBinds
+        }
 
         ast::Match::Tuple(tuple) => {
             let is_flat = tuple.fields.iter().all(|f| {
                 matches!(
                     f.pattern,
-                    ast::Match::Identifier(_, _) | ast::Match::Placeholder
+                    ast::Match::Identifier(_, _) | ast::Match::Placeholder | ast::Match::Ripple
                 )
             });
 
@@ -1160,6 +1162,27 @@ pub fn analyze_tuple_pattern_for_complement(
         return None;
     }
     let field_type_ids: Vec<usize> = tuple_info.fields.iter().map(|(_, t)| *t).collect();
+
+    // A repeated binder (or ripple) tests its positions for equality, so the branch can fail
+    // with every field's shape matching (`=[x, [x]]`). Only the shapes accepted below — binders
+    // at the top level, and in a flat sub-tuple — need checking.
+    let mut binders = std::collections::HashSet::new();
+    let repeated = tuple_pattern
+        .fields
+        .iter()
+        .flat_map(|field| match &field.pattern {
+            ast::Match::Tuple(sub) => sub.fields.iter().map(|field| &field.pattern).collect(),
+            other => vec![other],
+        })
+        .filter_map(|pattern| match pattern {
+            ast::Match::Identifier(name, _) => Some(name.as_str()),
+            ast::Match::Ripple => Some(ast::RIPPLE),
+            _ => None,
+        })
+        .any(|name| !binders.insert(name));
+    if repeated {
+        return None;
+    }
 
     let mut constraining: Option<(usize, usize)> = None;
 

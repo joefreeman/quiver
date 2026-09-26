@@ -400,3 +400,40 @@ x ~> =(Point[x: a, y: _] & p & (y: 'int))
             (identifier)
             (type_identifier
               (type_name))))))))
+
+================================================================================
+Ripple patterns
+================================================================================
+
+[1, [1, 2]] ~> =[~, [~, _]] ~> =(y: ~) ~> =(Ok[~] | ~)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (sequence
+    (chain
+      (tuple
+        (chain
+          (integer))
+        (chain
+          (tuple
+            (chain
+              (integer))
+            (chain
+              (integer)))))
+      (bind_match
+        (pattern_tuple
+          (ripple)
+          (pattern_tuple
+            (ripple)
+            (placeholder))))
+      (bind_match
+        (pattern_partial
+          name: (identifier)
+          (ripple)))
+      (bind_match
+        (pattern_or
+          (pattern_tuple
+            name: (tuple_name)
+            (ripple))
+          (ripple))))))

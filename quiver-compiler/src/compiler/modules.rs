@@ -560,6 +560,7 @@ impl Collector {
             | ast::Match::String(..)
             | ast::Match::Star(_)
             | ast::Match::Placeholder
+            | ast::Match::Ripple
             | ast::Match::Pin(_) => {}
             ast::Match::Tuple(tuple) => {
                 for field in &tuple.fields {

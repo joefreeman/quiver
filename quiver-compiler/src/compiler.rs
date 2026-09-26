@@ -133,6 +133,12 @@ pub enum Error {
     NegatedPatternBindings {
         bindings: Vec<String>,
     },
+    /// A ripple (`~`) inside a negated pattern: when the negation matches, its inner pattern
+    /// didn't, so there is no value there to yield.
+    NegatedPatternRipple,
+    /// Some alternatives of an or-pattern have a ripple (`~`) and others don't, so which value
+    /// the match yields would depend on the alternative that matched.
+    OrPatternRippleMismatch,
     /// `\_`: a negation that can never match.
     NegatedWildcard,
     /// `\\P`: a double negation, which is just `P` without its bindings.
@@ -240,6 +246,9 @@ pub enum Error {
     AssertionBindings {
         bindings: Vec<String>,
     },
+    /// A ripple (`~`) in a `//=` assertion: the assertion only observes, and the value flows on
+    /// unchanged.
+    AssertionRipple,
 
     /// A value flows into a union whose members include functions or processes, and the
     /// union is not sendable (a union of only process types is — the message is checked
@@ -428,6 +437,15 @@ impl std::fmt::Display for Error {
                     "A negated pattern cannot bind variables (found {bindings:?}); bind outside it, as in `(\\[] & x)`"
                 )
             }
+            Error::NegatedPatternRipple => write!(
+                f,
+                "A negated pattern cannot contain a ripple `~`: when it matches, its pattern \
+                 didn't, so there is no value there to yield"
+            ),
+            Error::OrPatternRippleMismatch => write!(
+                f,
+                "Either every alternative of an or-pattern has a ripple `~`, or none does"
+            ),
             Error::NegatedWildcard => write!(f, "`\\_` never matches"),
             Error::DoubleNegation => {
                 write!(f, "A double negation `\\\\P` is just `P`; write `P`")
@@ -552,6 +570,11 @@ impl std::fmt::Display for Error {
                         .join(", ")
                 )
             }
+            Error::AssertionRipple => write!(
+                f,
+                "An assertion pattern cannot contain a ripple `~`: an assertion only observes, \
+                 and the value flows on unchanged"
+            ),
             Error::UnionApplication {
                 union,
                 all_functions,
@@ -3325,7 +3348,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Whether the match stands in a step-level chain. Anywhere else (a tuple field, an
         // argument) values of a half-built expression may sit beneath it, for a failure to drop.
         gating: bool,
-    ) -> Result<usize, Error> {
+    ) -> Result<(usize, Provenance), Error> {
         let start_jump_addr = self.codegen.emit_jump_placeholder();
         let fail_jump_addr = self.codegen.emit_jump_placeholder();
 
@@ -3337,7 +3360,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             module_cache: &mut *self.module_cache,
             package: &self.current_package,
         };
-        let (bindings, binding_sets, result_type, narrowed_type) = pattern::analyze_pattern(
+        let pattern::PatternAnalysis {
+            bindings,
+            binding_sets,
+            result_type,
+            narrowed_type,
+            ripple_type,
+        } = pattern::analyze_pattern(
             &mut env,
             self.program,
             &pattern,
@@ -3411,7 +3440,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.match_failures.push(Failure { jump, nil_type });
                 }
             }
-            return Ok(self.program.never());
+            return Ok((self.program.never(), Provenance::Unknown));
         }
 
         // A binder of the whole scrutinee (`=x`, `=(P & x)`) is the scrutinee, so it keeps its
@@ -3519,7 +3548,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
-        // Success path: the match yields its scrutinee, still on the stack.
+        // Success path: the match yields its scrutinee, still on the stack — or, with a ripple,
+        // the value at the ripple, which the pattern code put in its place.
         let success_jump_addr = self.codegen.emit_jump_placeholder();
 
         // A receive filter's failure (`on_no_match`) leaves for its handler, which resets locals
@@ -3568,7 +3598,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
 
         self.codegen.patch_jump_to_here(success_jump_addr);
-        Ok(narrowed_type)
+        Ok(match ripple_type {
+            Some(ripple_type) => (ripple_type, Provenance::Unknown),
+            None => (narrowed_type, value_provenance),
+        })
     }
 
     /// Compile a block in its own scope: store the incoming value as the scope parameter, then
@@ -4195,7 +4228,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             module_cache: &mut *self.module_cache,
             package: &self.current_package,
         };
-        let (bindings, binding_sets, _, narrowed_type) = pattern::analyze_pattern(
+        let pattern::PatternAnalysis {
+            bindings,
+            binding_sets,
+            narrowed_type,
+            ripple_type,
+            ..
+        } = pattern::analyze_pattern(
             &mut env,
             self.program,
             &assertion.pattern,
@@ -4203,6 +4242,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             &self.scopes,
             value_provenance,
         )?;
+        // An assertion observes, and the value flows on unchanged, so there is nothing for a
+        // ripple to redirect.
+        if ripple_type.is_some() {
+            return Err(Error::AssertionRipple);
+        }
         // The syntactic check above names dead-alternative binders too; this one catches
         // bindings with no syntactic site of their own (a star pattern's are type-derived) —
         // which would otherwise emit `Store`s for locals never registered.
@@ -4747,10 +4791,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.record_destructured_import(term, &pattern);
             }
             let failures_before = self.match_failures.len();
-            let ty = self.compile_match(
+            let (ty, provenance) = self.compile_match(
                 pattern,
                 result_type,
-                current_prov.clone(),
+                current_prov,
                 on_no_match,
                 narrowing,
                 gating,
@@ -4759,7 +4803,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let verdict = gating.then(|| self.match_failures.split_off(failures_before));
             Ok(ChainResult {
                 ty,
-                provenance: current_prov,
+                provenance,
                 verdict,
             })
         } else {
@@ -6852,16 +6896,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Match requires a value".to_string())
                 })?;
-                let ty = self.compile_match(
+                // The match yields its scrutinee, keeping its provenance, unless a ripple
+                // yields a value from within it instead.
+                self.compile_match(
                     pattern,
                     val_type,
-                    value_provenance.clone(),
+                    value_provenance,
                     on_no_match,
                     narrowing,
                     gating,
-                )?;
-                // The match yields its scrutinee, so it keeps the scrutinee's provenance.
-                Ok((ty, value_provenance))
+                )
             }
             ast::Term::Spawn(function, argument, span) => {
                 let ty = match (function.is_bare_ripple(), argument) {

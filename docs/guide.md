@@ -41,7 +41,7 @@ Quiver uses a keyword-less syntax. The table below gives an overview of the symb
 | Symbol | Description | Example |
 | --- | --- | --- |
 | `~>` | pipe a value into the next term | `5 ~> double` |
-| `~` | the value flowing in this chain | `5 ~> [~, 1]` |
+| `~` | ripple: the value flowing in this chain; in a pattern, the part that flows on | `5 ~> [~, 1]` / `[5] ~> =[~]` |
 | `;` | step separator (a newline is the same) | `a = 1; a` |
 | `//` | comment, to end of line | `x = 1  // a note` |
 | `//=` | assert the value flowing here, in debug builds | `5 ~> double //= 10` |
@@ -164,7 +164,7 @@ for emphasis).
 ### Chains
 
 A **chain** is a sequence of terms joined by `~>`. The value produced by one term becomes
-the input to the next, and `~` refers to the value flowing in.
+the input to the next, and `~` — the **ripple** — refers to the value flowing in.
 
 ```quiver
 3 ~> %num.add [~, 2] ~> %num.mul [~, ~]   //= 25
@@ -411,7 +411,7 @@ Similarly to field label optionality, the defaults are defined on the function i
 ## Matching
 
 A **match** is used for testing a value, creating bindings, or both. When it succeeds it
-evaluates to the value it matched; when it fails, it fails its step, which ends the
+evaluates to the value it matched (or to the part of it a [ripple](#ripples-in-patterns) marks); when it fails, it fails its step, which ends the
 sequence.
 
 There are two variants of the syntax, which both work the same: `x = ...` and `... ~> =x`:
@@ -552,6 +552,35 @@ succ = #('int | []) { (\[] & n) = $; %num.add [n, 1] }
 succ 4                        //= 5
 succ []                       //= []
 5 ~> =\x                      //! cannot bind
+```
+
+### Ripples in patterns
+
+A match evaluates to the whole value it matched, so after destructuring, the chain still
+carries the whole. A ripple in a pattern marks the part that should flow on instead:
+
+```quiver
+[42] ~> =[~]                          //= 42
+Ok[41] ~> =Ok[~] ~> %num.add [~, 1]   //= 42
+[x: 1, y: 2] ~> =(y: ~)               //= 2
+```
+
+A ripple is typed at its position, so the chain after it is checked against what was
+there. Like a repeated binder, a repeated ripple requires the values at each to be equal:
+
+```quiver
+[1, [1, 2], 3] ~> =[~, [~, 'int], _]   //= 1
+{ [1, [2, 2], 3] ~> =[~, [~, _], _] }  //= []
+```
+
+A ripple follows the binding rules: every alternative of an alternation must have one or
+none may, and a negation may not contain one. A bare `~` is the whole value, so it is how an
+alternative passes its value on unchanged:
+
+```quiver
+unwrap = #(Ok['int] | Other) { =(Ok[~] | ~) }
+unwrap Ok[3]                  //= 3
+unwrap Other                  //= Other
 ```
 
 ### Where a match may appear

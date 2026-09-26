@@ -1271,6 +1271,7 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
             // Literals
             map(literal, Match::Literal),
             map(char('_'), |_| Match::Placeholder),
+            ripple_pattern,
             // Identifier
             map(spanned(identifier), |(span, name)| {
                 Match::Identifier(name, Spanned(Some(span)))
@@ -2871,6 +2872,11 @@ fn type_or_compound(input: Span) -> IResult<Span, Match> {
     alt((map(inline_type_expression, Match::Type), compound_pattern))(input)
 }
 
+/// The ripple `~` — not the start of a `~>`, which would end the pattern instead.
+fn ripple_pattern(input: Span) -> IResult<Span, Match> {
+    map(terminated(char('~'), not(char('>'))), |_| Match::Ripple)(input)
+}
+
 /// A negated pattern: `\` glued to the pattern it negates (`\[]`, `\'int`, `\^x`,
 /// `\(A | B)`).
 fn negated_pattern(input: Span) -> IResult<Span, Match> {
@@ -2914,6 +2920,7 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
         // Then try literals
         map(literal, Match::Literal),
         map(char('_'), |_| Match::Placeholder),
+        ripple_pattern,
         // Identifier must come last (since it's more general)
         map(spanned(identifier), |(span, name)| {
             Match::Identifier(name, Spanned(Some(span)))

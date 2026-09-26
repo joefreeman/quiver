@@ -123,6 +123,19 @@ fn test_negated_statically_decided() {
 }
 
 #[test]
+fn test_negation_cannot_bind_where_it_cannot_match() {
+    // `B[x]` can never match an `A`, but the binding inside the negation is still rejected.
+    quiver()
+        .evaluate("f = #A['int] { | =\\B[x] => Yes | No }; f A[1]")
+        .expect_compile_error(Error::NegatedPatternBindings {
+            bindings: vec!["x".to_string()],
+        });
+    quiver()
+        .evaluate("f = #A['int] { | =\\B[~] => Yes | No }; f A[1]")
+        .expect_compile_error(Error::NegatedPatternRipple);
+}
+
+#[test]
 fn test_negation_cannot_bind() {
     quiver()
         .evaluate("5 ~> =\\x")

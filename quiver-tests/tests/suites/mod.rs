@@ -56,6 +56,7 @@ mod r#ref;
 mod refcount_repl;
 mod registry;
 mod repl_atomicity;
+mod ripple_patterns;
 mod select_sources;
 mod sequences;
 mod serialization;

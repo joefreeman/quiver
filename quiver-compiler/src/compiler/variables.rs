@@ -279,6 +279,7 @@ impl<'a> FreeVariableCollector<'a> {
             | ast::Match::String(_, _)
             | ast::Match::Star(_)
             | ast::Match::Placeholder
+            | ast::Match::Ripple
             | ast::Match::Type(_) => {}
         }
     }

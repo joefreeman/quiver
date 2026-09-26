@@ -965,6 +965,7 @@ fn walk_match_spans(pattern: &mut ast::Match, f: &mut impl FnMut(&mut ast::Spann
         | ast::Match::String(_, _)
         | ast::Match::Star(_)
         | ast::Match::Placeholder
+        | ast::Match::Ripple
         | ast::Match::Type(_) => {}
         ast::Match::Tuple(tuple) => {
             for field in &mut tuple.fields {

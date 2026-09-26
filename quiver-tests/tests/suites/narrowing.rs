@@ -1481,3 +1481,15 @@ fn test_alternation_over_recursive_members_keeps_every_tail_variant() {
         .evaluate("'l = A | B | Cons[^]; e = #'l { | =(A | Cons[_]) => Y | =B => Z }; e")
         .expect_type("#(A | B | Cons[μ1]) -> (Y | Z)");
 }
+
+#[test]
+fn test_repeated_binder_blocks_field_complement() {
+    // The sub-tuple is the only type-constraining field, but the repeated `x` can still fail
+    // the match, so the block is not exhaustive and its type keeps the nil.
+    quiver()
+        .evaluate("{ [1, [2]] ~> =[x, [x]] } ~> { =[] => Missed | Matched }")
+        .expect("Missed");
+    quiver()
+        .evaluate("{ [1, [2]] ~> =[~, [~]] } ~> { =[] => Missed | Matched }")
+        .expect("Missed");
+}

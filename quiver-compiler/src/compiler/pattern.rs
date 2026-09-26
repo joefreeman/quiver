@@ -15,14 +15,23 @@ use super::{
     typing::{self, union_type_ids},
 };
 
-// Type aliases for complex pattern matching types (using type IDs)
-/// (bindings, binding sets, result type, success-narrowed type). The result type is the
-/// narrowed type widened with nil when the match can fail — the match *term's* value domain.
-/// The success-narrowed type is what the scrutinee is known to be when the pattern matched;
-/// success-path narrowing and complement recording must use it, not the widened result — a
-/// fallible `='int` covers `'int`, not `'int | []`, and recording the widened type would
-/// subtract nil from subsequent branches when the branch fails.
-type PatternAnalysisResult = (Vec<(String, usize)>, Vec<BindingSet>, usize, usize);
+/// What analysing a pattern tells its caller.
+pub struct PatternAnalysis {
+    /// The pattern's bindings with their types, sorted by name (the order
+    /// `generate_pattern_code` stores them in). Excludes the ripple.
+    pub bindings: Vec<(String, usize)>,
+    pub binding_sets: Vec<BindingSet>,
+    /// The narrowed type widened with nil when the match can fail.
+    pub result_type: usize,
+    /// What the scrutinee is known to be when the pattern matched. Success-path narrowing and
+    /// complement recording must use it, not the widened result — a fallible `='int` covers
+    /// `'int`, not `'int | []`, and recording the widened type would subtract nil from
+    /// subsequent branches when the branch fails.
+    pub narrowed_type: usize,
+    /// The type of the value at the ripple (`~`), when the pattern has one: what the match
+    /// yields in place of its scrutinee.
+    pub ripple_type: Option<usize>,
+}
 type TupleMatchResult = Vec<(usize, Vec<(usize, usize)>)>;
 // Field info plus how to rebuild a variant's narrowed type: the variant's fields, the matched
 // field indices, and the optional tuple name (`None` for a partial match, which keeps the input type).
@@ -236,7 +245,7 @@ pub fn analyze_pattern(
     value_type_id: usize,
     scopes: &[super::scopes::Scope],
     value_provenance: &super::provenance::Provenance,
-) -> Result<PatternAnalysisResult, Error> {
+) -> Result<PatternAnalysis, Error> {
     let mut identifiers = HashMap::new();
     let (binding_sets, narrowed_type_id) = analyze_match_pattern(
         env,
@@ -252,7 +261,13 @@ pub fn analyze_pattern(
     if binding_sets.is_empty() {
         // Won't match - return never type (empty union)
         let never = program.never();
-        return Ok((Vec::new(), Vec::new(), never, never));
+        return Ok(PatternAnalysis {
+            bindings: Vec::new(),
+            binding_sets: Vec::new(),
+            result_type: never,
+            narrowed_type: never,
+            ripple_type: None,
+        });
     }
 
     // Check if all binding sets have requirements (might match) or some have none (will match)
@@ -275,10 +290,16 @@ pub fn analyze_pattern(
     // depend on hash order, breaking reproducible compilation.
     let mut all_bindings: Vec<(String, Vec<usize>)> = bindings_map.into_iter().collect();
     all_bindings.sort_by(|a, b| a.0.cmp(&b.0));
-    let all_bindings: Vec<(String, usize)> = all_bindings
+    let mut all_bindings: Vec<(String, usize)> = all_bindings
         .into_iter()
         .map(|(name, types)| (name, union_type_ids(program, types)))
         .collect();
+    // Alternation requires every alternative to agree on its bindings, the ripple among them, so
+    // a ripple in one binding set is in all of them.
+    let ripple_type = all_bindings
+        .iter()
+        .position(|(name, _)| name == ast::RIPPLE)
+        .map(|index| all_bindings.remove(index).1);
 
     // Include [] in the result type if there are runtime requirements (might match)
     let result_type_id = if will_match {
@@ -288,7 +309,13 @@ pub fn analyze_pattern(
         union_type_ids(program, vec![nil_id, narrowed_type_id])
     };
 
-    Ok((all_bindings, binding_sets, result_type_id, narrowed_type_id))
+    Ok(PatternAnalysis {
+        bindings: all_bindings,
+        binding_sets,
+        result_type: result_type_id,
+        narrowed_type: narrowed_type_id,
+        ripple_type,
+    })
 }
 
 /// Generate bytecode for pattern matching
@@ -325,11 +352,20 @@ pub fn generate_pattern_code(
         // If we get here, all checks passed - extract bindings
         // Sort by name to ensure consistent ordering across binding sets (important for unions
         // where different variants may have bindings in different field orders)
-        let mut sorted_bindings: Vec<_> = binding_set.bindings.iter().collect();
+        let (ripple, mut sorted_bindings): (Vec<_>, Vec<_>) = binding_set
+            .bindings
+            .iter()
+            .partition(|binding| binding.name == ast::RIPPLE);
         sorted_bindings.sort_by(|a, b| a.name.cmp(&b.name));
         for binding in sorted_bindings {
             generate_value_access(codegen, &binding.path);
             codegen.add_instruction(Instruction::store());
+        }
+        // The value at the ripple replaces the scrutinee as what the match yields.
+        if let [ripple] = ripple.as_slice() {
+            for &access in &ripple.path {
+                emit_access(codegen, access);
+            }
         }
 
         // Jump to end (unless this is the last set)
@@ -457,6 +493,12 @@ fn analyze_match_pattern(
     match pattern {
         ast::Match::Identifier(name, _) => {
             analyze_identifier_pattern(name.clone(), value_type_id, path, identifiers)
+        }
+        // The ripple is a binder under a reserved name: repeated, its values must be equal, and
+        // alternation and negation hold it to their binding rules. `analyze_pattern` lifts it
+        // out of the bindings.
+        ast::Match::Ripple => {
+            analyze_identifier_pattern(ast::RIPPLE.to_string(), value_type_id, path, identifiers)
         }
         ast::Match::Literal(literal) => {
             analyze_literal_pattern(literal.clone(), path, value_type_id, program)
@@ -692,6 +734,78 @@ fn type_check_requirements(
     Ok((requirements, narrowed))
 }
 
+/// The names a pattern binds as written — its ripple among them, as [`ast::RIPPLE`] — sorted
+/// and deduplicated, or `None` when a star pattern's bindings, which only its value's type
+/// decides, leave them unknowable. Read from the syntax, so a part of the pattern that can never
+/// match its value is held to the binding rules as much as one that can.
+fn written_bindings(pattern: &ast::Match) -> Option<Vec<String>> {
+    fn collect(pattern: &ast::Match, out: &mut Vec<String>) -> Option<()> {
+        match pattern {
+            ast::Match::Identifier(name, _) => out.push(name.clone()),
+            ast::Match::Ripple => out.push(ast::RIPPLE.to_string()),
+            ast::Match::Star(_) => return None,
+            ast::Match::Tuple(tuple) => {
+                for field in &tuple.fields {
+                    collect(&field.pattern, out)?;
+                }
+            }
+            ast::Match::Partial(partial) => {
+                for field in &partial.fields {
+                    match &field.pattern {
+                        Some(nested) => collect(nested, out)?,
+                        None => out.push(field.name.clone()),
+                    }
+                }
+            }
+            ast::Match::Or(parts) | ast::Match::And(parts) => {
+                for part in parts {
+                    collect(part, out)?;
+                }
+            }
+            // A negation binds nothing, which its own analysis enforces.
+            ast::Match::Not(_)
+            | ast::Match::Literal(_)
+            | ast::Match::String(..)
+            | ast::Match::Placeholder
+            | ast::Match::Pin(_)
+            | ast::Match::Type(_) => {}
+        }
+        Some(())
+    }
+    let mut names = Vec::new();
+    collect(pattern, &mut names)?;
+    names.sort();
+    names.dedup();
+    Some(names)
+}
+
+/// Reject bindings inside a negation. `names` are sorted, as `written_bindings` and
+/// `analyze_pattern` produce them.
+fn check_negation_bindings(names: Vec<String>) -> Result<(), Error> {
+    if names.iter().any(|name| name == ast::RIPPLE) {
+        return Err(Error::NegatedPatternRipple);
+    }
+    if !names.is_empty() {
+        return Err(Error::NegatedPatternBindings { bindings: names });
+    }
+    Ok(())
+}
+
+/// Reject alternatives that disagree on their bindings, given each one's sorted names.
+fn check_alternative_bindings(expected: &[String], found: &[String]) -> Result<(), Error> {
+    let has_ripple = |names: &[String]| names.iter().any(|name| name == ast::RIPPLE);
+    if has_ripple(expected) != has_ripple(found) {
+        return Err(Error::OrPatternRippleMismatch);
+    }
+    if expected != found {
+        return Err(Error::OrPatternBindingMismatch {
+            expected: expected.to_vec(),
+            found: found.to_vec(),
+        });
+    }
+    Ok(())
+}
+
 /// Analyze a negated pattern `\\P`: a single requirement that none of `P`'s binding sets holds.
 ///
 /// `P` may not bind: when the negation matches, `P` didn't, so its bindings would be unset. A name
@@ -717,6 +831,11 @@ fn analyze_negated_pattern(
         ast::Match::Not(_) => return Err(Error::DoubleNegation),
         _ => {}
     }
+    // As written first, so a binding is rejected whether or not `P` could match; then as
+    // analysed, which also sees the bindings of a star pattern `P` could match with.
+    if let Some(names) = written_bindings(inner) {
+        check_negation_bindings(names)?;
+    }
     let (sets, inner_narrowed) = analyze_match_pattern(
         env,
         program,
@@ -731,11 +850,9 @@ fn analyze_negated_pattern(
         .iter()
         .flat_map(|set| set.bindings.iter().map(|binding| binding.name.clone()))
         .collect();
-    if !bindings.is_empty() {
-        bindings.sort();
-        bindings.dedup();
-        return Err(Error::NegatedPatternBindings { bindings });
-    }
+    bindings.sort();
+    bindings.dedup();
+    check_negation_bindings(bindings)?;
 
     let always_matches = || {
         vec![BindingSet {
@@ -788,7 +905,8 @@ fn analyze_negated_pattern(
 /// pattern matches if any alternative does. The narrowed type is the union of the alternatives'.
 ///
 /// Every alternative must bind the same set of variables, so the body sees them whichever one
-/// matched. Each alternative is analyzed in its own identifier scope, so a name bound in two
+/// matched. That holds of the alternatives as written, even one that can never match the value,
+/// and of their analysed bindings, which is what checks a star pattern's. Each alternative is analyzed in its own identifier scope, so a name bound in two
 /// alternatives is one binding (the alternatives are mutually exclusive) rather than a repeated
 /// identifier (an equality check).
 #[allow(clippy::too_many_arguments)]
@@ -802,6 +920,13 @@ fn analyze_or_pattern(
     scopes: &[super::scopes::Scope],
     value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, usize), Error> {
+    let mut written = alternatives.iter().filter_map(written_bindings);
+    if let Some(expected) = written.next() {
+        for found in written {
+            check_alternative_bindings(&expected, &found)?;
+        }
+    }
+
     let mut pooled_sets = vec![];
     let mut narrowed_ids = vec![];
     let mut expected_names: Option<Vec<String>> = None;
@@ -820,8 +945,8 @@ fn analyze_or_pattern(
         )?;
 
         // An alternative that produces no binding sets is statically dead for this value type
-        // (e.g. `A[x]` against a `B` value): it can never match at runtime, so it neither
-        // contributes bindings nor participates in the same-variables check.
+        // (e.g. `A[x]` against a `B` value): it can never match at runtime, so it contributes no
+        // bindings (its written ones were checked above).
         if sets.is_empty() {
             continue;
         }
@@ -834,13 +959,7 @@ fn analyze_or_pattern(
         names.dedup();
         match &expected_names {
             None => expected_names = Some(names),
-            Some(expected) if *expected != names => {
-                return Err(Error::OrPatternBindingMismatch {
-                    expected: expected.clone(),
-                    found: names,
-                });
-            }
-            Some(_) => {}
+            Some(expected) => check_alternative_bindings(expected, &names)?,
         }
 
         pooled_sets.extend(sets);
@@ -869,7 +988,7 @@ fn analyze_and_pattern(
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     let (binders, tests): (Vec<_>, Vec<_>) = conjuncts
         .iter()
-        .partition(|conjunct| matches!(conjunct, ast::Match::Identifier(..)));
+        .partition(|conjunct| matches!(conjunct, ast::Match::Identifier(..) | ast::Match::Ripple));
     let mut sets = vec![BindingSet {
         requirements: vec![],
         bindings: vec![],

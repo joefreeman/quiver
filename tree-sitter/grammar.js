@@ -626,6 +626,8 @@ module.exports = grammar({
       $.binary,
       $.star,
       $.placeholder,
+      // In a pattern, `~` marks the value the match yields in place of its scrutinee.
+      $.ripple,
       $.identifier,
     ),
 

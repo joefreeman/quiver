@@ -1727,6 +1727,7 @@ fn render_match_flat(pattern: &Match) -> String {
         Match::Star(None) => "*".to_string(),
         Match::Star(Some(name)) => format!("{}*", name),
         Match::Placeholder => "_".to_string(),
+        Match::Ripple => "~".to_string(),
         Match::Not(inner) => format!("\\{}", render_match(inner)),
         Match::Pin(target) => {
             let mut out = String::from("^");

@@ -557,6 +557,10 @@ pub struct PinTarget {
     pub span: Spanned,
 }
 
+/// The reserved binder name a ripple (`~`) is analysed under. Not a valid identifier, so it
+/// never collides with a user binding.
+pub const RIPPLE: &str = "~";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Match {
     /// A binding identifier (`x` in `[x, y] = ...` or `~> =x`). The span covers the
@@ -573,6 +577,10 @@ pub enum Match {
     /// requires the value to be named, mirroring a named partial pattern.
     Star(Option<String>),
     Placeholder,
+    /// The ripple `~`: the match yields the value here in place of its scrutinee, so
+    /// `[42] ~> =[~]` flows `42` on. Repeated, the values at each must be equal, as for a
+    /// repeated binder — which is how analysis treats it, under [`RIPPLE`].
+    Ripple,
     /// A pin against an existing value: `^name`, `^name.field`, `^$`, `^$x.0` — matches only
     /// if the value equals the referenced value. The target is an access path rooted at a
     /// variable or the enclosing function's parameter (with the parameter's usual glued first

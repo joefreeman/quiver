@@ -271,6 +271,36 @@ fn test_or_pattern_inconsistent_bindings_is_error() {
 }
 
 #[test]
+fn test_or_pattern_dead_alternative_bindings_checked() {
+    // `B[y]` can never match an `A`, but its bindings are held to the rule all the same.
+    let src = "f = #A['int] { =(A[x] | B[y]) => 9 };\nA[1] ~> f ~";
+    quiver().evaluate(src).expect_compile_error(
+        quiver_compiler::compiler::Error::OrPatternBindingMismatch {
+            expected: vec!["x".to_string()],
+            found: vec!["y".to_string()],
+        },
+    );
+    // A dead alternative that agrees is fine.
+    quiver()
+        .evaluate("f = #A['int] { =(A[x] | B[x]) => x };\nA[1] ~> f ~")
+        .expect("1");
+}
+
+#[test]
+fn test_or_pattern_star_alternatives_checked_by_analysis() {
+    // A star's bindings come from its value's type, so they are checked where it can match.
+    quiver()
+        .evaluate("f = #(A[x: 'int] | B[x: 'int]) { =(A* | B[x: x]) => x }; f B[x: 2]")
+        .expect("2");
+    quiver()
+        .evaluate("f = #(A[x: 'int] | B[y: 'int]) { =(A* | B[y: y]) => 1 }; f A[x: 1]")
+        .expect_compile_error(quiver_compiler::compiler::Error::OrPatternBindingMismatch {
+            expected: vec!["x".to_string()],
+            found: vec!["y".to_string()],
+        });
+}
+
+#[test]
 fn test_type_narrowing_in_blocks() {
     // Test type narrowing for int
     quiver()

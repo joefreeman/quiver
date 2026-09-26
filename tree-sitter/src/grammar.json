@@ -3073,6 +3073,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "ripple"
+        },
+        {
+          "type": "SYMBOL",
           "name": "identifier"
         }
       ]
