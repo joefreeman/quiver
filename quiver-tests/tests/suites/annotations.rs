@@ -52,8 +52,8 @@ fn test_function_annotation_does_not_affect_calls() {
 #[test]
 fn test_annotated_nil_still_matches_nil() {
     quiver()
-        .evaluate("[] ~> { :doc \"why\" } ~> =[]")
-        .expect("Ok");
+        .evaluate("[] ~> { :doc \"why\" } ~> { =[] => IsNil | NotNil }")
+        .expect("IsNil");
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn test_annotated_nil_still_short_circuits() {
 fn test_annotations_invisible_to_equality() {
     quiver()
         .evaluate("a = A[x: 1]; b = A[x: 1] ~> { :foo 9 }; a ~> =&b")
-        .expect("Ok");
+        .expect("A[x: 1]");
 }
 
 #[test]
@@ -113,10 +113,12 @@ fn test_branch_fallback_discards_payload() {
     // A branch recovering from the failure swallows the payload, like catching an
     // exception: the block's result is the fallback value, no annotation attached.
     // In-chain (a binding would short-circuit the nil case away entirely): the
-    // recovering branch yields a fresh Ok, so the payload is gone and :e reads nil.
+    // recovering branch yields a fresh value, so the payload is gone and :e reads nil.
     quiver()
-        .evaluate("[] ~> { :e Boom } ~> { =[] => Ok | ~ } ~> :e ~> =[]")
-        .expect("Ok");
+        .evaluate(
+            "[] ~> { :e Boom } ~> { =[] => Recovered | ~ } ~> :(Boom)e ~> { =[] => Gone | Kept }",
+        )
+        .expect("Gone");
 }
 
 #[test]
@@ -379,7 +381,7 @@ fn test_generic_carrier_is_invisible_to_the_row() {
             r#"stamp = #<'t>['t, 'int] { $0 ~> { :seen $1 } }
                stamp [Inc, 41] ~> =Inc"#,
         )
-        .expect("Ok");
+        .expect("Inc");
 }
 
 #[test]
@@ -525,8 +527,8 @@ fn test_builtin_attach_and_retrieve() {
 #[test]
 fn test_builtin_annotations_invisible_to_equality() {
     quiver()
-        .evaluate("a = __integer_add__; b = __integer_add__ ~> { :doc \"Adds.\" }; a ~> =&b")
-        .expect("Ok");
+        .evaluate("a = __integer_add__; b = __integer_add__ ~> { :doc \"Adds.\" }; a ~> { =&b => Equal | Different }")
+        .expect("Equal");
 }
 
 #[test]
@@ -568,8 +570,8 @@ fn test_checked_retrieval_definite_entry() {
 #[test]
 fn test_checked_retrieval_wrong_shape_is_nil() {
     quiver()
-        .evaluate("f = [1] ~> { :count \"hi\" }; f:('int)count ~> =[]")
-        .expect("Ok");
+        .evaluate("f = [1] ~> { :count \"hi\" }; f:('int)count ~> { =[] => IsNil | NotNil }")
+        .expect("IsNil");
 }
 
 #[test]
@@ -577,8 +579,8 @@ fn test_checked_retrieval_absent_key_is_nil() {
     // No typo firewall on the checked form: the explicit shape is the programmer's
     // declaration that this is beyond static tracking.
     quiver()
-        .evaluate("a = A[b: 1]; a:('int)foo ~> =[]")
-        .expect("Ok");
+        .evaluate("a = A[b: 1]; a:('int)foo ~> { =[] => IsNil | NotNil }")
+        .expect("IsNil");
 }
 
 #[test]
@@ -620,8 +622,8 @@ fn test_checked_retrieval_on_module_member() {
         .evaluate("%list.head:(Str['bin])doc")
         .expect("\"The first element of a list, or nil when it is empty.\"");
     quiver()
-        .evaluate("%list.head:('int)doc ~> =[]")
-        .expect("Ok");
+        .evaluate("%list.head:('int)doc ~> { =[] => IsNil | NotNil }")
+        .expect("IsNil");
 }
 
 #[test]

@@ -145,7 +145,7 @@ just a number here:
 
 ```quiver
 doc = "1000000000000000000000000000000"
-doc ~> %json.parse ~ ~> =('%json)v; v ~> %json.stringify ~ ~> =&doc   //= Ok
+doc ~> %json.parse ~ ~> =('%json)v; v ~> %json.stringify ~   //= &doc
 ```
 
 ## Rendering
@@ -210,7 +210,7 @@ and strings needing quote, backslash and newline escaping — checked with a sin
 
 ```quiver
 doc = "\{\"user\":\{\"name\":\"Ada \\\"L\\\"\",\"age\":36,\"active\":true,\"roles\":[\"admin\",\"dev\"],\"manager\":null},\"scores\":[10,-5,0],\"empty_obj\":\{},\"empty_arr\":[],\"path\":\"a\\\\b\\nc\"}"
-doc ~> %json.parse ~ ~> =('%json)v; v ~> %json.stringify ~ ~> =&doc   //= Ok
+doc ~> %json.parse ~ ~> =('%json)v; v ~> %json.stringify ~   //= &doc
 ```
 
 ## Reading
@@ -228,7 +228,7 @@ The empty path names the value itself:
 
 ```quiver
 doc = %json{ { "a": 1 } }
-%json.get [doc, %list{}] ~> =&doc   //= Ok
+%json.get [doc, %list{}]   //= &doc
 ```
 
 Every miss is nil, whether the key is absent, the kind is wrong, or the index is out of range:
@@ -359,13 +359,13 @@ the document unchanged — but still kind-strict, so an object key applied to an
 
 ```quiver
 doc = %json{ { "a": 1 } }
-%json.delete [doc, "z"] ~> =&doc   //= Ok
-%json.delete [doc, %list{ "z", "x" }] ~> =&doc   //= Ok
+%json.delete [doc, "z"]   //= &doc
+%json.delete [doc, %list{ "z", "x" }]   //= &doc
 ```
 
 ```quiver
 doc = %json{ [1] }
-%json.delete [doc, 5] ~> =&doc   //= Ok
+%json.delete [doc, 5]   //= &doc
 %json{ [1] } ~> %json.delete [~, "a"]   //= []
 ```
 
@@ -494,7 +494,7 @@ included. That is how a schema keeps an opaque region.
 
 ```quiver
 doc = %json{ { "a": [1, null] } }
-%json.decode<'%json> doc ~> =&doc   //= Ok
+%json.decode<'%json> doc   //= &doc
 ```
 
 ```quiver
@@ -547,7 +547,7 @@ A `'%json`-typed part passes through whole, as on the way in:
 
 ```quiver
 doc = %json{ { "a": [1, true, null] } }
-%json.encode<'%json> doc ~> =&doc   //= Ok
+%json.encode<'%json> doc   //= &doc
 ```
 
 A value with no JSON form at all — a function, process, ref, resource, binary, dict, or an
@@ -564,7 +564,7 @@ unlabelled tuple — is a runtime error rather than a nil, because no caller cou
 ```quiver
 'user = [name: '%str, age: 'int, email: '%str | []]
 u = [name: "ada", age: 36, email: []]
-%json.encode<'user> u ~> %json.decode<'user> ~ ~> =&u   //= Ok
+%json.encode<'user> u ~> %json.decode<'user> ~   //= &u
 ```
 
 and through text, which is the whole path a program actually uses:
@@ -572,5 +572,5 @@ and through text, which is the whole path a program actually uses:
 ```quiver
 'tree = Leaf[value: 'int] | Node[left: ^, right: ^]
 t = Node[left: Leaf[value: 1], right: Node[left: Leaf[value: 2], right: Leaf[value: 3]]]
-%json.encode<'tree> t ~> %json.stringify ~ ~> %json.parse ~ ~> %json.decode<'tree> ~ ~> =&t   //= Ok
+%json.encode<'tree> t ~> %json.stringify ~ ~> %json.parse ~ ~> %json.decode<'tree> ~   //= &t
 ```

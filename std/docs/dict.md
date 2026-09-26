@@ -285,7 +285,7 @@ Insertion order does not matter:
 ```quiver
 a = %dict.new [] ~> %dict.put [~, "alpha", 1] ~> %dict.put [~, "bravo", 2] ~> %dict.put [~, "charlie", 3]
 b = %dict.new [] ~> %dict.put [~, "charlie", 3] ~> %dict.put [~, "bravo", 2] ~> %dict.put [~, "alpha", 1]
-a ~> =&b     //= Ok
+a            //= &b
 ```
 
 Nor does a detour through an entry that was later removed:
@@ -293,7 +293,7 @@ Nor does a detour through an entry that was later removed:
 ```quiver
 a = %dict{ "alpha" => 1, "bravo" => 2, "charlie" => 3, "delta" => 4 } ~> %dict.remove [~, "charlie"]
 b = %dict{ "alpha" => 1, "bravo" => 2, "delta" => 4 }
-a ~> =&b     //= Ok
+a            //= &b
 ```
 
 The trie is an ordinary value, so its nodes can be matched directly. A one-entry dict is a
@@ -361,5 +361,5 @@ that never held it:
 ```quiver
 a = %dict{ <86f15dabd8> => 1, <86f166b4b6> => 2 } ~> %dict.remove [~, <86f15dabd8>]
 b = %dict{ <86f166b4b6> => 2 }
-a ~> =&b     //= Ok
+a            //= &b
 ```

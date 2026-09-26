@@ -158,16 +158,16 @@ A literal in a pattern tests, as any other literal does — and because the lite
 reduced rational, so is the test.
 
 ```quiver
-%num.add [0.1, 0.2] ~> =0.3   //= Ok
-2/4 ~> =1/2                   //= Ok
-%num.add [0.1, 0.2] ~> =0.4   //= []
+%num.add [0.1, 0.2] ~> =0.3       //= 3/10
+2/4 ~> =1/2                       //= 1/2
+%num.add [0.1, 0.2] ~> { =0.4 }   //= []
 ```
 
 Kind is part of the match: `4/2` is a rational, so it matches `=2/1` and not `=2`.
 
 ```quiver
-4/2 ~> =2/1                   //= Ok
-4/2 ~> =2                     //= []
+4/2 ~> =2/1                   //= 2/1
+4/2 ~> { =2 }                 //= []
 ```
 
 ## Surds

@@ -790,9 +790,9 @@ fn test_redirect_marks_state_without_changing_it() {
     quiver()
         .evaluate(
             r#"s = [page: "x", clicks: 3] ~> %html/live.redirect [~, "/posts/7"]
-               [s, s:('%str)redirect, s ~> =(page: "x")]"#,
+               [s, s:('%str)redirect, s ~> { =(page: "x") => Matches | Differs }]"#,
         )
-        .expect(r#"[[page: "x", clicks: 3], "/posts/7", Ok]"#);
+        .expect(r#"[[page: "x", clicks: 3], "/posts/7", Matches]"#);
 }
 
 #[test]

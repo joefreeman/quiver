@@ -2,7 +2,7 @@ use crate::common::*;
 
 #[test]
 fn test_pin_simple() {
-    quiver().evaluate("y = 2; 2 ~> =&y").expect("Ok");
+    quiver().evaluate("y = 2; 2 ~> =&y").expect("2");
     quiver().evaluate("y = 2; 3 ~> =&y").expect("[]");
 }
 
@@ -47,7 +47,7 @@ fn test_nested_pin_and_bind() {
 fn test_pin_multiple_variables() {
     quiver()
         .evaluate("x = 1; y = 2; [1, 2] ~> =[&x, &y]")
-        .expect("Ok");
+        .expect("[1, 2]");
     quiver()
         .evaluate("x = 1; y = 2; [1, 3] ~> =[&x, &y]")
         .expect("[]");
@@ -56,7 +56,7 @@ fn test_pin_multiple_variables() {
 #[test]
 fn test_repeated_identifier_pin() {
     // Repeated identifier in pin mode - checks equality
-    quiver().evaluate("[5, 5] ~> =[x, x]").expect("Ok");
+    quiver().evaluate("[5, 5] ~> =[x, x]").expect("[5, 5]");
     quiver().evaluate("[5, 6] ~> =[x, x]").expect("[]");
 }
 
@@ -68,7 +68,9 @@ fn test_pin_against_partial() {
     quiver().evaluate("A[x: 1, y: 2] ~> =(x: b); b").expect("1");
 
     // Pinning: (field_name: &var) checks field against variable value
-    quiver().evaluate("x = 1; A[x: 1] ~> =(x: &x)").expect("Ok");
+    quiver()
+        .evaluate("x = 1; A[x: 1] ~> =(x: &x)")
+        .expect("A[x: 1]");
     quiver().evaluate("x = 2; A[x: 1] ~> =(x: &x)").expect("[]");
 
     // Without variable for pin, should error: `&x` names an undefined binding.
@@ -82,7 +84,9 @@ fn test_pin_against_partial() {
 #[test]
 fn test_pin_with_variable_and_repetition() {
     // When variable exists and identifier is repeated, check both Variable and FieldEquality
-    quiver().evaluate("x = 5; [5, 5] ~> =[&x, &x]").expect("Ok");
+    quiver()
+        .evaluate("x = 5; [5, 5] ~> =[&x, &x]")
+        .expect("[5, 5]");
     quiver().evaluate("x = 5; [5, 6] ~> =[&x, &x]").expect("[]"); // Fails field equality
     quiver().evaluate("x = 5; [4, 4] ~> =[&x, &x]").expect("[]"); // Fails variable check
 }
@@ -100,7 +104,7 @@ fn test_pin_from_outer_scope() {
     // Pin pattern should be able to reference variables from outer scopes
     quiver()
         .evaluate("x = 5; f = #[] { A[5] ~> =A[&x] }; [] ~> f ~")
-        .expect("Ok");
+        .expect("A[5]");
     quiver()
         .evaluate("x = 5; f = #[] { A[6] ~> =A[&x] }; [] ~> f ~")
         .expect("[]");
@@ -120,20 +124,20 @@ fn test_pin_mixed_repeated_and_single() {
 
 #[test]
 fn test_pin_int_type() {
-    quiver().evaluate("42 ~> ='int").expect("Ok");
+    quiver().evaluate("42 ~> ='int").expect("42");
     quiver().evaluate("<ff> ~> ='int").expect("[]");
 }
 
 #[test]
 fn test_pin_bin_type() {
-    quiver().evaluate("<abcd> ~> ='bin").expect("Ok");
+    quiver().evaluate("<abcd> ~> ='bin").expect("<abcd>");
     quiver().evaluate("42 ~> ='bin").expect("[]");
 }
 
 #[test]
 fn test_pin_default_type() {
     // `='` references the enclosing module's default type, like `'int` references a named one.
-    quiver().evaluate("' = A | B;\nA ~> ='").expect("Ok");
+    quiver().evaluate("' = A | B;\nA ~> ='").expect("A");
     quiver().evaluate("' = A | B;\nC ~> ='").expect("[]");
 }
 
@@ -142,37 +146,35 @@ fn test_pin_variable_field_path() {
     // A pin target may walk fields of an existing variable.
     quiver()
         .evaluate("p = Point[x: 1, y: 2]; 1 ~> =&p.x")
-        .expect("Ok");
+        .expect("1");
     quiver()
         .evaluate("p = Point[x: 1, y: 2]; 2 ~> =&p.x")
         .expect("[]");
     quiver()
         .evaluate("p = [a: [b: 7]]; 7 ~> =&p.a.b")
-        .expect("Ok");
-    quiver().evaluate("p = [3, 4]; 4 ~> =&p.1").expect("Ok");
+        .expect("7");
+    quiver().evaluate("p = [3, 4]; 4 ~> =&p.1").expect("4");
 }
 
 #[test]
 fn test_pin_parameter() {
     // `&$` pins the whole parameter; `&$x` / `&$0` pin its fields (glued sugar, as in `$x`).
-    quiver()
-        .evaluate("f = #'int { 5 ~> =&$ }; f 5")
-        .expect("Ok");
+    quiver().evaluate("f = #'int { 5 ~> =&$ }; f 5").expect("5");
     quiver()
         .evaluate("f = #'int { 5 ~> =&$ }; f 6")
         .expect("[]");
     quiver()
         .evaluate("f = #[x: 'int, y: 'int] { $y ~> =&$x }; f [x: 3, y: 3]")
-        .expect("Ok");
+        .expect("3");
     quiver()
         .evaluate("f = #[x: 'int, y: 'int] { $y ~> =&$x }; f [x: 3, y: 4]")
         .expect("[]");
     quiver()
         .evaluate("f = #['int, 'int] { $1 ~> =&$0 }; f [3, 3]")
-        .expect("Ok");
+        .expect("3");
     quiver()
         .evaluate("f = #[p: [q: 'int]] { 9 ~> =&$p.q }; f [p: [q: 9]]")
-        .expect("Ok");
+        .expect("9");
 }
 
 #[test]
@@ -190,7 +192,7 @@ fn test_pin_path_in_tuple_pattern() {
         .expect("[]");
     quiver()
         .evaluate("p = [limit: 10]; [v: 10] ~> =(v: &p.limit)")
-        .expect("Ok");
+        .expect("[v: 10]");
 }
 
 #[test]
@@ -198,7 +200,7 @@ fn test_pin_path_captured_in_closure() {
     // A pin path rooted at an outer variable is captured like the equivalent expression access.
     quiver()
         .evaluate("p = [x: 42]; f = #'int { $ ~> =&p.x }; f 42")
-        .expect("Ok");
+        .expect("42");
     quiver()
         .evaluate("p = [x: 42]; f = #'int { $ ~> =&p.x }; f 41")
         .expect("[]");
@@ -456,11 +458,11 @@ fn test_partial_pattern_sequential_branches_narrow_union_field() {
 fn test_narrowing_with_branches() {
     quiver()
         .evaluate("f = #(A | B | C) { =(A | B) => =A }; A ~> f ~")
-        .expect_type("Ok | []");
+        .expect_type("A | []");
 
     quiver()
         .evaluate("f = #(A | B | C) { =(A | B) => =A | X }; A ~> f ~")
-        .expect_type("Ok | X | []");
+        .expect_type("A | X | []");
 
     quiver()
         .evaluate("f = #(A | B | C) { =(A | B) => 1 | X }; A ~> f ~")
@@ -548,11 +550,11 @@ fn test_narrowing_in_block_branches() {
 fn test_narrowing_with_fallback_branch() {
     quiver()
         .evaluate("f = #('int | 'bin) { ='bin | <ff> }; f")
-        .expect_type("#('bin | 'int) -> ('bin | Ok)");
+        .expect_type("#('bin | 'int) -> 'bin");
 
     quiver()
         .evaluate("f = #('int | 'bin) { ='bin | <ff> }; <0a> ~> f ~")
-        .expect("Ok");
+        .expect("<0a>");
     quiver()
         .evaluate("f = #('int | 'bin) { ='bin | <ff> }; 42 ~> f ~")
         .expect("<ff>");
@@ -571,10 +573,10 @@ fn test_nil_condition_with_fallback() {
 #[test]
 fn test_nil_match_type_narrowing() {
     // When `=[]` succeeds, it proves input was nil
-    // Subsequent branches receive narrowed type with nil subtracted
+    // Subsequent branches receive narrowed type with nil subtracted, so `=A` cannot fail
     quiver()
-        .evaluate("#(A | []) { =[] | =A }")
-        .expect_type("#(A | []) -> Ok");
+        .evaluate("#(A | []) { =[] => Nil | =A }")
+        .expect_type("#(A | []) -> (A | Nil)");
 }
 
 #[test]
@@ -829,7 +831,7 @@ fn test_destructure_covering_a_union_is_total() {
              g = #'int { f $ ~> =[x, y] ~> [~, x] }
              g 0",
         )
-        .expect("[Ok, A]");
+        .expect("[[A, B], A]");
 }
 
 #[test]
@@ -854,9 +856,9 @@ fn test_destructure_testing_a_member_stays_fallible() {
              g = #'int { f $ ~> =[x, C] }
              g",
         )
-        .expect_type("#'int -> (Ok | [])");
+        .expect_type("#'int -> ([A, C] | [])");
     // A recursive field constrained more deeply than the narrowed type records is not covered.
     quiver()
         .evaluate("'l = Nil | Cons['int, ^]; f = #'l { $ ~> =Cons[x, Cons[y, z]] }; f")
-        .expect_type("#(Cons['int, μ1] | Nil) -> (Ok | [])");
+        .expect_type("#(Cons['int, μ1] | Nil) -> (Cons['int, (Cons['int, μ1] | Nil)] | [])");
 }

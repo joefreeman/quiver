@@ -1098,13 +1098,10 @@ fn analyze_match_tuple_pattern(
         }
     }
 
+    // Nothing can arrive (e.g. after a match that can never succeed), so nothing matches — as
+    // for every other pattern kind.
     if is_never(value_type_id, program) {
-        return Err(Error::InternalError {
-            message: format!(
-                "analyze_assignment_tuple_pattern received empty type for tuple: {:?}",
-                tuple
-            ),
-        });
+        return Ok((vec![], value_type_id));
     }
 
     // `successful_tuple_ids` already holds reconstructed `Type::Tuple` ids (narrowed per field).

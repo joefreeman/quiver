@@ -21,10 +21,10 @@ fn test_certificates_decodes_a_fullchain() {
         .evaluate(&pki.splice(
             r#"
             expected = __CERT__
-            %pem.certificates "__CHAIN_PEM__" ~> =&expected
+            %pem.certificates "__CHAIN_PEM__" ~> { =&expected => Equal | Different }
             "#,
         ))
-        .expect("Ok");
+        .expect("Equal");
 }
 
 #[test]
@@ -35,8 +35,8 @@ fn test_key_decodes_pkcs8() {
         .evaluate(&pki.splice(
             r#"
             expected = __KEY__
-            %pem.key "__KEY_PEM__" ~> =&expected
+            %pem.key "__KEY_PEM__" ~> { =&expected => Equal | Different }
             "#,
         ))
-        .expect("Ok");
+        .expect("Equal");
 }

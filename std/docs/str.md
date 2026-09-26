@@ -88,7 +88,7 @@ s = "a\nb"
 """
 a
 b
-""" ~> =&s                    //= Ok
+"""                           //= &s
 ```
 
 ```quiver
@@ -96,7 +96,7 @@ x = "v"
 s = "a v"
 """
 a {x}
-""" ~> =&s                    //= Ok
+"""                           //= &s
 ```
 
 ```quiver
@@ -120,12 +120,12 @@ literal.
 
 ```quiver
 role = "admin"
-role ~> ="admin"              //= Ok
+role ~> ="admin"              //= "admin"
 ```
 
 ```quiver
 role = "guest"
-role ~> ="admin"              //= []
+role ~> { ="admin" }          //= []
 ```
 
 ## Emptiness and concatenation

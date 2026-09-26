@@ -3,7 +3,7 @@ use quiver_compiler::compiler::Error;
 
 #[test]
 fn test_negated_nil() {
-    quiver().evaluate("5 ~> =\\[]").expect("Ok");
+    quiver().evaluate("5 ~> =\\[]").expect("5");
     quiver().evaluate("[] ~> =\\[]").expect("[]");
     quiver()
         .evaluate("f = #('int | []) { | =\\[] => Some | None }; [f 1, f []]")
@@ -100,7 +100,7 @@ fn test_strict_binder() {
 #[test]
 fn test_negated_statically_decided() {
     // `\'bin` on an int always matches; `\'int` on an int never does.
-    quiver().evaluate("5 ~> =\\'bin").expect("Ok");
+    quiver().evaluate("5 ~> =\\'bin").expect("5");
     quiver()
         .evaluate("f = #'int { | =\\'int => A | B }; f 5")
         .expect("B");

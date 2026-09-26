@@ -61,12 +61,6 @@ pub fn closed_nil(program: &mut Program) -> usize {
     exact_empty(program, nil_type)
 }
 
-/// The type of a match verdict's success: `Ok` with an exact-empty row.
-pub fn closed_ok(program: &mut Program) -> usize {
-    let ok_type = program.register_type(Type::ok());
-    exact_empty(program, ok_type)
-}
-
 /// The `Str['bin]` type (the type of string literals, and of `:doc` values).
 pub fn str_type(program: &mut Program) -> usize {
     let binary_type = program.register_type(Type::Binary);
@@ -324,11 +318,10 @@ fn erased_error(program: &Program, member: usize, name: &str) -> Error {
 }
 
 /// The expected type of a `pre`/`post` contract for a function `#P -> R`:
-/// `pre` is `#P -> ok?`, `post` is `#[in: P, out: R] -> ok?`.
+/// `pre` is `#P -> _`, `post` is `#[in: P, out: R] -> _`. Only the verdict's truthiness counts,
+/// so the result may be anything — a predicate ending in a match answers the matched value.
 pub fn contract_type(program: &mut Program, name: &str, parameter: usize, result: usize) -> usize {
-    let ok_type = program.register_type(Type::ok());
-    let nil_type = program.register_type(Type::nil());
-    let verdict = typing::union_type_ids(program, vec![ok_type, nil_type]);
+    let verdict = program.register_type(Type::Top);
     let never = program.never();
     let contract_parameter = match name {
         PRE => parameter,

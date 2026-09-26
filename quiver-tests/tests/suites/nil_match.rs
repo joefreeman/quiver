@@ -5,7 +5,9 @@ use crate::common::*;
 
 #[test]
 fn test_nil_match_nil() {
-    quiver().evaluate("[] ~> =[]").expect("Ok");
+    quiver()
+        .evaluate("[] ~> { =[] => IsNil | NotNil }")
+        .expect("IsNil");
 }
 
 #[test]
@@ -45,11 +47,14 @@ fn test_double_nil_match() {
 
 #[test]
 fn test_pin_of_nil_valued_variable_matches_nil() {
-    // Pinning a variable whose value is nil must match a nil value: the Equal
-    // instruction's success result is a truth flag (Ok), not the compared value —
-    // "equal nils" used to answer nil and read as a failed match.
-    quiver().evaluate("y = []; [] ~> =&y").expect("Ok");
-    quiver().evaluate("y = []; Ok ~> =&y").expect("[]");
+    // Pinning a variable whose value is nil must match a nil value — "equal nils" used to
+    // answer nil and read as a failed match.
+    quiver()
+        .evaluate("y = []; [] ~> { =&y => Matched | Missed }")
+        .expect("Matched");
+    quiver()
+        .evaluate("y = []; Ok ~> { =&y => Matched | Missed }")
+        .expect("Missed");
     // A nil-valued pin in field position binds its siblings.
     quiver()
         .evaluate("y = []; [[], 7] ~> =[&y, n]; n")
@@ -78,34 +83,30 @@ fn test_fallible_match_must_end_its_chain() {
 #[test]
 fn test_irrefutable_match_may_continue_chain() {
     // A bare binder always succeeds, so its binding is always valid and the chain may
-    // continue through it. The value flowing on is the match's verdict, and the binding is
+    // continue through it. The value flowing on is the matched value, and the binding is
     // in scope for the terms after it.
-    quiver().evaluate("5 ~> =x ~> [~, x]").expect("[Ok, 5]");
+    quiver().evaluate("5 ~> =x ~> [~, x]").expect("[5, 5]");
 }
 
 #[test]
 fn test_fallible_match_in_field_is_verdict_data_without_narrowing() {
-    // In a tuple field nothing gates on the verdict — it is data (`ok?`-style flags
-    // are fine), but the match must not narrow the scrutinee for sibling fields: a
-    // failed `=T[_]` in field 0 leaves `$` a full 'g in field 1.
+    // In a tuple field nothing gates on the verdict, so a fallible match there is wrapped in a
+    // block, which yields the value or nil as data — and it must not narrow the scrutinee for
+    // sibling fields: a failed `=T[_]` in field 0 leaves `$` a full 'g in field 1.
     quiver()
         .evaluate(
             r#"'g = T['int] | M['int];
-               f = #'g { [$ ~> =T[_], $ ~> { | =M[_] => GotM | Other }] };
+               f = #'g { [$ ~> { =T[_] }, $ ~> { | =M[_] => GotM | Other }] };
                [f M[1], f T[5]]"#,
         )
-        .expect("[[[], GotM], [Ok, Other]]");
-    // And a fallible match may not BIND in a field — the bindings could never be
-    // relied on (the surrounding code runs whether or not it matched).
+        .expect("[[[], GotM], [T[5], Other]]");
+    // And a bare fallible match may not appear in a field at all — its bindings could never
+    // be relied on (the surrounding code runs whether or not it matched).
     quiver()
         .evaluate(
             r#"'g = T['int] | M['int];
                f = #'g { [$ ~> =T[x], 1] };
                f T[5]"#,
         )
-        .expect_compile_error(
-            quiver_compiler::compiler::Error::FallibleMatchBindingsInValueChain {
-                bindings: vec!["x".to_string()],
-            },
-        );
+        .expect_compile_error(quiver_compiler::compiler::Error::FallibleMatchInValuePosition);
 }

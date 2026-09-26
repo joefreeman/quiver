@@ -75,7 +75,7 @@ fn test_non_linear_partial_pattern_matches_by_name() {
         .evaluate(
             "f = #(x: 'int, y: 'int) { $ ~> =(x: v, y: v) }; a = [y: 4, x: 4] ~> f ~; b = [y: 4, x: 5] ~> f ~; [a, b]",
         )
-        .expect("[Ok, []]");
+        .expect("[[y: 4, x: 4], []]");
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn test_literal_field_check_through_partial() {
         .evaluate(
             "f = #(x: 'int) { $ ~> =(x: 2) }; a = [y: 0, x: 2] ~> f ~; b = [x: 3, y: 0] ~> f ~; [a, b]",
         )
-        .expect("[Ok, []]");
+        .expect("[[y: 0, x: 2], []]");
 }
 
 #[test]

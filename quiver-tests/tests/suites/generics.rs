@@ -294,9 +294,9 @@ fn test_generic_unification_of_resource_and_reference_types() {
         .evaluate(
             r#"pick = #<'t>['t, 't] { $0 }
                r = %ref []
-               pick [r, r] ~> =&r"#,
+               pick [r, r] ~> { =&r => Same | Distinct }"#,
         )
-        .expect("Ok");
+        .expect("Same");
 }
 
 // === Explicit type application (`f<'t>`) ================================================
@@ -519,7 +519,7 @@ fn test_optional_parser_result_keeps_its_none() {
 
     quiver()
         .evaluate(r#"maybe = %parse.opt %parse.int; %parse.run ["", maybe] ~> =None"#)
-        .expect("Ok");
+        .expect("None");
 
     quiver()
         .evaluate(r#"maybe = %parse.opt %parse.int; %parse.run ["5", maybe]"#)
@@ -639,12 +639,31 @@ fn test_type_test_on_a_type_variable_is_checked_at_runtime() {
         .expect("[[], 3]");
     quiver()
         .evaluate("f = #<'t>['t, 't] { $ ~> =[x, ('int)y] }; f")
-        .expect_type("#['t, 't] -> (Ok | [])");
+        .expect_type("#['t, 't] -> (['t, 't] | [])");
     quiver()
         .evaluate("f = #<'t>['t, 't] { $ ~> =[x, ('int)y] ~> [~, y] }")
         .expect_error_containing("must be the last term of its chain");
     // Binding alone still can't fail.
     quiver()
         .evaluate("k = #<'t>['t, 't] { $ ~> =[x, y] ~> [~, y] }; k [1, 2]")
-        .expect("[Ok, 2]");
+        .expect("[[1, 2], 2]");
+}
+
+#[test]
+fn test_type_test_on_a_type_variable_leaves_the_block_fallible() {
+    // Narrowing keeps a variable whole (`='int` on a `'t` narrows to `'t`), so a test on a
+    // variable-typed position must not make the block look exhaustive: its nil falls through,
+    // and a caller testing for it must still see it.
+    quiver()
+        .evaluate(
+            "f = #<'t>'t { $ ~> =('int)y }
+             f <01> ~> { =[] => IsNil | NotNil }",
+        )
+        .expect("IsNil");
+    quiver()
+        .evaluate(
+            "f = #<'t>'%list<'t> { | =Cons[('int)h, _] => Int | =Nil => Empty }
+             [f %list{1}, f Nil, f %list{<01>} ~> { =[] => IsNil | NotNil }]",
+        )
+        .expect("[Int, Empty, IsNil]");
 }

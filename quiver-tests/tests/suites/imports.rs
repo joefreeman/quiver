@@ -307,8 +307,8 @@ fn test_module_may_reference_ref_minting_function() {
 
     quiver()
         .with_modules(modules)
-        .evaluate("%util.mk [] ~> ='ref")
-        .expect("Ok");
+        .evaluate("%util.mk [] ~> { ='ref => IsRef | NotRef }")
+        .expect("IsRef");
 }
 
 #[test]

@@ -10,7 +10,9 @@ fn test_ref_creation() {
 fn test_ref_uniqueness() {
     // Multiple refs are unique
     quiver()
-        .evaluate("[%ref [], %ref [], %ref []] ~> =[a, b, c]; [a ~> =&b, b ~> =&c, a ~> =&c]")
+        .evaluate(
+            "[%ref [], %ref [], %ref []] ~> =[a, b, c]; [a ~> { =&b }, b ~> { =&c }, a ~> { =&c }]",
+        )
         .expect("[[], [], []]");
 }
 
@@ -25,7 +27,9 @@ fn test_ref_via_reference_binding() {
 #[test]
 fn test_ref_equality_same() {
     // Same ref compared to itself is equal
-    quiver().evaluate("r = %ref []; r ~> =&r").expect("Ok");
+    quiver()
+        .evaluate("r = %ref []; r ~> { =&r => Equal | Different }")
+        .expect("Equal");
 }
 
 #[test]

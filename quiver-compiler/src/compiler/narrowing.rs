@@ -975,6 +975,40 @@ pub fn pattern_constrains_recursive_field(
     false
 }
 
+/// Whether `pattern` tests a position whose type is, or has as a member, a type variable.
+///
+/// Narrowing keeps a variable whole — `='int` on a `'t` narrows to `'t` — so the narrowed type
+/// cannot reflect such a test, and a complement computed from it would exclude values that
+/// failed it. Binders and placeholders test nothing, and a tuple pattern's fields are checked
+/// against the field types, so `=Nil` and `=Cons[h, t]` over `Nil | Cons['t, ^]` stay exact.
+pub fn pattern_constrains_variable(
+    pattern: &ast::Match,
+    value_type: usize,
+    program: &mut Program,
+) -> bool {
+    let has_variable_member = |program: &mut Program| {
+        get_type_variants(value_type, program)
+            .into_iter()
+            .any(|member| matches!(program.lookup_type(member), Some(Type::Variable(_))))
+    };
+    match pattern {
+        ast::Match::Identifier(..) | ast::Match::Placeholder => false,
+        ast::Match::As(head, ..) => pattern_constrains_variable(head, value_type, program),
+        ast::Match::Or(alternatives) => alternatives
+            .iter()
+            .any(|alternative| pattern_constrains_variable(alternative, value_type, program)),
+        ast::Match::Tuple(tuple) => {
+            has_variable_member(program)
+                || tuple.fields.iter().enumerate().any(|(idx, field)| {
+                    get_field_type(value_type, idx, program).is_some_and(|field_type| {
+                        pattern_constrains_variable(&field.pattern, field_type, program)
+                    })
+                })
+        }
+        _ => has_variable_member(program),
+    }
+}
+
 /// The members of a type: a union's, none of them itself a union (`flatten_union_members`), or
 /// the type alone.
 fn get_type_variants(type_id: usize, program: &mut Program) -> Vec<usize> {

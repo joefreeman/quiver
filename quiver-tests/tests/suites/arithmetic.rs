@@ -71,11 +71,11 @@ fn test_builtin_factor_finds_a_prime_factor() {
         .expect("[2, 97, 2]");
     // Which prime of a semiprime comes back is unspecified.
     quiver()
-        .evaluate("__integer_factor__ 1000036000099 ~> =(1000003 | 1000033)")
+        .evaluate("__integer_factor__ 1000036000099 ~> { =(1000003 | 1000033) => Ok }")
         .expect("Ok");
     // 2⁶⁴ + 1, past trial division.
     quiver()
-        .evaluate("__integer_factor__ 18446744073709551617 ~> =(274177 | 67280421310721)")
+        .evaluate("__integer_factor__ 18446744073709551617 ~> { =(274177 | 67280421310721) => Ok }")
         .expect("Ok");
 }
 

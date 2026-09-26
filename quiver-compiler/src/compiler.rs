@@ -39,7 +39,7 @@ use crate::{
 use quiver_core::{
     bytecode::{Constant, Function, Instruction, Opcode},
     program::{InternError, Program},
-    types::{NIL, OK, Type, TypeLookup},
+    types::{NIL, Type, TypeLookup},
     value::{Binary, Payload, Value},
 };
 
@@ -201,11 +201,10 @@ pub enum Error {
     PatternNoMatchingTypes {
         pattern: String,
     },
-    /// A fallible match is followed by further terms in its chain. Nothing
-    /// short-circuits within a chain, so the continuation would run whether or not the
-    /// match succeeded — which would make the pattern's narrowing (its bindings and the
-    /// scrutinee's refinement) unsound. A fallible match must end its chain, so that
-    /// its verdict directly gates a step boundary (`=P; …`) or a branch (`=P => …`).
+    /// A fallible match is followed by further terms in its chain, or by the chain's binding.
+    /// A failed match leaves its step, so it must end its chain: its success is then the step's
+    /// (`=P; …`) or the branch's (`=P => …`).
+    /// TODO: temporary; a failed match is to fail its branch from anywhere in a chain.
     FallibleMatchNotChainFinal,
     /// A tail call or spawn is written without its argument. Every call states what it is
     /// called with, nil included (`f []`), and these are calls: `^ []` recurses on nil,
@@ -237,13 +236,13 @@ pub enum Error {
     /// gates on nil. Only the head is exempt — that is where a chain chooses its
     /// starting value, and the block's input is a starting value like any other.
     DiscardedChainValue,
-    /// A fallible match that binds variables appears in a value chain — a tuple field,
-    /// an argument, an annotation value — where its verdict is data and gates nothing:
-    /// the surrounding code runs whether or not it matched, so the bindings cannot be
-    /// relied on.
-    FallibleMatchBindingsInValueChain {
-        bindings: Vec<String>,
-    },
+    /// A fallible match appears in a value position — a tuple field, an argument, an annotation
+    /// value — where there is no step for its failure to end.
+    /// TODO: temporary; such a match is to fail its branch, like any other.
+    FallibleMatchInValuePosition,
+    /// A match that binds nothing and can only succeed on nil, whose value is the result: that
+    /// result is nil whether or not it matched.
+    MatchOnlyNil,
     /// A binding pattern appears in a `//=` assertion. Nothing gates on the assertion's
     /// verdict — and a release build skips the check entirely — so the binding could never
     /// be relied on. Assertions observe: literals, types and pins only.
@@ -499,11 +498,11 @@ impl std::fmt::Display for Error {
             Error::FallibleMatchNotChainFinal => {
                 write!(
                     f,
-                    "A fallible match must be the last term of its chain: nothing \
-                     short-circuits within a chain, so a following term would run \
-                     whether or not the match succeeded. Separate the steps (`=P; ...`) \
-                     so the match gates what follows, or test for a failed match with a \
-                     block (`{{ =P => [] | Ok }}`)"
+                    "A fallible match must be the last term of its chain (a binding \
+                     included): nothing short-circuits within a chain, so a following term \
+                     would run whether or not the match succeeded. Separate the steps \
+                     (`=P; ...`) so the match gates what follows, or contain the match in a \
+                     block, which is nil when it fails (`x = {{ e ~> =P }}`)"
                 )
             }
             Error::MissingCallArgument { form } => {
@@ -551,18 +550,20 @@ impl std::fmt::Display for Error {
                      block (`{{ step; Ok | Ok }}`)"
                 )
             }
-            Error::FallibleMatchBindingsInValueChain { bindings } => {
+            Error::MatchOnlyNil => {
                 write!(
                     f,
-                    "A fallible match binding {} cannot appear in a value position (a \
-                     tuple field, an argument, an annotation value): nothing gates on \
-                     its verdict there, so the bindings cannot be relied on. Bind in a \
-                     preceding step instead",
-                    bindings
-                        .iter()
-                        .map(|b| format!("'{b}'"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    "This match can only succeed on nil, and its value is the result, so the \
+                     result is nil whether or not it matches; test with a branch instead \
+                     (`{{ =[] => Yes | No }}`)"
+                )
+            }
+            Error::FallibleMatchInValuePosition => {
+                write!(
+                    f,
+                    "A match that can fail cannot appear in a value position (a tuple field, an \
+                     argument, an annotation value); wrap it in a block, as in `x ~> {{ ='int }}`, \
+                     which is nil when it fails"
                 )
             }
             Error::AssertionBindings { bindings } => {
@@ -803,6 +804,36 @@ fn leading_match(branch: &ast::Branch) -> Option<&ast::Match> {
     }
 }
 
+/// What a compiled sequence produced: its (success) type, and its failure exits when the caller
+/// asked for the last step's verdict as control flow. `dead` when some step always fails, so the
+/// sequence never succeeds. (A `never` type alone doesn't say that: a tail call never returns.)
+struct SequenceResult {
+    ty: usize,
+    failures: Vec<Failure>,
+    dead: bool,
+    /// The last step is a match that binds nothing and can only succeed on nil, so where its
+    /// value is the result, that result is nil whether or not it matched.
+    nil_only_match: bool,
+}
+
+/// What a compiled chain produced: its value's type and provenance, and — when the chain ends in
+/// a match — that match's failure exits. A step ending in a match takes the match's verdict (did
+/// it match?) rather than its value's nil-ness (see `compile_sequence`).
+struct ChainResult {
+    ty: usize,
+    provenance: Provenance,
+    verdict: Option<Vec<Failure>>,
+}
+
+/// A jump out of a failed match or step, taken with the failing nil on the stack in place of the
+/// value the success path leaves there. The nil is the scrutinee's own when that was nil (its
+/// annotations intact), else fresh.
+#[derive(Debug, Clone, Copy)]
+struct Failure {
+    jump: usize,
+    nil_type: usize,
+}
+
 pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // Core components
     codegen: InstructionBuilder,
@@ -905,6 +936,11 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // caller-supplied source name at top level, the module id inside imported modules
     // (swapped in `import_and_cache_module`, like `current_package`).
     current_module: String,
+
+    // The failure exits of the matches compiled since the enclosing chain last looked: a match
+    // pushes its own, and the chain that contains it takes them straight after compiling the
+    // match term, so they never outlive it.
+    match_failures: Vec<Failure>,
 
     // Bounds on compile-time evaluation (module bodies, dialect expansion): the step
     // budget, and the host's cooperative cancellation flag. See `CompileOptions`.
@@ -1047,6 +1083,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             function_depth: 0,
             debug: options.debug,
             current_module: options.source_name,
+            match_failures: Vec::new(),
             fuel: options.fuel,
             cancel: options.cancel,
             recorder,
@@ -1262,8 +1299,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             return Ok(self.program.register_type(Type::nil()));
         }
-        let (ty, _prov) = self.compile_sequence(ast::Sequence { steps }, None, None)?;
-        Ok(ty)
+        let result = self.compile_sequence(ast::Sequence { steps }, None, None, false)?;
+        Ok(result.ty)
     }
 
     /// Compile a type alias. `name` is `None` for the module's nameless default-type
@@ -1398,16 +1435,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // but there is no meaningful flowing value at attach time).
             self.codegen.add_instruction(Instruction::tuple(NIL));
             let closed_nil = annotations::closed_nil(self.program);
-            let (value_type, _) = self.compile_chain_with_input(
-                annotation.value,
-                None,
-                None,
-                Some((closed_nil, Provenance::Unknown)),
-                None,
-                false,
-                expected,
-                false, // an annotation value is data; nothing gates on it
-            )?;
+            let value_type = self
+                .compile_chain_with_input(
+                    annotation.value,
+                    None,
+                    None,
+                    Some((closed_nil, Provenance::Unknown)),
+                    None,
+                    false,
+                    expected,
+                    false, // an annotation value is data; nothing gates on it
+                )?
+                .ty;
             if let Some(expected) = expected
                 && !quiver_core::types::is_compatible(value_type, expected, &*self.program)
             {
@@ -1730,7 +1769,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         // The input value carries the piped value (and its provenance); nested
                         // tuples re-derive their own ripple context from it, so we pass no parent
                         // ripple_context here (which would otherwise have a stale stack offset).
-                        self.compile_chain_with_input(
+                        let field = self.compile_chain_with_input(
                             chain.clone(),
                             None,
                             None,
@@ -1739,7 +1778,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             false,
                             field_expected,
                             false, // a field's value is data; nothing gates on it
-                        )?
+                        )?;
+                        (field.ty, field.provenance)
                     }
                     ast::FieldValue::Spread(_) => {
                         unreachable!("Spread should be handled by compile_tuple_with_spread")
@@ -3361,8 +3401,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let prevents = pattern::prevents_complement_narrowing(&binding_sets, &*self.program)
             || narrowing::pattern_constrains_recursive_field(&pattern, value_type, self.program);
 
-        if prevents
-            && !has_tuple_complement
+        // Narrowing keeps a type variable whole (`='int` on a `'t` leaves `'t`), so where the
+        // pattern tests one, the complement would claim more than failed the test — making a
+        // block exhaustive that isn't.
+        let tests_variable =
+            narrowing::pattern_constrains_variable(&pattern, value_type, self.program);
+        if ((prevents && !has_tuple_complement) || tests_variable)
             && let Some(n) = narrowing.as_mut()
         {
             n.disable();
@@ -3373,8 +3417,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // pattern that provably cannot match a nil is the degenerate case of failing against
         // one, not a different kind of failure.
         if self.is_never(result_type) {
-            let carried = self.emit_match_failure(value_type);
-            return Ok(carried.unwrap_or_else(|| self.program.register_type(Type::nil())));
+            match on_no_match {
+                Some(handler) => self.codegen.emit_jump_to_addr(handler),
+                None => {
+                    let carried = self.emit_match_failure(value_type);
+                    let nil_type = carried.unwrap_or_else(|| annotations::closed_nil(self.program));
+                    let jump = self.codegen.emit_jump_placeholder();
+                    self.match_failures.push(Failure { jump, nil_type });
+                }
+            }
+            return Ok(self.program.never());
         }
 
         // A binder of the whole scrutinee (`=x`, `=(P)x`) is the scrutinee, so it keeps its
@@ -3477,74 +3529,58 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
-        // Success path: replace the matched value with the Ok verdict
-        self.codegen.add_instruction(Instruction::pop());
-        self.codegen.add_instruction(Instruction::tuple(OK));
+        // Success path: the match yields its scrutinee, still on the stack.
         let success_jump_addr = self.codegen.emit_jump_placeholder();
 
-        // Only patch fail_jump_addr if we didn't use on_no_match
+        // A receive filter's failure (`on_no_match`) leaves for its handler, which resets locals
+        // itself; otherwise the failure path is here.
         if on_no_match.is_none() {
             self.codegen.patch_jump_to_here(fail_jump_addr);
 
-            // The success path stored a local for each binding (sequential `Store`), so a
-            // fall-through failure must allocate the same locals — filled with nil, since nothing
-            // matched — to keep local indices aligned for whatever follows this match in the
-            // chain. (Without this, a `=('int)x` that fails at runtime mid-chain would leave the
-            // continuation's `Load`s reading shifted slots.) When `on_no_match` is set the failure
-            // jumps elsewhere and resets locals, so no fill is needed.
+            // The success path stored a local for each binding (sequential `Store`), so the
+            // failure path allocates the same locals — filled with nil, since nothing matched —
+            // keeping local indices aligned with compile-time numbering wherever it lands.
             for _ in 0..bindings.len() {
                 self.codegen.add_instruction(Instruction::tuple(NIL));
                 self.codegen.add_instruction(Instruction::store());
             }
+            let carried_nil = self.emit_match_failure(value_type);
+            let exit = self.codegen.emit_jump_placeholder();
+            // Nil in `result_type` is not by itself fallibility: a bare binder (`=x`) on a
+            // nil-typed value *matches* the nil and binds it. A pattern is irrefutable when
+            // some binding set has no runtime requirements, or when its sets together cover the
+            // value's type — `[x, y]` against `[A, B] | [A, C]` tests which member it has, but
+            // matches either. Coverage is the complement's
+            // verdict, which is exact only for pure type tests on non-recursive positions (what
+            // `prevents` rules out), and on a value without type variables — narrowing keeps a
+            // variable whole, so `=[x, ('int)y]` would seem to cover `['t, 't]`. Otherwise only
+            // a requirement-free set counts.
+            let irrefutable = pattern::is_irrefutable(&binding_sets)
+                || (!prevents
+                    && !binding_sets.is_empty()
+                    && !typing::contains_variables(value_type, &*self.program)
+                    && {
+                        let rest =
+                            narrowing::compute_complement(value_type, narrowed_type, self.program);
+                        self.is_never(rest)
+                    });
+            if irrefutable {
+                // The failure path is unreachable: rejoin the success path rather than report a
+                // failure that cannot happen.
+                self.codegen.patch_jump_to_here(exit);
+            } else {
+                let mut members = vec![annotations::closed_nil(self.program)];
+                members.extend(carried_nil);
+                let nil_type = typing::union_type_ids(self.program, members);
+                self.match_failures.push(Failure {
+                    jump: exit,
+                    nil_type,
+                });
+            }
         }
-        let carried_nil = self.emit_match_failure(value_type);
 
         self.codegen.patch_jump_to_here(success_jump_addr);
-
-        // Compute the final type — the verdict replacing the matched (success) type with Ok.
-        // `result_type` is the matched portion, already widened with nil when the match can fail.
-        // A `result_type` that is *exactly* nil has no success component: the match can never
-        // succeed. When the value itself can't be nil this means the pattern is unsatisfiable, so
-        // the term is statically dead (nil) — emitting `Ok | []` here would wrongly keep a dead
-        // branch alive. (If the value can be nil the pattern matches that nil value, so it stays a
-        // real success.)
-        // A verdict's `Ok` is freshly minted, so its row is exact-empty: provably
-        // annotation-free. Its nil is not, in general — a failure against a nil scrutinee
-        // re-emits that scrutinee (see the failure path above), so the verdict's nil is
-        // either a fresh one (a shape mismatch) or whichever nil members the scrutinee could
-        // have been, payload rows intact.
-        //
-        // Nil in `result_type` is not by itself fallibility: a bare binder (`=x`) on a
-        // nil-typed value *matches* the nil and binds it. A pattern is irrefutable when
-        // some binding set has no runtime requirements, or when its sets together cover the
-        // value's type — `[x, y]` against `[A, B] | [A, C]` tests which member it has, but
-        // matches either — and it then types as plain `Ok`. Coverage is the complement's
-        // verdict, which is exact only for pure type tests on non-recursive positions (what
-        // `prevents` rules out), and on a value without type variables — narrowing keeps a
-        // variable whole, so `=[x, ('int)y]` would seem to cover `['t, 't]`. Otherwise only
-        // a requirement-free set counts.
-        let irrefutable = pattern::is_irrefutable(&binding_sets)
-            || (!prevents
-                && !binding_sets.is_empty()
-                && !typing::contains_variables(value_type, &*self.program)
-                && {
-                    let rest =
-                        narrowing::compute_complement(value_type, narrowed_type, self.program);
-                    self.is_never(rest)
-                });
-        let final_type = if self.is_nil(result_type) && !self.contains_nil(value_type) {
-            result_type
-        } else if self.contains_nil(result_type) && !irrefutable {
-            let closed_ok = annotations::closed_ok(self.program);
-            let closed_nil = annotations::closed_nil(self.program);
-            let mut members = vec![closed_ok, closed_nil];
-            members.extend(carried_nil);
-            typing::union_type_ids(self.program, members)
-        } else {
-            annotations::closed_ok(self.program)
-        };
-
-        Ok(final_type)
+        Ok(narrowed_type)
     }
 
     /// Compile a block in its own scope: store the incoming value as the scope parameter, then
@@ -3680,14 +3716,40 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
             // Compile the condition expression - it can use ~> to access the parameter
             // We need both the type and provenance for forward narrowing
-            let (condition_type, condition_prov) = self.compile_sequence(
+            // The condition's verdict is control flow: its failures move on to the next branch,
+            // and falling through is success, whatever the value.
+            let condition = self.compile_sequence(
                 branch.condition.clone(),
                 on_no_match,
                 complement_faithful.then_some(&mut narrowing),
+                true,
             )?;
-
+            let condition_type = condition.ty;
+            let can_fail = !condition.failures.is_empty();
+            // The last plain branch's value is the block's, success or failure alike.
+            if is_last_branch && branch.consequence.is_none() && condition.nil_only_match {
+                return Err(Error::MatchOnlyNil);
+            }
             if is_last_branch {
-                last_condition_nils = annotations::nil_members(self.program, condition_type);
+                last_condition_nils = condition
+                    .failures
+                    .iter()
+                    .flat_map(|failure| annotations::nil_members(self.program, failure.nil_type))
+                    .collect();
+            }
+            // Where the failures go: the next branch (or, for the last branch, whatever follows
+            // the block — the `on_no_match` handler, or the block's nil result). A plain last
+            // branch's failures join the block's result directly, as its nil.
+            let needs_cleanup = self.local_count > param_local + 1;
+            if is_last_branch && branch.consequence.is_none() {
+                end_jumps.extend(condition.failures.iter().map(|failure| failure.jump));
+            } else {
+                next_branch_jumps.extend(
+                    condition
+                        .failures
+                        .iter()
+                        .map(|failure| (failure.jump, i + 1, needs_cleanup)),
+                );
             }
 
             // Capture this branch's parameter guard (now that the condition's pattern has
@@ -3730,13 +3792,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // A branch that records no narrowing of its own leaves the accumulated complements
             // untouched; they persist to subsequent branches automatically.
 
-            // If condition is compile-time NIL (won't match), skip this branch entirely
-            if self.is_nil(condition_type) {
-                // Only include nil in result type if this is the last branch
-                // Otherwise, nil causes fallthrough to the next branch
-                if is_last_branch {
-                    branch_types.push(condition_type);
-                }
+            // A condition that can never succeed makes the branch dead: its failures are all it has.
+            if condition.dead {
                 // A statically-dead branch is an unusual shape for a dispatch function; be
                 // conservative and abandon the case table rather than reason about it.
                 if let Some(d) = &mut dispatch {
@@ -3746,113 +3803,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
 
             if let Some(ref consequence) = branch.consequence {
-                // Branch has a consequence - compile it
-                // Use emit_duplicate_jump_if_nil (without pop) to keep the value on stack for consequence
-                let next_branch_jump = self.codegen.emit_duplicate_jump_if_nil();
-
-                // Track: jump address, target branch index, whether cleanup needed
-                // Cleanup resets locals to branch start (param_local + 1)
-                let needs_cleanup = self.local_count > param_local + 1;
-                next_branch_jumps.push((next_branch_jump, i + 1, needs_cleanup));
-
-                // Apply forward narrowing: if condition succeeded (non-nil), narrow to exclude nil.
-                // This enables type refinement like { a => %num.add[a, 1] } when a: [] | int.
-                if self.contains_nil(condition_type) {
-                    // Narrow the source value if it has trackable provenance. Narrow it to exclude
-                    // nil from *its own current type* — not from `condition_type`. For a plain
-                    // truthiness test (`a`) these coincide. For a `=PATTERN` match they don't: the
-                    // condition value is the verdict `Ok | []`, whose truthy part `Ok` is unrelated
-                    // to the matched value, so narrowing the provenance to `Ok` would collapse it to
-                    // never. `compile_match` has already narrowed the provenance to the matched
-                    // type, so dropping nil from that current type is the correct refinement.
-                    if !matches!(condition_prov, Provenance::Unknown) {
-                        let current =
-                            get_type_for_provenance(&self.scopes, &condition_prov, self.program);
-                        let truthy_type = self.without_nil(current);
-                        if !self.is_never(truthy_type) {
-                            apply_narrowing(
-                                &mut self.scopes,
-                                &condition_prov,
-                                truthy_type,
-                                self.program,
-                            );
-                        }
-                    }
-                    // Note: bindings made during the condition are deliberately NOT
-                    // blanket-narrowed here. Reaching the consequence proves the
-                    // condition's *result* was non-nil, which says nothing about a
-                    // bare-binder binding (`=x` succeeds even on nil — the verdict is Ok
-                    // either way). The pattern analysis already types each binding for
-                    // the success path, and the provenance-based narrowing above covers
-                    // the case where the condition result *is* a variable.
-                }
-
-                // Pop the condition result - consequence starts fresh with block parameter
+                // The condition succeeded: drop its value, as the consequence starts from the
+                // block's parameter like every sequence.
                 self.codegen.add_instruction(Instruction::pop());
-
-                // Consequence is a new chain that starts with the block's parameter value
-                // (not the condition's result). Every chain implicitly starts with the
-                // surrounding block's parameter. Pass None for input_type so the consequence
-                // loads the parameter via implicit_continuation.
-                let (consequence_type, _) = self.compile_sequence(
-                    consequence.clone(),
-                    None,
-                    None, // No narrowing for consequence
-                )?;
-                branch_types.push(consequence_type);
-
-                // If this is the last branch and condition always succeeds (non-nil), block is exhaustive
-                if is_last_branch && !self.contains_nil(condition_type) {
+                let consequence = self.compile_sequence(consequence.clone(), None, None, false)?;
+                branch_types.push(consequence.ty);
+                if is_last_branch && !can_fail {
                     is_exhaustive = true;
                 }
-
-                // Reset to branch start (param_local + 1), keeping just the parameter
-                // This is on the success path - bindings have been stored and should be cleared
-                if self.local_count > param_local + 1 {
-                    self.codegen
-                        .add_instruction(Instruction::reset(param_local + 1));
-                }
             } else {
-                // No consequence - use condition type
-                // For non-last branches, filter out nil since it causes fallthrough to next branch
-                if is_last_branch {
-                    branch_types.push(condition_type);
-                    // If the last branch's condition never returns nil, block is exhaustive
-                    if !self.contains_nil(condition_type) {
-                        is_exhaustive = true;
-                    }
-                } else {
-                    // Only include non-nil types - nil will be handled by subsequent branches
-                    if let Some(ty) = self.program.lookup_type(condition_type) {
-                        match ty {
-                            Type::Union(types) => {
-                                let non_nil_types: Vec<usize> = types
-                                    .iter()
-                                    .filter(|&type_id| !self.is_nil(*type_id))
-                                    .copied()
-                                    .collect();
-                                if !non_nil_types.is_empty() {
-                                    branch_types
-                                        .push(typing::union_type_ids(self.program, non_nil_types));
-                                }
-                            }
-                            _ if !self.is_nil(condition_type) => {
-                                branch_types.push(condition_type);
-                            }
-                            _ => {
-                                // Condition is purely nil - will always fall through
-                            }
-                        }
-                    }
+                // The condition is the branch's value.
+                branch_types.push(condition_type);
+                if is_last_branch && !can_fail {
+                    is_exhaustive = true;
                 }
+            }
 
-                // Reset to branch start (param_local + 1), keeping just the parameter
-                // Reset is safe regardless of whether condition succeeded: if pattern matching
-                // failed (returned nil), no bindings were stored so Reset is a no-op.
-                if self.local_count > param_local + 1 {
-                    self.codegen
-                        .add_instruction(Instruction::reset(param_local + 1));
-                }
+            // Reset to branch start (param_local + 1), keeping just the parameter: the branch
+            // succeeded, and its bindings go out of scope.
+            if self.local_count > param_local + 1 {
+                self.codegen
+                    .add_instruction(Instruction::reset(param_local + 1));
             }
 
             // Record this branch's (guard, result) for the dispatch table. Exactly one result
@@ -3872,14 +3843,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
 
             if !is_last_branch {
-                if branch.consequence.is_some() {
-                    let end_jump = self.codegen.emit_jump_placeholder();
-                    end_jumps.push(end_jump);
-                } else {
-                    self.codegen.add_instruction(Instruction::duplicate());
-                    let success_jump = self.codegen.emit_jump_if_placeholder();
-                    end_jumps.push(success_jump);
-                }
+                let end_jump = self.codegen.emit_jump_placeholder();
+                end_jumps.push(end_jump);
             }
         }
 
@@ -4300,31 +4265,33 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(())
     }
 
-    /// Compile a sequence of steps, short-circuiting to nil if any yields nil.
+    /// Compile a sequence of steps, short-circuiting to nil if any fails.
     ///
     /// Every step starts from the **block value** — the enclosing block's parameter, or the value
-    /// piped into it — not from the previous step's result. That makes steps consistent with the
-    /// two places that already worked this way: a block's branches, and a `=>` consequence (which
-    /// never received its condition's result either). What a step's result still does is gate the
-    /// boundary: nil ends the sequence, and the sequence evaluates to that nil.
+    /// piped into it — not from the previous step's result. What a step's result still does is
+    /// gate the boundary: every step ends in a verdict, and a failed one ends the sequence, which
+    /// evaluates to the nil that caused it. A step ending in a match takes the match's verdict (did
+    /// it match?), so a match that succeeds on nil carries on; any other step's verdict is whether
+    /// its value is nil.
+    ///
+    /// With `verdict` the last step's verdict is also control flow, for a branch condition: the
+    /// sequence's failures are returned unpatched (each with the failing nil on the stack), and
+    /// the type is the success type alone. Otherwise the failures rejoin the end, where the
+    /// sequence's value is whichever arrived.
     fn compile_sequence(
         &mut self,
         sequence: ast::Sequence,
         on_no_match: Option<usize>,
         mut narrowing: Option<&mut Narrowing>,
-    ) -> Result<(usize, Provenance), Error> {
-        // The sequence's result/short-circuit type, accumulated across chains.
-        let mut last_type = None;
-        let mut last_prov = Provenance::Unknown;
-        let mut end_jumps = Vec::new();
+        verdict: bool,
+    ) -> Result<SequenceResult, Error> {
         // Type aliases are transparent to the flow, so the step boundary is indexed by *chain*
-        // step: the last chain keeps its result (the sequence's value) rather than
-        // short-circuiting, and a trailing alias must not make the chain before it look non-final.
+        // step: the last chain keeps its result (the sequence's value), and a trailing alias
+        // must not make the chain before it look non-final.
         let last_chain_index = sequence
             .steps
             .iter()
             .rposition(|step| matches!(step, ast::Step::Chain(_)));
-        let mut chain_ordinal = 0usize;
 
         if last_chain_index.is_none() {
             // Only type aliases: nothing produces a value, so the sequence is nil — the same
@@ -4348,8 +4315,18 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 )?;
             }
             self.codegen.add_instruction(Instruction::tuple(NIL));
-            return Ok((self.program.register_type(Type::nil()), Provenance::Unknown));
+            return Ok(SequenceResult {
+                ty: self.program.register_type(Type::nil()),
+                failures: Vec::new(),
+                dead: false,
+                nil_only_match: false,
+            });
         }
+
+        let mut failures: Vec<Failure> = Vec::new();
+        let mut success_type = None;
+        let mut dead = false;
+        let mut nil_only_match = false;
 
         for (step_index, step) in sequence.steps.iter().enumerate() {
             let chain = match step {
@@ -4372,10 +4349,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     continue;
                 }
             };
-            let is_first_chain = chain_ordinal == 0;
             let is_last_chain = Some(step_index) == last_chain_index;
-            chain_ordinal += 1;
-            let (chain_type, chain_prov) = self.compile_chain_with_input(
+            let result = self.compile_chain_with_input(
                 chain.clone(),
                 on_no_match,
                 None,
@@ -4383,96 +4358,141 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 narrowing.as_deref_mut(),
                 true, // implicit_continuation: load the block parameter
                 None,
-                true, // a step's nil short-circuits the sequence: its result gates
+                true, // a step's verdict gates the sequence
             )?;
 
-            // Debug builds: a nil step result is a failure — stamp it with this step's
-            // provenance (a no-op for non-nil results and already-stamped nils). Steps
-            // whose type excludes nil skip the instruction entirely.
-            if self.debug && self.contains_nil(chain_type) {
-                let kind = if chain.binding.is_some()
-                    || chain.terms.iter().any(|t| matches!(t, ast::Term::Match(_)))
-                {
-                    quiver_core::bytecode::SiteKind::NoMatch
-                } else {
-                    quiver_core::bytecode::SiteKind::NilResult
-                };
-                self.emit_stamp(chain.span.get(), kind);
-            }
-
-            // If a prior chain could short-circuit to nil, the sequence's result includes
-            // that nil — the *same* value, so its typed nil members (annotation rows
-            // preserved) carry over rather than a fresh bare nil.
-            let should_propagate_nil =
-                !is_first_chain && last_type.as_ref().is_some_and(|&t| self.contains_nil(t));
-            last_type = Some(if should_propagate_nil {
-                let mut members = annotations::nil_members(
-                    self.program,
-                    last_type.expect("checked by should_propagate_nil"),
-                );
-                if members.is_empty() {
-                    members.push(self.program.register_type(Type::nil()));
+            let (step_success, can_succeed) = match result.verdict {
+                // The step ends in a match: its failures leave the sequence, and its success —
+                // whatever the value, nil included — carries on. (`compile_match` has already
+                // narrowed the scrutinee for the success path.)
+                Some(match_failures) => {
+                    let match_failures = self.stamp_failures(match_failures, chain.span.get());
+                    dead = self.is_never(result.ty) && !match_failures.is_empty();
+                    // A binding is the match's effect, so only a binder-free one is pointless.
+                    nil_only_match = is_last_chain && self.is_nil(result.ty) && {
+                        let mut bindings = Vec::new();
+                        match (&chain.binding, chain.terms.last()) {
+                            (Some(pattern), _) | (None, Some(ast::Term::Match(pattern))) => {
+                                collect_binding_spans(pattern, &mut bindings);
+                            }
+                            _ => {}
+                        }
+                        bindings.is_empty()
+                    };
+                    failures.extend(match_failures);
+                    (result.ty, !self.is_never(result.ty))
                 }
-                members.insert(0, chain_type);
-                typing::union_type_ids(self.program, members)
-            } else {
-                chain_type
-            });
-            last_prov = chain_prov.clone();
-
-            // If last_type is NIL, subsequent chains are unreachable - break early
-            if let Some(last_type_id) = last_type
-                && self.is_nil(last_type_id)
-            {
-                break;
-            }
-
-            if !is_last_chain {
-                // Short-circuit to the end of the sequence if the result is nil — the jump keeps
-                // that nil on the stack as the sequence's value. Otherwise discard it: the next
-                // step starts from the block value, so nothing consumes it.
-                let end_jump = self.codegen.emit_duplicate_jump_if_nil();
-                end_jumps.push(end_jump);
-                self.codegen.add_instruction(Instruction::pop());
-
-                // Passing the short-circuit proves this chain's *result* was non-nil, so
-                // narrow whatever the result's provenance tracks — the `=x, x, ...`
-                // idiom, where a step re-emits a binding precisely to test it. This is
-                // sound only when the chain's result IS the tracked value: a chain
-                // containing a match yields the *verdict* while its provenance still
-                // points at the matched value's source, and a bare binder's verdict is
-                // Ok even when it bound nil (`e =x` binds any value, including `[]`) —
-                // narrowing the source off the verdict typed nil-holding values non-nil
-                // (a stale leftover from the pre-`=PAT` semantics, where a failing
-                // chain-match itself short-circuited). To bind-and-guarantee non-nil in
-                // one step, ascribe: `e =('int)x`.
-                let result_is_tracked_value = chain.binding.is_none()
-                    && !chain
-                        .terms
-                        .iter()
-                        .any(|term| matches!(term, ast::Term::Match(_)));
-                if result_is_tracked_value
-                    && self.contains_nil(chain_type)
-                    && !matches!(last_prov, Provenance::Unknown)
-                {
-                    let current = get_type_for_provenance(&self.scopes, &last_prov, self.program);
-                    let truthy_type = self.without_nil(current);
-                    if !self.is_never(truthy_type) {
-                        apply_narrowing(&mut self.scopes, &last_prov, truthy_type, self.program);
+                // Any other step fails on a nil value.
+                None if (!is_last_chain || verdict) && self.contains_nil(result.ty) => {
+                    // Debug builds: a nil step result is a failure — stamp it with this step's
+                    // provenance (a no-op for already-stamped nils).
+                    if self.debug {
+                        self.emit_stamp(
+                            chain.span.get(),
+                            quiver_core::bytecode::SiteKind::NilResult,
+                        );
+                    }
+                    let mut nils = annotations::nil_members(self.program, result.ty);
+                    if nils.is_empty() {
+                        nils.push(self.program.register_type(Type::nil()));
+                    }
+                    let nil_type = typing::union_type_ids(self.program, nils);
+                    let truthy = self.without_nil(result.ty);
+                    if self.is_never(truthy) {
+                        // Always nil: the step always fails, and nothing after it runs.
+                        let jump = self.codegen.emit_jump_placeholder();
+                        failures.push(Failure { jump, nil_type });
+                        dead = true;
+                        (truthy, false)
+                    } else {
+                        let jump = self.codegen.emit_duplicate_jump_if_nil();
+                        failures.push(Failure { jump, nil_type });
+                        // Passing the test proves the step's value non-nil, so narrow whatever
+                        // its provenance tracks — the `x; use x` idiom, where a step names a
+                        // variable precisely to test it.
+                        if !matches!(result.provenance, Provenance::Unknown) {
+                            let current = get_type_for_provenance(
+                                &self.scopes,
+                                &result.provenance,
+                                self.program,
+                            );
+                            let narrowed = self.without_nil(current);
+                            if !self.is_never(narrowed) {
+                                apply_narrowing(
+                                    &mut self.scopes,
+                                    &result.provenance,
+                                    narrowed,
+                                    self.program,
+                                );
+                            }
+                        }
+                        (truthy, true)
                     }
                 }
+                None => {
+                    // Debug builds: the sequence's own nil result is a failure too.
+                    if self.debug && self.contains_nil(result.ty) {
+                        self.emit_stamp(
+                            chain.span.get(),
+                            quiver_core::bytecode::SiteKind::NilResult,
+                        );
+                    }
+                    (result.ty, !self.is_never(result.ty))
+                }
+            };
+
+            if is_last_chain || !can_succeed {
+                success_type = Some(step_success);
+                break;
             }
+            // The next step starts from the block value, so nothing consumes this one's.
+            self.codegen.add_instruction(Instruction::pop());
         }
 
-        let end_addr = self.codegen.instructions.len();
-        for jump_addr in end_jumps {
-            self.codegen.patch_jump_to_addr(jump_addr, end_addr);
-        }
-
-        let result_type = last_type.ok_or_else(|| Error::InternalError {
+        let success_type = success_type.ok_or_else(|| Error::InternalError {
             message: "Sequence compiled with no chains".to_string(),
         })?;
-        Ok((result_type, last_prov))
+        if verdict {
+            return Ok(SequenceResult {
+                ty: success_type,
+                failures,
+                dead,
+                nil_only_match,
+            });
+        }
+        if nil_only_match {
+            return Err(Error::MatchOnlyNil);
+        }
+        // The failures rejoin the success path at the end, each with its nil as the value.
+        let mut members = vec![success_type];
+        for failure in failures {
+            self.codegen.patch_jump_to_here(failure.jump);
+            members.push(failure.nil_type);
+        }
+        Ok(SequenceResult {
+            ty: typing::union_type_ids(self.program, members),
+            failures: Vec::new(),
+            dead,
+            nil_only_match,
+        })
+    }
+
+    /// Debug builds: route a step's match failures through a stamp naming the step, so a fresh
+    /// failure nil carries its origin. Returns the failures to use in their place.
+    fn stamp_failures(&mut self, failures: Vec<Failure>, span: Option<SourceSpan>) -> Vec<Failure> {
+        if !self.debug || failures.is_empty() || span.is_none() {
+            return failures;
+        }
+        let skip = self.codegen.emit_jump_placeholder();
+        for failure in &failures {
+            self.codegen.patch_jump_to_here(failure.jump);
+        }
+        self.emit_stamp(span, quiver_core::bytecode::SiteKind::NoMatch);
+        let jump = self.codegen.emit_jump_placeholder();
+        self.codegen.patch_jump_to_here(skip);
+        let members = failures.iter().map(|failure| failure.nil_type).collect();
+        let nil_type = typing::union_type_ids(self.program, members);
+        vec![Failure { jump, nil_type }]
     }
 
     fn compile_chain(
@@ -4495,7 +4515,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     ) -> Result<(usize, Provenance), Error> {
         // Tuple fields don't have implicit continuation - they start with no input.
         // Their result is data (nothing gates on it), so matches there don't narrow.
-        self.compile_chain_with_input(
+        let result = self.compile_chain_with_input(
             chain,
             on_no_match,
             ripple_context,
@@ -4504,7 +4524,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             false,
             None,
             false,
-        )
+        )?;
+        Ok((result.ty, result.provenance))
     }
 
     /// The type a chain term is expected to produce — the parameter type of whatever consumes its
@@ -4537,7 +4558,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // match prevents the downstream code from running, so it applies only in
         // gating chains; see the fallible-match checks in the term loop.
         gating: bool,
-    ) -> Result<(usize, Provenance), Error> {
+    ) -> Result<ChainResult, Error> {
         // Fallback location for a term-level error, for the terms that carry no span of
         // their own (a literal, a string).
         let chain_span = chain.span.get();
@@ -4572,6 +4593,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         let terms: Vec<_> = chain.terms.into_iter().collect();
         let last_index = terms.len().saturating_sub(1);
+        // `Some` once the chain's final term is a match: its failure exits.
+        let mut verdict = None;
         for (i, term) in terms.iter().enumerate() {
             // A chain threads a value through its terms, so every term but the head must use
             // the one flowing into it — otherwise the work before it is silently dropped.
@@ -4615,6 +4638,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Some(callee) => self.elaborate_argument(callee, term)?,
                 None => None,
             };
+            let failures_before = self.match_failures.len();
             let (term_type, term_prov) = self.compile_term(
                 filled.map_or_else(|| term.clone(), ast::Term::Tuple),
                 FlowingValue {
@@ -4627,34 +4651,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 term_expected,
                 gating,
             )?;
-            // A fallible match's narrowing is sound only where a failed match prevents
-            // the downstream code from running, so:
-            // - it must be the LAST term of its chain — its verdict then directly gates
-            //   the step boundary (`=P; …`) or branch (`=P => …`). Nothing
-            //   short-circuits within a chain, so a following term would run whether or
-            //   not the match succeeded, observing narrowed facts that don't hold.
-            // - in a value chain (gating == false) it must bind nothing — the verdict
-            //   is data there (`[ok?: x ~> =T[_]]` is fine) and gates nothing, so its
-            //   bindings could never be relied on. (`compile_match` also skips scrutinee
-            //   narrowing for these.)
-            // A receive filter (`on_no_match`) is exempt: its failure jumps out of the
-            // chain entirely, so the continuation runs only on success.
-            if on_no_match.is_none()
-                && self.contains_nil(term_type)
-                && let ast::Term::Match(m) = term
-            {
-                if i < last_index {
-                    return Err(Error::FallibleMatchNotChainFinal);
-                }
-                if !gating {
-                    let mut names = Vec::new();
-                    collect_binding_spans(m, &mut names);
-                    if !names.is_empty() {
-                        return Err(Error::FallibleMatchBindingsInValueChain {
-                            bindings: names.into_iter().map(|(n, _)| n).collect(),
-                        });
-                    }
-                }
+            let term_failures = self.match_failures.split_off(failures_before);
+            if matches!(term, ast::Term::Match(_)) && i == last_index && chain.binding.is_none() {
+                verdict = Some(term_failures);
+            } else if !term_failures.is_empty() {
+                // A fallible match's failure leaves its step (see `compile_sequence`), which is
+                // sound only when nothing in the chain follows it: nothing else short-circuits
+                // within a chain, so a following term would run on success alone while the
+                // chain's value no longer says whether the match succeeded.
+                return Err(Error::FallibleMatchNotChainFinal);
             }
 
             // Nil flows through a chain like any other value: within a chain, no term
@@ -4684,6 +4689,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             if let [term] = terms.as_slice() {
                 self.record_destructured_import(term, &pattern);
             }
+            let failures_before = self.match_failures.len();
             let ty = self.compile_match(
                 pattern,
                 result_type,
@@ -4692,9 +4698,21 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 narrowing,
                 gating,
             )?;
-            Ok((ty, current_prov))
+            let failures = self.match_failures.split_off(failures_before);
+            if !gating && !failures.is_empty() {
+                return Err(Error::FallibleMatchInValuePosition);
+            }
+            Ok(ChainResult {
+                ty,
+                provenance: current_prov,
+                verdict: Some(failures),
+            })
         } else {
-            Ok((result_type, current_prov))
+            Ok(ChainResult {
+                ty: result_type,
+                provenance: current_prov,
+                verdict,
+            })
         }
     }
 
@@ -6778,15 +6796,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let val_type = value_type.ok_or_else(|| {
                     Error::FeatureUnsupported("Match requires a value".to_string())
                 })?;
-                // In a value position (gating == false) a fallible match's verdict is
-                // data and gates nothing, so its bindings could never be relied on.
-                // The chain loop enforces this for chain terms; this covers a match
-                // reaching here as a bare term — e.g. an application argument
-                // (`f =(T)x`), where the silent alternative was a nil-filled binding.
-                let mut value_position_bindings = Vec::new();
-                if on_no_match.is_none() && !gating {
-                    collect_binding_spans(&pattern, &mut value_position_bindings);
-                }
+                let failures_before = self.match_failures.len();
                 let ty = self.compile_match(
                     pattern,
                     val_type,
@@ -6795,20 +6805,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     narrowing,
                     gating,
                 )?;
-                if !value_position_bindings.is_empty() && self.contains_nil(ty) {
-                    return Err(Error::FallibleMatchBindingsInValueChain {
-                        bindings: value_position_bindings
-                            .into_iter()
-                            .map(|(n, _)| n)
-                            .collect(),
-                    });
+                // In a value position there is no step for a failure to end. (In a gating
+                // chain the failures stay for the chain to collect.)
+                if !gating && self.match_failures.len() > failures_before {
+                    return Err(Error::FallibleMatchInValuePosition);
                 }
-                // Preserve the matched value's provenance: a chain/branch that follows a
-                // `=PATTERN` still narrows the original value (the match recorded its structural
-                // narrowing against this provenance inside `compile_match`). The term now yields
-                // the verdict `Ok`/`[]` rather than the matched value, so callers that interpret
-                // the *verdict* as the provenance's value (the `=>` forward nil-narrowing) guard
-                // against the disjoint verdict type collapsing the matched type to never.
+                // The match yields its scrutinee, so it keeps the scrutinee's provenance.
                 Ok((ty, value_provenance))
             }
             ast::Term::Spawn(function, argument, span) => {

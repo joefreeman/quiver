@@ -1023,7 +1023,7 @@ fn test_pin_with_type_alias_primitive() {
             42 ~> ='number_or_bytes
             "#,
         )
-        .expect("Ok");
+        .expect("42");
 
     quiver()
         .evaluate(
@@ -1032,7 +1032,7 @@ fn test_pin_with_type_alias_primitive() {
             <0a> ~> ='number_or_bytes
             "#,
         )
-        .expect("Ok");
+        .expect("<0a>");
 }
 
 #[test]
@@ -1044,7 +1044,7 @@ fn test_pin_with_type_alias_union() {
             Nil ~> ='list
             "#,
         )
-        .expect("Ok");
+        .expect("Nil");
 
     quiver()
         .evaluate(
@@ -1053,7 +1053,7 @@ fn test_pin_with_type_alias_union() {
             Cons[1, Cons[2, Nil]] ~> ='list
             "#,
         )
-        .expect("Ok");
+        .expect("Cons[1, Cons[2, Nil]]");
 }
 
 #[test]
@@ -1086,7 +1086,7 @@ fn test_pin_with_type_alias_in_pattern() {
             Circle[r: 5] ~> ='shape
             "#,
         )
-        .expect("Ok");
+        .expect("Circle[r: 5]");
 }
 
 #[test]
@@ -1098,7 +1098,7 @@ fn test_pin_with_type_alias_nested() {
             Wrapper[value: 42] ~> =Wrapper[value: 'inner]
             "#,
         )
-        .expect("Ok");
+        .expect("Wrapper[value: 42]");
 }
 
 #[test]
@@ -1109,7 +1109,7 @@ fn test_pin_with_inline_type_primitive() {
             42 ~> =('int | 'bin)
             "#,
         )
-        .expect("Ok");
+        .expect("42");
 
     quiver()
         .evaluate(
@@ -1117,7 +1117,7 @@ fn test_pin_with_inline_type_primitive() {
             <0a> ~> =('int | 'bin)
             "#,
         )
-        .expect("Ok");
+        .expect("<0a>");
 }
 
 #[test]
@@ -1139,7 +1139,7 @@ fn test_pin_with_inline_type_nested() {
             A[value: 42] ~> =A[value: ('int | 'bin)]
             "#,
         )
-        .expect("Ok");
+        .expect("A[value: 42]");
 }
 
 #[test]
@@ -1150,7 +1150,7 @@ fn test_pin_with_inline_type_complex() {
             Rectangle[w: 5, h: 10] ~> =(Rectangle[w: 'int, h: 'int] | Circle[r: 'int])
             "#,
         )
-        .expect("Ok");
+        .expect("Rectangle[w: 5, h: 10]");
 }
 
 #[test]
@@ -1162,7 +1162,7 @@ fn test_inline_type_without_ampersand() {
             42 ~> =('int | 'bin)
             "#,
         )
-        .expect("Ok");
+        .expect("42");
 }
 
 #[test]
@@ -1174,7 +1174,7 @@ fn test_generic_type_explicit_instantiation() {
             Cons[42, Nil] ~> ='list<'int>
             "#,
         )
-        .expect("Ok");
+        .expect("Cons[42, Nil]");
 }
 
 #[test]
@@ -1198,7 +1198,7 @@ fn test_generic_type_explicit_instantiation_in_pattern() {
             Cons[42, Cons[99, Nil]] ~> =Cons[x, 'list<'int>]
             "#,
         )
-        .expect("Ok");
+        .expect("Cons[42, Cons[99, Nil]]");
 }
 
 #[test]
@@ -1224,7 +1224,7 @@ fn test_generic_type_short_syntax() {
             Cons[42, Nil] ~> ='list<'int>
             "#,
         )
-        .expect("Ok");
+        .expect("Cons[42, Nil]");
 }
 
 #[test]
@@ -1244,7 +1244,7 @@ fn test_named_partial_type_without_parens() {
     // Named partial type without extra parentheses: =A(x: 'int)
     quiver()
         .evaluate("A[x: 1, y: 2] ~> =A(x: 'int)")
-        .expect("Ok");
+        .expect("A[x: 1, y: 2]");
 
     // Type mismatch should fail
     quiver()
@@ -1260,9 +1260,11 @@ fn test_named_partial_type_without_parens() {
 #[test]
 fn test_unnamed_partial_type_without_parens() {
     // Unnamed partial type without extra parentheses: =(x: 'int)
-    quiver().evaluate("A[x: 1] ~> =(x: 'int)").expect("Ok");
+    quiver().evaluate("A[x: 1] ~> =(x: 'int)").expect("A[x: 1]");
 
-    quiver().evaluate("[x: 1, y: 2] ~> =(x: 'int)").expect("Ok");
+    quiver()
+        .evaluate("[x: 1, y: 2] ~> =(x: 'int)")
+        .expect("[x: 1, y: 2]");
 
     // Type mismatch should fail
     quiver().evaluate("A[x: <ff>] ~> =(x: 'int)").expect("[]");
@@ -1271,8 +1273,8 @@ fn test_unnamed_partial_type_without_parens() {
 #[test]
 fn test_empty_partial_type_without_parens() {
     // Empty partial type matches any tuple: =()
-    quiver().evaluate("A[1] ~> =()").expect("Ok");
-    quiver().evaluate("[1, 2, 3] ~> =()").expect("Ok");
+    quiver().evaluate("A[1] ~> =()").expect("A[1]");
+    quiver().evaluate("[1, 2, 3] ~> =()").expect("[1, 2, 3]");
     quiver().evaluate("42 ~> =()").expect("[]");
 }
 
@@ -1502,7 +1504,7 @@ fn test_recursive_argument_in_variant_position() {
             [Node[Leaf[7]] ~> ='tree, Node[[]] ~> ='tree]
             "#,
         )
-        .expect("[Ok, Ok]");
+        .expect("[Node[Leaf[7]], Node[[]]]");
 }
 
 #[test]

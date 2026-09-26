@@ -198,8 +198,9 @@ A newline (not followed by a continuation) or a `;` ends a chain and starts a ne
 Two rules govern a sequence, and together they are most of Quiver's control flow:
 
 1. Every step starts from the same value - the enclosing block's input.
-2. If a step evaluates to nil, the rest of the sequence is skipped and the sequence
-   evaluates to (that) nil.
+2. If a step fails, the rest of the sequence is skipped and the sequence evaluates to the
+   nil that failed it. A step ending in a [match](#matching) fails when the match does;
+   any other step fails when it evaluates to nil.
 
 ```quiver
 { 1 }                     //= 1
@@ -409,15 +410,24 @@ Similarly to field label optionality, the defaults are defined on the function i
 
 ## Matching
 
-A **match** is used for testing a value, creating bindings, or both. It evaluates to `Ok` on success and nil
-on failure. Evaluating to nil on failure means it ends a sequence of steps.
+A **match** is used for testing a value, creating bindings, or both. When it succeeds it
+evaluates to the value it matched; when it fails, it fails its step, which ends the
+sequence.
 
 There are two variants of the syntax, which both work the same: `x = ...` and `... ~> =x`:
 
 ```quiver
-x = 42
-42 ~> =x                      //= Ok // match, in a chain
-42 ~> =41                     //= [] // and it can fail
+x = 42                        //= 42
+42 ~> =x                      //= 42 // match, in a chain
+{ 42 ~> =41 }                 //= [] // and it can fail
+```
+
+Whether a step ending in a match carries on is the match's say, not its value's, so a match
+that succeeds on nil is an ordinary success:
+
+```quiver
+{ [] ~> =[]; Matched }        //= Matched
+{ 5 ~> =[]; Matched }         //= []
 ```
 
 ### Destructuring
@@ -456,7 +466,7 @@ destructure a named tuple without stating its name, use a partial or star patter
 Literals inside a pattern test rather than bind:
 
 ```quiver
-{ Point[x: 0, y: n] = Point[x: 0, y: 10] }   //= Ok
+{ Point[x: 0, y: n] = Point[x: 0, y: 10] }   //= Point[x: 0, y: 10]
 { Point[x: 0, y: n] = Point[x: 1, y: 10] }   //= []
 ```
 
@@ -466,13 +476,13 @@ A type name is always a reference — types are never bound — so `='int` tests
 against an existing *value*, prefix it with `&`.
 
 ```quiver
-42 ~> ='int                   //= Ok
-<01> ~> ='int                 //= []
+42 ~> ='int                   //= 42
+{ <01> ~> ='int }             //= []
 
 y = 2
-2 ~> =&y                      //= Ok
-3 ~> =&y                      //= []
-Point[1, 2] ~> =Point[x, &y]  //= Ok // binds x, checks y is 2
+2 ~> =&y                      //= 2
+{ 3 ~> =&y }                  //= []
+Point[1, 2] ~> =Point[x, &y]  //= Point[1, 2] // binds x, checks y is 2
 ```
 
 A pin's target may be any access path — a field of a variable, or of the enclosing
@@ -480,9 +490,9 @@ function's parameter via `$`.
 
 ```quiver
 p = Point[x: 1, y: 2]
-1 ~> =&p.x                    //= Ok
+1 ~> =&p.x                    //= 1
 same? = #[x: 'int, y: 'int] { $y ~> =&$x }
-same? [x: 3, y: 3]            //= Ok
+same? [x: 3, y: 3]            //= 3
 ```
 
 `(T)x` asserts a type *and* binds the value at that narrowed type. The identifier must be
@@ -503,8 +513,8 @@ A parenthesised, `|`-separated list matches if any alternative does. Every alter
 must bind the same variables (if any).
 
 ```quiver
-[[], 5] ~> =([[], _] | [_, []])   //= Ok
-42 ~> =('int | 'bin)              //= Ok
+[[], 5] ~> =([[], _] | [_, []])   //= [[], 5]
+42 ~> =('int | 'bin)              //= 42
 ```
 
 Either reading takes a binder, exactly as `(T)x` does, and it binds at the alternatives'
@@ -521,11 +531,11 @@ union:
 nested anywhere a pattern can be.
 
 ```quiver
-5 ~> =\[]                         //= Ok // not nil
-<01> ~> =\'int                    //= Ok
-42 ~> =\42                        //= []
-A[b: <01>] ~> =A[b: \'int]         //= Ok
-2 ~> =\(0 | 1)                    //= Ok
+5 ~> =\[]                         //= 5 // not nil
+<01> ~> =\'int                    //= <01>
+{ 42 ~> =\42 }                    //= []
+A[b: <01>] ~> =A[b: \'int]         //= A[b: <01>]
+2 ~> =\(0 | 1)                    //= 2
 ```
 
 When a negation matches, its pattern didn't, so there is nothing to bind inside one. A
@@ -552,15 +562,19 @@ Splitting the steps is what gates it.
 ```
 
 An irrefutable match — a bare binder, or one against a type that admits nothing else — may
-continue its chain.
+continue its chain, and the value flows on:
 
-In a **value position** — a tuple field, a call argument, an annotation value — nothing
-gates on the verdict at all, so a match there is just data: it may not bind, and it does
-not narrow the matched value for the surrounding code.
+```quiver
+5 ~> =x ~> [~, x]             //= [5, 5]
+```
+
+In a **value position** — a tuple field, a call argument, an annotation value — there is no
+step for a failure to end, so a match that can fail may not appear there. A block gives it
+one: the block is nil when the match fails.
 
 ```quiver
 x = 5
-[int?: x ~> ='int, bin?: x ~> ='bin]   //= [int?: Ok, bin?: []]
+[int?: x ~> { ='int }, bin?: x ~> { ='bin }]   //= [int?: 5, bin?: []]
 ```
 
 ## Branching
@@ -573,8 +587,8 @@ all of them.
 B[42] ~> { =A[a] => 1 | =B[b] => 2 }   //= 2
 ```
 
-If a branch's sequence evaluates to nil, control moves to the next branch; if there are
-none left, the block is nil. Branches are therefore fallbacks, tried in order:
+If a branch's sequence fails, control moves to the next branch; if there are none left, the
+block is nil. Branches are therefore fallbacks, tried in order:
 
 ```quiver
 label = #'int {
@@ -587,8 +601,8 @@ label = #'int {
 
 ### Condition and consequence
 
-`cond => body` is a branch that commits: if `cond` is non-nil, `body` runs and the block
-is done, even if `body` itself fails. If `cond` is nil, control moves on as usual.
+`cond => body` is a branch that commits: if `cond` succeeds, `body` runs and the block is
+done, even if `body` itself fails. If `cond` fails, control moves on as usual.
 
 ```quiver
 sign = #'int {
@@ -621,7 +635,7 @@ To test that a pattern does *not* match, [negate](#negation) it:
 
 ```quiver
 not_square? = #'shape { =\Square() }
-Circle[radius: 1] ~> not_square? ~   //= Ok
+Circle[radius: 1] ~> not_square? ~   //= Circle[radius: 1]
 Square[side: 1] ~> not_square? ~     //= []
 ```
 
@@ -1050,7 +1064,7 @@ recently entered with, which is the spawn init and then each tail call in the ro
 'status = Loading | Done['int]
 step = #'status { =Loading => 7 ~> ^ Done[~] | =Done[x] => x }
 p = Loading ~> @step ~
-?p ~> ='status                //= Ok // Loading, then Done[7]
+?p ~> ='status                //= ('status) // Loading, then Done[7]
 ```
 
 The sample's type is inferred at the spawn site: the root function's own parameter type
@@ -1072,7 +1086,7 @@ p = Loading ~> @step ~
 
 watch = #(@?'status) { ?$ }         // sample-only
 await = #(@!'int) { !$ }            // awaitable
-watch p ~> ='status                //= Ok
+watch p ~> ='status                //= ('status)
 await p                            //= 7
 ```
 
@@ -1196,7 +1210,7 @@ tag = %ref []
 
 ```quiver
 a = %ref []; b = %ref []
-a ~> =&b                      //= [] // distinct refs are not equal
+{ a ~> =&b }                  //= [] // distinct refs are not equal
 ```
 
 ## Resources and failure
@@ -1301,9 +1315,10 @@ total on any carrier, answering nil when the key is absent or outside the shape.
 
 ### Contracts
 
-`:pre` and `:post` are checked keys. For a function `#P -> R`, `:pre` is a `#P -> ok?` run
-on the argument, and `:post` a `#[in: P, out: R] -> ok?` run afterwards. They are inert in
-release builds and enforced in debug builds, where a nil verdict aborts.
+`:pre` and `:post` are checked keys. For a function `#P -> R`, `:pre` is a `#P -> _` run on
+the argument, and `:post` a `#[in: P, out: R] -> _` run afterwards; only whether the answer is
+nil counts. They are inert in release builds and enforced in debug builds, where a nil answer
+aborts.
 
 ```quiver
 half = #'int {
@@ -1328,7 +1343,7 @@ running it.
 ```quiver
 double = #'int { %num.mul [$, 2] }
 5 ~> double ~ //= 10
-x = double 3  //= 6 // the value, not the binding's verdict
+x = double 3  //= 6
 x             //= 6
 ```
 
@@ -1358,10 +1373,9 @@ most of what a binder would. A pattern that could never match the value's type i
 error, so a stale expectation fails the build even in release mode, where the check itself
 costs nothing.
 
-Since it is a *chain* the assertion observes, a binding's is applied after: `x = e //= P`
-tests `e`, not the `Ok` the step goes on to evaluate to. The verdict is what the match
-spelling's chain produces, so that is where it is observed, and `e ~> =P //= []` asserts a
-failure.
+An assertion after a match observes the matched value, on the match's success: a failed
+match has left its step, so nothing flows there. To assert that a match fails, contain it in
+a block, which is nil when it does: `{ e ~> =P } //= []`.
 
 A `//=` may also open its own line. A leading `//=` continues the line above — it is the
 trailing form with a line break — and several stack, each observing the same value. At the

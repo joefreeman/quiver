@@ -143,7 +143,7 @@ fn test_pun_piped_into_a_call() {
 fn test_pun_matches_the_equivalent_literal() {
     quiver()
         .evaluate("a = 1; b = 2; (a, b) ~> =[a: 1, b: 2]")
-        .expect("Ok");
+        .expect("[a: 1, b: 2]");
 }
 
 // A leading `(a, b) = p` is still a partial-pattern binding: the binding alternative is tried

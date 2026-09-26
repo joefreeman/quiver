@@ -861,7 +861,7 @@ fn test_type_intersection_syntax_matches() {
     // `=('t & 'u)` succeeds for a value in both members, fails for a value in only one.
     quiver()
         .evaluate("'t = A | B | C;\n'u = B | C | D;\nB ~> =('t & 'u)")
-        .expect("Ok");
+        .expect("B");
     quiver()
         .evaluate("'t = A | B | C;\n'u = B | C | D;\nA ~> =('t & 'u)")
         .expect("[]");
@@ -903,7 +903,7 @@ fn test_type_intersection_of_partials_checks_every_member() {
     // Soundness: each member is checked separately, so a value satisfying only one partial fails.
     quiver()
         .evaluate("[x: 1, y: 2] ~> =((x: 'int) & (y: 'int))")
-        .expect("Ok");
+        .expect("[x: 1, y: 2]");
     quiver()
         .evaluate("[x: 1] ~> =((x: 'int) & (y: 'int))")
         .expect("[]");
@@ -1005,7 +1005,7 @@ fn test_type_intersection_disjoint_is_never() {
 #[test]
 fn test_type_intersection_binds_tighter_than_union() {
     // `'a & 'b | 'c` parses as `('a & 'b) | 'c`: A matches via the `| A` arm.
-    quiver().evaluate("A ~> =('int & 'int | A)").expect("Ok");
+    quiver().evaluate("A ~> =('int & 'int | A)").expect("A");
 }
 
 #[test]
@@ -1282,11 +1282,7 @@ fn test_value_position_match_bindings_rejected_in_apply_argument() {
     // it compiled silently and the binding came out nil-filled.
     quiver()
         .evaluate(r#"v = Lb[5]; x = v =(I['int])s; Got[x, s]"#)
-        .expect_compile_error(
-            quiver_compiler::compiler::Error::FallibleMatchBindingsInValueChain {
-                bindings: vec!["s".to_string()],
-            },
-        );
+        .expect_compile_error(quiver_compiler::compiler::Error::FallibleMatchInValuePosition);
 }
 
 // --- Block-parameter narrowing must not mis-resolve scope-relative provenance --------
@@ -1396,7 +1392,8 @@ fn test_recursive_member_overlaps_through_an_entered_union() {
             'ts = Nil | Cons[['int, 'int], ^]
             'v = 'int | L['int, 'ts]
             t = #('v | []) { | =L[a, ts] => Hit }
-            z = { | =0 => [] | L[0, Cons[[2, 5], Nil]] }
+            mk = #('v | []) { $ }
+            z = mk L[0, Cons[[2, 5], Nil]]
             t z
             "#,
         )

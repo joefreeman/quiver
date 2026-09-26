@@ -41,7 +41,7 @@ fn test_binary_digits_may_be_grouped() {
     quiver().evaluate("<0a 1b 2c>").expect("<0a1b2c>");
     quiver()
         .evaluate("<6a09e667 bb67ae85> ~> =<6a09e667bb67ae85>")
-        .expect("Ok");
+        .expect("<6a09e667bb67ae85>");
 }
 
 #[test]
@@ -65,7 +65,9 @@ fn test_binary_may_be_written_across_lines() {
     quiver()
         .evaluate("<\n  6a09e667 bb67ae85\n  3c6ef372 a54ff53a\n>")
         .expect("<6a09e667bb67ae85…> (16 bytes)");
-    quiver().evaluate("<\n  0a1b\n> ~> =<0a1b>").expect("Ok");
+    quiver()
+        .evaluate("<\n  0a1b\n> ~> =<0a1b>")
+        .expect("<0a1b>");
     // Blank lines and ragged indentation collapse — neither carries bytes.
     quiver()
         .evaluate("<\n\n      0a1b\n\n  2c3d\n\n>")
@@ -118,7 +120,9 @@ fn a_folded_literal_destructures_and_compares() {
     quiver()
         .evaluate("[1, 2] ~> =[x, y]; [y, x]")
         .expect("[2, 1]");
-    quiver().evaluate("a = [1, 2]; [1, 2] ~> =&a").expect("Ok");
+    quiver()
+        .evaluate("a = [1, 2]; [1, 2] ~> =&a")
+        .expect("[1, 2]");
 }
 
 #[test]

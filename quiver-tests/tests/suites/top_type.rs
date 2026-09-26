@@ -148,9 +148,9 @@ fn test_top_as_type_argument() {
     quiver()
         .evaluate(
             "f = #_ { $ }
-             [f %list{ 1, 2 } ~> ='%list<_>, f 3 ~> ='%list<_>]",
+             [f %list{ 1, 2 } ~> { ='%list<_> }, f 3 ~> { ='%list<_> }]",
         )
-        .expect("[Ok, []]");
+        .expect("[Cons[1, Cons[2, Nil]], []]");
 }
 
 #[test]

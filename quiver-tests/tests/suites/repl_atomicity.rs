@@ -90,7 +90,7 @@ fn split_line_runs_and_chains() {
     let (mut environment, mut repl) = session();
     assert_eq!(
         eval_split(&mut environment, &mut repl, "x = 40").as_deref(),
-        Some("Ok")
+        Some("40")
     );
     assert_eq!(
         eval_split(&mut environment, &mut repl, "[x, 2] ~> __integer_add__ ~").as_deref(),
@@ -144,7 +144,7 @@ fn type_definition_line_commits_without_executing() {
     );
     assert_eq!(
         eval_split(&mut environment, &mut repl, "first = #'pair { $0 }").as_deref(),
-        Some("Ok")
+        Some("#0")
     );
     assert_eq!(
         eval_split(&mut environment, &mut repl, "first [7, 8]").as_deref(),

@@ -27,8 +27,10 @@ fn keys_are_data_values_compared_structurally() {
     quiver()
         .evaluate("p = @#[] { !'int } []; %registry.register [Worker[shard: %num.add [1, 2]], p]")
         .expect("Ok")
-        .then_evaluate("%registry.lookup<@'int> Worker[shard: 3] ~> =(@'int)")
-        .expect("Ok");
+        .then_evaluate(
+            "%registry.lookup<@'int> Worker[shard: 3] ~> { =(@'int) => Found | Missing }",
+        )
+        .expect("Found");
 }
 
 #[test]
@@ -55,8 +57,8 @@ fn lookup_grants_exactly_what_it_spells() {
         .expect("[]")
         .then_evaluate("%registry.lookup<(@?'int)> Typed")
         .expect("[]")
-        .then_evaluate("%registry.lookup<@!'int> Typed ~> =(@!'int)")
-        .expect("Ok");
+        .then_evaluate("%registry.lookup<@!'int> Typed ~> { =(@!'int) => Found | Missing }")
+        .expect("Found");
 }
 
 #[test]

@@ -1280,14 +1280,14 @@ fn registry_rendezvous_across_sessions() {
     // process type it states, checked at lookup.
     let mut b = Session::open(&server);
     assert_eq!(
-        b.evaluate_value("%registry.lookup<@'bin> Shared ~> =[]"),
-        "Ok",
+        b.evaluate_value("%registry.lookup<@'bin> Shared ~> { =[] => Missing | Found }"),
+        "Missing",
         "a lookup at the wrong send type must answer nil"
     );
     // The name is taken environment-wide: B's own registration answers nil.
     assert_eq!(
-        b.evaluate_value("p = @#[] { !'int } []; %registry.register [Shared, p] ~> =[]"),
-        "Ok"
+        b.evaluate_value("p = @#[] { !'int } []; %registry.register [Shared, p] ~> { =[] => Refused | Registered }"),
+        "Refused"
     );
 
     // B reaches the (one-shot) service by name, serves an exchange — and the
@@ -1300,8 +1300,8 @@ fn registry_rendezvous_across_sessions() {
         "42"
     );
     assert_eq!(
-        b.evaluate_value("%registry.lookup<@'int> Shared ~> =[]"),
-        "Ok"
+        b.evaluate_value("%registry.lookup<@'int> Shared ~> { =[] => Missing | Found }"),
+        "Missing"
     );
 }
 

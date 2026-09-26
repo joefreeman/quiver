@@ -6,7 +6,7 @@ use crate::common::*;
 
 #[test]
 fn test_equal_integers() {
-    quiver().evaluate("a = 42; 42 ~> =&a").expect("Ok");
+    quiver().evaluate("a = 42; 42 ~> =&a").expect("42");
 }
 
 #[test]
@@ -19,8 +19,10 @@ fn test_binary_equality_content() {
     // Binaries with the same content are equal even if built as different values.
     quiver()
         .evaluate("a = <68656c6c6f>; <68656c6c6f> ~> =&a")
-        .expect("Ok");
-    quiver().evaluate("a = <abcd>; <abcd> ~> =&a").expect("Ok");
+        .expect("<68656c6c6f>");
+    quiver()
+        .evaluate("a = <abcd>; <abcd> ~> =&a")
+        .expect("<abcd>");
 }
 
 #[test]
@@ -37,7 +39,7 @@ fn test_binary_inequality_content() {
 fn test_equal_strings() {
     quiver()
         .evaluate("a = \"abc\"; \"abc\" ~> =&a")
-        .expect("Ok");
+        .expect("\"abc\"");
 }
 
 #[test]
@@ -50,7 +52,7 @@ fn test_structural_equality_across_construction() {
             "mk = #<'t>['t, 't] { =[x, y]; Cons[x, Cons[y, Nil]] }; \
              a = Cons[1, Cons[2, Nil]]; [1, 2] ~> mk ~ ~> =&a",
         )
-        .expect("Ok");
+        .expect("Cons[1, Cons[2, Nil]]");
 }
 
 #[test]
@@ -67,16 +69,26 @@ fn field_less_tuples_sharing_one_payload_are_still_distinguished() {
     // pointer fast path over payloads — so the canonical-shape test must run first, or `Ok`,
     // `[]` and `Blue` would all compare equal. Pinning the order here because moving the
     // pointer test earlier would look like a harmless simplification.
-    quiver().evaluate("a = Ok; b = []; a ~> =&b").expect("[]");
-    quiver().evaluate("a = []; b = Ok; a ~> =&b").expect("[]");
-    quiver().evaluate("a = Blue; b = Ok; a ~> =&b").expect("[]");
     quiver()
-        .evaluate("a = Blue; b = Blue; a ~> =&b")
-        .expect("Ok");
-    quiver().evaluate("a = Ok; b = Ok; a ~> =&b").expect("Ok");
-    quiver().evaluate("a = []; b = []; a ~> =&b").expect("Ok");
+        .evaluate("a = Ok; b = []; a ~> { =&b => Equal | Different }")
+        .expect("Different");
+    quiver()
+        .evaluate("a = []; b = Ok; a ~> { =&b => Equal | Different }")
+        .expect("Different");
+    quiver()
+        .evaluate("a = Blue; b = Ok; a ~> { =&b => Equal | Different }")
+        .expect("Different");
+    quiver()
+        .evaluate("a = Blue; b = Blue; a ~> { =&b => Equal | Different }")
+        .expect("Equal");
+    quiver()
+        .evaluate("a = Ok; b = Ok; a ~> { =&b => Equal | Different }")
+        .expect("Equal");
+    quiver()
+        .evaluate("a = []; b = []; a ~> { =&b => Equal | Different }")
+        .expect("Equal");
     // A name still separates otherwise-identical shapes.
     quiver()
-        .evaluate("a = A[1]; b = [1]; a ~> =&b")
-        .expect("[]");
+        .evaluate("a = A[1]; b = [1]; a ~> { =&b => Equal | Different }")
+        .expect("Different");
 }

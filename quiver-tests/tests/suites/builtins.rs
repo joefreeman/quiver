@@ -62,9 +62,9 @@ fn test_type_argument_participates_in_equality() {
     // builtins are unequal and same-instantiated ones equal. (Referenced inside tuples —
     // a bare callable in a value position would be *called*.)
     quiver()
-        .evaluate(r#"f = __data_decode__<'int>; g = __data_decode__<'bin>; [f] ~> =[&g]"#)
-        .expect("[]");
+        .evaluate(r#"f = __data_decode__<'int>; g = __data_decode__<'bin>; [f] ~> { =[&g] => Equal | Different }"#)
+        .expect("Different");
     quiver()
-        .evaluate(r#"f = __data_decode__<'int>; g = __data_decode__<'int>; [f] ~> =[&g]"#)
-        .expect("Ok");
+        .evaluate(r#"f = __data_decode__<'int>; g = __data_decode__<'int>; [f] ~> { =[&g] => Equal | Different }"#)
+        .expect("Equal");
 }

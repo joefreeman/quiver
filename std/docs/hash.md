@@ -39,7 +39,7 @@ a binary literal is hashed exactly as the string that carries the same bytes.
 ```quiver
 a = %hash.sha256 <616263>
 b = "abc" ~> .0 ~> %hash.sha256 ~
-a ~> =&b                      //= Ok
+a                             //= &b
 ```
 
 The digest is the whole message's, so a one-bit change to the input relates the two outputs
@@ -48,7 +48,7 @@ not at all:
 ```quiver
 a = "abc" ~> .0 ~> %hash.sha256 ~
 b = "abd" ~> .0 ~> %hash.sha256 ~
-a ~> =&b                      //= []
+a                             //= \&b
 %bin.length a                 //= 32
 %bin.length b                 //= 32
 ```
@@ -90,15 +90,15 @@ alone does not determine the output:
 msg = "Hi There" ~> .0
 a = %hash.hmac_sha256 [<0b0b0b0b>, msg]
 b = %hash.hmac_sha256 [<0b0b0b0c>, msg]
-a ~> =&b                      //= []
+a                             //= \&b
 ```
 
 Verifying a tag is comparing it with a freshly computed one, which is an ordinary pin:
 
 ```quiver
 tag = %hash.hmac_sha256 ["secret" ~> .0, "payload" ~> .0]
-%hash.hmac_sha256 ["secret" ~> .0, "payload" ~> .0] ~> =&tag   //= Ok
-%hash.hmac_sha256 ["secret" ~> .0, "payl0ad" ~> .0] ~> =&tag   //= []
+%hash.hmac_sha256 ["secret" ~> .0, "payload" ~> .0]   //= &tag
+%hash.hmac_sha256 ["secret" ~> .0, "payl0ad" ~> .0]   //= \&tag
 ```
 
 ## SHA-1

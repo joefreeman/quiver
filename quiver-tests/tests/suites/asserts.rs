@@ -14,7 +14,7 @@ fn test_assertion_passes_and_value_flows() {
 #[test]
 fn test_binding_chain_observes_its_value_not_the_verdict() {
     // The binding matches the chain's result, and the assertion ends the chain — so it sees
-    // what is about to be bound, not the `Ok` the step goes on to evaluate to.
+    // what is about to be bound, not the verdict of the binding step that follows.
     quiver().debug().evaluate("x = 5 //= 5\nx").expect("5");
     quiver()
         .debug()
@@ -22,11 +22,11 @@ fn test_binding_chain_observes_its_value_not_the_verdict() {
         .expect_compile_error(quiver_compiler::compiler::Error::PatternNoMatchingTypes {
             pattern: "Ok".to_string(),
         });
-    // The verdict is what the match spelling's chain evaluates to, so that is where it is
-    // observable — including a failing one, which short-circuits as usual.
+    // An assertion only observes a match's success path, so a failure is asserted on a block
+    // wrapping the match, which evaluates to nil — and short-circuits as usual.
     quiver()
         .debug()
-        .evaluate("{ 5 ~> =6 //= []\nUnreached | Reached }")
+        .evaluate("{ 5 ~> { =6 } //= []\nUnreached | Reached }")
         .expect("Reached");
 }
 
@@ -93,10 +93,10 @@ fn test_nil_is_assertable_and_still_short_circuits() {
         .debug()
         .evaluate("{ | [] //= []\nUnreached | Reached }")
         .expect("Reached");
-    // A chain-final match's verdict is the step's value, so its failure is assertable.
+    // A failing match wrapped in a block evaluates to nil, so its failure is assertable.
     quiver()
         .debug()
-        .evaluate("{ | 42 ~> =41 //= []\nUnreached | Reached }")
+        .evaluate("{ | 42 ~> { =41 } //= []\nUnreached | Reached }")
         .expect("Reached");
 }
 

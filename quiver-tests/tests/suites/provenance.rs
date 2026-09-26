@@ -81,8 +81,8 @@ fn test_program_reads_origin_by_shape() {
 fn test_checked_origin_read_is_nil_in_release() {
     // Same program, release build: same types, the retrieval just answers nil.
     quiver()
-        .evaluate("f = #'int { =0 => Ok }; x = 5 ~> f ~; x:((line: 'int))origin ~> =[]")
-        .expect("Ok");
+        .evaluate("f = #'int { =0 => Ok }; x = 5 ~> f ~; x:((line: 'int))origin ~> { =[] => IsNil | NotNil }")
+        .expect("IsNil");
 }
 
 #[test]

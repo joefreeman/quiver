@@ -340,10 +340,10 @@ fn test_receive_function_cannot_await() {
             p = @#[] { ![#'int { !q; Ok }] } [];
             %proc.send [p, 10];
             r = !p;
-            r:(Error(pid: (@)))crash ~> =Error(pid: &p)
+            r:(Error(pid: (@)))crash ~> { =Error(pid: &p) => Matched | Missed }
             "#,
         )
-        .expect("Ok");
+        .expect("Matched");
 }
 
 #[test]
@@ -979,12 +979,12 @@ fn test_continuation_after_timeout() {
             r#"
             @#[] {
                 slow = @#[] { !#'int } [];
-                result = ![slow, 100] ~> =[];
+                result = ![slow, 100] ~> { =[] => TimedOut | Arrived };
                 [result, 42]
             } [] ~> !
             "#,
         )
-        .expect("[Ok, 42]");
+        .expect("[TimedOut, 42]");
 }
 
 #[test]
@@ -1187,7 +1187,7 @@ fn test_process_reference_after_completion() {
     // Test that @N syntax works even after the process has completed
     quiver()
         .evaluate("p = @[] { 42 } []")
-        .expect("Ok")
+        .expect("@1")
         .then_evaluate("!@1")
         .expect("42");
 }

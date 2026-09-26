@@ -330,7 +330,7 @@ frac_bytes = #[(fracpart): 'int, (width): 'int] {
 // to 12 places. `scaled` is `round(|n|·10^12 / d)` via the exact integer identity
 // `(2·|n|·10^12 + d) / (2d)`; trailing zeros are then stripped.
 format_rational = #[(n): 'int, (d): 'int] {
-  neg? = __integer_compare__ [$n, 0] ~> =-1
+  neg? = { __integer_compare__ [$n, 0] ~> =-1 }
   mag = {
     | neg? => __integer_subtract__ [0, $n]
     | $n
