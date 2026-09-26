@@ -199,8 +199,8 @@ Two rules govern a sequence, and together they are most of Quiver's control flow
 
 1. Every step starts from the same value - the enclosing block's input.
 2. If a step fails, the rest of the sequence is skipped and the sequence evaluates to the
-   nil that failed it. A step ending in a [match](#matching) fails when the match does;
-   any other step fails when it evaluates to nil.
+   nil that failed it. A step fails when a [match](#matching) in it fails, or when it
+   doesn't end in a match and evaluates to nil.
 
 ```quiver
 { 1 }                     //= 1
@@ -551,26 +551,21 @@ succ []                       //= []
 
 ### Where a match may appear
 
-A match that can fail must be the **last term of its chain**, because nothing
-short-circuits inside a chain: a term after the match would run whether or not it matched.
-Splitting the steps is what gates it.
+A match may stand anywhere a term can: mid-chain, in a tuple field, as a call's argument.
+Wherever it stands, a match that fails fails its **step**, dropping whatever the step had
+built so far, so everything after the match — the rest of the chain, the tuple's later
+fields — runs only when it matched, and may rely on its bindings.
 
 ```quiver
-42 ~> =41 ~> %num.add [~, 1]     //! must be the last term of its chain
-42 ~> { =41; %num.add [~, 1] }   //= []
-42 ~> { =42; %num.add [~, 1] }   //= 43
+42 ~> =42 ~> %num.add [~, 1]     //= 43
+{ 42 ~> =41 ~> %num.add [~, 1] } //= []
+f = #('int | 'bin) { [$ ~> =('int)n, %num.add [n, 1]] }
+f 5                              //= [5, 6]
+f <01>                           //= []
 ```
 
-An irrefutable match — a bare binder, or one against a type that admits nothing else — may
-continue its chain, and the value flows on:
-
-```quiver
-5 ~> =x ~> [~, x]             //= [5, 5]
-```
-
-In a **value position** — a tuple field, a call argument, an annotation value — there is no
-step for a failure to end, so a match that can fail may not appear there. A block gives it
-one: the block is nil when the match fails.
+A block contains the failure, being nil when it fails, which is how to keep a match's
+outcome as data:
 
 ```quiver
 x = 5

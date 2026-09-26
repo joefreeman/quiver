@@ -1276,13 +1276,15 @@ fn test_checked_annotation_gate_on_recursive_entry() {
 }
 
 #[test]
-fn test_value_position_match_bindings_rejected_in_apply_argument() {
-    // A fallible match as an *application argument* is a value position: its verdict
-    // is data and gates nothing, so binding through it must be rejected — previously
-    // it compiled silently and the binding came out nil-filled.
+fn test_match_in_apply_argument_fails_its_step() {
+    // A fallible match as an application argument fails its step when it misses — never a
+    // call with a nil-filled binding — so a binding made there holds afterwards.
     quiver()
-        .evaluate(r#"v = Lb[5]; x = v =(I['int])s; Got[x, s]"#)
-        .expect_compile_error(quiver_compiler::compiler::Error::FallibleMatchInValuePosition);
+        .evaluate(
+            "f = #('int | 'bin) { g = #'int { $ }; x = g =('int)s; Got[x, s] }
+             [f 5, f <01>]",
+        )
+        .expect("[Got[5, 5], []]");
 }
 
 // --- Block-parameter narrowing must not mis-resolve scope-relative provenance --------

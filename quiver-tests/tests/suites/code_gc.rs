@@ -2,7 +2,7 @@
 //! nothing live references (keeping identity — pids' root-function indices still type-
 //! test), and an identical re-registration *revives* a stubbed slot in place, so the
 //! REPL's whole-program merges stay correct across sweeps. A stub that is nonetheless
-//! executed panics the process loudly ("reclaimed code invoked"), so every passing
+//! executed panics the process loudly ("unreachable code executed"), so every passing
 //! evaluation after a sweep is itself evidence the liveness walk was right.
 
 use crate::common::quiver;
@@ -71,7 +71,7 @@ fn tombstone_result_on_another_worker_keeps_code_alive() {
     // The closure's only surviving reference after the rebind is the result retained
     // by a completed process's tombstone (placed on a worker by pid round-robin).
     // Awaiting after the sweep hands the closure back and calls it — a missed
-    // cross-worker root would surface as "reclaimed code invoked".
+    // cross-worker root would surface as "unreachable code executed".
     quiver()
         .isolated()
         .evaluate("f = #'int { [$, 7] ~> __integer_add__ ~ }; p = @#[] { f } []; Ok")

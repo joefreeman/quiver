@@ -1,4 +1,8 @@
-use quiver_core::bytecode::{Instruction, Offset, Opcode};
+use quiver_core::{
+    bytecode::{Instruction, Offset, Opcode},
+    program::Program,
+    types::TypeLookup,
+};
 
 /// Helper struct for managing instruction generation and jumps
 pub struct InstructionBuilder {
@@ -110,4 +114,100 @@ impl InstructionBuilder {
         self.add_instruction(Instruction::not());
         self.emit_jump_if_placeholder()
     }
+}
+
+/// How an instruction changes the operand stack's depth, or `None` for one that ends the
+/// function's flow here (a tail call, a self-recursion, a reclaimed trap).
+fn stack_effect(instruction: Instruction, program: &Program) -> Result<Option<isize>, String> {
+    let operand = instruction.operand() as usize;
+    Ok(Some(match instruction.opcode() {
+        Opcode::Constant
+        | Opcode::Duplicate
+        | Opcode::Pick
+        | Opcode::Load
+        | Opcode::Nil
+        | Opcode::Ok
+        | Opcode::Builtin
+        | Opcode::Self_ => 1,
+        Opcode::Rotate
+        | Opcode::Reset
+        | Opcode::GetPositional
+        | Opcode::GetNamed
+        | Opcode::IsType
+        | Opcode::Jump
+        | Opcode::Not
+        | Opcode::GetAnnotation
+        | Opcode::Stamp
+        | Opcode::Select
+        | Opcode::Process
+        | Opcode::State => 0,
+        Opcode::Pop
+        | Opcode::Store
+        | Opcode::JumpIf
+        | Opcode::Call
+        | Opcode::Equal
+        | Opcode::Annotate
+        | Opcode::Spawn => -1,
+        Opcode::Tuple => {
+            let tuple = program
+                .lookup_tuple(operand)
+                .ok_or_else(|| format!("unknown tuple {operand}"))?;
+            1 - tuple.fields.len() as isize
+        }
+        Opcode::Function => {
+            let function = program
+                .get_function(operand)
+                .ok_or_else(|| format!("unknown function {operand}"))?;
+            1 - function.captures as isize
+        }
+        Opcode::Squash => -(operand as isize),
+        Opcode::TailCall | Opcode::Recurse | Opcode::Reclaimed => return Ok(None),
+    }))
+}
+
+/// The operand-stack depth before each instruction from `start` on, relative to depth 0 at
+/// `start`; `None` where no path from `start` reaches. The jumps at `exits` leave the range —
+/// where they land is not this range's to say — as does any jump landing outside it. Codegen is
+/// structured, so every instruction has one depth: two paths disagreeing is an error.
+pub fn operand_depths(
+    instructions: &[Instruction],
+    start: usize,
+    exits: &[usize],
+    program: &Program,
+) -> Result<Vec<Option<isize>>, String> {
+    let len = instructions.len();
+    let mut depths: Vec<Option<isize>> = vec![None; len.saturating_sub(start)];
+    let mut work = vec![(start, 0isize)];
+    while let Some((addr, depth)) = work.pop() {
+        if addr < start || addr >= len {
+            continue;
+        }
+        match depths[addr - start] {
+            Some(known) if known == depth => continue,
+            Some(known) => {
+                return Err(format!(
+                    "instruction {addr} reached at depths {known} and {depth}"
+                ));
+            }
+            None => depths[addr - start] = Some(depth),
+        }
+        let instruction = instructions[addr];
+        let Some(effect) = stack_effect(instruction, program)? else {
+            continue;
+        };
+        let after = depth + effect;
+        let target = || (addr as Offset + 1 + instruction.offset()) as usize;
+        match instruction.opcode() {
+            Opcode::Jump if exits.contains(&addr) => {}
+            Opcode::Jump => work.push((target(), after)),
+            Opcode::JumpIf => {
+                work.push((addr + 1, after));
+                if !exits.contains(&addr) {
+                    work.push((target(), after));
+                }
+            }
+            _ => work.push((addr + 1, after)),
+        }
+    }
+    Ok(depths)
 }

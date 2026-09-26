@@ -1771,6 +1771,7 @@ impl<E: Effect> Executor<E> {
             Opcode::Duplicate => self.handle_duplicate(proc),
             Opcode::Pick => self.handle_pick(proc, operand),
             Opcode::Rotate => self.handle_rotate(proc, operand),
+            Opcode::Squash => self.handle_squash(proc, operand),
             Opcode::Load => self.handle_load(proc, operand),
             Opcode::Store => self.handle_store(proc),
             Opcode::Tuple => self.handle_tuple(proc, operand),
@@ -1794,8 +1795,11 @@ impl<E: Effect> Executor<E> {
             Opcode::Stamp => self.handle_stamp(proc, operand),
             // Liveness said nothing could reach this code; abort the process loudly
             // rather than return garbage.
+            // Nothing should reach this: reclaimed code (a code-collection liveness bug) or the
+            // point after a call that never returns.
             Opcode::Reclaimed => Err(Error::Panic(
-                "reclaimed code invoked (code-collection liveness bug)".to_string(),
+                "unreachable code executed (reclaimed code, or past a call that never returns)"
+                    .to_string(),
             )),
             Opcode::Spawn | Opcode::Self_ | Opcode::Select | Opcode::Process | Opcode::State => {
                 unreachable!("cold instruction routed to execute_hot")
@@ -1963,6 +1967,28 @@ impl<E: Effect> Executor<E> {
         let index = proc.stack.len() - 1 - n;
         let value = proc.stack[index].clone();
         self.push_value(proc, value);
+
+        if let Some(frame) = proc.frames.last_mut() {
+            frame.counter += 1;
+        }
+        Ok(None)
+    }
+
+    fn handle_squash(
+        &mut self,
+        proc: &mut Process,
+        count: usize,
+    ) -> Result<Option<Action<E>>, Error> {
+        let len = proc.stack.len();
+        if len <= count {
+            return Err(Error::StackUnderflow);
+        }
+        // The dropped values leave the stack, releasing them as they go.
+        let top = self.pop_value(proc).expect("stack depth checked above");
+        for _ in 0..count {
+            self.pop_value(proc);
+        }
+        self.push_value(proc, top);
 
         if let Some(frame) = proc.frames.last_mut() {
             frame.counter += 1;

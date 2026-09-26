@@ -714,6 +714,7 @@ pub enum Opcode {
     Process,
     State,
     Reclaimed,
+    Squash,
 }
 
 /// What an opcode's operand field means — the one place that knows, so the disassembler
@@ -754,7 +755,7 @@ impl Opcode {
 
     /// Every opcode, in discriminant order — `ALL[op as usize] == op` (asserted in tests),
     /// which is what makes the decode below a single indexed load.
-    pub const ALL: [Opcode; 32] = [
+    pub const ALL: [Opcode; 33] = [
         Opcode::Constant,
         Opcode::Pop,
         Opcode::Duplicate,
@@ -787,6 +788,7 @@ impl Opcode {
         Opcode::Process,
         Opcode::State,
         Opcode::Reclaimed,
+        Opcode::Squash,
     ];
 }
 
@@ -1058,12 +1060,19 @@ impl Instruction {
         Instruction::bare(Opcode::State)
     }
 
-    /// The body of a function whose code was reclaimed: liveness said nothing could call
-    /// it, so executing this is a reclamation bug — it aborts the process loudly rather
-    /// than returning garbage. Never emitted by the compiler; written into stubbed slots
-    /// by `Program::reclaim_code`.
+    /// A point execution never reaches, which aborts the process loudly if it does rather than
+    /// return garbage: the body of a function whose code was reclaimed (liveness said nothing
+    /// could call it; written into stubbed slots by `Program::reclaim_code`), or the point after
+    /// a call that never returns (`__panic__`), which marks the flow as ending there.
     pub fn reclaimed() -> Instruction {
         Instruction::bare(Opcode::Reclaimed)
+    }
+
+    /// Keep the top of the stack and drop the `count` values beneath it — how a failure leaves
+    /// a half-built expression (a tuple's earlier fields, a call's callee) for its step, with
+    /// only the failing nil where the step's value belongs.
+    pub fn squash(count: usize) -> Instruction {
+        Instruction::with_id(Opcode::Squash, count)
     }
 }
 

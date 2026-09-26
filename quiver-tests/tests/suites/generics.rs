@@ -641,8 +641,8 @@ fn test_type_test_on_a_type_variable_is_checked_at_runtime() {
         .evaluate("f = #<'t>['t, 't] { $ ~> =[x, ('int)y] }; f")
         .expect_type("#['t, 't] -> (['t, 't] | [])");
     quiver()
-        .evaluate("f = #<'t>['t, 't] { $ ~> =[x, ('int)y] ~> [~, y] }")
-        .expect_error_containing("must be the last term of its chain");
+        .evaluate("f = #<'t>['t, 't] { $ ~> =[x, ('int)y] ~> [~, y] }; [f [1, 2], f [<01>, <02>]]")
+        .expect("[[[1, 2], 2], []]");
     // Binding alone still can't fail.
     quiver()
         .evaluate("k = #<'t>['t, 't] { $ ~> =[x, y] ~> [~, y] }; k [1, 2]")

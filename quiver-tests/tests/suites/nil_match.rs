@@ -62,22 +62,23 @@ fn test_pin_of_nil_valued_variable_matches_nil() {
 }
 
 #[test]
-fn test_fallible_match_must_end_its_chain() {
-    // Nothing short-circuits within a chain, so a term after a fallible match would
-    // run whether or not it matched — observing bindings and narrowings that don't
-    // hold. A fallible match must be the last term of its chain (its verdict then
-    // gates the step boundary or branch); this holds for binding and bindingless
-    // patterns alike.
+fn test_fallible_match_mid_chain_fails_its_step() {
+    // A failed match leaves its step wherever it stands, so the terms after it run only on
+    // success, where its bindings and narrowings hold.
     quiver()
         .evaluate(
             r#"'g = T['int] | M['int];
-               f = #'g { $ ~> =T[x] ~> %num.gt? [x, 0] };
-               f T[1]"#,
+               f = #'g { $ ~> =T[x] ~> [~, x] };
+               [f T[1], f M[1]]"#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::FallibleMatchNotChainFinal);
+        .expect("[[T[1], 1], []]");
     quiver()
-        .evaluate("a = 1; 2 ~> =&a ~> =[]")
-        .expect_compile_error(quiver_compiler::compiler::Error::FallibleMatchNotChainFinal);
+        .evaluate("a = 1; [2 ~> { =&a ~> [~] => Went | Stopped }, 1 ~> =&a ~> [~]]")
+        .expect("[Stopped, [1]]");
+    // A binding after the match is part of the same step.
+    quiver()
+        .evaluate("f = #('int | 'bin) { n = $ ~> ='int; [n] }; [f 3, f <01>]")
+        .expect("[[3], []]");
 }
 
 #[test]
@@ -100,13 +101,54 @@ fn test_fallible_match_in_field_is_verdict_data_without_narrowing() {
                [f M[1], f T[5]]"#,
         )
         .expect("[[[], GotM], [T[5], Other]]");
-    // And a bare fallible match may not appear in a field at all — its bindings could never
-    // be relied on (the surrounding code runs whether or not it matched).
+    // A bare fallible match in a field fails the whole step, dropping the tuple built so far,
+    // so its bindings and narrowing hold for the rest of the step.
     quiver()
         .evaluate(
             r#"'g = T['int] | M['int];
-               f = #'g { [$ ~> =T[x], 1] };
-               f T[5]"#,
+               f = #'g { [0, $ ~> =T[x], x] };
+               [f T[5], f M[1]]"#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::FallibleMatchInValuePosition);
+        .expect("[[0, T[5], 5], []]");
+}
+
+#[test]
+fn test_failure_inside_a_half_built_expression_unwinds_it() {
+    // A failure deep in nested tuples drops everything built so far, leaving only its nil.
+    quiver()
+        .evaluate(
+            "f = #('int | 'bin) { | [a: 1, b: [x: $ ~> ='int, y: 2]] => Got | Other }
+             [f 5, f <01>]",
+        )
+        .expect("[Got, Other]");
+    // In a call's argument, the callee is dropped with it.
+    quiver()
+        .evaluate("f = #('int | 'bin) { %num.add [$ ~> ='int, 1] }; [f 5, f <01>]")
+        .expect("[6, []]");
+    // The next branch runs on a clean stack, with the earlier branch's locals cleared.
+    quiver()
+        .evaluate(
+            "f = #('int | 'bin) {
+               | [a: 0, b: $ ~> =('int)n, c: n] => Int[n]
+               | x = $; Other[x]
+             }
+             [f 5, f <01>]",
+        )
+        .expect("[Int[5], Other[<01>]]");
+}
+
+#[test]
+fn test_repeated_unwinding_leaves_the_stack_balanced() {
+    // Each round fails a match inside a half-built tuple and recurses; a leak would grow the
+    // stack round by round.
+    quiver()
+        .evaluate(
+            "count = #[n: 'int, acc: 'int] {
+               | $n ~> =0 => $acc
+               | [pad: $n, v: <01> ~> ='int] => Never
+               | ^ [n: __integer_subtract__ [$n, 1], acc: __integer_add__ [$acc, 1]]
+             }
+             count [n: 1000, acc: 0]",
+        )
+        .expect("1000");
 }
