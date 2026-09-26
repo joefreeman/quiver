@@ -5,7 +5,7 @@ use crate::effects::Effect;
 use crate::error::{Error, Operation};
 use crate::process::{
     Action, Frame, Process, ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo,
-    ProcessStatus, RestrictedContext, SelectState, StreamEvent, Watcher,
+    ProcessStatus, RestrictedContext, SelectState, StreamEvent, Wait, Watcher,
 };
 use crate::types::{BuiltinInfo, NIL, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Payload, ResourceId, Value};
@@ -13,7 +13,8 @@ use crate::wire::{WirePayload, WireValue};
 use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -147,12 +148,15 @@ enum SelectResult {
 pub struct Executor<E: Effect> {
     processes: FxHashMap<ProcessId, Process>,
     process_function_indices: FxHashMap<ProcessId, usize>, // Maps process ID to its function index (for REPL)
+    /// Processes to run, in order. A process is in it at most once (`Process::queued`);
+    /// one taken out early leaves an entry that is skipped on reaching the front.
     queue: VecDeque<ProcessId>,
-    spawning: HashSet<ProcessId>,
-    selecting: HashSet<ProcessId>,
-    effecting: HashSet<ProcessId>,
-    /// Parked on a remote `?` state read, woken by `notify_state`.
-    sampling: HashSet<ProcessId>,
+    /// How many of `queue`'s entries are live, so `has_runnable` need not scan past stale ones.
+    runnable: usize,
+    /// Select deadlines, soonest first: `(deadline, pid)`, pushed when a select starts
+    /// timing. An entry outlives a select that completed first; waking its process then is
+    /// harmless, since a select re-checks its own sources and parks again.
+    timeouts: BinaryHeap<Reverse<(u64, ProcessId)>>,
     /// Completion notifications awaiting delivery: `(watcher, completed pid)` pairs
     /// recorded when a watched process terminated (see `flush_watchers`). The runtime
     /// above drains these via `take_watcher_events` — delivery routes through the
@@ -531,18 +535,14 @@ impl<E: Effect> Executor<E> {
             Some(process) if process.result.is_none() && !process.persistent => {
                 process.result = Some(Err(Box::new(error)));
                 process.frames.clear();
+                // A kill lands while the process is parked (or queued for a slice); no
+                // delivery will ever wake it again, so clear its scheduling state here. Left
+                // set, it would misreport the tombstone as Waiting/Active.
+                process.wait = None;
             }
             _ => return,
         }
-        // A kill lands while the process is parked in a waiting set (or queued for a
-        // slice); no delivery will ever pull it out again, so clear its scheduling
-        // state here. A stale entry would misreport the tombstone as Waiting/Active —
-        // and an expiring select timeout would re-queue the corpse.
-        self.spawning.remove(&pid);
-        self.selecting.remove(&pid);
-        self.effecting.remove(&pid);
-        self.sampling.remove(&pid);
-        self.queue.retain(|&queued| queued != pid);
+        self.dequeue(pid);
         self.tombstone(pid);
     }
 
@@ -778,10 +778,8 @@ impl<E: Effect> Executor<E> {
             processes: FxHashMap::default(),
             process_function_indices: FxHashMap::default(),
             queue: VecDeque::new(),
-            spawning: HashSet::new(),
-            selecting: HashSet::new(),
-            effecting: HashSet::new(),
-            sampling: HashSet::new(),
+            runnable: 0,
+            timeouts: BinaryHeap::new(),
             pending_watcher_events: Vec::new(),
             pending_state_wakeups: HashSet::new(),
             pending_unsubscribes: Vec::new(),
@@ -892,8 +890,7 @@ impl<E: Effect> Executor<E> {
         // Cache the function index for REPL references
         self.set_process_function_index(id, function_index);
 
-        // Add to queue
-        self.queue.push_back(id);
+        self.enqueue(id);
 
         Ok(())
     }
@@ -910,26 +907,12 @@ impl<E: Effect> Executor<E> {
         &self.builtins_registry
     }
 
-    pub fn suspend_process(&mut self, id: ProcessId) {
-        self.queue.retain(|&pid| pid != id);
-    }
-
     /// Notify a process that spawned a new process with the new PID
     pub fn notify_spawn(&mut self, id: ProcessId, pid: Value) {
-        let was_spawning = self.spawning.remove(&id);
-
         if let Some(process) = self.processes.get_mut(&id) {
-            // For spawn notifications, just push the PID onto the stack and increment counter
+            // The spawn's result: the process resumes past it with the pid on the stack.
             process.stack.push(pid);
-
-            if let Some(frame) = process.frames.last_mut() {
-                frame.counter += 1;
-            }
-
-            // Only re-queue if it was actually spawning (not already queued by something else)
-            if was_spawning {
-                self.queue.push_back(id);
-            }
+            self.wake(id, Wait::Spawn);
         }
     }
 
@@ -940,12 +923,7 @@ impl<E: Effect> Executor<E> {
 
         if let Some(process) = self.get_process_mut(id) {
             process.stack.push(sample);
-            if let Some(frame) = process.frames.last_mut() {
-                frame.counter += 1;
-            }
-            if self.sampling.remove(&id) {
-                self.queue.push_back(id);
-            }
+            self.wake(id, Wait::Sample);
         }
         Ok(())
     }
@@ -989,10 +967,8 @@ impl<E: Effect> Executor<E> {
                 .insert(awaited, Some(injected_result));
         }
 
-        // Re-queue awaiter to retry its Select instruction
-        if self.selecting.remove(&awaiter) {
-            self.queue.push_back(awaiter);
-        }
+        // Wake the awaiter to retry its select.
+        self.wake(awaiter, Wait::Select);
 
         Ok(())
     }
@@ -1008,8 +984,6 @@ impl<E: Effect> Executor<E> {
         process_id: ProcessId,
         result: Result<WireValue, crate::effects::EffectFailure>,
     ) -> Result<(), Error> {
-        let was_effecting = self.effecting.remove(&process_id);
-
         let value_result = match result {
             Ok(v) => Ok(self.from_wire(v)?),
             Err(crate::effects::EffectFailure::Expected(error)) => {
@@ -1020,9 +994,6 @@ impl<E: Effect> Executor<E> {
             )),
         };
 
-        // Retain the success value as it enters the stack (below).
-
-        // Get process and update based on result
         let process = self
             .get_process_mut(process_id)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
@@ -1032,24 +1003,19 @@ impl<E: Effect> Executor<E> {
             Ok(value) => {
                 // A value, or a failure nil: either way the process resumes.
                 process.stack.push(value);
-                if let Some(frame) = process.frames.last_mut() {
-                    frame.counter += 1;
-                }
             }
             Err(error) => {
                 // Fault: set error and terminate the process
                 process.result = Some(Err(Box::new(error)));
                 process.frames.clear();
+                process.wait = None;
                 killed = true;
             }
         }
         if killed {
             self.tombstone(process_id);
-        }
-
-        // Re-queue if it was effecting
-        if was_effecting {
-            self.queue.push_back(process_id);
+        } else {
+            self.wake(process_id, Wait::Effect);
         }
 
         Ok(())
@@ -1073,10 +1039,8 @@ impl<E: Effect> Executor<E> {
                 .push_back(injected_message);
         }
 
-        // Re-queue if the process is selecting (waiting for messages)
-        if self.selecting.remove(&id) {
-            self.queue.push_back(id);
-        }
+        // Wake the process if its select is waiting for messages.
+        self.wake(id, Wait::Select);
 
         Ok(())
     }
@@ -1149,52 +1113,75 @@ impl<E: Effect> Executor<E> {
             "a stream resource may have at most one event in flight"
         );
 
-        if self.selecting.remove(&id) {
-            self.queue.push_back(id);
-        }
+        self.wake(id, Wait::Select);
         Ok(())
     }
 
-    pub fn mark_spawning(&mut self, id: ProcessId) {
-        self.spawning.insert(id);
-        self.queue.retain(|&pid| pid != id);
+    /// Park a process on `wait`: it runs again once the matching notification wakes it.
+    /// By id, for the cold handlers, which run with the process in the map; the running
+    /// process is never queued, so there is no queue entry to take back.
+    fn park(&mut self, id: ProcessId, wait: Wait) {
+        if let Some(process) = self.processes.get_mut(&id) {
+            process.wait = Some(wait);
+        }
     }
 
-    pub fn mark_selecting(&mut self, id: ProcessId) {
-        self.selecting.insert(id);
-        self.queue.retain(|&pid| pid != id);
+    /// Resume a process parked on `wait`. A process parked on anything else — or not
+    /// parked, or gone — is left alone.
+    fn wake(&mut self, id: ProcessId, wait: Wait) {
+        if let Some(process) = self.processes.get_mut(&id)
+            && process.wait == Some(wait)
+        {
+            process.wait = None;
+            self.enqueue(id);
+        }
     }
 
-    pub fn mark_effecting(&mut self, id: ProcessId) {
-        self.effecting.insert(id);
-        self.queue.retain(|&pid| pid != id);
+    /// Wake a process parked on its select without delivering anything, so it re-scans its
+    /// sources: its await targets had no results to give, or it only armed stream reads.
+    pub fn wake_selecting(&mut self, id: ProcessId) {
+        self.wake(id, Wait::Select);
     }
 
-    pub fn mark_sampling(&mut self, id: ProcessId) {
-        self.sampling.insert(id);
-        self.queue.retain(|&pid| pid != id);
-    }
-
-    pub fn mark_active(&mut self, id: ProcessId) {
-        let was_spawning = self.spawning.remove(&id);
-        let was_selecting = self.selecting.remove(&id);
-        if was_spawning || was_selecting {
+    /// Queue a process to run, unless it already is.
+    pub fn enqueue(&mut self, id: ProcessId) {
+        if let Some(process) = self.processes.get_mut(&id)
+            && !process.queued
+        {
+            process.queued = true;
+            self.runnable += 1;
             self.queue.push_back(id);
         }
     }
 
-    pub fn add_to_queue(&mut self, process_id: ProcessId) {
-        self.queue.push_back(process_id);
+    /// Take a process out of the run queue, leaving its entry to be skipped.
+    fn dequeue(&mut self, id: ProcessId) {
+        if let Some(process) = self.processes.get_mut(&id)
+            && process.queued
+        {
+            process.queued = false;
+            self.runnable -= 1;
+        }
     }
 
-    fn get_status(&self, id: ProcessId, process: &Process) -> ProcessStatus {
-        if self.queue.contains(&id) {
+    /// The next process to run, skipping entries left by processes taken out early.
+    fn next_queued(&mut self) -> Option<ProcessId> {
+        while let Some(id) = self.queue.pop_front() {
+            if let Some(process) = self.processes.get_mut(&id)
+                && process.queued
+            {
+                process.queued = false;
+                self.runnable -= 1;
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    fn get_status(process: &Process) -> ProcessStatus {
+        if process.queued {
             ProcessStatus::Active
-        } else if self.spawning.contains(&id)
-            || self.selecting.contains(&id)
-            || self.effecting.contains(&id)
-            || self.sampling.contains(&id)
-        {
+        } else if process.wait.is_some() {
             ProcessStatus::Waiting
         } else if matches!(&process.result, Some(Err(_))) {
             ProcessStatus::Failed
@@ -1214,7 +1201,7 @@ impl<E: Effect> Executor<E> {
     pub fn get_process_statuses(&self) -> HashMap<ProcessId, ProcessStatus> {
         self.processes
             .iter()
-            .map(|(id, process)| (*id, self.get_status(*id, process)))
+            .map(|(id, process)| (*id, Self::get_status(process)))
             .collect()
     }
 
@@ -1358,7 +1345,7 @@ impl<E: Effect> Executor<E> {
 
             ProcessInfo {
                 id,
-                status: self.get_status(id, process),
+                status: Self::get_status(process),
                 function_index,
                 stack_size: process.stack.len(),
                 locals_count: process.locals.len(),
@@ -1379,16 +1366,6 @@ impl<E: Effect> Executor<E> {
     /// Get builtin name by index
     pub fn get_builtin_name(&self, index: usize) -> Option<&str> {
         self.builtins.get(index).map(|s| s.as_str())
-    }
-
-    /// Re-queue a process for execution (e.g., after I/O completion)
-    pub fn requeue_process(&mut self, process_id: ProcessId) {
-        self.queue.push_back(process_id);
-    }
-
-    /// Remove a process from the execution queue
-    pub fn remove_from_queue(&mut self, process_id: ProcessId) {
-        self.queue.retain(|&p| p != process_id);
     }
 
     /// Update executor with program data (appends to existing data).
@@ -1545,8 +1522,7 @@ impl<E: Effect> Executor<E> {
     pub fn step(&mut self, max_units: usize, current_time_ms: u64) -> (bool, Option<Action<E>>) {
         // Check for expired timeouts before processing
         self.check_expired_timeouts(current_time_ms);
-        // Pop process from queue
-        let Some(current_pid) = self.queue.pop_front() else {
+        let Some(current_pid) = self.next_queued() else {
             return (false, None); // No processes to run
         };
 
@@ -1562,7 +1538,7 @@ impl<E: Effect> Executor<E> {
 
         // Execute instructions for current process
         while units_executed < max_units {
-            let Some(instruction) = Self::current_instruction(&proc, &self.functions) else {
+            let Some(instruction) = Self::fetch(&mut proc, &self.functions) else {
                 // The current frame is exhausted. Returning into the caller ends the
                 // time-slice only at the root frame (process completion, handled below);
                 // an inner return pops inline so call-heavy code isn't throttled to one
@@ -1600,26 +1576,27 @@ impl<E: Effect> Executor<E> {
                 Err(error) => {
                     proc.result = Some(Err(Box::new(error.clone())));
                     proc.frames.clear();
+                    proc.wait = None;
                 }
             }
 
             // Yield once the instruction has routed an action (at most one per slice) or
-            // parked the process. Only a cold instruction parks without routing one — a
-            // select with nothing ready — so the waiting sets, which are hashed, are consulted
-            // only then rather than after every instruction.
-            if pending_request.is_some() || (cold && self.is_waiting(current_pid)) {
+            // parked the process.
+            if pending_request.is_some() || proc.wait.is_some() {
                 break;
             }
-            debug_assert!(
-                !self.is_waiting(current_pid),
-                "a hot instruction parked the process without routing an action"
-            );
         }
 
-        // Pop any exhausted frames before checking whether the process finished.
-        while !proc.frames.is_empty() && Self::current_instruction(&proc, &self.functions).is_none()
-        {
-            self.pop_exhausted_frame(current_pid, &mut proc);
+        // Pop any exhausted frames before checking whether the process finished. Not while
+        // it waits: the counter has moved past the instruction it parked on, which may have
+        // been its frame's last, and the result it waits for is not on the stack yet — the
+        // frame returns once it resumes.
+        if proc.wait.is_none() {
+            while !proc.frames.is_empty()
+                && Self::current_instruction(&proc, &self.functions).is_none()
+            {
+                self.pop_exhausted_frame(current_pid, &mut proc);
+            }
         }
 
         // Return the process to the map; the bookkeeping below operates via the map.
@@ -1650,16 +1627,13 @@ impl<E: Effect> Executor<E> {
             // Validate the refcount invariant at this quiescent point (debug only) — the
             // worker/concurrency-path counterpart of the check in `execute_bytecode_sync`. This
             // catches *leaks* (missing releases) that the `release` underflow assert cannot.
-        } else {
-            let should_requeue = !self.spawning.contains(&current_pid)
-                && !self.selecting.contains(&current_pid)
-                && !self.sampling.contains(&current_pid);
-
-            if should_requeue {
-                // Process not finished - re-queue it so it can continue
-                // This handles both: time slice exhaustion AND yielding after routing (e.g., Send)
-                self.queue.push_back(current_pid);
-            }
+        } else if self
+            .get_process(current_pid)
+            .is_some_and(|p| p.wait.is_none())
+        {
+            // Not finished and not parked — the slice ran out, or the process yielded after
+            // routing an action (a send, say) — so it goes to the back of the queue.
+            self.enqueue(current_pid);
         }
 
         // Return (did_work=true, pending_request) - we always do work if we got here
@@ -1667,9 +1641,10 @@ impl<E: Effect> Executor<E> {
     }
 
     /// Pop one exhausted frame of the running process (held out of the map for its slice):
-    /// return into the caller (or a re-entered select), release the frame's locals, and
-    /// reconcile a returning tracked-render thunk's reactive subscriptions. The callee's
-    /// result is already on the stack.
+    /// return into the caller, release the frame's locals, and reconcile a returning
+    /// tracked-render thunk's reactive subscriptions. The callee's result is already on the
+    /// stack, and the caller's counter already points where it resumes — past its call, or
+    /// back at a select that ran a receive filter.
     fn pop_exhausted_frame(&mut self, pid: ProcessId, process: &mut Process) {
         // A returning tracked-render thunk is the frame whose pre-pop depth matches the
         // recorded boundary; its return reconciles the caller's reactive subscriptions.
@@ -1681,16 +1656,6 @@ impl<E: Effect> Executor<E> {
         let frame = process.frames.pop().expect("an exhausted frame to pop");
         let is_last_frame = process.frames.is_empty();
 
-        // Returning into the select that called a receive filter re-runs the select rather
-        // than advancing past it.
-        let returns_into_select = process.select_state.as_ref().is_some_and(|select_state| {
-            select_state.frame == process.frames.len().saturating_sub(1)
-                && select_state.instruction == process.frames.last().map_or(0, |f| f.counter)
-        });
-        if !returns_into_select && let Some(calling_frame) = process.frames.last_mut() {
-            calling_frame.counter += 1;
-        }
-
         // Release the frame's locals (captures included). A persistent process keeps its
         // top-level frame's locals: they are the session's bindings.
         if !process.persistent || !is_last_frame {
@@ -1699,14 +1664,6 @@ impl<E: Effect> Executor<E> {
         if is_track_boundary {
             self.reconcile_tracking(pid, process);
         }
-    }
-
-    /// Whether a process is parked, waiting on a spawn, select, effect or state read.
-    fn is_waiting(&self, pid: ProcessId) -> bool {
-        self.spawning.contains(&pid)
-            || self.selecting.contains(&pid)
-            || self.effecting.contains(&pid)
-            || self.sampling.contains(&pid)
     }
 
     /// Whether an instruction is a "cold" control/concurrency op handled via the process map
@@ -1718,13 +1675,25 @@ impl<E: Effect> Executor<E> {
         )
     }
 
-    /// Fetch the instruction at the current frame's counter without a process-map lookup.
+    /// The instruction at the current frame's counter, without a process-map lookup.
     fn current_instruction(proc: &Process, functions: &[Function]) -> Option<Instruction> {
         let frame = proc.frames.last()?;
         functions[frame.function_index]
             .instructions
             .get(frame.counter)
             .copied()
+    }
+
+    /// Fetch the instruction at the current frame's counter and advance past it, so the
+    /// counter always names the next instruction to run: a handler moves it only to jump.
+    /// `None` when the frame has run off its end.
+    fn fetch(proc: &mut Process, functions: &[Function]) -> Option<Instruction> {
+        let frame = proc.frames.last_mut()?;
+        let instruction = *functions[frame.function_index]
+            .instructions
+            .get(frame.counter)?;
+        frame.counter += 1;
+        Some(instruction)
     }
 
     /// Hot path: execute an instruction against the running process held as a local,
@@ -1892,9 +1861,6 @@ impl<E: Effect> Executor<E> {
         let value = self.materialize_constant(index)?;
         self.push_value(proc, value);
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -1906,18 +1872,12 @@ impl<E: Effect> Executor<E> {
     ) -> Result<Option<Action<E>>, Error> {
         self.push_value(proc, value);
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
     fn handle_pop(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
         self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -1929,9 +1889,6 @@ impl<E: Effect> Executor<E> {
         let value = proc.stack[index].clone();
         self.push_value(proc, value);
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -1951,9 +1908,6 @@ impl<E: Effect> Executor<E> {
         }
         self.push_value(proc, top);
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -1972,9 +1926,6 @@ impl<E: Effect> Executor<E> {
         let item = process.stack.remove(len - n);
         process.stack.push(item);
 
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -1994,9 +1945,6 @@ impl<E: Effect> Executor<E> {
 
         self.push_value(proc, value);
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -2006,9 +1954,8 @@ impl<E: Effect> Executor<E> {
         slot: usize,
     ) -> Result<Option<Action<E>>, Error> {
         let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
-        let frame = proc.frames.last_mut().ok_or(Error::FrameUnderflow)?;
+        let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
         let index = frame.locals_base + slot;
-        frame.counter += 1;
         // Bindings are stored in slot order, so this is almost always an append.
         if index == proc.locals.len() {
             proc.locals.push(value);
@@ -2061,9 +2008,6 @@ impl<E: Effect> Executor<E> {
         });
         self.push_value(proc, Value::Tuple(type_id, payload.shared()));
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -2084,9 +2028,6 @@ impl<E: Effect> Executor<E> {
                     .clone();
                 self.push_value(proc, element);
 
-                if let Some(frame) = proc.frames.last_mut() {
-                    frame.counter += 1;
-                }
                 Ok(None)
             }
             _ => Err(Error::TypeMismatch {
@@ -2124,9 +2065,6 @@ impl<E: Effect> Executor<E> {
                     .clone();
                 self.push_value(proc, element);
 
-                if let Some(frame) = proc.frames.last_mut() {
-                    frame.counter += 1;
-                }
                 Ok(None)
             }
             _ => Err(Error::TypeMismatch {
@@ -2156,9 +2094,6 @@ impl<E: Effect> Executor<E> {
         })?;
         self.push_value(proc, annotated);
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -2178,9 +2113,6 @@ impl<E: Effect> Executor<E> {
             .unwrap_or_else(Value::nil);
         self.push_value(proc, annotation);
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -2215,9 +2147,6 @@ impl<E: Effect> Executor<E> {
             self.push_value(proc, stamped);
         }
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -2233,9 +2162,6 @@ impl<E: Effect> Executor<E> {
 
         self.push_value(proc, if is_match { Value::ok() } else { Value::nil() });
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -2280,15 +2206,14 @@ impl<E: Effect> Executor<E> {
         }
     }
 
+    /// Jump by `offset` — counted, like the counter, from the instruction after the jump.
     fn handle_jump(
         &mut self,
         proc: &mut Process,
         offset: isize,
     ) -> Result<Option<Action<E>>, Error> {
-        if let Some(frame) = proc.frames.last_mut() {
-            // A jump counts from the instruction after it.
-            frame.counter = frame.counter.wrapping_add_signed(offset + 1);
-        }
+        let frame = proc.frames.last_mut().ok_or(Error::FrameUnderflow)?;
+        frame.counter = frame.counter.wrapping_add_signed(offset);
         Ok(None)
     }
 
@@ -2301,14 +2226,8 @@ impl<E: Effect> Executor<E> {
         when_present: bool,
     ) -> Result<Option<Action<E>>, Error> {
         let condition = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
-        if let Some(frame) = proc.frames.last_mut() {
-            // A jump counts from the instruction after it.
-            let step = if condition.is_nil() != when_present {
-                offset + 1
-            } else {
-                1
-            };
-            frame.counter = frame.counter.wrapping_add_signed(step);
+        if condition.is_nil() != when_present {
+            self.handle_jump(proc, offset)?;
         }
         Ok(None)
     }
@@ -2346,7 +2265,6 @@ impl<E: Effect> Executor<E> {
                 proc.frames
                     .push(Frame::new(function_index, locals_base, captures_count));
 
-                // Don't increment counter - new frame starts at 0
                 Ok(None)
             }
             Value::Builtin(builtin_id, payload) => {
@@ -2422,13 +2340,9 @@ impl<E: Effect> Executor<E> {
 
                 match result? {
                     crate::builtins::Completion::Value(value) => {
-                        // Immediate result: push value (retaining any freshly allocated
-                        // binaries). Builtins don't create a frame, so the counter
-                        // advances here; a verb-queued action (kill/link) routes on.
+                        // Immediate result: push the value; a verb-queued action
+                        // (kill/link) routes on.
                         self.push_value(proc, value);
-                        if let Some(frame) = proc.frames.last_mut() {
-                            frame.counter += 1;
-                        }
                         Ok(action)
                     }
                     crate::builtins::Completion::Effect(effect) => {
@@ -2445,8 +2359,8 @@ impl<E: Effect> Executor<E> {
                             "a builtin cannot both queue an action and park for an effect"
                         );
                         // Park: the result arrives via notify_effect_completion, which
-                        // pushes it and advances the counter.
-                        self.mark_effecting(pid);
+                        // pushes it for the process to resume with.
+                        proc.wait = Some(Wait::Effect);
                         Ok(Some(Action::RequestEffect {
                             process_id: pid,
                             effect,
@@ -2454,21 +2368,20 @@ impl<E: Effect> Executor<E> {
                     }
                     crate::builtins::Completion::Suspend => {
                         // The environment answers the queued action with a value push
-                        // (`notify_state`), which delivers the result and advances the
-                        // counter — so park exactly like a remote `?` sample. The
-                        // queueing verb already refused restricted contexts.
+                        // (`notify_state`), which delivers the result — so park exactly
+                        // like a remote `?` sample. The queueing verb already refused
+                        // restricted contexts.
                         debug_assert!(
                             action.is_some(),
                             "a suspending builtin must queue the action that answers it"
                         );
-                        self.mark_sampling(pid);
+                        proc.wait = Some(Wait::Sample);
                         Ok(action)
                     }
                     crate::builtins::Completion::Call { function, captures } => {
                         // Resolve via a call: push the [.., parameter, function] shape
-                        // handle_call expects and leave this call un-advanced — the
-                        // callee frame's return delivers the result and bumps the
-                        // counter, exactly like an ordinary call. The target is a
+                        // handle_call expects — the callee frame's return delivers the
+                        // result, exactly like an ordinary call. The target is a
                         // genuine function, so handle_call always pushes a frame (and
                         // returns no action). For a tracked render (begin_tracking),
                         // the fresh frame is the reconciliation boundary (see the
@@ -2575,7 +2488,6 @@ impl<E: Effect> Executor<E> {
         self.push_value(proc, argument);
         *proc.frames.last_mut().unwrap() = Frame::new(function_index, locals_base, captures_count);
 
-        // Don't increment counter - frame was reset to 0
         Ok(None)
     }
 
@@ -2607,7 +2519,6 @@ impl<E: Effect> Executor<E> {
                 *proc.frames.last_mut().unwrap() =
                     Frame::new(function_index, locals_base, captures_count);
 
-                // Don't increment counter - frame was reset to 0
                 Ok(None)
             }
             _ => Err(Error::CallInvalid),
@@ -2635,9 +2546,6 @@ impl<E: Effect> Executor<E> {
         let function_value = Value::function(function_index, captures);
         self.push_value(proc, function_value);
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -2646,9 +2554,7 @@ impl<E: Effect> Executor<E> {
         proc: &mut Process,
         slot: usize,
     ) -> Result<Option<Action<E>>, Error> {
-        let frame = proc.frames.last_mut().ok_or(Error::FrameUnderflow)?;
-        let target = frame.locals_base + slot;
-        frame.counter += 1;
+        let target = proc.frames.last().ok_or(Error::FrameUnderflow)?.locals_base + slot;
         self.truncate_locals(proc, target);
         Ok(None)
     }
@@ -2669,9 +2575,6 @@ impl<E: Effect> Executor<E> {
 
         self.push_value(proc, result);
 
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -2711,10 +2614,10 @@ impl<E: Effect> Executor<E> {
         };
 
         // Mark caller as spawning - will be notified with Value::Pid(new_pid)
-        self.mark_spawning(pid);
+        self.park(pid, Wait::Spawn);
 
         // Return routing request for scheduler to handle
-        // Don't increment counter - will be incremented in notify_spawn
+        // The pid arrives via notify_spawn, which pushes it for the process to resume with.
         Ok(Some(Action::Spawn {
             caller: pid,
             function_index,
@@ -2735,9 +2638,6 @@ impl<E: Effect> Executor<E> {
             .function_index;
         process.stack.push(Value::Process(pid, function_index));
 
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -2765,9 +2665,6 @@ impl<E: Effect> Executor<E> {
             .stack
             .push(Value::Process(process_id, function_index));
 
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 
@@ -2807,16 +2704,13 @@ impl<E: Effect> Executor<E> {
                 .get_process_mut(pid)
                 .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
             process.stack.push(sample);
-            if let Some(frame) = process.frames.last_mut() {
-                frame.counter += 1;
-            }
             return Ok(None);
         }
 
         // Remote: park and route through the environment. Ownership of any resource
         // handles in the state does NOT transfer (a sample is a read, not a message). When
         // tracking, the target's worker registers the subscription as it serves the read.
-        self.mark_sampling(pid);
+        self.park(pid, Wait::Sample);
         Ok(Some(Action::ReadState {
             caller: pid,
             target,
@@ -2834,9 +2728,10 @@ impl<E: Effect> Executor<E> {
             return Ok(None); // Not a continuation
         };
 
-        // Verify we're handling the same select instruction
+        // Verify we're handling the same select instruction (the one just fetched, which the
+        // counter has moved past).
         let current_frame = process.frames.len().saturating_sub(1);
-        let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
+        let current_instruction = process.frames.last().map_or(0, |f| f.counter - 1);
 
         if select_state.frame != current_frame || select_state.instruction != current_instruction {
             // A select at a different position while select state exists is a select (or
@@ -2922,7 +2817,7 @@ impl<E: Effect> Executor<E> {
         }
 
         let current_frame = process.frames.len().saturating_sub(1);
-        let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
+        let current_instruction = process.frames.last().map_or(0, |f| f.counter - 1);
 
         // If we have PIDs, defer start_time until await completes
         let start_time = if pid_targets.is_empty() {
@@ -2960,7 +2855,8 @@ impl<E: Effect> Executor<E> {
                 }
             }
 
-            self.mark_selecting(pid);
+            self.schedule_select_timeout(pid);
+            self.park(pid, Wait::Select);
             return Ok(Some(Action::Await {
                 targets: pid_targets,
                 caller: pid,
@@ -2968,7 +2864,32 @@ impl<E: Effect> Executor<E> {
             }));
         }
 
+        self.schedule_select_timeout(pid);
         Ok(None)
+    }
+
+    /// Put a select's deadline — its start plus its shortest timeout source — on the timer
+    /// heap, once it has started timing (a select awaiting processes starts only when they
+    /// answer). A timeout past `i64` is effectively unbounded.
+    fn schedule_select_timeout(&mut self, pid: ProcessId) {
+        let deadline = self
+            .get_process(pid)
+            .and_then(|process| process.select_state.as_ref())
+            .and_then(|state| {
+                let timeout = state
+                    .sources
+                    .iter()
+                    .filter_map(|source| match source {
+                        Value::Int(ms) => Some((*ms).max(0) as u64),
+                        Value::BigInt(_) => Some(i64::MAX as u64),
+                        _ => None,
+                    })
+                    .min()?;
+                Some(state.start_time?.saturating_add(timeout))
+            });
+        if let Some(deadline) = deadline {
+            self.timeouts.push(Reverse((deadline, pid)));
+        }
     }
 
     /// Ensure select start time is set (lazily after awaits complete)
@@ -2996,6 +2917,7 @@ impl<E: Effect> Executor<E> {
             if let Some(ref mut state) = process.select_state {
                 state.start_time = Some(current_time_ms);
             }
+            self.schedule_select_timeout(pid);
             Ok(current_time_ms)
         }
     }
@@ -3076,7 +2998,7 @@ impl<E: Effect> Executor<E> {
         }
 
         // No sources ready - mark as selecting
-        self.mark_selecting(pid);
+        self.park(pid, Wait::Select);
         Ok(None)
     }
 
@@ -3327,6 +3249,23 @@ impl<E: Effect> Executor<E> {
         pid: ProcessId,
         current_time_ms: u64,
     ) -> Result<Option<Action<E>>, Error> {
+        let result = self.run_select(pid, current_time_ms);
+        // A select that hasn't completed runs again — when something wakes it, or at once
+        // after its own setup or a receive filter it called — so its frame's counter goes
+        // back onto it.
+        if let Some(process) = self.get_process_mut(pid)
+            && let Some(state) = &process.select_state
+        {
+            process.frames[state.frame].counter = state.instruction;
+        }
+        result
+    }
+
+    fn run_select(
+        &mut self,
+        pid: ProcessId,
+        current_time_ms: u64,
+    ) -> Result<Option<Action<E>>, Error> {
         // Phase 1: Check if we're continuing from a receive function call
         let receive_result = self.handle_select_continuation(pid)?;
 
@@ -3368,73 +3307,31 @@ impl<E: Effect> Executor<E> {
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
 
         process.stack.push(result);
-
-        // Increment frame counter
-        if let Some(frame) = process.frames.last_mut() {
-            frame.counter += 1;
-        }
-
         Ok(None)
     }
 
     /// Whether any process is queued to run immediately. Event-driven runtimes use this to
     /// decide whether to keep stepping (true) or go idle and wait for a wake (false).
     pub fn has_runnable(&self) -> bool {
-        !self.queue.is_empty()
+        self.runnable > 0
     }
 
     /// Earliest absolute clock time (ms, same scale as the `current_time_ms` passed to `step`)
-    /// at which a pending select timeout will expire, or `None` if no selecting process has a
-    /// timeout. Event-driven runtimes schedule a single timer for this instant instead of
-    /// polling the clock. Mirrors the expiry rule in `check_expired_timeouts`.
+    /// at which a pending select timeout will expire, or `None` if no select has one.
+    /// Event-driven runtimes schedule a single timer for this instant instead of polling the
+    /// clock. It may name a select that has since completed; the wake is then spurious, and
+    /// harmless.
     pub fn next_timeout_ms(&self) -> Option<u64> {
-        self.selecting
-            .iter()
-            .filter_map(|pid| {
-                let process = self.get_process(*pid)?;
-                let select_state = process.select_state.as_ref()?;
-                let start_time = select_state.start_time?;
-                let timeout = select_state
-                    .sources
-                    .iter()
-                    .filter_map(|source| match source {
-                        Value::Int(ms) => Some((*ms).max(0) as u64),
-                        Value::BigInt(_) => Some(i64::MAX as u64),
-                        _ => None,
-                    })
-                    .min()?;
-                Some(start_time.saturating_add(timeout))
-            })
-            .min()
+        self.timeouts.peek().map(|Reverse((deadline, _))| *deadline)
     }
 
+    /// Wake each select whose deadline has passed, so it runs again and answers its timeout.
     fn check_expired_timeouts(&mut self, current_time_ms: u64) {
-        // Scan selecting processes for expired select timeouts
-        let expired: Vec<ProcessId> = self
-            .selecting
-            .iter()
-            .filter(|pid| {
-                if let Some(process) = self.get_process(**pid)
-                    && let Some(ref select_state) = process.select_state
-                    && let Some(start_time) = select_state.start_time
-                {
-                    // Check if any timeout sources have expired
-                    let elapsed = current_time_ms.saturating_sub(start_time);
-                    return select_state.sources.iter().any(|source| match source {
-                        Value::Int(ms) => elapsed >= (*ms).max(0) as u64,
-                        Value::BigInt(_) => elapsed >= i64::MAX as u64,
-                        _ => false,
-                    });
-                }
-                false
-            })
-            .copied()
-            .collect();
-
-        // Re-queue expired processes to retry their Select instruction
-        for pid in expired {
-            self.queue.push_back(pid);
-            self.selecting.remove(&pid);
+        while let Some(&Reverse((deadline, pid))) = self.timeouts.peek()
+            && deadline <= current_time_ms
+        {
+            self.timeouts.pop();
+            self.wake(pid, Wait::Select);
         }
     }
 

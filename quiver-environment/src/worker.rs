@@ -525,14 +525,12 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     })?;
                 }
                 if !awaits {
-                    self.executor.mark_active(caller);
+                    self.executor.wake_selecting(caller);
                 }
             }
             Action::RequestEffect { process_id, effect } => {
-                // Mark process as effecting - it will be re-queued when effect completes
-                self.executor.mark_effecting(process_id);
-
-                // Send effect request to Environment
+                // The process is already parked on the effect (the dispatch site's Effect
+                // handling); the completion wakes it.
                 self.sender
                     .send(Event::EffectRequest { process_id, effect })?;
             }
@@ -641,8 +639,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         // Update the cached function index for REPL references
         self.executor.set_process_function_index(id, function_index);
 
-        // Add back to queue
-        self.executor.add_to_queue(id);
+        self.executor.enqueue(id);
 
         Ok(())
     }
@@ -693,11 +690,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             }
         }
 
-        // If no actual results were provided, manually wake up the awaiter
-        // notify_result handles this when there are results
+        // With no results to deliver, wake the awaiter anyway so its select re-scans;
+        // notify_result wakes it when there are results.
         if !has_any_result {
-            // Remove from waiting and add to queue
-            self.executor.mark_active(awaiter);
+            self.executor.wake_selecting(awaiter);
         }
 
         Ok(())

@@ -73,18 +73,18 @@ pub mod registry;
 pub mod vector;
 
 /// How a builtin call resolves. The bytecode contract of a builtin call is that exactly
-/// one result lands on the caller's stack and execution advances past the call, exactly
-/// once — a completion names which of the three ways that happens.
+/// one result lands on the caller's stack before execution continues past the call — a
+/// completion names which of the four ways that happens.
 #[derive(Debug)]
 pub enum Completion<E: Effect> {
-    /// The result, immediately: the dispatch site pushes it and advances.
+    /// The result, immediately: the dispatch site pushes it.
     Value(Value),
     /// The result comes from the host: the caller parks while the environment performs
-    /// the effect, and the completion notification delivers the result and advances.
+    /// the effect, and the completion notification delivers the result.
     Effect(E),
     /// The result comes from Quiver code: the dispatch site invokes the (nilary)
-    /// function on a fresh frame and leaves the call un-advanced, so the frame's return
-    /// delivers the callee's result as the builtin's own — exactly like an ordinary
+    /// function on a fresh frame, so the frame's return delivers the callee's result as
+    /// the builtin's own — exactly like an ordinary
     /// call (this is how `%proc.track` runs its thunk). The target is specifically a
     /// function — never a builtin, whose frameless resolution would break the tracking
     /// boundary and could route an action the dispatch site doesn't collect.
@@ -93,8 +93,8 @@ pub enum Completion<E: Effect> {
         captures: Rc<Payload>,
     },
     /// The result comes from the environment: the builtin queued a routed action whose
-    /// answer arrives as a host value push (`notify_value`), which delivers the result
-    /// and advances. The caller parks until then, exactly like a remote `?` sample.
+    /// answer arrives as a host value push (`notify_state`), which delivers the result.
+    /// The caller parks until then, exactly like a remote `?` sample.
     Suspend,
 }
 

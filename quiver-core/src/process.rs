@@ -230,7 +230,8 @@ impl Frame {
 pub struct SelectState {
     /// The frame index where the select instruction is
     pub frame: usize,
-    /// The instruction counter within that frame
+    /// The select instruction's index within that frame — where the frame's counter is
+    /// put back while the select is unfinished, so that it runs again.
     pub instruction: usize,
     /// The sources for this select (popped from stack)
     pub sources: Vec<Value>,
@@ -431,6 +432,21 @@ impl ArmedResources {
     }
 }
 
+/// What a parked process waits for. Each is answered by one notification, which resumes
+/// the process past the instruction that parked it — except a select, which runs again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wait {
+    /// The pid of a process it spawned.
+    Spawn,
+    /// Anything its select may complete on: a message, an awaited result, a stream event,
+    /// or its timeout.
+    Select,
+    /// The result of an effect the host performs.
+    Effect,
+    /// A value the environment answers with: a remote `?` sample, or a routed request.
+    Sample,
+}
+
 #[derive(Debug)]
 pub struct Process {
     pub stack: Vec<Value>,
@@ -438,6 +454,13 @@ pub struct Process {
     pub frames: Vec<Frame>,
     pub mailbox: VecDeque<Value>,
     pub persistent: bool,
+    /// What the process is parked on, if anything; the matching notification clears it and
+    /// queues the process to run.
+    pub(crate) wait: Option<Wait>,
+    /// Whether the process is in its executor's run queue. The queue holds a process at
+    /// most once, and taking one out only clears this — the entry left behind is skipped
+    /// when it reaches the front.
+    pub(crate) queued: bool,
     /// The completed process's outcome. The error arm is **boxed**: `Error` is 48 bytes and a
     /// crash is the rare case, so inline it made `result` tie for the largest field in a struct
     /// every live process pays for.
@@ -494,6 +517,8 @@ impl Process {
             frames: Vec::new(),
             mailbox: VecDeque::new(),
             persistent,
+            wait: None,
+            queued: false,
             result: None,
             select_state: None,
             watchers: Vec::new(),
