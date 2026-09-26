@@ -457,4 +457,14 @@ fn test_spawn_elaborates_its_init_as_a_call_does() {
     quiver()
         .evaluate("h = #['int, #'int -> 'int] { $1 $0 }; r = @h [4, #{ %num.mul [$, 2] }]; !r")
         .expect("8");
+    // Piped into the spawn (`[…] ~> @f ~`), the literal is still the init, elaborated alike.
+    quiver()
+        .evaluate(
+            "f = #[(x): 'int, (y): 'int] { %num.add [$x, $y] }
+             p = [5, 6] ~> @f ~; q = [y: 1, x: 2] ~> @f ~; [!p, !q]",
+        )
+        .expect("[11, 3]");
+    quiver()
+        .evaluate("g = #[(path): '%str, n: 'int = 3] { $n }; q = [\"a\"] ~> @g ~; !q")
+        .expect("3");
 }

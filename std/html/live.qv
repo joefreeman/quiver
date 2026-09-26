@@ -1227,29 +1227,34 @@ settle = #<'i, 's, 'e>[(state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e>,
 // for a child. Children spawn strictly after the announcement, so their first
 // frames arrive behind the markup that holds their markers (or, at a dead render,
 // splice into it at the app).
-view_run = #<'i, 's, 'e>['i, 'component<'i, 's, 'e>, '%str, @'app_msg, 'vboot] {
-  =[init, comp, vid, app, boot]
+view_run = #<'i, 's, 'e>[
+  (init): 'i,
+  (comp): 'component<'i, 's, 'e>,
+  (vid): '%str,
+  (app): @'app_msg,
+  (boot): 'vboot,
+] {
   // `.` before any receiving call: taken later, its inferred send would be the
   // partially-widened receive (just the settle drain's `Changed`), which no longer
   // narrows into `@'view_msg` params. Taken here it is still the unknown-send
   // handle, which does.
   me = @
-  state = comp.mount init
-  f = settle [state, render_view [state, comp], comp, settle_deadline]
-  ar = assign_bounds [collect_of [collect_of, f, Nil], Nil, vid, 1, Nil]
+  state = $comp.mount $init
+  f = settle [state, render_view [state, $comp], $comp, settle_deadline]
+  ar = assign_bounds [collect_of [collect_of, f, Nil], Nil, $vid, 1, Nil]
   rf = resolve_of [resolve_of, f, ar.0] ~> as_frame ~
-  boot ~> {
+  $boot ~> {
     | =Reply[reply] => { %proc.send [reply, Region[render rf]]; Ok }
     | =Replace => {
-      %proc.send [app, Frame[encode [vid, Cons[SetHtml[path: Nil, html: render rf], Nil]]]]
+      %proc.send [$app, Frame[encode [$vid, Cons[SetHtml[path: Nil, html: render rf], Nil]]]]
       Ok
     }
   }
-  kids = exec_bounds [ar.0, Nil, app, me, Nil]
-  mode = boot ~> { =Reply[_] => Idle | Live }
+  kids = exec_bounds [ar.0, Nil, $app, me, Nil]
+  mode = $boot ~> { =Reply[_] => Idle | Live }
   // The sync tracker starts at the mount state's own mark, if any: the page was served
   // for the URL that produced this state, so only a mark that changes needs syncing.
-  vlife [mode, state, rf, comp, vid, app, kids, ar.1, state:('%str)redirect]
+  vlife [mode, state, rf, $comp, $vid, $app, kids, ar.1, state:('%str)redirect]
 }
 
 // Define a component from its record: answers the **placeable component** — a
@@ -1696,10 +1701,15 @@ compose = #[
 // tears the view tree down by ownership.
 'aboot = Dead[@'%str] | Cold
 
-app_run = #['%http, 'root_view, @'reg_msg, ('%str | []), 'aboot] {
-  =[req, root, reg, token, boot]
+app_run = #[
+  (req): '%http,
+  (root): 'root_view,
+  (reg): @'reg_msg,
+  (token): ('%str | []),
+  (boot): 'aboot,
+] {
   {
-    | token ~> =Str[tb] => { %proc.send [reg, Register[Str[tb], @]]; Ok }
+    | $token ~> =Str[tb] => { %proc.send [$reg, Register[Str[tb], @]]; Ok }
     | Ok
   }
   me = @
@@ -1707,19 +1717,19 @@ app_run = #['%http, 'root_view, @'reg_msg, ('%str | []), 'aboot] {
   // take the spawn thunk off the node, and run it as vid "0" with the app's boot.
   // (A root that didn't come from `view` carries no :boundary — the retrieval
   // fails and the app ends, so the GET times out. Fail fast.)
-  node = root [init: req, key: "root"]
+  node = $root [init: $req, key: "root"]
   node:('bnd)boundary ~> =(start: st)
-  boot ~> {
+  $boot ~> {
     | =Dead[handler] => {
       v = st ["0", me, Reply[me]]
       %proc.link v
       end = %num.add [%time.monotonic [], settle_deadline]
-      compose [handler, [], Nil, token, reg, Cons[[vid: "0", pid: v], Nil], end, req]
+      compose [handler, [], Nil, $token, $reg, Cons[[vid: "0", pid: v], Nil], end, $req]
     }
     | =Cold => {
       v = st ["0", me, Replace]
       %proc.link v
-      alife [req, Parked, Nil, token, reg, Cons[[vid: "0", pid: v], Nil]]
+      alife [$req, Parked, Nil, $token, $reg, Cons[[vid: "0", pid: v], Nil]]
     }
   }
 }

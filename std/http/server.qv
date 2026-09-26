@@ -123,13 +123,12 @@ conn_loop = #[(sock): +TcpSocket, (handler): 'handler, (buf): 'bin] {
 // A connection's whole life. With TLS material the socket is upgraded first, here in the
 // connection's own process — a handshake that fails (or stalls until teardown) takes only
 // this connection with it, and the socket is closed by the process ending either way.
-conn = #[+TcpSocket, 'handler, ('tls | [])] {
-  =[sock, h, t]
+conn = #[(sock): +TcpSocket, (handler): 'handler, (tls): ('tls | [])] {
   {
-    | t ~> =[cert: c, key: k] => %tls.accept [socket: sock, cert: c, key: k]
+    | $tls ~> =[cert: c, key: k] => %tls.accept [socket: $sock, cert: c, key: k]
     | Ok
   }
-  conn_loop [sock, h, <>]
+  conn_loop [$sock, $handler, <>]
 }
 
 // A failed accept ends the loop rather than spinning on a broken listener; the nil carries

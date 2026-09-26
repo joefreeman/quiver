@@ -4648,19 +4648,33 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // piped counterpart of an Apply's head. Only `[…] ~> f ~` pipes a literal into a
             // call: the literal *is* the argument, so the head is the callee. (A bare access
             // no longer calls, so nothing else can consume a piped literal.)
-            let piped_callee = if i == last_index {
-                None
-            } else if matches!(term, ast::Term::Tuple(_) | ast::Term::Function(_))
-                && let Some(ast::Term::Apply(head, argument)) = terms.get(i + 1)
-                && argument.is_bare_ripple()
-                && !matches!(
-                    head.source,
-                    Some(ast::AccessSource::Ripple | ast::AccessSource::TailCallRipple)
-                )
+            let piped_callee = if i == last_index
+                || !matches!(term, ast::Term::Tuple(_) | ast::Term::Function(_))
             {
-                Some(head)
-            } else {
                 None
+            } else {
+                match terms.get(i + 1) {
+                    Some(ast::Term::Apply(head, argument))
+                        if argument.is_bare_ripple()
+                            && !matches!(
+                                head.source,
+                                Some(ast::AccessSource::Ripple | ast::AccessSource::TailCallRipple)
+                            ) =>
+                    {
+                        Some(head)
+                    }
+                    // A spawn's init is written like a call's argument, so a literal piped
+                    // into `@f ~` is elaborated against `f` just as one piped into `f ~` is.
+                    Some(ast::Term::Spawn(target, Some(argument), _))
+                        if argument.is_bare_ripple() =>
+                    {
+                        match &**target {
+                            ast::Term::Access(access) if !target.is_bare_ripple() => Some(access),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
             };
             // Only the chain's final term produces the chain's value, so only it receives the
             // chain's expected type. An earlier literal term flows its result into the next
