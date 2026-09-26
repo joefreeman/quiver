@@ -506,6 +506,15 @@ impl Process {
         }
     }
 
+    /// Remove `subscriber`'s reactive subscription to this process, keeping
+    /// `subscriber_count` in step. No-op if absent.
+    pub(crate) fn remove_subscriber(&mut self, subscriber: ProcessId) {
+        let entry = Watcher::Subscriber { pid: subscriber };
+        let before = self.watchers.len();
+        self.watchers.retain(|watcher| *watcher != entry);
+        self.subscriber_count -= (before - self.watchers.len()) as u32;
+    }
+
     /// Whether this process is currently inside a `%proc.track` render — a restricted,
     /// re-evaluable context, like a receive filter.
     pub fn is_tracking(&self) -> bool {

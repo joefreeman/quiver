@@ -2,6 +2,11 @@ use crate::bytecode::{ConcreteType, Function, Opcode};
 use crate::types::{BuiltinInfo, TupleTypeInfo, Type, TypeLookup, is_compatible};
 use std::collections::{HashMap, HashSet};
 
+/// The concrete types a type admits: what a runtime type test looks a value's concrete type
+/// up in. Fx-hashed, because the test runs on every pattern match and the keys are small
+/// integers that need no protection against collision attacks.
+pub type ConcreteTypes = rustc_hash::FxHashSet<ConcreteType>;
+
 /// TypeLookup implementation for compatibility computation.
 ///
 /// Answers ids beyond the program's own type table from [`Self::derived`]: the process
@@ -132,7 +137,7 @@ fn extract_function_type_info(
 /// This precomputes which ConcreteTypes are compatible with which pattern types,
 /// allowing O(1) runtime type checking instead of recursive type traversal.
 /// Returns a Vec where index is type_id and value is the set of compatible concrete types.
-pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<ConcreteType>> {
+pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<ConcreteTypes> {
     let lookup = TypeLookupImpl::new(input.types, input.tuples, input.functions);
     let index = TypeIndex::build(input, &lookup);
 
@@ -160,7 +165,7 @@ pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<HashSet<Con
     }
 
     // Initialize the compatibility table with entries for all pattern types
-    let mut compatible_with: Vec<HashSet<ConcreteType>> = vec![HashSet::new(); input.types.len()];
+    let mut compatible_with: Vec<ConcreteTypes> = vec![ConcreteTypes::default(); input.types.len()];
 
     // For each pattern type, compute which ConcreteTypes are compatible with it
     for &pattern_id in &pattern_type_ids {
@@ -263,20 +268,20 @@ fn field_offset(info: &TupleTypeInfo, name: &str) -> Option<usize> {
 /// Returns (function_param_compatibility, builtin_param_compatibility).
 pub fn compute_param_compatibility(
     input: &CompatibilityInput,
-) -> (Vec<HashSet<ConcreteType>>, Vec<HashSet<ConcreteType>>) {
+) -> (Vec<ConcreteTypes>, Vec<ConcreteTypes>) {
     let lookup = TypeLookupImpl::new(input.types, input.tuples, input.functions);
     let index = TypeIndex::build(input, &lookup);
 
     // Many functions share a parameter type, so memoise the result by parameter type id.
-    let mut memo: HashMap<usize, HashSet<ConcreteType>> = HashMap::new();
-    let mut compatible_for = |param: usize| -> HashSet<ConcreteType> {
+    let mut memo: HashMap<usize, ConcreteTypes> = HashMap::new();
+    let mut compatible_for = |param: usize| -> ConcreteTypes {
         memo.entry(param)
             .or_insert_with(|| compute_compatible_concrete_types(param, input, &lookup, &index))
             .clone()
     };
 
     // Compute function parameter compatibility by extracting type info from each function
-    let function_params: Vec<HashSet<ConcreteType>> = input
+    let function_params: Vec<ConcreteTypes> = input
         .functions
         .iter()
         .map(|func| {
@@ -286,7 +291,7 @@ pub fn compute_param_compatibility(
         .collect();
 
     // Compute builtin parameter compatibility
-    let builtin_params: Vec<HashSet<ConcreteType>> = input
+    let builtin_params: Vec<ConcreteTypes> = input
         .builtins
         .iter()
         .map(|builtin_info| compatible_for(builtin_info.param_type))
@@ -315,11 +320,11 @@ pub struct CompatibilityTables {
     /// Pattern type ids (`IsType` / checked `GetAnnotation` targets) already computed.
     pattern_ids: HashSet<usize>,
     /// Per-type compatibility, as `compute_type_compatibility` returns.
-    pub type_compatibility: Vec<HashSet<ConcreteType>>,
+    pub type_compatibility: Vec<ConcreteTypes>,
     /// Per-function parameter compatibility, as `compute_param_compatibility` returns.
-    pub function_params: Vec<HashSet<ConcreteType>>,
+    pub function_params: Vec<ConcreteTypes>,
     /// Per-builtin parameter compatibility, as `compute_param_compatibility` returns.
-    pub builtin_params: Vec<HashSet<ConcreteType>>,
+    pub builtin_params: Vec<ConcreteTypes>,
     /// Canonical value-shape id per tuple, as `compute_canonical_tuples` returns.
     pub canonical_tuples: Vec<usize>,
     /// The shape → lowest-id map behind `canonical_tuples`. Kept so appending tuples
@@ -347,11 +352,11 @@ pub struct CompatibilityDelta {
     /// Members inserted into `type_compatibility` rows (new or pre-existing).
     pub type_additions: Vec<(usize, Vec<ConcreteType>)>,
     /// Rows appended to `function_params`, in order.
-    pub function_rows: Vec<HashSet<ConcreteType>>,
+    pub function_rows: Vec<ConcreteTypes>,
     /// Members inserted into pre-existing `function_params` rows.
     pub function_additions: Vec<(usize, Vec<ConcreteType>)>,
     /// Rows appended to `builtin_params`, in order.
-    pub builtin_rows: Vec<HashSet<ConcreteType>>,
+    pub builtin_rows: Vec<ConcreteTypes>,
     /// Members inserted into pre-existing `builtin_params` rows.
     pub builtin_additions: Vec<(usize, Vec<ConcreteType>)>,
     /// Entries appended to `canonical_tuples` (existing entries never change).
@@ -368,13 +373,13 @@ impl CompatibilityDelta {
     /// `update` call started from — to the state it ended at.
     pub fn apply(
         self,
-        type_compatibility: &mut Vec<HashSet<ConcreteType>>,
-        function_params: &mut Vec<HashSet<ConcreteType>>,
-        builtin_params: &mut Vec<HashSet<ConcreteType>>,
+        type_compatibility: &mut Vec<ConcreteTypes>,
+        function_params: &mut Vec<ConcreteTypes>,
+        builtin_params: &mut Vec<ConcreteTypes>,
         canonical_tuples: &mut Vec<usize>,
         field_offsets: &mut Vec<Vec<Option<usize>>>,
     ) {
-        type_compatibility.resize(self.types_len, HashSet::new());
+        type_compatibility.resize(self.types_len, ConcreteTypes::default());
         for (row, members) in self.type_additions {
             type_compatibility[row].extend(members);
         }
@@ -418,7 +423,7 @@ impl CompatibilityTables {
         let index = TypeIndex::build(input, &lookup);
 
         self.type_compatibility
-            .resize(input.types.len(), HashSet::new());
+            .resize(input.types.len(), ConcreteTypes::default());
 
         // Newly testable concrete types, with the type id representing each in
         // `is_compatible` checks. A concrete becomes testable when its own id is new
@@ -581,8 +586,8 @@ impl CompatibilityTables {
         }
 
         // New parameter rows get a full scan too, shared per parameter type.
-        let mut memo: HashMap<usize, HashSet<ConcreteType>> = HashMap::new();
-        let mut compatible_for = |param: usize| -> HashSet<ConcreteType> {
+        let mut memo: HashMap<usize, ConcreteTypes> = HashMap::new();
+        let mut compatible_for = |param: usize| -> ConcreteTypes {
             memo.entry(param)
                 .or_insert_with(|| compute_compatible_concrete_types(param, input, &lookup, &index))
                 .clone()
@@ -755,8 +760,8 @@ fn compute_compatible_concrete_types(
     input: &CompatibilityInput,
     lookup: &TypeLookupImpl,
     index: &TypeIndex,
-) -> HashSet<ConcreteType> {
-    let mut compat_set = HashSet::new();
+) -> ConcreteTypes {
+    let mut compat_set = ConcreteTypes::default();
 
     // Annotation rows are invisible to pattern matching, so a runtime type check
     // against `T @ row` must behave exactly as against `T`.

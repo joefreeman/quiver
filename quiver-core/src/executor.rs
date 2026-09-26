@@ -1,5 +1,6 @@
 use crate::binary::BinaryData;
 use crate::bytecode::{ConcreteType, Constant, Function, Instruction, Opcode};
+use crate::compatibility::ConcreteTypes;
 use crate::effects::Effect;
 use crate::error::{Error, Operation};
 use crate::process::{
@@ -58,11 +59,11 @@ pub enum CompatibilityUpdate {
     /// across platforms; only the sharing differs.)
     Shared {
         /// For each type_id, the set of concrete types compatible with it.
-        type_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
+        type_compatibility: Arc<Vec<ConcreteTypes>>,
         /// For each function_id, the set of concrete types compatible with its parameter.
-        function_params: Arc<Vec<HashSet<ConcreteType>>>,
+        function_params: Arc<Vec<ConcreteTypes>>,
         /// For each builtin_id, the set of concrete types compatible with its parameter.
-        builtin_params: Arc<Vec<HashSet<ConcreteType>>>,
+        builtin_params: Arc<Vec<ConcreteTypes>>,
         /// For each tuple_id, a canonical *value-shape* id (same name + field labels),
         /// letting `==` treat structurally-identical tuples built via different paths
         /// as equal.
@@ -116,6 +117,21 @@ pub struct ProgramUpdate {
     pub patched_functions: Vec<(usize, Function)>,
     #[serde(default)]
     pub patched_constants: Vec<(usize, Constant)>,
+}
+
+/// A binary's bytes as [`Executor::binary_bytes`] finds them.
+enum BinaryBytes<'a> {
+    Flat(&'a [u8]),
+    Rope(&'a BinaryData),
+}
+
+impl BinaryBytes<'_> {
+    fn len(&self) -> usize {
+        match self {
+            BinaryBytes::Flat(bytes) => bytes.len(),
+            BinaryBytes::Rope(rope) => rope.len(),
+        }
+    }
 }
 
 /// Result of processing a select source
@@ -185,11 +201,11 @@ pub struct Executor<E: Effect> {
     /// so structurally-identical tuples built via different paths compare equal.
     canonical_tuples: Arc<Vec<usize>>,
     /// For each type_id, the set of concrete types compatible with it (for IsType checks)
-    type_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
+    type_compatibility: Arc<Vec<ConcreteTypes>>,
     /// For each function_id, the set of concrete types compatible with its parameter
-    function_param_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
+    function_param_compatibility: Arc<Vec<ConcreteTypes>>,
     /// For each builtin_id, the set of concrete types compatible with its parameter
-    builtin_param_compatibility: Arc<Vec<HashSet<ConcreteType>>>,
+    builtin_param_compatibility: Arc<Vec<ConcreteTypes>>,
     /// For each field-name id, each tuple_id's offset for that field — GetNamed's table.
     field_offsets: Arc<Vec<Vec<Option<usize>>>>,
     // Cumulative count of tombstone process entries reclaimed (see `reclaim_process`).
@@ -298,8 +314,8 @@ impl<E: Effect> Executor<E> {
         proc.locals.truncate(len);
     }
 
-    /// Like [`truncate_locals`] but addresses the process by id, for callers (e.g. frame
-    /// teardown in the step loop) that hold only `&mut self`, not a separate `&mut Process`.
+    /// Like [`truncate_locals`] but addresses the process by id, for callers (tombstoning)
+    /// that hold only `&mut self`, not a separate `&mut Process`.
     fn truncate_locals_pid(&mut self, pid: ProcessId, len: usize) {
         if let Some(process) = self.get_process_mut(pid) {
             process.locals.truncate(len);
@@ -467,10 +483,7 @@ impl<E: Effect> Executor<E> {
     /// the dependency), decrementing `target.subscriber_count`. No-op if absent.
     pub fn remove_subscriber(&mut self, target: ProcessId, subscriber: ProcessId) {
         if let Some(process) = self.get_process_mut(target) {
-            let entry = Watcher::Subscriber { pid: subscriber };
-            let before = process.watchers.len();
-            process.watchers.retain(|watcher| *watcher != entry);
-            process.subscriber_count -= (before - process.watchers.len()) as u32;
+            process.remove_subscriber(subscriber);
         }
     }
 
@@ -883,17 +896,6 @@ impl<E: Effect> Executor<E> {
         self.queue.push_back(id);
 
         Ok(())
-    }
-
-    fn get_current_instruction(&self, process_id: ProcessId) -> Option<Instruction> {
-        self.get_process(process_id)
-            .and_then(|p| p.frames.last())
-            .and_then(|f| {
-                self.functions[f.function_index]
-                    .instructions
-                    .get(f.counter)
-                    .copied()
-            })
     }
 
     pub fn get_process(&self, id: ProcessId) -> Option<&Process> {
@@ -1568,17 +1570,13 @@ impl<E: Effect> Executor<E> {
                 if proc.frames.len() <= 1 {
                     break; // Root frame: process finished
                 }
-                self.processes.insert(current_pid, proc);
-                self.pop_exhausted_frame(current_pid);
-                proc = self
-                    .processes
-                    .remove(&current_pid)
-                    .expect("process should remain in map after a frame pop");
+                self.pop_exhausted_frame(current_pid, &mut proc);
                 units_executed += 1;
                 continue;
             };
 
-            let step_result = if Self::is_cold(instruction) {
+            let cold = Self::is_cold(instruction);
+            let step_result = if cold {
                 // Rare control/concurrency ops use the existing handlers, which expect the
                 // process to be present in the map (they may also touch other processes).
                 self.processes.insert(current_pid, proc);
@@ -1605,40 +1603,27 @@ impl<E: Effect> Executor<E> {
                 }
             }
 
-            // Check if process should yield (moved to spawning/selecting/effecting, or has pending request)
-            // Pending request check ensures only ONE routing request per step
-            if self.spawning.contains(&current_pid)
-                || self.selecting.contains(&current_pid)
-                || self.effecting.contains(&current_pid)
-                || self.sampling.contains(&current_pid)
-                || pending_request.is_some()
-            {
+            // Yield once the instruction has routed an action (at most one per slice) or
+            // parked the process. Only a cold instruction parks without routing one — a
+            // select with nothing ready — so the waiting sets, which are hashed, are consulted
+            // only then rather than after every instruction.
+            if pending_request.is_some() || (cold && self.is_waiting(current_pid)) {
                 break;
             }
+            debug_assert!(
+                !self.is_waiting(current_pid),
+                "a hot instruction parked the process without routing an action"
+            );
         }
 
-        // Return the process to the map; the bookkeeping below operates via the map as before.
+        // Pop any exhausted frames before checking whether the process finished.
+        while !proc.frames.is_empty() && Self::current_instruction(&proc, &self.functions).is_none()
+        {
+            self.pop_exhausted_frame(current_pid, &mut proc);
+        }
+
+        // Return the process to the map; the bookkeeping below operates via the map.
         self.processes.insert(current_pid, proc);
-
-        // Auto-pop any exhausted frames before checking if process is finished
-        loop {
-            // Check if current instruction exists
-            if self.get_current_instruction(current_pid).is_some() {
-                break; // Current frame still has instructions to execute
-            }
-
-            // Check if there's a frame to pop
-            let has_frames = self
-                .get_process(current_pid)
-                .map(|p| !p.frames.is_empty())
-                .unwrap_or(false);
-
-            if !has_frames {
-                break; // No frames to pop
-            }
-
-            self.pop_exhausted_frame(current_pid);
-        }
 
         let process = self.get_process(current_pid);
         let finished = process.map(|p| p.frames.is_empty()).unwrap_or(false);
@@ -1681,59 +1666,47 @@ impl<E: Effect> Executor<E> {
         (true, pending_request)
     }
 
-    /// Pop one exhausted frame: return into the caller (or a re-entered select),
-    /// release the frame's locals, and reconcile a returning tracked-render thunk's
-    /// reactive subscriptions. The callee's result is already on the stack.
-    fn pop_exhausted_frame(&mut self, pid: ProcessId) {
-        // Pop the exhausted frame and decide what to release; the local-release happens after
-        // the process borrow ends, since it needs `&mut self`.
-        let (clear_base, is_track_boundary) = {
-            let process = self.get_process_mut(pid).expect("Process should exist");
+    /// Pop one exhausted frame of the running process (held out of the map for its slice):
+    /// return into the caller (or a re-entered select), release the frame's locals, and
+    /// reconcile a returning tracked-render thunk's reactive subscriptions. The callee's
+    /// result is already on the stack.
+    fn pop_exhausted_frame(&mut self, pid: ProcessId, process: &mut Process) {
+        // A returning tracked-render thunk is the frame whose pre-pop depth matches the
+        // recorded boundary; its return reconciles the caller's reactive subscriptions.
+        let is_track_boundary = process
+            .tracking
+            .as_ref()
+            .is_some_and(|t| t.boundary_len == process.frames.len());
 
-            // A returning tracked-render thunk is the frame whose
-            // pre-pop depth matches the recorded boundary; its return reconciles the
-            // caller's reactive subscriptions.
-            let pre_pop_len = process.frames.len();
-            let is_track_boundary = process
-                .tracking
-                .as_ref()
-                .is_some_and(|t| t.boundary_len == pre_pop_len);
+        let frame = process.frames.pop().expect("an exhausted frame to pop");
+        let is_last_frame = process.frames.is_empty();
 
-            // Frame exhausted - pop it without stack manipulation
-            // (the result is already on the stack from the last instruction)
-            let frame = process.frames.pop().unwrap();
-            let is_last_frame = process.frames.is_empty();
+        // Returning into the select that called a receive filter re-runs the select rather
+        // than advancing past it.
+        let returns_into_select = process.select_state.as_ref().is_some_and(|select_state| {
+            select_state.frame == process.frames.len().saturating_sub(1)
+                && select_state.instruction == process.frames.last().map_or(0, |f| f.counter)
+        });
+        if !returns_into_select && let Some(calling_frame) = process.frames.last_mut() {
+            calling_frame.counter += 1;
+        }
 
-            // Clear locals from the popped frame (including captures). For persistent
-            // processes, only keep locals if this was the last (top-level) frame.
-            let should_clear_locals = !process.persistent || !is_last_frame;
-
-            // Check if we're in an active select and returning to the select instruction
-            let should_skip_increment = if let Some(ref select_state) = process.select_state {
-                let current_frame = process.frames.len().saturating_sub(1);
-                let current_instruction = process.frames.last().map(|f| f.counter).unwrap_or(0);
-                select_state.frame == current_frame
-                    && select_state.instruction == current_instruction
-            } else {
-                false
-            };
-
-            // Increment counter of calling frame unless we're in an active select
-            if !should_skip_increment && let Some(calling_frame) = process.frames.last_mut() {
-                calling_frame.counter += 1;
-            }
-
-            (
-                should_clear_locals.then_some(frame.locals_base),
-                is_track_boundary,
-            )
-        };
-        if let Some(base) = clear_base {
-            self.truncate_locals_pid(pid, base);
+        // Release the frame's locals (captures included). A persistent process keeps its
+        // top-level frame's locals: they are the session's bindings.
+        if !process.persistent || !is_last_frame {
+            process.locals.truncate(frame.locals_base);
         }
         if is_track_boundary {
-            self.reconcile_tracking(pid);
+            self.reconcile_tracking(pid, process);
         }
+    }
+
+    /// Whether a process is parked, waiting on a spawn, select, effect or state read.
+    fn is_waiting(&self, pid: ProcessId) -> bool {
+        self.spawning.contains(&pid)
+            || self.selecting.contains(&pid)
+            || self.effecting.contains(&pid)
+            || self.sampling.contains(&pid)
     }
 
     /// Whether an instruction is a "cold" control/concurrency op handled via the process map
@@ -2558,26 +2531,23 @@ impl<E: Effect> Executor<E> {
     /// the tracked thunk's frame returns). Dependencies still sampled
     /// stay (they were subscribed atomically at the sample); dependencies no longer sampled
     /// are unsubscribed — a local target directly, a remote one via `pending_unsubscribes`.
-    fn reconcile_tracking(&mut self, pid: ProcessId) {
-        let dropped: Vec<ProcessId> = {
-            let Some(process) = self.get_process_mut(pid) else {
-                return;
-            };
-            let Some(tracking) = process.tracking.take() else {
-                return;
-            };
-            let sampled = tracking.sampled;
-            let old = std::mem::replace(
-                &mut process.subscriptions,
-                sampled.iter().copied().collect(),
-            );
-            old.into_iter().filter(|p| !sampled.contains(p)).collect()
+    fn reconcile_tracking(&mut self, pid: ProcessId, process: &mut Process) {
+        let Some(tracking) = process.tracking.take() else {
+            return;
         };
-        for target in dropped {
-            // A target on this worker (live or tombstone) is removed directly; a remote one
+        let sampled = tracking.sampled;
+        let old = std::mem::replace(
+            &mut process.subscriptions,
+            sampled.iter().copied().collect(),
+        );
+        for target in old.into_iter().filter(|p| !sampled.contains(p)) {
+            // A target on this worker (live or tombstone) is removed directly — the tracker
+            // itself included, which is out of the map while it runs — and a remote one
             // routes an unsubscribe to its owning worker.
-            if self.get_process(target).is_some() {
-                self.remove_subscriber(target, pid);
+            if target == pid {
+                process.remove_subscriber(pid);
+            } else if let Some(target_process) = self.get_process_mut(target) {
+                target_process.remove_subscriber(pid);
             } else {
                 self.pending_unsubscribes.push((target, pid));
             }
@@ -3513,6 +3483,42 @@ impl<E: Effect> Executor<E> {
             .unwrap_or(tuple_id)
     }
 
+    /// Whether two binaries hold the same bytes. Lengths are compared first, which is O(1)
+    /// for every representation and settles most mismatches; flat bytes (a leaf, or a
+    /// constant's) are then compared in place, and only a rope is realised.
+    fn binaries_equal(&self, a: &Binary, b: &Binary) -> bool {
+        let (a, b) = match (self.binary_bytes(a), self.binary_bytes(b)) {
+            (Some(a), Some(b)) => (a, b),
+            _ => return false,
+        };
+        if a.len() != b.len() {
+            return false;
+        }
+        match (a, b) {
+            (BinaryBytes::Flat(a), BinaryBytes::Flat(b)) => a == b,
+            (BinaryBytes::Flat(flat), BinaryBytes::Rope(rope))
+            | (BinaryBytes::Rope(rope), BinaryBytes::Flat(flat)) => rope.to_vec() == flat,
+            (BinaryBytes::Rope(a), BinaryBytes::Rope(b)) => {
+                std::ptr::eq(a, b) || a.to_vec() == b.to_vec()
+            }
+        }
+    }
+
+    /// A binary's bytes without copying them: a flat leaf or constant in place, or the rope.
+    /// `None` for a constant index that names no binary.
+    fn binary_bytes<'a>(&'a self, binary: &'a Binary) -> Option<BinaryBytes<'a>> {
+        match binary {
+            Binary::Data(data) => Some(match &**data {
+                BinaryData::Owned(bytes) => BinaryBytes::Flat(bytes),
+                rope => BinaryBytes::Rope(rope),
+            }),
+            Binary::Constant(index) => match self.get_constant(*index) {
+                Some(Constant::Binary(bytes)) => Some(BinaryBytes::Flat(bytes)),
+                _ => None,
+            },
+        }
+    }
+
     /// Structural equality, as the `Equal` instruction sees it.
     ///
     /// **Iterative**: a pair work-list rather than recursion, because a value nests once per
@@ -3529,23 +3535,7 @@ impl<E: Effect> Executor<E> {
                 (Value::Int(a), Value::Int(b)) => a == b,
                 // Mixed small/big pairs are unequal by the canonical-form invariant.
                 (Value::BigInt(a), Value::BigInt(b)) => a == b,
-                (Value::Binary(a), Value::Binary(b)) => {
-                    // Compare contents, whichever side owns its bytes. `to_vec` realises a
-                    // rope, which a byte-wise walk would have to do anyway.
-                    let bytes = |binary: &Binary| -> Option<Vec<u8>> {
-                        match binary {
-                            Binary::Data(data) => Some(data.to_vec()),
-                            Binary::Constant(index) => match self.get_constant(*index) {
-                                Some(Constant::Binary(bytes)) => Some(bytes.clone()),
-                                _ => None,
-                            },
-                        }
-                    };
-                    match (bytes(a), bytes(b)) {
-                        (Some(a), Some(b)) => a == b,
-                        _ => false,
-                    }
-                }
+                (Value::Binary(a), Value::Binary(b)) => self.binaries_equal(a, b),
                 (Value::Tuple(type_a, elements_a), Value::Tuple(type_b, elements_b)) => {
                     // Compare by canonical value-shape (name + field labels), not raw tuple-id:
                     // the same shape built via paths that inferred different field types gets
@@ -4465,9 +4455,8 @@ mod reactive_notification_tests {
             sampled: HashSet::new(),
             boundary_len: 1,
         }));
+        ex.reconcile_tracking(0, &mut tracker);
         ex.processes.insert(0, tracker);
-
-        ex.reconcile_tracking(0);
 
         // The dropped dependency is unsubscribed (count back to the fast path) and the
         // tracking state is cleared.
@@ -4488,5 +4477,54 @@ mod reactive_notification_tests {
         ex.prune_watchers(&HashSet::from([1]));
         assert_eq!(ex.get_process(0).unwrap().subscriber_count, 1);
         assert_eq!(ex.get_process(0).unwrap().watchers.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod binary_equality_tests {
+    use super::*;
+    use crate::builtins::BuiltinRegistry;
+    use crate::value::ResourceId;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestEffect;
+    impl Effect for TestEffect {
+        fn resource_id(&self) -> Option<ResourceId> {
+            None
+        }
+    }
+
+    fn binary(data: BinaryData) -> Value {
+        Value::Binary(Binary::Data(Rc::new(data)))
+    }
+
+    /// Equality reads the same bytes whether they sit in a leaf, a constant or a rope.
+    #[test]
+    fn binaries_compare_by_content_across_representations() {
+        let mut ex: Executor<TestEffect> = Executor::new(BuiltinRegistry::new(), 0);
+        ex.constants = Arc::new(vec![Constant::Binary(b"hello".to_vec())]);
+        let flat = binary(BinaryData::new(b"hello".to_vec()));
+        let rope = binary(BinaryData::concat(
+            Rc::new(BinaryData::new(b"he".to_vec())),
+            Rc::new(BinaryData::new(b"llo".to_vec())),
+        ));
+        let constant = Value::Binary(Binary::Constant(0));
+        for (a, b) in [
+            (&flat, &rope),
+            (&rope, &constant),
+            (&constant, &flat),
+            (&rope, &rope),
+        ] {
+            assert!(ex.values_equal(a, b));
+        }
+        let other = binary(BinaryData::concat(
+            Rc::new(BinaryData::new(b"he".to_vec())),
+            Rc::new(BinaryData::new(b"lp!".to_vec())),
+        ));
+        let longer = binary(BinaryData::new(b"hello!".to_vec()));
+        for (a, b) in [(&flat, &other), (&rope, &other), (&constant, &longer)] {
+            assert!(!ex.values_equal(a, b));
+        }
     }
 }
