@@ -197,7 +197,9 @@ A newline (not followed by a continuation) or a `;` ends a chain and starts a ne
 
 Two rules govern a sequence, and together they are most of Quiver's control flow:
 
-1. Every step starts from the same value - the enclosing block's input.
+1. Every step starts from the same value - the sequence's input. That is the enclosing
+   block's input, except in a [consequence](#condition-and-consequence), which starts from
+   its condition's value.
 2. If a step fails, the rest of the sequence is skipped and the sequence evaluates to the
    nil that failed it. A step fails when a [match](#matching) in it fails, or when it
    doesn't end in a match and evaluates to nil.
@@ -644,6 +646,23 @@ sign = #'int {
 -5 ~> sign ~                    //= "negative"
 ```
 
+The consequence starts from the condition's value, as a branch without one evaluates to it.
+A match evaluates to what it matched, so after one the consequence starts from the block's
+input as before — unless a [ripple](#ripples-in-patterns) picks out part of it. A condition
+that finds something hands it on, with nil ruled out:
+
+```quiver
+Lit[5] ~> { | =Lit[~] => %num.add [~, 1] | 0 }     //= 6
+
+ages = %dict{ "ada" => 36 }
+older = #'%str { ages ~> { | %dict.get [~, $] => %num.add [~, 1] | 0 } }
+older "ada"                     //= 37
+older "bob"                     //= 0
+```
+
+Every step of the consequence starts from that value, as the steps of any sequence start
+from its input.
+
 A condition is a *sequence*, so a step separator adds a guard: the match is one step and
 the guard the next, and the boundary short-circuits, so the guard sees the pattern's
 bindings only when it matched.
@@ -658,6 +677,16 @@ size = #'shape {
 Square[side: 20] ~> size ~      //= "large"
 Square[side: 2] ~> size ~       //= "small"
 Circle[radius: 1] ~> size ~     //= "small"
+```
+
+The condition's value is its last step's, so after a guard the consequence would start from
+the guard's answer. To pass the block's input on instead, end the condition with a `~` step
+— or, if the input may be nil (which fails a plain step), with a match, which succeeds on it:
+
+```quiver
+5 ~> { | %num.gt? [~, 3] => [~, 1] | No }      //= [Ok, 1] // the guard's answer
+5 ~> { | %num.gt? [~, 3]; ~ => [~, 1] | No }   //= [5, 1]
+[] ~> { | =[]; =_ => [~, 1] | No }             //= [[], 1]
 ```
 
 To test that a pattern does *not* match, [negate](#negation) it:

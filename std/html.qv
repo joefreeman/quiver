@@ -465,10 +465,10 @@ emit_hole = #[(member): Str['bin], (span): 'span] {
 
 // An attribute value's construction expression.
 emit_attr_val = #'pattr_val {
-  | =Lit[s] => s
+  | =Lit[~]
   | =Flag => Tuple[name: "Ok", fields: Nil]
-  | =AHole[sp] => emit_hole ["attr_value", sp]
-  | =Expr[e] => e
+  | =AHole[~] => emit_hole ["attr_value", ~]
+  | =Expr[~]
 }
 
 // Attribute pairs as a list of `[name, value]` tuple expressions.
@@ -482,7 +482,7 @@ emit_list = #[(self): ^, (items): 'pnodes, (acc): 'xs] -> 'xs {
     | =Nil => %list.reverse $acc
     | =Cons[node, rest] => {
       e = node ~> {
-        | =PText[b] => Tuple[name: "Raw", fields: Cons[Str[b], Nil]]
+        | =PText[~] => Tuple[name: "Raw", fields: Cons[Str[~], Nil]]
         | =PHole[offset: o, length: l] => emit_hole ["child", [offset: o, length: l]]
         | =PElem[tag: t, attrs: alist, children: kids] => Tuple[
             name: "Element",
@@ -580,7 +580,7 @@ instrument_list = #[(self): ^, (items): 'pnodes, (ist): 'ist] -> 'ist {
     | =Nil => $ist
     | =Cons[node, rest] => {
       ist2 = node ~> {
-        | =PText[b] => $ist[..., cur: %bin.concat [$ist.cur, b]]
+        | =PText[~] => $ist[..., cur: %bin.concat [$ist.cur, ~]]
         | =PHole[offset: o, length: l] => {
           i = %str.from_int $ist.ci ~> .0
           opened = %bin.concat [$ist.cur, "<!--q:" ~> .0] ~> %bin.concat [~, i] ~> %bin.concat [
@@ -774,7 +774,7 @@ render_list = #[(self): ^, (items): 'nodes<_>, (acc): 'bin] -> 'bin {
       acc2 = node ~> {
         | =Raw[Str[b]] => %bin.concat [$acc, b]
         | =Text[Str[b]] => esc_text [b, 0, %bin.length b, $acc]
-        | =Fragment[kids] => $self [$self, kids, $acc]
+        | =Fragment[~] => $self [$self, ~, $acc]
         | =Element[tag: Str[t], attrs: attrs, children: kids] => {
           opened = %bin.concat [%bin.append [$acc, 60, 1], t] ~> render_attrs [attrs, ~]
 

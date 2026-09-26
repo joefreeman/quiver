@@ -116,7 +116,7 @@ impl Default for Narrowing {
 /// scope-relative — created where `Parameter` named the then-current scope's parameter —
 /// so it cannot be resolved through `scopes` from a different (inner) scope, which would
 /// read that scope's own parameter instead. See `apply_narrowing`'s Parameter arm.
-fn rooted_at_parameter(provenance: &Provenance) -> bool {
+pub fn rooted_at_parameter(provenance: &Provenance) -> bool {
     match provenance {
         Provenance::Parameter => true,
         Provenance::Field(parent, _) => rooted_at_parameter(parent),

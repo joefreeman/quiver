@@ -1761,12 +1761,18 @@ fn render_match_flat(pattern: &Match) -> String {
                 .join(" | ")
         ),
         // Conjuncts render as themselves: `&` binds tighter than `|`, and an alternation or union
-        // conjunct renders its own parens (`((0 | 1) & v)`).
+        // conjunct renders its own parens (`((0 | 1) & v)`). A conjunct may also be a type the
+        // intersection grammar admits bare where a lone pattern could not (`(+File & fd)`).
         Match::And(conjuncts) => format!(
             "({})",
             conjuncts
                 .iter()
-                .map(render_match)
+                .map(|conjunct| match conjunct {
+                    Match::Type(type_def) if is_bare_conjunct_type(type_def) => {
+                        render_type(type_def)
+                    }
+                    other => render_match(other),
+                })
                 .collect::<Vec<_>>()
                 .join(" & ")
         ),
@@ -1823,6 +1829,16 @@ fn partial_pattern_doc(partial: &PartialPattern) -> Doc {
         })
         .collect();
     bracketed(format!("{}(", name), ")", fields, true)
+}
+
+/// Whether a type conjunct of a conjunction pattern renders without parentheses: a resource, or a
+/// process type without clauses. A clause would take the conjunction's `&` as part of its type.
+fn is_bare_conjunct_type(type_def: &Type) -> bool {
+    match type_def {
+        Type::Resource(_) => true,
+        Type::Process(process) => process.return_type.is_none() && process.state_type.is_none(),
+        _ => false,
+    }
 }
 
 /// Render a type used as a pattern. A pattern's type position only accepts the bare forms recognised
@@ -2172,6 +2188,22 @@ mod tests {
         let ast = parse(source).expect("source must parse");
         let printed = format_program(&ast, source);
         assert_eq!(printed, expected, "\n--- got ---\n{printed}");
+    }
+
+    #[test]
+    fn conjunction_type_conjuncts_render_bare() {
+        // The intersection grammar admits a resource or clause-free process type bare as a
+        // conjunct; a clause would read the conjunction's `&` into its type, so it keeps parens.
+        assert_formats("x ~> =(+File & fd)\n", "x ~> =(+File & fd)\n");
+        assert_formats("x ~> =(@'int & p)\n", "x ~> =(@'int & p)\n");
+        assert_formats("x ~> =((@'int !'bin) & p)\n", "x ~> =((@'int !'bin) & p)\n");
+    }
+
+    #[test]
+    fn ripple_patterns_render_as_written() {
+        assert_formats("x ~> =[~, [~, _]]\n", "x ~> =[~, [~, _]]\n");
+        assert_formats("x ~> =(Ok[~] | ~)\n", "x ~> =(Ok[~] | ~)\n");
+        assert_formats("x ~> =(y: ~) ~> f ~\n", "x ~> =(y: ~) ~> f ~\n");
     }
 
     #[test]
@@ -2922,6 +2954,11 @@ mod tests {
             "=A[b: \\'int, c: \\^y]",
             "=\\(0 | 1)",
             "=(\\[] & n)",
+            // A ripple marks what the match yields; `~>` after a pattern stays a continuation.
+            "=[~]",
+            "=[~, [~, 'int], _] ~> f ~",
+            "=(Ok[~] | Err[_] & ~)",
+            "[~] = x",
             "(\\[] & n) = f x; n",
             // An alternation head renders its own pair, and takes a binder like a type head.
             "=((32 | 9 | 10 | 13) & b)",

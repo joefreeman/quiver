@@ -421,8 +421,8 @@ obj_get = #[(pairs): 'pairs, (key): '%str, (found): 'opt] {
 get1 = #[(value): 'opt, (key): ('%str | 'int)] -> 'opt {
   $value ~> =(' & v)
   $key ~> {
-    | =('%str & k) => v ~> =Object[pairs]; obj_get [pairs, k, []]
-    | =('int & i) => v ~> =Array[items]; %list.nth [items, i]
+    | =('%str & k) => v ~> =Object[~] ~> obj_get [~, k, []]
+    | =('int & i) => v ~> =Array[~] ~> %list.nth [~, i]
   }
 }
 
@@ -471,8 +471,8 @@ arr_set = #[(rest): '%list<'>, (index): 'int, (new): ', (acc): '%list<'>] -> ('%
 set1 = #[(value): 'opt, (key): ('%str | 'int), (new): '] -> 'opt {
   $value ~> =(' & v)
   $key ~> {
-    | =('%str & k) => { v ~> =Object[pairs]; obj_set [pairs, k, $new, Nil, []] ~> Object[~] }
-    | =('int & i) => { v ~> =Array[items]; Array[arr_set [items, i, $new, Nil] ~> ='%list<'>] }
+    | =('%str & k) => v ~> =Object[~] ~> obj_set [~, k, $new, Nil, []] ~> Object[~]
+    | =('int & i) => v ~> =Array[~] ~> Array[arr_set [~, i, $new, Nil] ~> ='%list<'>]
   }
 }
 
@@ -525,8 +525,8 @@ arr_delete = #[(rest): '%list<'>, (index): 'int, (acc): '%list<'>] -> '%list<'> 
 delete1 = #[(value): 'opt, (key): ('%str | 'int)] -> 'opt {
   $value ~> =(' & v)
   $key ~> {
-    | =('%str & k) => v ~> =Object[pairs]; obj_delete [pairs, k, Nil] ~> Object[~]
-    | =('int & i) => v ~> =Array[items]; arr_delete [items, i, Nil] ~> Array[~]
+    | =('%str & k) => v ~> =Object[~] ~> obj_delete [~, k, Nil] ~> Object[~]
+    | =('int & i) => v ~> =Array[~] ~> arr_delete [~, i, Nil] ~> Array[~]
   }
 }
 
@@ -562,7 +562,7 @@ merge = #[(value): 'opt, (with): 'opt] -> 'opt {
 
 to_dict = #'opt {
   :doc "An object's pairs as a %dict (later duplicates win, matching `get`); order is not preserved. Nil for anything but an object."
-  =' ~> =Object[pairs]; %dict.from pairs
+  =' ~> =Object[~] ~> %dict.from ~
 }
 
 object = #('%dict<'%str, '> | 'pairs) -> ' {

@@ -44,7 +44,7 @@ parse = #[(segments): '%list<'%str>, (init): '] {
         | =Str[<2e>] => $0
         | =Str[<2e2e>] => $0 ~> {
           | =Path[_, parent] => parent
-          | =Relative[n] => %num.add [n, 1] ~> Relative[~]
+          | =Relative[~] => %num.add [~, 1] ~> Relative[~]
           | =Root => Root
         }
         | Path[~, $0]
@@ -72,7 +72,7 @@ parse = #[(segments): '%list<'%str>, (init): '] {
     :doc "The parent of a path; the root is its own parent."
     | =Path[_, p] => p
     | =Root => Root
-    | =Relative[n] => %num.add [n, 1] ~> Relative[~]
+    | =Relative[~] => %num.add [~, 1] ~> Relative[~]
   },
 
   // Accepts a nil path (e.g. the result of an invalid `join`) and propagates it, so a nil flows

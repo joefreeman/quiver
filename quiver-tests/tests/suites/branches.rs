@@ -48,18 +48,66 @@ fn test_string_match() {
 }
 
 #[test]
-fn test_consequence_ripple_is_block_parameter_not_condition_result() {
-    // When a condition transforms its input (e.g., returns Ok), the consequence's
-    // ripple (~) should still refer to the block parameter, not the condition result.
-    // Here ok? returns Ok when input is 0, but ~ in the consequence should be 0.
+fn test_consequence_ripple_is_condition_result() {
+    // A consequence starts from its condition's value: here `ok?` answers `Ok` for 0, so
+    // that is what `~` is in the consequence.
     quiver()
         .evaluate(
             r#"
             ok? = #'int { =0 => Ok };
-            0 ~> { | ok? => ~ | 999 }
+            0 ~> { | ok? ~ => ~ | 999 }
             "#,
         )
-        .expect("0");
+        .expect("Ok");
+}
+
+#[test]
+fn test_consequence_ripple_after_match_is_block_parameter() {
+    // A match yields its scrutinee, so after one the consequence starts from the block's input.
+    quiver()
+        .evaluate("f = #('int | 'bin) { | ='int => [~, $] | No }; f 3")
+        .expect("[3, 3]");
+}
+
+#[test]
+fn test_consequence_ripple_after_ripple_match() {
+    quiver()
+        .evaluate("Lit[5] ~> { | =Lit[~] => %num.add [~, 1] | 0 }")
+        .expect("6");
+}
+
+#[test]
+fn test_consequence_uses_found_value() {
+    // A lookup as the condition: the consequence gets what was found, with nil ruled out.
+    quiver()
+        .evaluate(
+            r#"
+            m = %dict{ "a" => 1 }
+            f = #'%str { m ~> { | %dict.get [~, $] => %num.add [~, 10] | 0 } }
+            [f "a", f "b"]
+            "#,
+        )
+        .expect("[11, 0]");
+}
+
+#[test]
+fn test_consequence_steps_all_start_from_condition_value() {
+    quiver()
+        .evaluate("Lit[5] ~> { | =Lit[~] => [~, 1]; [~, 2] | No }")
+        .expect("[5, 2]");
+}
+
+#[test]
+fn test_guard_ending_in_ripple_restores_input() {
+    // After a guard, `~` would be the guard's answer; ending the condition with a `~` step
+    // passes the block's input on instead.
+    quiver()
+        .evaluate("5 ~> { | %num.gt? [~, 0]; ~ => [~, 1] | No }")
+        .expect("[5, 1]");
+    // A nil input fails a plain `~` step, so a match (which succeeds on nil) passes it on.
+    quiver()
+        .evaluate("[] ~> { | =[]; =_ => [~, 1] | No }")
+        .expect("[[], 1]");
 }
 
 #[test]
@@ -69,10 +117,10 @@ fn test_consequence_ripple_in_tuple() {
         .evaluate(
             r#"
             ok? = #'int { =0 => Ok };
-            0 ~> { | ok? => [~, 1] | [~, 2] }
+            0 ~> { | ok? ~ => [~, 1] | [~, 2] }
             "#,
         )
-        .expect("[0, 1]");
+        .expect("[Ok, 1]");
 }
 
 #[test]

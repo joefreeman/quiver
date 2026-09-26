@@ -141,7 +141,7 @@ binding = #[(attr): '%html.pattr, (event): '%str] {
 // What one written attribute means here. Anything this layer doesn't claim passes through
 // untouched — including its value, which %html normalizes as usual.
 live_policy = #'%html.pattr {
-  | event_name? $name ~> =Str[eb] => binding [$, Str[eb]]
+  | event_name? $name ~> ='%str => binding [$, ~]
   | $name ~> ="nav" => {
     | $mods ~> =[]; $value ~> =Flag => Cons[$[..., name: "data-q-nav"], Nil]
     | %parse.fail [$pos, "a bare 'nav' (it takes no value and no modifiers)"]
@@ -303,7 +303,7 @@ key_opts = #[
 enc_attr = #'%html.attr_val<_> {
   | =Str[b] => Str[b]
   | =Ok => Ok
-  | =Data[payload] => %data.encode payload
+  | =Data[~] => %data.encode ~
   | []
 }
 
@@ -314,13 +314,13 @@ frame_of = #[(self): ^, (node): '%html<_>] -> 'frame {
     slots = %list.map [
       h,
       #{
-        | =Child[n] => $$self [$$self, n]
+        | =Child[~] => $$self [$$self, ~]
         | =Attr[elem: e, name: nm, value: v] => ALeaf[elem: e, name: nm, value: enc_attr v]
       },
     ]
     Tmpl[statics: s, slots: slots]
   }
-  | $node ~> =Text[str] => Leaf[str]
+  | $node ~> =Text[~] => Leaf[~]
   | $node ~> =Fragment[items] => {
     // An un-annotated Fragment in a child slot is a node list: a Many of per-item
     // frames (chat items being their own templates diff granularly), each carrying
@@ -800,7 +800,7 @@ pointer_of = #'jsons {
   ]
 }
 
-submit_of = #'jsons { =Cons[fj, Nil]; fj ~> jval ~ ~> =Array[fs]; Submit[fields: pairs_of fs] }
+submit_of = #'jsons { =Cons[~, Nil] ~> jval ~ ~> =Array[~] ~> Submit[fields: pairs_of ~] }
 
 // `input` and `change` report the same thing — the control's value and, for a checkbox or
 // radio, whether it is ticked — so they share a reader and differ only in their tag.
@@ -973,14 +973,14 @@ key_assigned? = #[(items): 'assigns, (k): '%str] { %list.any? [$items, #{ =(key:
 // A kid by key (reconcile) or by vid (crash reports).
 kid_of = #[(items): 'kids, (k): '%str] -> 'kid_hit {
   {
-    | %list.find [$items, #{ =(key: ^$$k) }] ~> =('kid & kd) => KFound[kd]
+    | %list.find [$items, #{ =(key: ^$$k) }] ~> ='kid => KFound[~]
     | KMissing
   }
 }
 
 kid_by_vid = #[(items): 'kids, (v): '%str] -> 'kid_hit {
   {
-    | %list.find [$items, #{ =(vid: ^$$v) }] ~> =('kid & kd) => KFound[kd]
+    | %list.find [$items, #{ =(vid: ^$$v) }] ~> ='kid => KFound[~]
     | KMissing
   }
 }
@@ -1478,7 +1478,7 @@ alife = #[
           | Ok
         }
       }
-      | =Frame[s] => ^ [$req, Parked, Cons[s, $buffer], $token, reg, $routes]
+      | =Frame[~] => ^ [$req, Parked, Cons[~, $buffer], $token, reg, $routes]
       | =Route[v, p] => ^ [
           $req,
           Parked,
@@ -1487,7 +1487,7 @@ alife = #[
           reg,
           Cons[[vid: v, pid: p], del_route [$routes, v]],
         ]
-      | =Unroute[v] => ^ [$req, Parked, $buffer, $token, reg, del_route [$routes, v]]
+      | =Unroute[~] => ^ [$req, Parked, $buffer, $token, reg, del_route [$routes, ~]]
       | Ok
     }
     | =Attached[conn] => {
@@ -1511,7 +1511,7 @@ alife = #[
             reg,
             Cons[[vid: v, pid: p], del_route [$routes, v]],
           ]
-        | =Unroute[v] => ^ [$req, Attached[conn], Nil, $token, reg, del_route [$routes, v]]
+        | =Unroute[~] => ^ [$req, Attached[conn], Nil, $token, reg, del_route [$routes, ~]]
         // A clean `Closed`, or the nil of a failed read — a reset is how a browser tab
         // usually vanishes. Either way the socket is gone, and gone means park: the
         // recovery is deliberate, so the clean/failed difference is dropped with the nil.
@@ -1677,7 +1677,7 @@ compose = #[
           $end,
           $req,
         ]
-      | =Unroute[v] => ^ [handler, $page, $buffer, $token, reg, del_route [$routes, v], $end, $req]
+      | =Unroute[~] => ^ [handler, $page, $buffer, $token, reg, del_route [$routes, ~], $end, $req]
       // An Attach cannot arrive before the page (the token is in it); dropping the
       // impossible conn closes it and the client retries cold.
       | =Attach[_] => ^ [handler, $page, $buffer, $token, reg, $routes, $end, $req]

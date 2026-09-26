@@ -460,7 +460,7 @@ pi_l2 = coarsen [pi_top, 64] ~> l2_of ~
 e_l2 = coarsen [e_top, 64] ~> l2_of ~
 gen_l2 = #'gen -> ['int, 'int, 'int] {
   | =Pi => [pi_l2.0, pi_l2.1, l2_den]
-  | =E[d] => [e_l2.0, e_l2.1, __integer_multiply__ [l2_den, d]]
+  | =E[~] => [e_l2.0, e_l2.1, __integer_multiply__ [l2_den, ~]]
 }
 
 // --- Sparse term lists ---
@@ -784,7 +784,7 @@ tx_dominant = #'tx -> (['int, 'int, 'int] | []) {
   rest_mag [ts, l2, k, [], 0] ~> =[rest, n]
   {
     | rest ~> =[] => Ok
-    | rest ~> =('int & rhi) => outweighs [lo, rhi, n]
+    | rest ~> ='int => outweighs [lo, ~, n]
   }
   [to_rational c ~> rsign ~, __integer_subtract__ [lo, 1], __integer_add__ [hi, 1]]
 }
@@ -921,7 +921,7 @@ slow_div = #['opt, 'opt] {
 // different fields and can't be equal — unless both are transcendental, where that is
 // unproven and the budget applies. A bulky operand is ordered by magnitude instead.
 slow_compare = #['opt, 'opt] {
-  | slow_sub $ ~> =(('coeff | 'slow) & d) => diff_sign d
+  | slow_sub $ ~> =('coeff | 'slow) => diff_sign ~
   | =[(('coeff | 'slow) & x), (('coeff | 'slow) & y)]
     { bulky x | bulky y } => mag_compare [x, y]
   | =[(('tx | 'lg) & x), (('tx | 'lg) & y)] => refine [x, y, 64, 1]
@@ -1034,9 +1034,9 @@ clamp = #[(value): 'opt, (min): 'opt, (max): 'opt] {
       | =v => { compare [$in.min, v] ~> =\1; compare [v, $in.max] ~> =\1; Ok }
     }
   }
-  | $value ~> =([] & n) => n
-  | $min ~> =([] & n) => n
-  | $max ~> =([] & n) => n
+  | $value ~> =[]
+  | $min ~> =[]
+  | $max ~> =[]
   | compare [$value, $min] ~> =-1 => $min
   | compare [$value, $max] ~> =1 => $max
   | $value
@@ -1287,10 +1287,10 @@ sqrt = #'opt {
   | sign $ ~> =-1 => [] ~> { :error OutOfDomain }
   | =Tx[Pi, Cons[[k, c], Nil]]
     __integer_modulo__ [k, 2] ~> =0
-    csqrt c ~> =('coeff & r) => tx_build [Pi, Cons[[__integer_divide__ [k, 2], r], Nil]]
-  | =Tx[E[d], Cons[[k, c], Nil]]; csqrt c ~> =('coeff & r) => tx_build [
+    csqrt c ~> ='coeff => tx_build [Pi, Cons[[__integer_divide__ [k, 2], ~], Nil]]
+  | =Tx[E[d], Cons[[k, c], Nil]]; csqrt c ~> ='coeff => tx_build [
       E[__integer_multiply__ [d, 2]],
-      Cons[[k, r], Nil],
+      Cons[[k, ~], Nil],
     ]
   | [] ~> { :error Unrepresentable }
 }
@@ -1542,10 +1542,10 @@ qpow = #[', 'int, 'int] {
   | =[Tx[Pi, Cons[[k, c], Nil]], p, q]
     kp = __integer_multiply__ [k, p]
     __integer_modulo__ [kp, q] ~> =0
-    cqpow [c, p, q] ~> =('coeff & r) => tx_build [Pi, Cons[[__integer_divide__ [kp, q], r], Nil]]
-  | =[Tx[E[d], Cons[[k, c], Nil]], p, q]; cqpow [c, p, q] ~> =('coeff & r) => tx_build [
+    cqpow [c, p, q] ~> ='coeff => tx_build [Pi, Cons[[__integer_divide__ [kp, q], ~], Nil]]
+  | =[Tx[E[d], Cons[[k, c], Nil]], p, q]; cqpow [c, p, q] ~> ='coeff => tx_build [
       E[__integer_multiply__ [d, q]],
-      Cons[[__integer_multiply__ [k, p], r], Nil],
+      Cons[[__integer_multiply__ [k, p], ~], Nil],
     ]
   | [] ~> { :error Unrepresentable }
 }
@@ -1700,21 +1700,21 @@ inverse = #[(v): ', (table): #' -> ('rational | [])] {
 sin = #'opt {
   :doc "The sine, exact at rational multiples of π where the value is rational or a single surd; nil otherwise."
   | =([] & n) => n
-  | pi_ratio $ ~> =('rational & r) => sin_r r
+  | pi_ratio $ ~> ='rational => sin_r ~
   | [] ~> { :error Unrepresentable }
 }
 
 cos = #'opt {
   :doc "The cosine, exact at rational multiples of π where the value is rational or a single surd; nil otherwise."
   | =([] & n) => n
-  | pi_ratio $ ~> =('rational & r) => rsub [Rational[1, 2], r] ~> sin_r ~
+  | pi_ratio $ ~> ='rational => rsub [Rational[1, 2], ~] ~> sin_r ~
   | [] ~> { :error Unrepresentable }
 }
 
 tan = #'opt {
   :doc "The tangent, exact at rational multiples of π where the value is rational or a single surd; nil otherwise, and at the poles."
   | =([] & n) => n
-  | pi_ratio $ ~> =('rational & r) => tan_r r
+  | pi_ratio $ ~> ='rational => tan_r ~
   | [] ~> { :error Unrepresentable }
 }
 
@@ -1722,7 +1722,7 @@ asin = #'opt {
   :doc "The arcsine, in [−π/2, π/2]: exact where the sine table has the value; nil otherwise."
   | =([] & n) => n
   | abs $ ~> compare [~, 1] ~> =1 => [] ~> { :error OutOfDomain }
-  | inverse [$, asin_table] ~> =('rational & r) => pi_times r
+  | inverse [$, asin_table] ~> ='rational => pi_times ~
   | [] ~> { :error Unrepresentable }
 }
 
@@ -1730,14 +1730,14 @@ acos = #'opt {
   :doc "The arccosine, in [0, π]: exact where the sine table has the value; nil otherwise."
   | =([] & n) => n
   | abs $ ~> compare [~, 1] ~> =1 => [] ~> { :error OutOfDomain }
-  | inverse [$, asin_table] ~> =('rational & r) => rsub [Rational[1, 2], r] ~> pi_times ~
+  | inverse [$, asin_table] ~> ='rational => rsub [Rational[1, 2], ~] ~> pi_times ~
   | [] ~> { :error Unrepresentable }
 }
 
 atan = #'opt {
   :doc "The arctangent, in (−π/2, π/2): exact where the tangent table has the value; nil otherwise."
   | =([] & n) => n
-  | inverse [$, atan_table] ~> =('rational & r) => pi_times r
+  | inverse [$, atan_table] ~> ='rational => pi_times ~
   | [] ~> { :error Unrepresentable }
 }
 

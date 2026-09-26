@@ -805,6 +805,8 @@ fn leading_match(branch: &ast::Branch) -> Option<&ast::Match> {
 /// sequence never succeeds. (A `never` type alone doesn't say that: a tail call never returns.)
 struct SequenceResult {
     ty: usize,
+    /// The provenance of the last step's value.
+    provenance: Provenance,
     failures: Vec<Failure>,
     dead: bool,
     /// The last step is a match that binds nothing and can only succeed on nil, so where its
@@ -3824,11 +3826,38 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
 
             if let Some(ref consequence) = branch.consequence {
-                // The condition succeeded: drop its value, as the consequence starts from the
-                // block's parameter like every sequence.
-                self.codegen.add_instruction(Instruction::pop());
-                let consequence = self.compile_sequence(consequence.clone(), None, None, false)?;
-                branch_types.push(consequence.ty);
+                // The condition succeeded, and the consequence starts from its value.
+                let consequence_type = if branch.condition.yields_input() {
+                    // That value is the block's parameter, where the condition's matches
+                    // narrowed it, so the consequence reads it from there like any sequence.
+                    self.codegen.add_instruction(Instruction::pop());
+                    self.compile_sequence(consequence.clone(), None, None, false)?
+                        .ty
+                } else {
+                    // Otherwise the consequence gets a scope whose parameter it is. A
+                    // provenance rooted at a parameter names this block's scope, so it
+                    // cannot follow the value into the new one.
+                    let provenance = if narrowing::rooted_at_parameter(&condition.provenance) {
+                        Provenance::Unknown
+                    } else {
+                        condition.provenance.clone()
+                    };
+                    self.compile_scoped_block(
+                        ast::Block {
+                            annotations: Vec::new(),
+                            branches: vec![ast::Branch {
+                                condition: consequence.clone(),
+                                consequence: None,
+                            }],
+                        },
+                        condition_type,
+                        provenance,
+                        None,
+                        ScopeKind::Block,
+                        false,
+                    )?
+                };
+                branch_types.push(consequence_type);
                 if is_last_branch && !can_fail {
                     is_exhaustive = true;
                 }
@@ -4351,6 +4380,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.codegen.add_instruction(Instruction::tuple(NIL));
             return Ok(SequenceResult {
                 ty: self.program.register_type(Type::nil()),
+                provenance: Provenance::Unknown,
                 failures: Vec::new(),
                 dead: false,
                 nil_only_match: false,
@@ -4361,6 +4391,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut success_type = None;
         let mut dead = false;
         let mut nil_only_match = false;
+        let mut provenance = Provenance::Unknown;
 
         for (step_index, step) in sequence.steps.iter().enumerate() {
             let chain = match step {
@@ -4403,6 +4434,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             if let Some(verdict) = &result.verdict {
                 match_failures.extend(verdict.iter().copied());
             }
+            provenance = result.provenance.clone();
             let unwinds = self.pending_unwinds.split_off(unwinds_before);
             self.resolve_unwinds(step_start, &unwinds, &match_failures)?;
             let match_failures = self.stamp_failures(match_failures, chain.span.get());
@@ -4500,6 +4532,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if verdict {
             return Ok(SequenceResult {
                 ty: success_type,
+                provenance,
                 failures,
                 dead,
                 nil_only_match,
@@ -4516,6 +4549,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
         Ok(SequenceResult {
             ty: typing::union_type_ids(self.program, members),
+            provenance,
             failures: Vec::new(),
             dead,
             nil_only_match,

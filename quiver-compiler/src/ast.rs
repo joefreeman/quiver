@@ -85,6 +85,23 @@ impl Sequence {
         }
     }
 
+    /// Whether the sequence's value is statically its own input: its last step is that input
+    /// itself (`~`, or an assertion-only step), or a match against it with no ripple — a match
+    /// yields its scrutinee. Every step starts from the input, so earlier steps don't matter.
+    pub fn yields_input(&self) -> bool {
+        let Some(last) = self.chains().last() else {
+            return false;
+        };
+        last.binding.is_none()
+            && match last.terms.as_slice() {
+                [] => true,
+                [term] if term.is_bare_ripple() => true,
+                [Term::Match(pattern)] => !pattern.contains_ripple(),
+                [head, Term::Match(pattern)] => head.is_bare_ripple() && !pattern.contains_ripple(),
+                _ => false,
+            }
+    }
+
     /// A sequence of chain steps, with no type aliases.
     pub fn from_chains(chains: impl IntoIterator<Item = Chain>) -> Self {
         Sequence {
@@ -601,6 +618,32 @@ pub enum Match {
     /// matched, so there is nothing to bind), but may pin, test types, and nest anywhere a pattern
     /// can (`=A[b: \'int]`). `(\[] & x)` binds `x` while requiring it to be non-nil.
     Not(Box<Match>),
+}
+
+impl Match {
+    /// Whether a ripple (`~`) appears anywhere in the pattern.
+    pub fn contains_ripple(&self) -> bool {
+        match self {
+            Match::Ripple => true,
+            Match::Tuple(tuple) => tuple
+                .fields
+                .iter()
+                .any(|field| field.pattern.contains_ripple()),
+            Match::Partial(partial) => partial
+                .fields
+                .iter()
+                .any(|field| field.pattern.as_ref().is_some_and(Match::contains_ripple)),
+            Match::Or(parts) | Match::And(parts) => parts.iter().any(Match::contains_ripple),
+            Match::Not(inner) => inner.contains_ripple(),
+            Match::Identifier(..)
+            | Match::Literal(_)
+            | Match::String(..)
+            | Match::Star(_)
+            | Match::Placeholder
+            | Match::Pin(_)
+            | Match::Type(_) => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

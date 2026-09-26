@@ -62,7 +62,7 @@ further = #[(a): ('perr | []), (b): ('perr | [])] {
   | $a ~> =Expected(offset: ao)
     $b ~> =Expected(offset: bo)
     __integer_compare__ [ao, bo] ~> =(0 | 1) => $a
-  | $b ~> =('perr & x) => x
+  | $b ~> ='perr
   | $a
 }
 
@@ -97,7 +97,7 @@ satisfy = #[(pred): 'pred<'int>, (what): Str['bin]] {
   pred = $pred
   what = $what
   #' {
-    | peek $ ~> =('int & b); pred b ~> =('int & v) => [v, advance [$, 1]]
+    | peek $ ~> =('int & b); pred b ~> ='int => [~, advance [$, 1]]
     | fail_in [$, what]
   }
 }
@@ -215,7 +215,7 @@ qstr_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
               | =116 => 9
               | =114 => 13
             }
-            ~> =('int & r) => ^ [$data, __integer_add__ [p1, 1], $len, %bin.append [$acc, r, 1]]
+            ~> ='int => ^ [$data, __integer_add__ [p1, 1], $len, %bin.append [$acc, ~, 1]]
           | [] ~> { :error Expected[offset: p1, message: "an escape character"] }
         }
       }

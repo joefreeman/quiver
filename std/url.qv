@@ -149,8 +149,9 @@ authority = #' {
 directory = #'%str {
   =Str[p]
   {
-    | last_index [p, 47, __integer_subtract__ [%bin.length p, 1]]
-      ~> =('int & i) => %bin.slice [p, 0, __integer_add__ [i, 1]] ~> Str[~]
+    | last_index [p, 47, __integer_subtract__ [%bin.length p, 1]] ~> ='int => __integer_add__ [~, 1]
+      ~> %bin.slice [p, 0, ~]
+      ~> Str[~]
     | "/"
   }
 }

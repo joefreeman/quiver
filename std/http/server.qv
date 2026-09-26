@@ -91,7 +91,7 @@ conn_loop = #[(sock): +TcpSocket, (handler): 'handler, (buf): 'bin] {
         }
         | {
           resp = {
-            | r ~> =('%http.response & ok) => ok
+            | r ~> ='%http.response
             | plain [500, "Internal Server Error"]
           }
           resp2 = {

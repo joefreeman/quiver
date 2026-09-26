@@ -56,7 +56,7 @@ watch = #[(id): '%str, (child): @!_, (sup): @'down] {
   @[] {
     r = ![child]
     o = {
-      | r:crash<'%proc.crash> ~> =('%proc.crash & e) => Crashed[e]
+      | r:crash<'%proc.crash> => Crashed[~]
       | Done
     }
     %proc.send [sup, Down[id: id, pid: child, outcome: o]]

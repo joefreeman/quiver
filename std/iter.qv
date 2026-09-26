@@ -156,7 +156,9 @@ fold = #<'t, 'acc>[(it): 'thunk<'t>, (acc): 'acc, (f): #['acc, 't] -> 'acc] {
 try_fold = #<'t, 'acc>[(it): 'thunk<'t>, (acc): 'acc, (f): #['acc, 't] -> 'acc] {
   $it [] ~> {
     | =[value, next] => $f [$acc, value] ~> ^ [next, ~, $f]
-    | :error<()> => ~
+    // A consequence starts from its condition's value, so the condition ends with a match on
+    // the failed nil itself (a plain `~` step would fail on it), which propagates it intact.
+    | :error<()>; =_ => ~
     | $acc
   }
 }
@@ -205,37 +207,37 @@ intersperse = #<'t>[(self): ^, (it): 'thunk<'t>, (sep): 't] -> 'thunk<'t> {
 
   map: #<'t, 'u>[(iter): '<'t>, (f): #'t -> 'u] {
     :doc "Transforms each element of an iterator with a function, lazily."
-    $iter ~> =Iter[r]; map [map, r, $f] ~> Iter[~]
+    $iter ~> =Iter[~] ~> map [map, ~, $f] ~> Iter[~]
   },
 
   filter: #<'t>[(iter): '<'t>, (pred): #'t -> _] {
     :doc "Keeps only the elements for which the predicate is non-nil, lazily."
-    $iter ~> =Iter[r]; filter [filter, r, $pred] ~> Iter[~]
+    $iter ~> =Iter[~] ~> filter [filter, ~, $pred] ~> Iter[~]
   },
 
   take: #<'t>[(iter): '<'t>, (n): 'int] {
     :doc "An iterator over at most the first n elements."
-    $iter ~> =Iter[r]; take [take, r, $n] ~> Iter[~]
+    $iter ~> =Iter[~] ~> take [take, ~, $n] ~> Iter[~]
   },
 
   drop: #<'t>[(iter): '<'t>, (n): 'int] {
     :doc "An iterator that skips the first n elements."
-    $iter ~> =Iter[r]; drop [drop, r, $n] ~> Iter[~]
+    $iter ~> =Iter[~] ~> drop [drop, ~, $n] ~> Iter[~]
   },
 
   take_while: #<'t>[(iter): '<'t>, (pred): #'t -> _] {
     :doc "Yields elements while the predicate is non-nil, then ends."
-    $iter ~> =Iter[r]; take_while [take_while, r, $pred] ~> Iter[~]
+    $iter ~> =Iter[~] ~> take_while [take_while, ~, $pred] ~> Iter[~]
   },
 
   drop_while: #<'t>[(iter): '<'t>, (pred): #'t -> _] {
     :doc "Skips elements while the predicate is non-nil, yielding the rest."
-    $iter ~> =Iter[r]; drop_while [drop_while, r, $pred] ~> Iter[~]
+    $iter ~> =Iter[~] ~> drop_while [drop_while, ~, $pred] ~> Iter[~]
   },
 
   flat_map: #<'t, 'u>[(iter): '<'t>, (f): #'t -> '<'u>] {
     :doc "Maps each element to an iterator and concatenates the results, lazily."
-    $iter ~> =Iter[r]; flat_map [flat_map, r, $f, #{ [] }] ~> Iter[~]
+    $iter ~> =Iter[~] ~> flat_map [flat_map, ~, $f, #{ [] }] ~> Iter[~]
   },
 
   chain: #<'t>[(iter): '<'t>, (with): '<'t>] {
@@ -250,12 +252,12 @@ intersperse = #<'t>[(self): ^, (it): 'thunk<'t>, (sep): 't] -> 'thunk<'t> {
 
   enumerate: #<'t>'<'t> {
     :doc "Pairs each element with its zero-based index."
-    =Iter[r]; enumerate [enumerate, r, 0] ~> Iter[~]
+    =Iter[~] ~> enumerate [enumerate, ~, 0] ~> Iter[~]
   },
 
   cycle: #<'t>'<'t> {
     :doc "An iterator that repeats the elements endlessly."
-    =Iter[r]; cycle [cycle, r, r] ~> Iter[~]
+    =Iter[~] ~> cycle [cycle, ~, ~] ~> Iter[~]
   },
 
   repeat: #<'t>'t {
@@ -265,42 +267,42 @@ intersperse = #<'t>[(self): ^, (it): 'thunk<'t>, (sep): 't] -> 'thunk<'t> {
 
   fold: #<'t, 'acc>[(iter): '<'t>, (init): 'acc, (f): #['acc, 't] -> 'acc] {
     :doc "Reduces an iterator by folding each element into an accumulator."
-    $iter ~> =Iter[r]; fold [r, $init, $f]
+    $iter ~> =Iter[~] ~> fold [~, $init, $f]
   },
 
   try_fold: #<'t, 'acc>[(iter): '<'t>, (init): 'acc, (f): #['acc, 't] -> 'acc] {
     :doc "Folds an iterator that may fail (one backed by io), answering the accumulator on exhaustion and nil — carrying the failure's :error — if the source broke part-way."
-    $iter ~> =Iter[r]; try_fold [r, $init, $f]
+    $iter ~> =Iter[~] ~> try_fold [~, $init, $f]
   },
 
   find: #<'t>[(iter): '<'t>, (pred): #'t -> _] {
     :doc "The first element for which the predicate is non-nil, or nil when none matches."
-    $iter ~> =Iter[r]; find [r, $pred]
+    $iter ~> =Iter[~] ~> find [~, $pred]
   },
 
   find_index: #<'t>[(iter): '<'t>, (pred): #'t -> _] {
     :doc "The zero-based index of the first matching element, or nil when none matches."
-    $iter ~> =Iter[r]; find_index [r, $pred, 0]
+    $iter ~> =Iter[~] ~> find_index [~, $pred, 0]
   },
 
   any?: #<'t>[(iter): '<'t>, (pred): #'t -> _] {
     :doc "Whether any element satisfies the predicate."
-    $iter ~> =Iter[r]; any [r, $pred]
+    $iter ~> =Iter[~] ~> any [~, $pred]
   },
 
   all?: #<'t>[(iter): '<'t>, (pred): #'t -> _] {
     :doc "Whether every element satisfies the predicate."
-    $iter ~> =Iter[r]; all [r, $pred]
+    $iter ~> =Iter[~] ~> all [~, $pred]
   },
 
   count: #'<_> {
     :doc "The number of elements in the iterator."
-    =Iter[r]; fold [r, 0, #['int, _] { %num.add [$0, 1] }]
+    =Iter[~] ~> fold [~, 0, #['int, _] { %num.add [$0, 1] }]
   },
 
   nth: #<'t>[(iter): '<'t>, (n): 'int] {
     :doc "The element at the given zero-based index, or nil when the iterator is too short."
-    $iter ~> =Iter[r]; nth [r, $n]
+    $iter ~> =Iter[~] ~> nth [~, $n]
   },
 
   intersperse: #<'t>[(iter): '<'t>, (sep): 't] {
