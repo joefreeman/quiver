@@ -3,10 +3,10 @@
 // The lookup's state: the open resolver, or the nil an *open* failure produced — passed
 // straight through, so a failed resolve yields an iterator that terminates with the failure
 // rather than one that is merely empty.
-'lookup = \DnsResolver | []
+'lookup = +DnsResolver | []
 
 lookup_step = #'lookup {
-  | =(\DnsResolver)r => __dns_next__ r ~> {
+  | =(+DnsResolver)r => __dns_next__ r ~> {
     | =('bin)b => __binary_length__ b ~> {
       | =4 => [IPv4[b], r]
       | =16 => [IPv6[b], r]

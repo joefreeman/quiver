@@ -438,7 +438,7 @@ macro_rules! register_builtin {
 /// the produced resource (whose kind is named alongside).
 #[derive(Clone, Debug)]
 pub struct StreamSpec {
-    /// The bytes event (e.g. `Data[sock: \TcpSocket, data: 'bin]`), or None for
+    /// The bytes event (e.g. `Data[sock: +TcpSocket, data: 'bin]`), or None for
     /// streams that never yield bytes.
     pub data: Option<TypeSpec>,
     /// The fresh-resource event (e.g. `Accepted[listener, sock]`) and the produced

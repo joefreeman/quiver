@@ -13,7 +13,7 @@
 // Read until the buffer holds a whole response. An empty read is end-of-connection, which is
 // what terminates a response framed by neither Content-Length nor chunking — and, if the
 // response is still incomplete at that point, what makes it a truncation rather than a wait.
-read_loop = #[(sock): \TcpSocket, (buf): 'bin] {
+read_loop = #[(sock): +TcpSocket, (buf): 'bin] {
   %tcp.read [$sock, 8192] ~> =('bin)chunk
   eof = { %bin.length chunk ~> =0 => Ok | [] }
   buffer = %bin.concat [$buf, chunk]
@@ -32,7 +32,7 @@ read_loop = #[(sock): \TcpSocket, (buf): 'bin] {
 // Open a connection of the kind the scheme calls for. TLS verifies against the host's default
 // anchors; a caller needing its own would go through `%tls` directly.
 open = #'%url {
-  %tcp.connect [$host, $port] ~> =(\TcpSocket)sock
+  %tcp.connect [$host, $port] ~> =(+TcpSocket)sock
   $scheme ~> {
     | ="http" => sock
     | ="https" => %tls.attach [socket: sock, hostname: $host]
@@ -48,7 +48,7 @@ exchange = #[(url): '%url, (request): '%http] {
     | %http.header [$request.headers, "host"] ~> ='%str => $request.headers
     | %list.prepend [$request.headers, ["host", %url.authority $url]]
   }
-  open $url ~> =(\TcpSocket)sock
+  open $url ~> =(+TcpSocket)sock
   %tcp.write [sock, %http.serialize_request $request[..., headers: hs]]
 
   // Bound with a bare binder rather than a narrowing one: a failed read must still reach the

@@ -194,7 +194,7 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
                 }
             }
         }
-        Type::Resource(name) => format!("\\{}", name),
+        Type::Resource(name) => format!("+{}", name),
         // A `#N` suffix is the compiler's per-definition uniquifier, not part of the
         // source-level name.
         Type::Variable(name) => format!("'{}", name.split('#').next().unwrap_or(name)),
@@ -481,7 +481,7 @@ fn format_step<'a, T: TypeLookup, B: BinaryLookup>(
             None => out.push_str("<binary>"),
         },
         Value::Process(process_id, _) => out.push_str(&format!("@{}", process_id)),
-        Value::Resource(resource_id, _) => out.push_str(&format!("\\#{}", resource_id)),
+        Value::Resource(resource_id, _) => out.push_str(&format!("+#{}", resource_id)),
         Value::Reference(r) => {
             let worker_id = r >> 48;
             let counter = r & 0xFFFFFFFFFFFF;

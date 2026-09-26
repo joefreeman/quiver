@@ -51,7 +51,7 @@ keep_alive? = #'request {
 // The connection pump: serve every complete request in the buffer, reading more only
 // when the parse is incomplete; close on end-of-input, a malformed request, or a
 // non-keep-alive exchange.
-conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
+conn_loop = #[(sock): +TcpSocket, (handler): 'handler, (buf): 'bin] {
   %http.parse_request $buf ~> {
     | =Incomplete => {
       // A read failure ends the connection: the nil short-circuits out of the pump, the
@@ -123,7 +123,7 @@ conn_loop = #[(sock): \TcpSocket, (handler): 'handler, (buf): 'bin] {
 // A connection's whole life. With TLS material the socket is upgraded first, here in the
 // connection's own process — a handshake that fails (or stalls until teardown) takes only
 // this connection with it, and the socket is closed by the process ending either way.
-conn = #[\TcpSocket, 'handler, ('tls | [])] {
+conn = #[+TcpSocket, 'handler, ('tls | [])] {
   =[sock, h, t]
   {
     | t ~> =[cert: c, key: k] => %tls.accept [socket: sock, cert: c, key: k]
@@ -134,8 +134,8 @@ conn = #[\TcpSocket, 'handler, ('tls | [])] {
 
 // A failed accept ends the loop rather than spinning on a broken listener; the nil carries
 // its `:error` out to `serve`'s caller.
-accept_loop = #[(listener): \TcpListener, (handler): 'handler, (tls): ('tls | [])] {
-  __tcp_listener_accept__ $listener ~> =(\TcpSocket)sock
+accept_loop = #[(listener): +TcpListener, (handler): 'handler, (tls): ('tls | [])] {
+  __tcp_listener_accept__ $listener ~> =(+TcpSocket)sock
   [sock, $handler, $tls] ~> @conn ~
   ^ [$listener, $handler, $tls]
 }
@@ -144,7 +144,7 @@ serve = #[port: 'int, handler: 'handler, tls: ('tls | []) = []] {
   :doc "Serves HTTP on the port, one process per connection, each request answered by the handler (a nil result becomes a 500). With `tls:` ([cert, key] as %tls.accept takes them) each connection is upgraded first, serving HTTPS. Blocks forever; nil (with :error) if the listen or an accept failed."
   =[port: p, handler: h, tls: t]
 
-  p ~> __tcp_listen__ [~, 128] ~> =(\TcpListener)listener
+  p ~> __tcp_listen__ [~, 128] ~> =(+TcpListener)listener
 
   accept_loop [listener, h, t]
 }

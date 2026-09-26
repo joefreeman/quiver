@@ -822,7 +822,7 @@ module.exports = grammar({
 
     type_spread: $ => seq('...', optional(seq($.type_name, optional($.type_arguments)))),
 
-    resource_type: $ => /\\[A-Z][a-zA-Z0-9_]*/,
+    resource_type: $ => /\+[A-Z][a-zA-Z0-9_]*/,
 
     // The top type: every value belongs to it. The same token as a pattern's placeholder.
     top_type: _ => '_',

@@ -5583,7 +5583,7 @@
     },
     "resource_type": {
       "type": "PATTERN",
-      "value": "\\\\[A-Z][a-zA-Z0-9_]*"
+      "value": "\\+[A-Z][a-zA-Z0-9_]*"
     },
     "top_type": {
       "type": "STRING",

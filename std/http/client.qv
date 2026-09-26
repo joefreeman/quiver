@@ -39,11 +39,11 @@ redirect_of = #[(status): 'int, (method): '%http.method] {
   | NoFollow
 }
 
-// Drain the response body: the ordinary select-and-accumulate loop over a `\ByteStream`.
+// Drain the response body: the ordinary select-and-accumulate loop over a `+ByteStream`.
 // A failed read answers nil carrying `:error`, and the binding gates on it — the failure
 // propagates out of the exchange rather than passing off a truncated body as the whole
 // one. Only a clean `Closed` means the accumulator holds everything.
-drain = #[(stream): \ByteStream, (acc): 'bin] {
+drain = #[(stream): +ByteStream, (acc): 'bin] {
   event = ![$stream]
   event ~> {
     | =Data[stream: _, data: d] => ^ [$stream, %bin.concat [$acc, d]]

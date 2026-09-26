@@ -62,7 +62,7 @@ Quiver uses a keyword-less syntax. The table below gives an overview of the symb
 | `:` | field label; annotation key | `[x: 1]`, `f:doc` |
 | `.` | field access | `p.x` |
 | `...` | spread operator | `[...p, y: 3]` |
-| `\` | identifies a resource type | `\File` |
+| `+` | identifies a resource type | `+File` |
 | `_` | ignore value in a pattern; the top type | `=[x, _]`, `#'int -> _` |
 | `*` | bind every named field | `* = p` |
 
@@ -624,7 +624,7 @@ sets them apart.
 
 There are three primitive types: `'int`, `'bin`, and `'ref` (unique opaque identifiers,
 covered under [Refs](#refs)). Tuples compose them, and functions, processes and resources
-are each their own kind, with their own notation — `#'int -> 'bin`, `@'int`, `\File`.
+are each their own kind, with their own notation — `#'int -> 'bin`, `@'int`, `+File`.
 
 ### Tuple and function types
 
@@ -1180,8 +1180,8 @@ a ~> =&b                      //= [] // distinct refs are not equal
 ## Resources and failure
 
 Some operations produce **resources** — opaque handles to external state. A resource type
-is written `\Name`: `\File`, `\Dir`, `\TcpSocket`, `\TcpListener`, `\DnsResolver`,
-`\ByteStream`.
+is written `+Name`: `+File`, `+Dir`, `+TcpSocket`, `+TcpListener`, `+DnsResolver`,
+`+ByteStream`.
 
 Every resource is owned by exactly one process, and only its owner may operate on it.
 Ownership **moves** when the handle is sent in a message or captured by a spawn, and after
@@ -1221,9 +1221,9 @@ check; `%iter.try_fold` and `%list.try_collect` do.
 ### Streams
 
 Some resources are **streams**: their next event arrives when it arrives, so they can be
-select sources. A `\TcpSocket` yields `Data[sock, bytes] | Closed[sock]`, and a
-`\TcpListener` yields `Accepted[listener, sock] | Closed[listener]`. A source that is
-nothing but bytes-until-a-clean-end, such as an HTTP response body, is a `\ByteStream`,
+select sources. A `+TcpSocket` yields `Data[sock, bytes] | Closed[sock]`, and a
+`+TcpListener` yields `Accepted[listener, sock] | Closed[listener]`. A source that is
+nothing but bytes-until-a-clean-end, such as an HTTP response body, is a `+ByteStream`,
 yielding `Data[stream, bytes] | Closed[stream]` whatever produced it.
 
 ```quiver ignore

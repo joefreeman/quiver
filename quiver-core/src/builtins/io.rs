@@ -1,7 +1,7 @@
 //! Type contract for the IO builtins (file and network).
 //!
 //! The signatures live here — in the type-system authority — independently of any
-//! implementation: `__file_read__: [\File, 'int, 'int] -> 'bin` is true regardless of which host
+//! implementation: `__file_read__: [+File, 'int, 'int] -> 'bin` is true regardless of which host
 //! provides the runtime. A type-checking host (the language server) registers the signatures
 //! alone via [`register_io_signatures`]; an executing host registers the same signatures paired
 //! with its own implementations (e.g. `quiver-io`'s native io-uring backend, or a web backend).
@@ -234,7 +234,7 @@ pub fn register_tls_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 /// Method and headers cross as bytes (a raw CRLF block) rather than as structured values: the
 /// backend has no type registry, so a `'%http.pairs` would mean plumbing tuple ids for `Cons`,
 /// `Nil` and `Str` through `set_type_ids` — while `%http` already has the header codec both
-/// ways. The response body is a `\ByteStream`.
+/// ways. The response body is a `+ByteStream`.
 fn http_request_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     let bin = TypeSpec::Binary;
     let int = TypeSpec::Integer;
@@ -261,10 +261,10 @@ fn http_request_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     )]
 }
 
-/// Register `\ByteStream`: the general verb-free stream of byte chunks. A socket is a
+/// Register `+ByteStream`: the general verb-free stream of byte chunks. A socket is a
 /// stream *and* a bundle of operations, so it earns its own kind; a source that is
 /// nothing but "chunks until a clean end" — an HTTP response body today; a streamed
-/// request body or a child process's output tomorrow — is a `\ByteStream`, whatever
+/// request body or a child process's output tomorrow — is a `+ByteStream`, whatever
 /// produced it. One kind is what lets one consumer drain them all. Every capability
 /// group whose operations mint one declares it (the registration is keyed by kind, so
 /// repeats agree harmlessly); which group *minted* a given handle is the operation's

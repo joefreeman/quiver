@@ -286,10 +286,10 @@ fn test_generic_unification_of_resource_and_reference_types() {
         .with_io()
         .evaluate(
             r#"pick = #<'t>['t, 't] { $0 }
-               ["/tmp/quiver-generic-res-test" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(\File)f
+               ["/tmp/quiver-generic-res-test" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(+File)f
                pick [f, f]"#,
         )
-        .expect_type("[] | \\File");
+        .expect_type("+File | []");
     quiver()
         .evaluate(
             r#"pick = #<'t>['t, 't] { $0 }

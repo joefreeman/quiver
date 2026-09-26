@@ -82,7 +82,7 @@ pub enum Resource {
         /// Current position in the iterator
         position: usize,
     },
-    /// An `http_request` response body: the `\ByteStream` handed back in the result. It
+    /// An `http_request` response body: the `+ByteStream` handed back in the result. It
     /// reads through the exchange's own socket — internal to the backend, never handed to
     /// a process — and decodes the head's framing as the body is pulled.
     HttpBody {

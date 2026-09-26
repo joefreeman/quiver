@@ -1938,7 +1938,7 @@ fn render_type_flat(type_def: &Type) -> String {
         Type::Cycle(None) => "^".to_string(),
         Type::Cycle(Some(level)) => format!("^{}", level),
         Type::Process(process_type) => render_process_type(process_type),
-        Type::Resource(name) => format!("\\{}", name),
+        Type::Resource(name) => format!("+{}", name),
         Type::Top => "_".to_string(),
         Type::ModuleType {
             module,
@@ -2937,7 +2937,7 @@ mod tests {
             "=(x: 'int)p",
             "=(Point(x: 'int))p",
             // A resource type renders bare, so the binder supplies the only pair.
-            "=(\\File)fd",
+            "=(+File)fd",
             "('bin)ip = f x; ip",
             "=([a] | [b])",
             // An alternation head renders its own pair, and takes a binder like a type head.
@@ -2995,7 +2995,7 @@ mod tests {
             "'watch = @?'int",
             "'punion = 'int | @'int ?'int",
             "'pout = #'int -> (@'int !'bin)",
-            "'res = \\File",
+            "'res = +File",
             "'post = Post[...'entity, title: Str['bin], ...'updateable]",
             "' = Str['bin]",
             "'<'t> = Nil | Cons['t, ^]",

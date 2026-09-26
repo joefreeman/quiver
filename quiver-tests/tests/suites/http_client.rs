@@ -191,7 +191,7 @@ fn test_an_untrusted_anchor_set_is_refused() {
         .evaluate(
             r#""example.com" ~> %dns.resolve ~ ~> %iter.nth [~, 0]
                ~> { | =IPv4[b] => b | =IPv6[b] => b } ~> =('bin)ip
-               %tcp.connect [ip, 443] ~> =(\TcpSocket)s
+               %tcp.connect [ip, 443] ~> =(+TcpSocket)s
                %tls.attach [socket: s, hostname: "example.com", roots: <deadbeef>]
                ~> :('%io)error ~> =IoError(message: m); m"#,
         )

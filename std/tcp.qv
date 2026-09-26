@@ -24,12 +24,12 @@
 // `Data` events carry decrypted bytes, a close_notify ends the stream as `Closed`, and a
 // peer that vanished without one fails it — the same distinction the blocking read draws.
 
-'data = Data[sock: \TcpSocket, data: 'bin]
-'closed = Closed[sock: \TcpSocket]
+'data = Data[sock: +TcpSocket, data: 'bin]
+'closed = Closed[sock: +TcpSocket]
 'event = 'data | 'closed
 
-'accepted = Accepted[listener: \TcpListener, sock: \TcpSocket]
-'listener_closed = Closed[listener: \TcpListener]
+'accepted = Accepted[listener: +TcpListener, sock: +TcpSocket]
+'listener_closed = Closed[listener: +TcpListener]
 'listener_event = 'accepted | 'listener_closed
 
 // Where a connection goes: a raw IP address (4 or 16 bytes), or a hostname to resolve.
@@ -47,7 +47,7 @@ try_each = #[(addrs): '%list<'%dns.ip>, (port): 'int, (last): []] {
 
       outcome = __tcp_connect__ [ip, $port]
       outcome ~> {
-        | =(\TcpSocket)s => s
+        | =(+TcpSocket)s => s
         | =([])failure => ^ [rest, $port, failure]
       }
     }
@@ -56,7 +56,7 @@ try_each = #[(addrs): '%list<'%dns.ip>, (port): 'int, (last): []] {
 
 [
   connect: #[(to): 'address, (port): 'int] {
-    :doc "Connects to [to, port], yielding a \\TcpSocket. A raw IP ('bin, 4 or 16 bytes) is connected in one step; a hostname ('%str) is resolved and each address tried until one accepts. Nil (carrying :error) on failure — for a hostname, also when resolution fails or the name has no addresses."
+    :doc "Connects to [to, port], yielding a +TcpSocket. A raw IP ('bin, 4 or 16 bytes) is connected in one step; a hostname ('%str) is resolved and each address tried until one accepts. Nil (carrying :error) on failure — for a hostname, also when resolution fails or the name has no addresses."
     $to ~> {
       | =('bin)ip => __tcp_connect__ [ip, $port]
       | =('%str)host => {
@@ -70,7 +70,7 @@ try_each = #[(addrs): '%list<'%dns.ip>, (port): 'int, (last): []] {
     }
   },
   listen: __tcp_listen__ ~> {
-    :doc "Listens on [port: 'int, backlog: 'int], yielding a \\TcpListener."
+    :doc "Listens on [port: 'int, backlog: 'int], yielding a +TcpListener."
   },
   read: __tcp_socket_read__ ~> {
     :doc "Reads up to [sock, n] bytes, blocking until some arrive; empty at EOF. For racing a read against messages or a timeout, select on the socket instead."

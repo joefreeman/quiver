@@ -15,7 +15,7 @@ use quiver_core::builtins::{BuiltinContext, BuiltinRegistry, Completion};
 use quiver_core::error::Error;
 use quiver_core::value::Value;
 
-/// http_request([method, url, headers, body]) -> [status, headers, body: \ByteStream]
+/// http_request([method, url, headers, body]) -> [status, headers, body: +ByteStream]
 /// Parks the process while the backend performs the exchange.
 pub fn builtin_http_request(
     value: &Value,

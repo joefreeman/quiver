@@ -416,3 +416,30 @@ top type
             (identifier))
           (type_arguments
             (top_type)))))))
+
+==================
+resource type
+==================
+
+open = #[(fd): +File] { $ ~> =(+TcpSocket)s }
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (identifier)
+      (function
+        (tuple_type
+          (identifier)
+          (resource_type))
+        (block
+          (branch
+            (sequence
+              (chain
+                (access
+                  (parameter))
+                (bind_match
+                  (pattern_ascription
+                    (resource_type)
+                    (identifier)))))))))))

@@ -9,10 +9,10 @@
 // The walk's state: the open handle, or the nil an *open* failure produced — passed straight
 // through, so an unopenable directory yields an iterator that terminates with the failure
 // rather than one that is merely empty.
-'walk = \Dir | []
+'walk = +Dir | []
 
 walk_step = #'walk {
-  | =(\Dir)dir => __directory_next__ dir ~> {
+  | =(+Dir)dir => __directory_next__ dir ~> {
     | =[name, kind] => [Entry[name: Str[name], kind: kind], dir]
     // Any terminator ends the walk — exhaustion, or a failure carrying `:error`. Passing it
     // through unchanged is what lets `%list.try_collect` tell the two apart; `%list.collect`

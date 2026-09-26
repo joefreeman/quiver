@@ -13,9 +13,9 @@ fn test_listener_and_socket_as_select_sources() {
         .with_io()
         .evaluate(
             r#"
-            %tcp.listen [4293, 8] ~> =(\TcpListener)l
+            %tcp.listen [4293, 8] ~> =(+TcpListener)l
             c = @[] {
-              %tcp.connect [<7f000001>, 4293] ~> =(\TcpSocket)s
+              %tcp.connect [<7f000001>, 4293] ~> =(+TcpSocket)s
               %tcp.write [s, "ping" ~> .0]
               !'int
             } []
@@ -37,9 +37,9 @@ fn test_stream_select_is_fallible() {
     // means the stream was seen whole.
     quiver()
         .with_io()
-        .evaluate(r#"#\TcpSocket { ![$] }"#)
+        .evaluate(r#"#+TcpSocket { ![$] }"#)
         .expect_type(
-            "#\\TcpSocket -> (Closed[sock: \\TcpSocket] | Data[sock: \\TcpSocket, data: 'bin] | [])",
+            "#+TcpSocket -> (Closed[sock: +TcpSocket] | Data[sock: +TcpSocket, data: 'bin] | [])",
         );
 }
 
@@ -50,8 +50,8 @@ fn test_socket_select_races_timeout() {
         .with_io()
         .evaluate(
             r#"
-            %tcp.listen [4294, 8] ~> =(\TcpListener)l
-            c = @[] { %tcp.connect [<7f000001>, 4294] ~> =(\TcpSocket)s; !'int } []
+            %tcp.listen [4294, 8] ~> =(+TcpListener)l
+            c = @[] { %tcp.connect [<7f000001>, 4294] ~> =(+TcpSocket)s; !'int } []
             ![l] ~> =Accepted[listener: _, sock: conn]
             ![conn, 50] ~> {
               | =Data[sock: _, data: _] => GotData
@@ -71,9 +71,9 @@ fn test_socket_select_races_mailbox() {
         .with_io()
         .evaluate(
             r#"
-            %tcp.listen [4295, 8] ~> =(\TcpListener)l
+            %tcp.listen [4295, 8] ~> =(+TcpListener)l
             c = @[] {
-              %tcp.connect [<7f000001>, 4295] ~> =(\TcpSocket)s
+              %tcp.connect [<7f000001>, 4295] ~> =(+TcpSocket)s
               !'int ~> =1
               %tcp.write [s, "later" ~> .0]
               Ok
@@ -104,9 +104,9 @@ fn test_socket_closed_event() {
         .with_io()
         .evaluate(
             r#"
-            %tcp.listen [4296, 8] ~> =(\TcpListener)l
+            %tcp.listen [4296, 8] ~> =(+TcpListener)l
             c = @[] {
-              %tcp.connect [<7f000001>, 4296] ~> =(\TcpSocket)s
+              %tcp.connect [<7f000001>, 4296] ~> =(+TcpSocket)s
               %tcp.close s
               Done
             } []
@@ -130,9 +130,9 @@ fn test_plain_read_consumes_stashed_event() {
         .with_io()
         .evaluate(
             r#"
-            %tcp.listen [4297, 8] ~> =(\TcpListener)l
+            %tcp.listen [4297, 8] ~> =(+TcpListener)l
             c = @[] {
-              %tcp.connect [<7f000001>, 4297] ~> =(\TcpSocket)s
+              %tcp.connect [<7f000001>, 4297] ~> =(+TcpSocket)s
               !'int ~> =1
               %tcp.write [s, "stash me" ~> .0]
               !'int
@@ -157,7 +157,7 @@ fn test_non_stream_resource_is_rejected() {
     // File is random-access — no next event — so selecting on it is a compile error.
     quiver()
         .with_io()
-        .evaluate(r#"__file_open__ ["/dev/null" ~> .0, 0, 0] ~> =(\File)f; ![f]"#)
+        .evaluate(r#"__file_open__ ["/dev/null" ~> .0, 0, 0] ~> =(+File)f; ![f]"#)
         .expect_error_containing("not a stream");
 }
 
@@ -188,7 +188,7 @@ fn test_scoped_host_still_compiles_pure_code() {
     // Naming a resource TYPE needs no capability — only the builtins do.
     quiver()
         .scoped_no_io()
-        .evaluate(r#"'h = \TcpSocket; Ok"#)
+        .evaluate(r#"'h = +TcpSocket; Ok"#)
         .expect("Ok");
 }
 

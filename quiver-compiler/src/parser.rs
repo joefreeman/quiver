@@ -1342,7 +1342,7 @@ fn resource_type_name(input: Span) -> IResult<Span, String> {
 }
 
 fn resource_type(input: Span) -> IResult<Span, Type> {
-    map(preceded(char('\\'), resource_type_name), Type::Resource)(input)
+    map(preceded(char('+'), resource_type_name), Type::Resource)(input)
 }
 
 /// The top type: a lone `_`, not the start of a longer name.
@@ -1889,7 +1889,7 @@ fn base_type(input: Span) -> IResult<Span, Type> {
     alt((
         tuple_type,
         partial_type,  // Must come before grouping parentheses to have priority
-        resource_type, // Must come before type_identifier to match \Resource
+        resource_type, // Must come before type_identifier to match +Resource
         top_type,
         type_cycle,
         process_type,

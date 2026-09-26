@@ -101,7 +101,7 @@ fn test_upgraded_echo_end_to_end() {
             };
             @[] { [port: 4183, handler: handler] ~> %http/server.serve ~ } [];
             { ![50] | Ok };
-            [<7f000001>, 4183] ~> __tcp_connect__ ~ ~> =(\TcpSocket)sock;
+            [<7f000001>, 4183] ~> __tcp_connect__ ~ ~> =(+TcpSocket)sock;
             req = "GET /ws HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
             __tcp_socket_write__ [sock, req ~> .0];
             __tcp_socket_read__ [sock, 4096] ~> =('bin)r1;
@@ -139,7 +139,7 @@ fn test_upgrade_pings_and_fragments_end_to_end() {
             };
             @[] { [port: 4184, handler: handler] ~> %http/server.serve ~ } [];
             { ![50] | Ok };
-            [<7f000001>, 4184] ~> __tcp_connect__ ~ ~> =(\TcpSocket)sock;
+            [<7f000001>, 4184] ~> __tcp_connect__ ~ ~> =(+TcpSocket)sock;
             req = "GET /ws HTTP/1.1\r\nHost: t\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
             __tcp_socket_write__ [sock, req ~> .0];
             __tcp_socket_read__ [sock, 4096] ~> =('bin)r1;
@@ -168,7 +168,7 @@ fn test_upgrade_without_key_answers_400() {
             handler = #'%http { Upgrade[handler: #'%http/websocket { Ok }] };
             @[] { [port: 4185, handler: handler] ~> %http/server.serve ~ } [];
             { ![50] | Ok };
-            [<7f000001>, 4185] ~> __tcp_connect__ ~ ~> =(\TcpSocket)sock;
+            [<7f000001>, 4185] ~> __tcp_connect__ ~ ~> =(+TcpSocket)sock;
             __tcp_socket_write__ [sock, "GET /ws HTTP/1.1\r\n\r\n" ~> .0];
             __tcp_socket_read__ [sock, 4096] ~> =('bin)r;
             sock ~> __tcp_socket_close__ ~;

@@ -17,19 +17,19 @@
 // first) and `key` its PKCS#8 private key.
 
 [
-  attach: #[(socket): \TcpSocket, (hostname): '%str, roots: 'bin = <>] {
+  attach: #[(socket): +TcpSocket, (hostname): '%str, roots: 'bin = <>] {
     :doc "Upgrades a connected socket to TLS (client side), verifying the peer against the given DER trust anchors (empty for the host's defaults). Answers the same socket; a failed handshake closes it."
     __tls_attach__ [socket: $socket, hostname: $hostname.0, roots: $roots]
   },
 
-  accept: #[(socket): \TcpSocket, (cert): 'bin, (key): 'bin] {
+  accept: #[(socket): +TcpSocket, (cert): 'bin, (key): 'bin] {
     :doc "Upgrades an accepted socket to TLS (server side), presenting the certificate chain (concatenated DER, leaf first) with its PKCS#8 DER key. Answers the same socket; a failed handshake closes it."
     __tls_accept__ [socket: $socket, cert: $cert, key: $key]
   },
 
   connect: #[(host): '%str, (port): 'int, roots: 'bin = <>] {
     :doc "Resolves, connects and upgrades in one step: a TLS connection to host:port, trying each resolved address until one accepts. Nil (with :error) if any stage fails."
-    %tcp.connect [$host, $port] ~> =(\TcpSocket)socket
+    %tcp.connect [$host, $port] ~> =(+TcpSocket)socket
     __tls_attach__ [socket: socket, hostname: $host.0, roots: $roots]
   },
 ]

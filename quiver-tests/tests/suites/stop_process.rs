@@ -239,7 +239,7 @@ fn stop_releases_a_listener_with_an_accept_in_flight() {
         &mut environment,
         &mut repl,
         &format!(
-            "[{port}, 16] ~> __tcp_listen__ ~ ~> =(\\TcpListener)l; __tcp_listener_accept__ l"
+            "[{port}, 16] ~> __tcp_listen__ ~ ~> =(+TcpListener)l; __tcp_listener_accept__ l"
         ),
     );
     // Bind-probe readiness: the wildcard listener makes a local bind fail, without

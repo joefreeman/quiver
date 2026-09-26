@@ -15,11 +15,11 @@ fn test_file_write_and_read() {
             // O_RDONLY = 0
             // Mode 0o644 = 420
 
-            ["{}" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(\File)write_file;
+            ["{}" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(+File)write_file;
             [write_file, 0, "Hello, World!" ~> .0] ~> __file_write__ ~;
             write_file ~> __file_close__ ~;
 
-            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(\File)read_file;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File)read_file;
             [read_file, 0, 4096] ~> __file_read__ ~ ~> =('bin)data;
             read_file ~> __file_close__ ~;
 
@@ -45,17 +45,17 @@ fn test_file_append() {
         .evaluate(&format!(
             r#"
             // O_WRONLY | O_CREAT | O_TRUNC = 577
-            ["{}" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(\File)write_file;
+            ["{}" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(+File)write_file;
             [write_file, 0, "First line\n" ~> .0] ~> __file_write__ ~;
             write_file ~> __file_close__ ~;
 
             // Write at offset 11 (length of "First line\n")
-            ["{}" ~> .0, 1, 420] ~> __file_open__ ~ ~> =(\File)append_file;
+            ["{}" ~> .0, 1, 420] ~> __file_open__ ~ ~> =(+File)append_file;
             [append_file, 11, "Second line\n" ~> .0] ~> __file_write__ ~;
             append_file ~> __file_close__ ~;
 
             // Read everything
-            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(\File)read_file;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File)read_file;
             [read_file, 0, 4096] ~> __file_read__ ~ ~> =('bin)data;
             read_file ~> __file_close__ ~;
 
@@ -77,7 +77,7 @@ fn test_file_type_checking() {
         .evaluate(
             r#"
             // Function that takes a file and returns data
-            read_from_file = #\File {
+            read_from_file = #+File {
                 =f;
                 [f, 0, 1024] ~> __file_read__ ~ ~> =('bin)data;
                 data
@@ -95,7 +95,7 @@ fn test_file_resource_type() {
     quiver()
         .with_io()
         .evaluate(r#"["/tmp/foo" ~> .0, 577, 420] ~> __file_open__ ~"#)
-        .expect_type("[] | \\File");
+        .expect_type("+File | []");
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn test_file_flush() {
         .with_io()
         .evaluate(&format!(
             r#"
-            ["{}" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(\File)file;
+            ["{}" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(+File)file;
             [file, 0, "Flushed data" ~> .0] ~> __file_write__ ~;
             file ~> __file_flush__ ~;
             file ~> __file_close__ ~;
@@ -138,13 +138,13 @@ fn test_multiple_writes() {
         .with_io()
         .evaluate(&format!(
             r#"
-            ["{}" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(\File)file;
+            ["{}" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(+File)file;
             [file, 0, "Line 1\n" ~> .0] ~> __file_write__ ~;
             [file, 7, "Line 2\n" ~> .0] ~> __file_write__ ~;
             [file, 14, "Line 3\n" ~> .0] ~> __file_write__ ~;
             file ~> __file_close__ ~;
 
-            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(\File)read_file;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File)read_file;
             [read_file, 0, 4096] ~> __file_read__ ~ ~> =('bin)data;
             read_file ~> __file_close__ ~;
 
@@ -172,7 +172,7 @@ fn test_read_from_closed_file() {
         .with_io()
         .evaluate(&format!(
             r#"
-            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(\File)file;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File)file;
             file ~> __file_close__ ~;
             [file, 0, 1024] ~> __file_read__ ~
         "#,
@@ -201,11 +201,11 @@ fn test_resource_ownership_transfers_on_send() {
         .with_io()
         .evaluate(&format!(
             r#"
-            'reader = Read[\File];
+            'reader = Read[+File];
             r = @[] {{
                 !#'reader ~> {{ =Read[f] => [f, 0, 5] ~> __file_read__ ~ ~> Str[~] }}
             }} [];
-            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(\File)file;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File)file;
             %proc.send [r, Read[file]];
             !r
         "#,
@@ -235,11 +235,11 @@ fn test_resource_ownership_transfers_in_an_annotation() {
             r = @[] {{
                 !#'msg ~> {{
                     =m
-                    m:(\File)handle ~> =(\File)f
+                    m:(+File)handle ~> =(+File)f
                     [f, 0, 5] ~> __file_read__ ~ ~> Str[~]
                 }}
             }} [];
-            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(\File)file;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File)file;
             Go ~> {{ :handle file }} ~> %proc.send [r, ~];
             !r
         "#,
@@ -265,11 +265,11 @@ fn test_resource_ownership_enforced_after_transfer() {
         .with_io()
         .evaluate(&format!(
             r#"
-            'holder = Hold[\File];
+            'holder = Hold[+File];
             h = @[] {{
                 !#'holder ~> {{ =Hold[_] => [] ~> ^ ~ }}
             }} [];
-            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(\File)file;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File)file;
             %proc.send [h, Hold[file]];
             [file, 0, 5] ~> __file_read__ ~
         "#,
@@ -296,11 +296,11 @@ fn test_resource_cleanup_on_owner_completion() {
         .with_io()
         .evaluate(&format!(
             r#"
-            'reader = Read[\File];
+            'reader = Read[+File];
             r = @[] {{
                 !#'reader ~> {{ =Read[f] => [f, 0, 5] ~> __file_read__ ~ ~> Str[~] }}
             }} [];
-            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(\File)file;
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File)file;
             %proc.send [r, Read[file]];
             !r;
             [file, 0, 5] ~> __file_read__ ~
@@ -753,7 +753,7 @@ fn test_directory_entry_has_its_real_declared_type() {
         .evaluate(&format!(
             r#"
             warm = [1, 2] ~> =['int, 'int];
-            "{dir_str}" ~> .0 ~> __directory_read__ ~ ~> =(\Dir)d;
+            "{dir_str}" ~> .0 ~> __directory_read__ ~ ~> =(+Dir)d;
             e = d ~> __directory_next__ ~;
             [
               e ~> {{ | =['bin, File] => Yes | No }},

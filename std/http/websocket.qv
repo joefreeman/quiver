@@ -10,7 +10,7 @@
 // socket dropped, and the Close yielded. Sends write single unfragmented frames.
 // Text payloads are not UTF-8 validated.
 
-' = Conn[sock: \TcpSocket, buf: 'bin, part: (Nil | Part[opcode: 'int, data: 'bin])]
+' = Conn[sock: +TcpSocket, buf: 'bin, part: (Nil | Part[opcode: 'int, data: 'bin])]
 
 'message = Text['%str] | Binary['bin] | Close[code: 'int, reason: '%str]
 'messages = '%list<'message>
@@ -151,7 +151,7 @@ close_payload = #[(code): 'int, (reason): '%str] {
   __binary_append__ [<>, $code, 2] ~> %bin.concat [~, $reason.0]
 }
 
-conn = #[(sock): \TcpSocket, (buf): 'bin] {
+conn = #[(sock): +TcpSocket, (buf): 'bin] {
   :doc "A connection over an upgraded socket, seeded with any bytes already read past the handshake."
   Conn[sock: $sock, buf: $buf, part: Nil]
 }

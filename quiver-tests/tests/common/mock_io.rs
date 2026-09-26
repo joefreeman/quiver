@@ -49,7 +49,7 @@ pub struct MockBackend {
         std::collections::HashMap<ResourceId, std::collections::VecDeque<(StreamEvent, Vec<u8>)>>,
     events: Vec<(ResourceId, usize, StreamEvent, Vec<u8>)>,
     /// Resource type ids, as pushed by the environment. A handle carrying the wrong one fails
-    /// the `=(\TcpSocket)` / `=(\DnsResolver)` checks in std and looks like an empty result.
+    /// the `=(+TcpSocket)` / `=(+DnsResolver)` checks in std and looks like an empty result.
     socket_type_id: usize,
     dns_type_id: usize,
     byte_stream_type_id: usize,
@@ -79,7 +79,7 @@ impl MockBackend {
     }
 
     /// A mocked `http_request` answer: the canned bytes through the real head parser and
-    /// framing decoder, the body queued as stream events behind a `\ByteStream` handle.
+    /// framing decoder, the body queued as stream events behind a `+ByteStream` handle.
     fn http_exchange(&mut self, method: &[u8]) -> EffectResult {
         let MockIo::Serves(chunks) = &self.behaviour else {
             unreachable!("only Serves reaches the exchange");
