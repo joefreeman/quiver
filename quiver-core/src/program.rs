@@ -501,12 +501,17 @@ impl Program {
         let builtin_info = if let Some((param_spec, result_spec)) = registry.get_specs(&name) {
             let param_type = param_spec.resolve_to_id(self);
             let result_type = result_spec.resolve_to_id(self);
+            let labels = match type_argument {
+                Some(argument) => crate::labels::value_labels([argument, result_type], self),
+                None => Vec::new(),
+            };
 
             BuiltinInfo {
                 name: name.clone(),
                 param_type,
                 result_type,
                 type_argument,
+                labels,
             }
         } else {
             // Builtin not found in registry - this shouldn't happen in well-formed programs
@@ -517,6 +522,7 @@ impl Program {
                 param_type: never_id,
                 result_type: never_id,
                 type_argument,
+                labels: Vec::new(),
             }
         };
 

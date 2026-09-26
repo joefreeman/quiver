@@ -295,10 +295,13 @@ fn decode_tuple<E: Effect>(
     let Value::Tuple(input_id, payload) = value else {
         return Ok(None);
     };
-    // The same interned tuple: already exactly the expected type (ids agree on field
-    // types too), so the subtree passes through whole. This is what makes a
-    // `'%json`-typed part capture raw JSON, and covers `Str`/`Rational`/keyword leaves.
-    if *input_id == expected_id {
+    // What the expected member is built as here: itself when closed, else closed against the
+    // binders this walk entered to reach it.
+    let built_as = ctx.label(expected_id, stack)?;
+    // Already labelled exactly as a decoded value would be (ids agree on field types too), so
+    // the subtree passes through whole. This is what makes a `'%json`-typed part capture raw
+    // JSON, and covers `Str`/`Rational`/keyword leaves.
+    if *input_id == built_as {
         return Ok(Some(value.clone()));
     }
     let Some(expected) = TypeLookup::lookup_tuple(&*ctx.executor, expected_id).cloned() else {
@@ -331,7 +334,7 @@ fn decode_tuple<E: Effect>(
             }
         }
         if matched {
-            return Ok(Some(Value::tuple(expected_id, fields)));
+            return Ok(Some(Value::tuple(built_as, fields)));
         }
     }
 
@@ -361,7 +364,7 @@ fn decode_tuple<E: Effect>(
                 }
             }
         }
-        return Ok(Some(Value::tuple(expected_id, fields)));
+        return Ok(Some(Value::tuple(built_as, fields)));
     }
 
     Ok(None)
@@ -370,7 +373,8 @@ fn decode_tuple<E: Effect>(
 // ===== encode ===========================================================================
 
 /// The `'%json` output shapes' tuple ids, read off the builtin's registered result
-/// type — the same no-minting discipline as decode's expected-type ids.
+/// type — the same no-minting discipline as decode's expected-type ids — and labelled at the
+/// binders a walk of it reaches each inside.
 struct JsonIds {
     /// The registered `'%json` union itself — the target the encoder normalizes
     /// `'%json`-typed subtrees through.
@@ -400,8 +404,8 @@ impl JsonIds {
         let mut object = None;
         let mut null = None;
         let mut str_id = None;
-        // (cons id, nil id, element pair id when the element is a pair tuple)
-        let list_parts = |field_type: usize| -> Option<(usize, usize, Option<usize>)> {
+        // (list union id, cons id, nil id, element pair id when the element is a pair tuple)
+        let list_parts = |field_type: usize| -> Option<(usize, usize, usize, Option<usize>)> {
             let Some(Type::Union(list_members)) = lookup.lookup_type(field_type) else {
                 return None;
             };
@@ -426,7 +430,7 @@ impl JsonIds {
                     _ => return None,
                 }
             }
-            Some((cons?, nil?, pair))
+            Some((field_type, cons?, nil?, pair))
         };
         let mut array_parts = None;
         let mut object_parts = None;
@@ -451,18 +455,42 @@ impl JsonIds {
                 _ => {}
             }
         }
-        let (array_cons, nil, _) = array_parts.ok_or_else(missing)?;
-        let (object_cons, _, pair) = object_parts.ok_or_else(missing)?;
+        let (array_list, array_cons, nil, _) = array_parts.ok_or_else(missing)?;
+        let (object_list, object_cons, _, pair) = object_parts.ok_or_else(missing)?;
+        let (array, object, pair, null, str_id) = (
+            array.ok_or_else(missing)?,
+            object.ok_or_else(missing)?,
+            pair.ok_or_else(missing)?,
+            null.ok_or_else(missing)?,
+            str_id.ok_or_else(missing)?,
+        );
+
+        let mut stack = BinderStack::default();
+        stack.enter(result_type);
+        let (array, object, null, str_id) = (
+            ctx.label(array, &stack)?,
+            ctx.label(object, &stack)?,
+            ctx.label(null, &stack)?,
+            ctx.label(str_id, &stack)?,
+        );
+        stack.enter(array_list);
+        let (array_cons, nil) = (ctx.label(array_cons, &stack)?, ctx.label(nil, &stack)?);
+        stack.leave(array_list);
+        stack.enter(object_list);
+        let (object_cons, pair) = (ctx.label(object_cons, &stack)?, ctx.label(pair, &stack)?);
+        stack.leave(object_list);
+        stack.leave(result_type);
+
         Ok(JsonIds {
             json_type: result_type,
-            array: array.ok_or_else(missing)?,
+            array,
             array_cons,
-            object: object.ok_or_else(missing)?,
+            object,
             object_cons,
-            pair: pair.ok_or_else(missing)?,
+            pair,
             nil,
-            null: null.ok_or_else(missing)?,
-            str: str_id.ok_or_else(missing)?,
+            null,
+            str: str_id,
         })
     }
 }

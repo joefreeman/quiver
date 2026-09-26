@@ -1,6 +1,8 @@
+use crate::binders::BinderStack;
 use crate::effects::Effect;
 use crate::error::{Error, Operation};
 use crate::executor::Executor;
+use crate::labels::LabelTable;
 use crate::process::{Action, Process, ProcessId, RegistryRequest, TrackingState, Watcher};
 use crate::program::Program;
 use crate::types::Type;
@@ -10,6 +12,7 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// View a value as an integer, erroring with a type mismatch if it isn't one.
 pub fn value_as_int(value: &Value) -> Result<crate::value::IntRef<'_>, Error> {
@@ -116,6 +119,8 @@ pub struct BuiltinContext<'a, E: Effect> {
     /// implementation that constructs typed results (`__json_encode__`'s `'%json`
     /// shapes) obtains their ids without minting any.
     result_type: Option<usize>,
+    /// The labels the builtin's instantiation builds tuples with (see [`crate::labels`]).
+    labels: Arc<LabelTable>,
 }
 
 impl<'a, E: Effect> BuiltinContext<'a, E> {
@@ -125,6 +130,7 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
         executor: &'a mut Executor<E>,
         type_argument: Option<usize>,
         result_type: Option<usize>,
+        labels: Arc<LabelTable>,
     ) -> Self {
         Self {
             executor,
@@ -133,6 +139,7 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
             action: None,
             type_argument,
             result_type,
+            labels,
         }
     }
 
@@ -150,6 +157,12 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
     /// The builtin's registered result type id, from its table row.
     pub fn result_type(&self) -> Option<usize> {
         self.result_type
+    }
+
+    /// The label to build `tuple` with, where a walk of the instantiation's type argument or
+    /// result type reaches it inside `stack`.
+    pub fn label(&self, tuple: usize, stack: &BinderStack) -> Result<usize, Error> {
+        self.labels.label(tuple, stack)
     }
 
     /// Take the routed action a verb queued, for the dispatch site to return from the step.

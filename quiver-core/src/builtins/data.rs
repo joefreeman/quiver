@@ -16,6 +16,7 @@
 use num_bigint::BigInt;
 
 use super::{BuiltinContext, Completion};
+use crate::binders::BinderStack;
 use crate::effects::Effect;
 use crate::error::Error;
 use crate::types::{TupleTypeInfo, Type, TypeLookup};
@@ -187,8 +188,7 @@ pub fn builtin_data_decode<E: Effect>(
         bytes: &bytes,
         pos: 0,
     };
-    let mut stack = Vec::new();
-    let value = decoder.decode_type(expected, &mut stack)?;
+    let value = decoder.decode_type(expected, &mut BinderStack::default())?;
     // The whole input must be one value: trailing non-whitespace fails the decode.
     decoder.skip_ws();
     let value = match value {
@@ -203,8 +203,7 @@ pub fn builtin_data_decode<E: Effect>(
 /// successfully-parsed member could otherwise be a strict prefix of a sibling is closed
 /// by lookahead instead of full backtracking — a bare named-empty tuple is never
 /// followed by a glued `[` (that is the named-fields form). Recursive types resolve
-/// through the same union-boundary stack the compatibility checker uses: union ids push
-/// on descent, and `Cycle(n)` reads `n` boundaries up.
+/// through a binder stack, as the compatibility checker's do.
 /// The whitespace between two things inside a binary literal. Between groups any gap will
 /// do; against a bracket only a line break will, which is what keeps `< 0a>` malformed while
 /// letting a literal be written as a table across lines.
@@ -224,7 +223,7 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
     fn decode_type(
         &mut self,
         type_id: usize,
-        stack: &mut Vec<usize>,
+        stack: &mut BinderStack,
     ) -> Result<Option<Value>, Error> {
         let Some(typ) = TypeLookup::lookup_type(&*self.ctx.executor, type_id).cloned() else {
             return Ok(None);
@@ -233,10 +232,7 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
             // Rows are invisible to the data plane: decode as the base shape.
             Type::Annotated { base, .. } => self.decode_type(base, stack),
             Type::Union(members) => {
-                let already = stack.contains(&type_id);
-                if !already {
-                    stack.push(type_id);
-                }
+                stack.enter(type_id);
                 let start = self.pos;
                 let mut result = None;
                 for member in members {
@@ -246,25 +242,20 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
                         break;
                     }
                 }
-                if !already {
-                    stack.pop();
-                }
+                stack.leave(type_id);
                 if result.is_none() {
                     self.pos = start;
                 }
                 Ok(result)
             }
             Type::Cycle(depth) => {
-                if stack.len() < depth {
+                // Re-enter the target at its own depth, so the references inside it count the
+                // binders they were written under.
+                let Some((target, cut)) = stack.follow(depth) else {
                     return Ok(None);
-                }
-                // Re-enter the target at its own depth: boundaries pushed since it
-                // (sibling branches of this walk) would otherwise skew the depths of
-                // cycles resolved inside the target, so they are set aside and restored.
-                let saved = stack.split_off(stack.len() - depth + 1);
-                let target = *stack.last().expect("cycle target on the stack");
+                };
                 let result = self.decode_type(target, stack);
-                stack.extend(saved);
+                stack.restore(cut);
                 result
             }
             Type::Integer => Ok(self.parse_int()),
@@ -285,7 +276,7 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
     fn decode_tuple(
         &mut self,
         tuple_id: usize,
-        stack: &mut Vec<usize>,
+        stack: &mut BinderStack,
     ) -> Result<Option<Value>, Error> {
         let Some(info) = TypeLookup::lookup_tuple(&*self.ctx.executor, tuple_id).cloned() else {
             return Ok(None);
@@ -299,7 +290,10 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
                     return Ok(None);
                 };
                 let binary = self.ctx.executor.allocate_binary(bytes)?;
-                return Ok(Some(Value::tuple(tuple_id, vec![Value::Binary(binary)])));
+                return Ok(Some(Value::tuple(
+                    self.ctx.label(tuple_id, stack)?,
+                    vec![Value::Binary(binary)],
+                )));
             }
         }
 
@@ -321,7 +315,7 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
                 if self.peek() == Some(b'[') {
                     return Ok(None);
                 }
-                return Ok(Some(Value::tuple(tuple_id, vec![])));
+                return Ok(Some(Value::tuple(self.ctx.label(tuple_id, stack)?, vec![])));
             }
             // Named fields open with a *glued* bracket, as in code.
             if !self.eat(b'[') {
@@ -336,7 +330,7 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
                 if !self.eat(b']') {
                     return Ok(None);
                 }
-                return Ok(Some(Value::tuple(tuple_id, vec![])));
+                return Ok(Some(Value::tuple(self.ctx.label(tuple_id, stack)?, vec![])));
             }
         }
 
@@ -373,7 +367,7 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
         if !self.eat(b']') {
             return Ok(None);
         }
-        Ok(Some(Value::tuple(tuple_id, values)))
+        Ok(Some(Value::tuple(self.ctx.label(tuple_id, stack)?, values)))
     }
 
     fn parse_int(&mut self) -> Option<Value> {

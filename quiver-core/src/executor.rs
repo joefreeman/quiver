@@ -187,6 +187,8 @@ pub struct Executor<E: Effect> {
     // Explicit type arguments, indexed by builtin_id (parallel to `builtins`). `Some` only
     // for an instantiated type-consuming builtin; the value `Builtin` pushes carries it.
     builtin_type_arguments: Vec<Option<usize>>,
+    /// Per builtin, the labels its instantiation builds tuples with.
+    builtin_labels: Vec<Arc<crate::labels::LabelTable>>,
     // Registered result types, indexed by builtin_id (parallel to `builtins`) — how an
     // implementation that constructs typed results reads their ids off its own signature.
     builtin_result_types: Vec<usize>,
@@ -785,6 +787,7 @@ impl<E: Effect> Executor<E> {
             builtin_impls: vec![],
             builtin_purities: vec![],
             builtin_type_arguments: vec![],
+            builtin_labels: vec![],
             builtin_result_types: vec![],
             compile_time: false,
             tuples: vec![0, 0], // NIL and OK have 0 fields
@@ -1424,6 +1427,7 @@ impl<E: Effect> Executor<E> {
             self.builtin_impls.clear();
             self.builtin_purities.clear();
             self.builtin_type_arguments.clear();
+            self.builtin_labels.clear();
             self.builtin_result_types.clear();
         }
         for b in infos.iter() {
@@ -1436,6 +1440,8 @@ impl<E: Effect> Executor<E> {
                     .unwrap_or(crate::builtins::Purity::Pure),
             );
             self.builtin_type_arguments.push(b.type_argument);
+            self.builtin_labels
+                .push(Arc::new(crate::labels::LabelTable::new(&b.labels)));
             self.builtin_result_types.push(b.result_type);
             self.builtins.push(b.name.clone());
         }
@@ -2302,6 +2308,11 @@ impl<E: Effect> Executor<E> {
                 // slice) and the executor; its verbs mutate the caller's record and
                 // queue at most one routed action.
                 let result_type = self.builtin_result_types.get(builtin_id).copied();
+                let labels = self
+                    .builtin_labels
+                    .get(builtin_id)
+                    .cloned()
+                    .unwrap_or_default();
                 let (result, action) = {
                     let mut ctx = crate::builtins::BuiltinContext::new(
                         pid,
@@ -2309,6 +2320,7 @@ impl<E: Effect> Executor<E> {
                         self,
                         type_argument,
                         result_type,
+                        labels,
                     );
                     let result = builtin(&parameter, &mut ctx);
                     let action = ctx.take_action();

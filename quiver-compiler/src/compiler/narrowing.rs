@@ -7,14 +7,13 @@
 use std::collections::HashMap;
 
 use quiver_core::binders::{BinderPair, is_binder};
+use quiver_core::binders::{close_against, has_free_cycles};
 use quiver_core::program::Program;
 use quiver_core::types::{Type, TypeLookup, is_compatible, types_overlap};
 
 use super::provenance::Provenance;
 use super::scopes::{Scope, lookup_variable};
-use super::typing::{
-    close_against, close_root_references, flatten_union_members, has_free_cycles, union_type_ids,
-};
+use super::typing::{close_root_references, flatten_union_members, union_type_ids};
 
 /// Narrowing information recorded during condition compilation.
 /// Used to compute complement types for subsequent branches.

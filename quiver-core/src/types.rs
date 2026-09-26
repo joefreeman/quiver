@@ -256,6 +256,11 @@ pub struct BuiltinInfo {
     /// instantiation for the `Builtin` instruction that pushes it.
     #[serde(default)]
     pub type_argument: Option<usize>,
+    /// For an instantiation, the labels of the tuples it may build: those reached from its
+    /// type argument and its result type (see [`crate::labels`]). A function of the pair
+    /// registration dedupes on, so never compared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<crate::labels::ValueLabel>,
 }
 
 /// The serialized spelling of [`Type`]: the same variants, with the struct-shaped ones

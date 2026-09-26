@@ -18,6 +18,7 @@ mod code_gc;
 mod comments;
 mod comparison;
 mod compile_fuel;
+mod decoded_labels;
 mod dialects;
 mod dispatch;
 mod elision;

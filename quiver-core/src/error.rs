@@ -54,6 +54,10 @@ pub enum Error {
     CallInvalid,
     FunctionUndefined(usize),
     BuiltinUndefined(usize),
+    /// A type-directed builtin built a tuple its instantiation has no label for.
+    LabelUndefined {
+        tuple: usize,
+    },
     FrameUnderflow,
 
     // Variable and constant access errors
@@ -198,6 +202,12 @@ impl fmt::Display for Error {
             }
             Error::BuiltinUndefined(index) => {
                 write!(f, "internal error: no builtin at index {index}")
+            }
+            Error::LabelUndefined { tuple } => {
+                write!(
+                    f,
+                    "internal error: no label for tuple {tuple} at its position"
+                )
             }
             Error::ConstantUndefined(index) => {
                 write!(f, "internal error: no constant at index {index}")

@@ -40,6 +40,7 @@ use crate::{
 };
 
 use quiver_core::{
+    binders::has_free_cycles,
     bytecode::{Constant, Function, Instruction, Opcode},
     program::{InternError, Program},
     types::{NIL, Type, TypeLookup},
@@ -3025,25 +3026,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             None => None,
         };
-        let self_typed = function.parameter_type.is_some()
-            && typing::has_free_cycles(parameter_type, &*self.program);
-        let (body_parameter_type, declared_result) = if self_typed
-            || declared_result.is_some_and(|r| typing::has_free_cycles(r, &*self.program))
-        {
-            let result = declared_result.ok_or(Error::SelfTypedParameterNeedsResult)?;
-            let declared = self.program.register_type(Type::Callable {
-                parameter: parameter_type,
-                result,
-                receive: receive_type,
-                states: None,
-                omittable: self.current_omittable.clone(),
-            });
-            let parts = typing::open_callable(declared, self.program)
-                .expect("a registered function type opens");
-            (parts.parameter, Some(parts.result))
-        } else {
-            (parameter_type, declared_result)
-        };
+        let self_typed =
+            function.parameter_type.is_some() && has_free_cycles(parameter_type, &*self.program);
+        let (body_parameter_type, declared_result) =
+            if self_typed || declared_result.is_some_and(|r| has_free_cycles(r, &*self.program)) {
+                let result = declared_result.ok_or(Error::SelfTypedParameterNeedsResult)?;
+                let declared = self.program.register_type(Type::Callable {
+                    parameter: parameter_type,
+                    result,
+                    receive: receive_type,
+                    states: None,
+                    omittable: self.current_omittable.clone(),
+                });
+                let parts = typing::open_callable(declared, self.program)
+                    .expect("a registered function type opens");
+                (parts.parameter, Some(parts.result))
+            } else {
+                (parameter_type, declared_result)
+            };
         // Seed the states union with the parameter (the spawn init / bare-`^` argument) as the
         // body sees it, which is how the tail calls widening it type their arguments too.
         self.current_states = Some(body_parameter_type);
@@ -4554,6 +4554,51 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     message: format!("malformed body: {message}"),
                 }
             })?;
+            self.verify_tuple_labels(instructions)?;
+        }
+        Ok(())
+    }
+
+    /// A tuple's id is its label: what a whole-type test reads the value as. A field type with
+    /// a free reference means nothing outside the type it was taken from, and would fit
+    /// anything, so every tuple a body builds — directly or as a constant — must be closed.
+    fn verify_tuple_labels(&self, instructions: &[Instruction]) -> Result<(), Error> {
+        let open_tuple = |tuple_id: usize| {
+            let info = self.program.lookup_tuple(tuple_id)?;
+            info.fields
+                .iter()
+                .any(|(_, field)| has_free_cycles(*field, &*self.program))
+                .then(|| Error::InternalError {
+                    message: format!("tuple {tuple_id} is built with a free recursive reference"),
+                })
+        };
+        let mut constants: Vec<usize> = Vec::new();
+        for instruction in instructions {
+            match instruction.opcode() {
+                Opcode::Tuple => {
+                    if let Some(error) = open_tuple(instruction.operand() as usize) {
+                        return Err(error);
+                    }
+                }
+                Opcode::Constant => constants.push(instruction.operand() as usize),
+                _ => {}
+            }
+        }
+        let mut seen = HashSet::new();
+        while let Some(index) = constants.pop() {
+            if !seen.insert(index) {
+                continue;
+            }
+            let constant = self
+                .program
+                .get_constant(index)
+                .expect("constant operand in the table");
+            if let Constant::Tuple { id, .. } = constant
+                && let Some(error) = open_tuple(*id)
+            {
+                return Err(error);
+            }
+            constants.extend(constant.children());
         }
         Ok(())
     }

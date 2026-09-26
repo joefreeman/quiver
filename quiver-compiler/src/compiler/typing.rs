@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast;
 use crate::resolver::{ModuleResolver, PackageId};
 use quiver_core::{
-    binders::{BinderStack, is_binder},
+    binders::{BinderStack, has_free_cycles, is_binder, rewrite_free_cycles},
     program::Program,
     types::{Type, TypeLookup},
 };
@@ -1642,22 +1642,6 @@ pub fn close_root_references(
     })
 }
 
-/// `type_id`, standing inside the binders `enclosing` (outermost first), with every free
-/// reference replaced by the binder it names, itself closed against the binders enclosing it.
-/// The result means the same wherever it is used. A reference reaching past the outermost
-/// binder has nothing to be closed with, and is kept.
-pub fn close_against(type_id: usize, enclosing: &[usize], program: &mut Program) -> usize {
-    rewrite_free_cycles(
-        type_id,
-        0,
-        program,
-        &mut |depth, cutoff, program| match enclosing.len().checked_sub(depth - cutoff) {
-            Some(index) => close_against(enclosing[index], &enclosing[..index], program),
-            None => program.register_type(Type::Cycle(depth)),
-        },
-    )
-}
-
 /// `type_id` with any union among its members spliced in, so that none is itself a union.
 /// Closing a reference that stood as a member (`(^1 | [])`, closed with the union it named)
 /// leaves one there. Each spliced union was written inside this one, and its members'
@@ -1824,60 +1808,6 @@ pub fn generalize_growth(new: usize, old: usize, program: &mut Program) -> Optio
         }
     }
     Some(generalized)
-}
-
-/// Whether `type_id` has a `Cycle` reaching above its own root — one whose meaning depends on
-/// where the type sits.
-pub fn has_free_cycles(type_id: usize, program: &Program) -> bool {
-    fn walk(
-        type_id: usize,
-        cutoff: usize,
-        program: &Program,
-        seen: &mut HashSet<(usize, usize)>,
-    ) -> bool {
-        if !seen.insert((type_id, cutoff)) {
-            return false;
-        }
-        let Some(typ) = program.lookup_type(type_id) else {
-            return false;
-        };
-        if let Type::Cycle(depth) = typ {
-            return *depth > cutoff;
-        }
-        let inner = cutoff + usize::from(is_binder(typ));
-        typ.parts(program)
-            .into_iter()
-            .any(|part| walk(part, inner, program, seen))
-    }
-    walk(type_id, 0, program, &mut HashSet::new())
-}
-
-/// Rebuild `type_id` with each *free* `Cycle` — one reaching above the walked fragment's
-/// root, `Cycle(k)` with `k > cutoff` at `cutoff` binders deep — replaced by
-/// `rewrite(k, cutoff)`.
-fn rewrite_free_cycles(
-    type_id: usize,
-    cutoff: usize,
-    program: &mut Program,
-    rewrite: &mut dyn FnMut(usize, usize, &mut Program) -> usize,
-) -> usize {
-    let Some(typ) = program.lookup_type(type_id).cloned() else {
-        return type_id;
-    };
-    if let Type::Cycle(depth) = typ {
-        return if depth > cutoff {
-            rewrite(depth, cutoff, program)
-        } else {
-            type_id
-        };
-    }
-    let inner = cutoff + usize::from(is_binder(&typ));
-    let parts: Vec<usize> = typ
-        .parts(&*program)
-        .into_iter()
-        .map(|part| rewrite_free_cycles(part, inner, program, rewrite))
-        .collect();
-    program.with_parts(type_id, &parts)
 }
 
 pub fn substitute(
