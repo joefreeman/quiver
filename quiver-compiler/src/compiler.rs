@@ -3005,7 +3005,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // the function itself (`#[(self): ^, …] -> 'r`) is seen by the body at the function's
         // type, which is built from the declared parts (states are the body's to find, so they
         // are left unknown here).
-        let declared_result = match &function.return_type {
+        let written_result = match &function.return_type {
             Some(return_type_ast) => {
                 let mut env = typing::TypeEnv {
                     resolver: self.resolver,
@@ -3029,8 +3029,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let self_typed =
             function.parameter_type.is_some() && has_free_cycles(parameter_type, &*self.program);
         let (body_parameter_type, declared_result) =
-            if self_typed || declared_result.is_some_and(|r| has_free_cycles(r, &*self.program)) {
-                let result = declared_result.ok_or(Error::SelfTypedParameterNeedsResult)?;
+            if self_typed || written_result.is_some_and(|r| has_free_cycles(r, &*self.program)) {
+                let result = written_result.ok_or(Error::SelfTypedParameterNeedsResult)?;
                 let declared = self.program.register_type(Type::Callable {
                     parameter: parameter_type,
                     result,
@@ -3042,7 +3042,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     .expect("a registered function type opens");
                 (parts.parameter, Some(parts.result))
             } else {
-                (parameter_type, declared_result)
+                (parameter_type, written_result)
             };
         // Seed the states union with the parameter (the spawn init / bare-`^` argument) as the
         // body sees it, which is how the tail calls widening it type their arguments too.
@@ -3167,8 +3167,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // or as nil where it can also fall through. Such a branch answers the function's whole
         // result type instead. Keeping its own would type a call dispatching to it wrongly —
         // `n = len [xs, 0]` with `xs` known non-empty as a match that can never succeed.
+        //
+        // A declared result is the contract callers see, so it is never specialized either.
         let dispatch_table = dispatch
-            .filter(|d| d.valid && !d.branches.is_empty())
+            .filter(|d| written_result.is_none() && d.valid && !d.branches.is_empty())
             .map(|d| {
                 d.branches
                     .into_iter()
@@ -3182,9 +3184,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // `current_receive_type_id`: the body pre-pass seed (line above the save), widened
         // during body compilation by every call/tail-call to a receiving function — a
         // callee's receives execute in whichever process runs this function.
+        //
+        // A declared result is the contract: callers see it, never the body's sharper type, which
+        // is free to change without changing what a call is typed as.
         let callable_type_id = self.program.register_type(Type::Callable {
             parameter: parameter_type,
-            result: body_type,
+            result: written_result.unwrap_or(body_type),
             receive: self.current_receive_type_id,
             states: self.current_states,
             omittable: self.current_omittable.clone(),

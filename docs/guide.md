@@ -304,7 +304,14 @@ A function without a body is an identity function:
 #'int                         //= (#'int -> 'int)
 ```
 
-A result type can be stated and is then checked: `#'int -> 'bin { … }`.
+A result type can be stated and is then checked: `#'int -> 'bin { … }`. It is also what a
+call is typed as, even where the body's own type is narrower, so the body can change without
+changing what its callers see:
+
+```quiver
+f = #'int -> ('int | 'bin) { 5 }
+f 1 ~> %num.add [~, 1]        //! Type mismatch // f's callers see 'int | 'bin
+```
 
 ### Reaching outer parameters
 

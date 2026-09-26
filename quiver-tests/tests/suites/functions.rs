@@ -331,6 +331,32 @@ fn test_function_tuple_return_type_mismatch() {
 }
 
 #[test]
+fn test_call_is_typed_by_the_declared_result() {
+    // The declared result is the contract callers see, not the body's sharper type.
+    quiver()
+        .evaluate("f = #'int -> ('int | 'bin) { 5 }; f 1")
+        .expect_type("'bin | 'int");
+    quiver()
+        .evaluate("f = #'int -> ('int | 'bin) { 5 }; f 1 ~> __integer_add__ [~, 1]")
+        .expect_type_mismatch();
+    // Without a declaration, the body's type is the result.
+    quiver()
+        .evaluate("f = #'int { 5 }; f 1")
+        .expect_type("'int");
+}
+
+#[test]
+fn test_declared_result_is_not_specialized_per_argument() {
+    // Return-type dispatch would answer `A`'s branch alone; a declared result stands instead.
+    quiver()
+        .evaluate("f = #(A | B) -> ('int | 'bin) { | =A => 1 | =B => <01> }; f A")
+        .expect_type("'bin | 'int");
+    quiver()
+        .evaluate("f = #(A | B) { | =A => 1 | =B => <01> }; f A")
+        .expect_type("'int");
+}
+
+#[test]
 fn test_identity_function_with_return_type() {
     quiver()
         .evaluate("f = #'int -> 'int; 42 ~> f ~")
