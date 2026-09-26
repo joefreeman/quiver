@@ -84,11 +84,10 @@ seed = #[(specs): 'specs, (sup): @'down] {
 // `Allowed` carries the pruned stamps to store back. (Internal; exportable if an
 // embedded supervisor — a live-view boundary, say — ever wants to share the policy.)
 allow? = #[stamps: 'stamps, now: 'int, max: 'int, window: 'int] -> 'verdict {
-  =[stamps: ts, now: now, max: m, window: w]
-  cutoff = __integer_subtract__ [now, w]
-  recent = Cons[now, %list.filter [ts, #{ __integer_compare__ [~, cutoff] ~> =1; $ }]]
+  cutoff = __integer_subtract__ [$now, $window]
+  recent = Cons[$now, %list.filter [$stamps, #{ __integer_compare__ [~, cutoff] ~> =1; $ }]]
   {
-    | __integer_compare__ [%list.count recent, m] ~> =1 => Exceeded
+    | __integer_compare__ [%list.count recent, $max] ~> =1 => Exceeded
     | Allowed[recent]
   }
 }
@@ -105,60 +104,58 @@ restart? = #[(r): 'row, (o): 'outcome] {
 }
 
 loop = #'state {
-  =[table: t, max: m, window: w]
   !'msg ~> {
     | =Down[id: i, pid: dp, outcome: o] => {
       // The row must hold the SAME incarnation the watcher awaited — a late report
       // for a reused id (drop, then add again) pin-fails and is dropped.
-      | %dict.get [t, i] ~> =('row)r; r ~> =(pid: &dp) => {
+      | %dict.get [$table, i] ~> =('row)r; r ~> =(pid: &dp) => {
         | restart? [r, o] => {
           now = %time.monotonic []
-          allow? [stamps: r.restarts, now: now, max: m, window: w] ~> {
+          allow? [stamps: r.restarts, now: now, max: $max, window: $window] ~> {
             | =Allowed[recent] => {
               p = r.spec ~> ~.start [i, @]
-              ^ [
-                table: %dict.put [t, i, [id: i, pid: p, spec: r.spec, restarts: recent]],
-                max: m,
-                window: w,
+              ^ $[
+                ...,
+                table: %dict.put [$table, i, [id: i, pid: p, spec: r.spec, restarts: recent]],
               ]
             }
             | "%sup: restart intensity exceeded" ~> __panic__ ~
           }
         }
         // No restart wanted: the child is done — drop its row.
-        | ^ [table: %dict.remove [t, i], max: m, window: w]
+        | ^ $[..., table: %dict.remove [$table, i]]
       }
       // A Down for an id no longer in the table (e.g. a deliberately dropped
       // child's watcher reporting the kill), or for a previous incarnation of a
       // reused id, is silently dropped.
-      | ^ [table: t, max: m, window: w]
+      | ^ $
     }
     | =Add[s, reply] => {
-      | %dict.has? [t, s.id] => { %proc.send [reply, Duplicate]; ^ [table: t, max: m, window: w] }
+      | %dict.has? [$table, s.id] => { %proc.send [reply, Duplicate]; ^ $ }
       | {
         row = start_row [s, @]
         row ~> =(pid: p)
         %proc.send [reply, Started[p]]
-        ^ [table: %dict.put [t, s.id, row], max: m, window: w]
+        ^ $[..., table: %dict.put [$table, s.id, row]]
       }
     }
     | =Drop[i] => {
       // Remove the row BEFORE the kill, so the watcher's report finds nothing.
-      | %dict.get [t, i] ~> =('row)r => {
-        t2 = %dict.remove [t, i]; r ~> =(pid: p); %proc.kill p; ^ [table: t2, max: m, window: w]
+      | %dict.get [$table, i] ~> =('row)r => {
+        t2 = %dict.remove [$table, i]; r ~> =(pid: p); %proc.kill p; ^ $[..., table: t2]
       }
-      | ^ [table: t, max: m, window: w]
+      | ^ $
     }
   }
 }
 
 run = #[specs: 'specs, max: 'int, window: 'int] {
-  =[specs: ss, max: m, window: w]; ^loop [table: seed [ss, @], max: m, window: w]
+  ^loop [table: seed [$specs, @], max: $max, window: $window]
 }
 
 start = #[children: 'specs, max_restarts: 'int = 3, window: 'int = 5000] {
   :doc "Starts a supervisor over the child specs (one_for_one): each child is restarted per its spec's restart type, at most max_restarts times (default 3) within window ms (default 5000) — beyond that the supervisor gives up and crashes, tearing down its subtree. The child set is dynamic: `add` a child, `drop` one. Answers the supervisor's pid, owned by the caller."
-  =[children: ss, max_restarts: m, window: w]; [specs: ss, max: m, window: w] ~> @run ~
+  [specs: $children, max: $max_restarts, window: $window] ~> @run ~
 }
 
 add = #[(sup): @'msg, (spec): 'spec] {

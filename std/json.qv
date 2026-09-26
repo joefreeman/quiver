@@ -54,9 +54,8 @@ word_p = #'%parse {
 }
 
 // The value grammar, self-passed to tie the value↔array/object recursion.
-value_step = #[^, '%parse] -> (['expr, '%parse] | []) {
-  =[self, st]
-  value = #'%parse { self [self, $] }
+value_step = #[(self): ^, (st): '%parse] -> (['expr, '%parse] | []) {
+  value = #'%parse { $$self [$$self, $] }
 
   comma = tok [44, "','"]
 
@@ -87,7 +86,7 @@ value_step = #[^, '%parse] -> (['expr, '%parse] | []) {
   core = %parse.alt2 [composite, leaf]
   core_ws = %parse.right [%parse.ws, core]
 
-  core_ws st
+  core_ws $st
 }
 
 value = #'%parse { value_step [value_step, $] }
@@ -361,10 +360,9 @@ format_rational = #[(n): 'int, (d): 'int] {
 }
 
 // Serialize a `'%json` value to its compact string form, self-passed to recurse.
-str_step = #[^, '] -> '%str {
-  =[self, v]
-  go = #' { self [self, $] }
-  v ~> {
+str_step = #[(self): ^, (v): '] -> '%str {
+  go = #' { $$self [$$self, $] }
+  $v ~> {
     | =Null => "null"
     | =True => "true"
     | =False => "false"
@@ -480,12 +478,11 @@ set1 = #[(value): 'opt, (key): ('%str | 'int), (new): '] -> 'opt {
 
 // A path set: recurse to the leaf, then rebuild each level on the way back out. A missing
 // intermediate makes the inner set nil, which propagates. Self-passed to recurse.
-set_step = #[^, 'opt, '%list<('%str | 'int)>, '] -> 'opt {
-  =[self, value, path, new]
-  path ~> {
-    | =Nil => new
-    | =Cons[k, Nil] => set1 [value, k, new]
-    | =Cons[k, rest] => set1 [value, k, self [self, get1 [value, k], rest, new] ~> =']
+set_step = #[(self): ^, (value): 'opt, (path): '%list<('%str | 'int)>, (new): '] -> 'opt {
+  $path ~> {
+    | =Nil => $new
+    | =Cons[k, Nil] => set1 [$value, k, $new]
+    | =Cons[k, rest] => set1 [$value, k, $self [$self, get1 [$value, k], rest, $new] ~> =']
   }
 }
 
@@ -535,14 +532,13 @@ delete1 = #[(value): 'opt, (key): ('%str | 'int)] -> 'opt {
 
 // A path delete: a missing intermediate means the target is already absent, so the value
 // answers unchanged. Self-passed to recurse.
-delete_step = #[^, 'opt, '%list<('%str | 'int)>] -> 'opt {
-  =[self, value, path]
-  path ~> {
+delete_step = #[(self): ^, (value): 'opt, (path): '%list<('%str | 'int)>] -> 'opt {
+  $path ~> {
     | =Nil => []
-    | =Cons[k, Nil] => delete1 [value, k]
-    | =Cons[k, rest] => get1 [value, k] ~> {
-      | =(')child => set1 [value, k, self [self, child, rest] ~> =']
-      | value
+    | =Cons[k, Nil] => delete1 [$value, k]
+    | =Cons[k, rest] => get1 [$value, k] ~> {
+      | =(')child => set1 [$value, k, $self [$self, child, rest] ~> =']
+      | $value
     }
   }
 }
@@ -559,8 +555,8 @@ merge = #[(value): 'opt, (with): 'opt] -> 'opt {
   :doc "A shallow merge of two objects: the first's pairs in their order with the second's values winning per key, then the second's remaining pairs in its order. Nil unless both are objects."
   $value ~> =' ~> =Object[a]
   $with ~> =' ~> =Object[b]
-  merged = %list.map [a, #{ [k, v] = $; obj_get [b, k, []] ~> { =(')bv => [k, bv] | [k, v] } }]
-  extra = %list.filter [b, #{ [k, _] = $; obj_get [a, k, []] ~> =[]; $ }]
+  merged = %list.map [a, #{ obj_get [b, $0, []] ~> { =(')bv => [$0, bv] | [$0, $1] } }]
+  extra = %list.filter [b, #{ obj_get [a, $0, []] ~> =[]; $ }]
   %list.chain [merged, extra] ~> Object[~]
 }
 

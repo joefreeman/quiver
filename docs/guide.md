@@ -1318,7 +1318,7 @@ aborts.
 ```quiver
 half = #'int {
   :pre #{ %num.gt? [~, 0] }
-  :post #{ $ ~> =[in: i, out: o]; %num.gt? [i, o] }
+  :post #{ %num.gt? [$in, $out] }
   %int.div [~, 2]
 }
 half 10                       //= 5

@@ -142,11 +142,9 @@ accept_loop = #[(listener): +TcpListener, (handler): 'handler, (tls): ('tls | []
 
 serve = #[port: 'int, handler: 'handler, tls: ('tls | []) = []] {
   :doc "Serves HTTP on the port, one process per connection, each request answered by the handler (a nil result becomes a 500). With `tls:` ([cert, key] as %tls.accept takes them) each connection is upgraded first, serving HTTPS. Blocks forever; nil (with :error) if the listen or an accept failed."
-  =[port: p, handler: h, tls: t]
+  $port ~> __tcp_listen__ [~, 128] ~> =(+TcpListener)listener
 
-  p ~> __tcp_listen__ [~, 128] ~> =(+TcpListener)listener
-
-  accept_loop [listener, h, t]
+  accept_loop [listener, $handler, $tls]
 }
 
 html = #'%html<_> {

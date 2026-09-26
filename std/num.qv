@@ -610,12 +610,11 @@ log_pair = #['opt, 'opt] {
   | =[('coeff)c, Log[a, ys]] => [c, Nil, a, ys]
 }
 // `(a + Σ c·ln p)·r`, for any coefficient `r`.
-log_scale = #['coeff, 'terms, 'coeff] {
-  =[a, ts, r]
-  rr = to_rational r
+log_scale = #[(a): 'coeff, (ts): 'terms, (r): 'coeff] {
+  rr = to_rational $r
   {
     | rsign rr ~> =0 => 0
-    | log_build [rmul [to_rational a, rr] ~> lower ~, terms_scale [ts, rr, 0, Nil]]
+    | log_build [rmul [to_rational $a, rr] ~> lower ~, terms_scale [$ts, rr, 0, Nil]]
   }
 }
 
@@ -702,11 +701,10 @@ kl_iv = #[['int, 'int, 'int], 'int] -> ['int, 'int] {
 }
 
 // The magnitude of the term `c·gᵏ`.
-term_mag = #[['int, 'int, 'int], 'int, 'coeff] -> ['int, 'int] {
-  =[l2, k, c]
-  to_rational c ~> =Rational[p, q]
+term_mag = #[(l2): ['int, 'int, 'int], (k): 'int, (c): 'coeff] -> ['int, 'int] {
+  to_rational $c ~> =Rational[p, q]
   e = __integer_subtract__ [log2_floor [__integer_abs__ p, 0], log2_floor [q, 0]]
-  kl_iv [l2, k] ~> =[lo, hi]
+  kl_iv [$l2, $k] ~> =[lo, hi]
   [__integer_add__ [lo, __integer_subtract__ [e, 1]], __integer_add__ [hi, __integer_add__ [e, 1]]]
 }
 
@@ -859,14 +857,13 @@ mag = #('coeff | 'slow) -> (['int, 'int] | []) {
 }
 
 // Order two numbers, one of them bulky, by sign and then by magnitude.
-mag_compare = #[('coeff | 'slow), ('coeff | 'slow)] -> 'int {
-  =[x, y]
-  sx = diff_sign x
-  c = __integer_compare__ [sx, diff_sign y]
+mag_compare = #[(x): ('coeff | 'slow), (y): ('coeff | 'slow)] -> 'int {
+  sx = diff_sign $x
+  c = __integer_compare__ [sx, diff_sign $y]
   {
     | c ~> =(-1 | 1) => c
     | {
-      m = [mag x, mag y]
+      m = [mag $x, mag $y]
       {
         | m ~> =[[_, xhi], [ylo, _]]
           __integer_compare__ [xhi, ylo] ~> =-1 => __integer_multiply__ [sx, -1]
@@ -1536,7 +1533,7 @@ npow = #['opt, 'int, 'opt] -> 'opt {
 
 // c^(p/q) for a positive coefficient, through its logarithm: exact when every prime's
 // exponent comes out an integer or a half.
-cqpow = #['coeff, 'int, 'int] { =[c, p, q]; mul [Rational[p, q], ln_coeff c] ~> exp ~ }
+cqpow = #[(c): 'coeff, (p): 'int, (q): 'int] { mul [Rational[$p, $q], ln_coeff $c] ~> exp ~ }
 
 // x^(p/q), `q ≥ 2`, for a positive number: a coefficient, or a monomial in a generator whose
 // coefficient's power is rational and, for π, whose exponent stays an integer.
@@ -1695,12 +1692,9 @@ lowered = #' {
 }
 
 // r with table(r) = |v|, carrying v's sign.
-inverse = #[', #' -> ('rational | [])] {
-  =[v, table]
-  {
-    | compare [v, 0] ~> =-1 => { neg v ~> lowered ~ ~> table ~ ~> =('rational)r; rneg r }
-    | lowered v ~> table ~
-  }
+inverse = #[(v): ', (table): #' -> ('rational | [])] {
+  | compare [$v, 0] ~> =-1 => { neg $v ~> lowered ~ ~> $table ~ ~> =('rational)r; rneg r }
+  | lowered $v ~> $table ~
 }
 
 sin = #'opt {
@@ -1803,26 +1797,22 @@ cf_value = #['ints, 'rational] -> 'rational {
 }
 
 // The simplest rational — smallest denominator, then smallest numerator — in [x, y].
-simplest = #['rational, 'rational] {
-  =[x, y]
-  {
-    | rsign x ~> =(-1 | 0); rsign y ~> =(0 | 1) => 0
-    | rsign y ~> =-1 => simplest_terms [rneg y, rneg x, Nil] ~> =Cons[a, rest]
-        cf_value [rest, Rational[a, 1]] ~> rneg ~ ~> lower ~
-    | simplest_terms [x, y, Nil] ~> =Cons[a, rest]; cf_value [rest, Rational[a, 1]] ~> lower ~
-  }
+simplest = #[(x): 'rational, (y): 'rational] {
+  | rsign $x ~> =(-1 | 0); rsign $y ~> =(0 | 1) => 0
+  | rsign $y ~> =-1 => simplest_terms [rneg $y, rneg $x, Nil] ~> =Cons[a, rest]
+      cf_value [rest, Rational[a, 1]] ~> rneg ~ ~> lower ~
+  | simplest_terms [$x, $y, Nil] ~> =Cons[a, rest]; cf_value [rest, Rational[a, 1]] ~> lower ~
 }
 
 // Bound `x` until the bounds are within `eps` of each other; every rational in
 // [hi − eps, lo + eps] is then within `eps` of `x`, and the simplest of them is the answer.
-approx_step = #[', 'rational, 'int] {
-  =[x, eps, k]
-  bounds [x, k] ~> =[lo, hi]
-  unit = pow2 k
+approx_step = #[(x): ', (eps): 'rational, (k): 'int] {
+  bounds [$x, $k] ~> =[lo, hi]
+  unit = pow2 $k
   {
-    | rcompare [reduce Rational[__integer_subtract__ [hi, lo], unit], eps]
-      ~> =1 => ^ [x, eps, __integer_multiply__ [k, 2]]
-    | simplest [rsub [reduce Rational[hi, unit], eps], radd [reduce Rational[lo, unit], eps]]
+    | rcompare [reduce Rational[__integer_subtract__ [hi, lo], unit], $eps]
+      ~> =1 => ^ [$x, $eps, __integer_multiply__ [$k, 2]]
+    | simplest [rsub [reduce Rational[hi, unit], $eps], radd [reduce Rational[lo, unit], $eps]]
   }
 }
 

@@ -133,16 +133,14 @@ pad = #'bin {
 }
 
 digest = #'state {
-  =[a, b, c, d, e, f, g, h]
-
-  __binary_append__ [<>, a, 4]
-  ~> __binary_append__ [~, b, 4]
-  ~> __binary_append__ [~, c, 4]
-  ~> __binary_append__ [~, d, 4]
-  ~> __binary_append__ [~, e, 4]
-  ~> __binary_append__ [~, f, 4]
-  ~> __binary_append__ [~, g, 4]
-  ~> __binary_append__ [~, h, 4]
+  __binary_append__ [<>, $0, 4]
+  ~> __binary_append__ [~, $1, 4]
+  ~> __binary_append__ [~, $2, 4]
+  ~> __binary_append__ [~, $3, 4]
+  ~> __binary_append__ [~, $4, 4]
+  ~> __binary_append__ [~, $5, 4]
+  ~> __binary_append__ [~, $6, 4]
+  ~> __binary_append__ [~, $7, 4]
 }
 
 sha256 = #'bin {

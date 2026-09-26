@@ -55,8 +55,7 @@ lower = #'%str {
 
 // The first value whose name matches case-insensitively, or nil.
 header_find = #[(pairs): 'pairs, (target): 'bin] {
-  %list.find [$pairs, #{ =[n, _]; lower n ~> =Str[&$$target] }]
-  ~> =[_, v]
+  %list.find [$pairs, #{ lower $0 ~> =Str[&$$target] }] ~> =[_, v]
 
   v
 }
