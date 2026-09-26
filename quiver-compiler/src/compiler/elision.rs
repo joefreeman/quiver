@@ -15,7 +15,7 @@
 //! emits ordinary instructions that the artifact extraction and id-remapping passes
 //! handle like any others.
 
-use quiver_core::bytecode::Opcode;
+use quiver_core::bytecode::{Constant, Opcode};
 use quiver_core::program::Program;
 use quiver_core::types::TypeLookup;
 
@@ -110,8 +110,10 @@ pub fn analyze(program: &Program, function_index: usize) -> Option<Forwarder> {
                 locals.push(Sym::Param);
             }
             Opcode::Load => stack.push(locals.get(operand)?.clone()),
-            Opcode::Constant => stack.push(Sym::Const(operand)),
-            Opcode::Duplicate => stack.push(stack.last()?.clone()),
+            Opcode::Constant => stack.push(match program.get_constant(operand)? {
+                Constant::Builtin { id } => Sym::BuiltinRef(*id),
+                _ => Sym::Const(operand),
+            }),
             Opcode::Pick => {
                 let index = stack.len().checked_sub(1 + operand)?;
                 stack.push(stack[index].clone());
@@ -124,7 +126,7 @@ pub fn analyze(program: &Program, function_index: usize) -> Option<Forwarder> {
                 let value = stack.remove(index);
                 stack.push(value);
             }
-            Opcode::Squash => {
+            Opcode::Drop => {
                 let top = stack.pop()?;
                 stack.truncate(stack.len().checked_sub(operand)?);
                 stack.push(top);
@@ -156,7 +158,6 @@ pub fn analyze(program: &Program, function_index: usize) -> Option<Forwarder> {
                     return None;
                 }
             }
-            Opcode::Builtin => stack.push(Sym::BuiltinRef(operand)),
             Opcode::Call => {
                 // Exactly one call, of a builtin, on a forwardable argument.
                 if forwarder.is_some() {

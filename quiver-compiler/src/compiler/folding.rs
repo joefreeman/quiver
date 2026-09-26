@@ -56,7 +56,6 @@ pub fn constant_of_range(program: &mut Program, instructions: &[Instruction]) ->
             Opcode::Ok => stack.push(Sym::Const(empty_tuple(program, OK))),
             // A copy, never a consume: reaching past what the range itself pushed reads a
             // value from below, which stays opaque but is not disturbed.
-            Opcode::Duplicate => stack.push(pick(&stack, 0)),
             Opcode::Pick => stack.push(pick(&stack, operand)),
             // Consuming past the range's own values would take one of the enclosing frame's,
             // which the replacement `Constant` push would not do.

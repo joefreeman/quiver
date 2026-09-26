@@ -1825,7 +1825,6 @@ fn collect_instruction(instruction: &Instruction, closure: &mut Closure, queue: 
     match instruction.opcode() {
         Opcode::Constant => add_constant(id, closure, queue),
         Opcode::Function => add_function(id, closure, queue),
-        Opcode::Builtin => add_builtin(id, closure, queue),
         Opcode::Tuple => add_tuple(id, closure, queue),
         Opcode::IsType => add_type(id, closure, queue),
         Opcode::GetNamed => {
@@ -2078,7 +2077,6 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
                         ));
                     }
                 }
-                Opcode::Builtin => check("builtin", id, unit.builtins.len())?,
                 Opcode::Tuple => check("tuple", id, unit.tuples.len())?,
                 Opcode::IsType => check("type", id, unit.types.len())?,
                 Opcode::GetNamed => check("field name", id, unit.field_names.len())?,

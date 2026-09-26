@@ -196,7 +196,6 @@ impl Function {
                 let (table, label) = match instruction.opcode() {
                     Opcode::Constant => (&remaps.constants, "constant"),
                     Opcode::Function => (&remaps.functions, "function"),
-                    Opcode::Builtin => (&remaps.builtins, "builtin"),
                     Opcode::Tuple => (&remaps.tuples, "tuple"),
                     Opcode::IsType => (&remaps.types, "type"),
                     Opcode::GetNamed => (&remaps.field_names, "field name"),
@@ -455,6 +454,7 @@ mod tests {
         for offset in [0, 1, -1, 930, -833, (1 << 23) - 1, -(1 << 23)] {
             assert_eq!(Instruction::jump(offset).offset(), offset);
             assert_eq!(Instruction::jump_if(offset).offset(), offset);
+            assert_eq!(Instruction::jump_unless(offset).offset(), offset);
         }
     }
 
@@ -632,11 +632,9 @@ mod tests {
         }
     }
 
-    /// The two normalising constructors are what keep the encoding canonical.
+    /// The normalising constructor is what keeps the encoding canonical.
     #[test]
     fn constructors_normalise() {
-        assert_eq!(Instruction::pick(0), Instruction::duplicate());
-        assert_eq!(Instruction::pick(1).opcode(), Opcode::Pick);
         assert_eq!(Instruction::tuple(super::NIL), Instruction::nil());
         assert_eq!(Instruction::tuple(super::OK), Instruction::ok());
         assert_eq!(Instruction::tuple(2).opcode(), Opcode::Tuple);
@@ -684,9 +682,9 @@ pub type Offset = i32;
 pub enum Opcode {
     Constant,
     Pop,
-    Duplicate,
     Pick,
     Rotate,
+    Drop,
     Reset,
     Load,
     Store,
@@ -698,13 +696,12 @@ pub enum Opcode {
     IsType,
     Jump,
     JumpIf,
+    JumpUnless,
     Call,
     TailCall,
     Recurse,
     Function,
-    Builtin,
     Equal,
-    Not,
     Annotate,
     GetAnnotation,
     Stamp,
@@ -714,7 +711,6 @@ pub enum Opcode {
     Process,
     State,
     Reclaimed,
-    Squash,
 }
 
 /// What an opcode's operand field means — the one place that knows, so the disassembler
@@ -733,9 +729,8 @@ impl Opcode {
     /// What this opcode's operand field means.
     pub fn operand_kind(self) -> OperandKind {
         match self {
-            Opcode::Jump | Opcode::JumpIf => OperandKind::Offset,
+            Opcode::Jump | Opcode::JumpIf | Opcode::JumpUnless => OperandKind::Offset,
             Opcode::Pop
-            | Opcode::Duplicate
             | Opcode::Store
             | Opcode::Nil
             | Opcode::Ok
@@ -743,7 +738,6 @@ impl Opcode {
             | Opcode::TailCall
             | Opcode::Recurse
             | Opcode::Equal
-            | Opcode::Not
             | Opcode::Spawn
             | Opcode::Self_
             | Opcode::Select
@@ -755,12 +749,12 @@ impl Opcode {
 
     /// Every opcode, in discriminant order — `ALL[op as usize] == op` (asserted in tests),
     /// which is what makes the decode below a single indexed load.
-    pub const ALL: [Opcode; 33] = [
+    pub const ALL: [Opcode; 31] = [
         Opcode::Constant,
         Opcode::Pop,
-        Opcode::Duplicate,
         Opcode::Pick,
         Opcode::Rotate,
+        Opcode::Drop,
         Opcode::Reset,
         Opcode::Load,
         Opcode::Store,
@@ -772,13 +766,12 @@ impl Opcode {
         Opcode::IsType,
         Opcode::Jump,
         Opcode::JumpIf,
+        Opcode::JumpUnless,
         Opcode::Call,
         Opcode::TailCall,
         Opcode::Recurse,
         Opcode::Function,
-        Opcode::Builtin,
         Opcode::Equal,
-        Opcode::Not,
         Opcode::Annotate,
         Opcode::GetAnnotation,
         Opcode::Stamp,
@@ -788,7 +781,6 @@ impl Opcode {
         Opcode::Process,
         Opcode::State,
         Opcode::Reclaimed,
-        Opcode::Squash,
     ];
 }
 
@@ -798,9 +790,8 @@ impl Opcode {
 /// unit or a module artifact into a session — rewrites operands in place, which a
 /// variable-length encoding would turn into a re-assembly of the whole stream.
 ///
-/// Build one through the named constructors, never by hand: [`Instruction::tuple`] and
-/// [`Instruction::pick`] normalise their operands, and the rest keep the debug-build
-/// range check in one place.
+/// Build one through the named constructors, never by hand: [`Instruction::tuple`]
+/// normalises its operand, and the rest keep the range check in one place.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Instruction(u32);
@@ -881,19 +872,9 @@ impl Instruction {
         Instruction::bare(Opcode::Pop)
     }
 
-    /// Push a copy of the top of the stack.
-    pub fn duplicate() -> Instruction {
-        Instruction::bare(Opcode::Duplicate)
-    }
-
-    /// Push a copy of the value `depth` slots below the top. Depth zero is
-    /// [`Instruction::duplicate`], which is much the commonest case and has its own
-    /// opcode; normalising here is what keeps `Pick` non-zero.
+    /// Push a copy of the value `depth` slots below the top; `Pick(0)` duplicates the top.
     pub fn pick(depth: usize) -> Instruction {
-        match depth {
-            0 => Instruction::duplicate(),
-            other => Instruction::with_id(Opcode::Pick, other),
-        }
+        Instruction::with_id(Opcode::Pick, depth)
     }
 
     /// Move the value `count - 1` slots below the top to the top, sliding the rest down.
@@ -969,6 +950,12 @@ impl Instruction {
         Instruction::with_offset(Opcode::JumpIf, offset)
     }
 
+    /// Pop a value; jump if it is nil. A test's failure is the usual reason to branch, so
+    /// this saves inverting the test's answer first.
+    pub fn jump_unless(offset: Offset) -> Instruction {
+        Instruction::with_offset(Opcode::JumpUnless, offset)
+    }
+
     /// Call the callable on top of the stack with the argument beneath it.
     pub fn call() -> Instruction {
         Instruction::bare(Opcode::Call)
@@ -992,23 +979,11 @@ impl Instruction {
         Instruction::with_id(Opcode::Function, function_id)
     }
 
-    /// Push a builtin value. A type-consuming builtin's explicit type argument
-    /// (`__data_decode__<'t>`) belongs to the *entry* this names rather than to the
-    /// instruction: each instantiation is its own builtin-table entry.
-    pub fn builtin(builtin_id: usize) -> Instruction {
-        Instruction::with_id(Opcode::Builtin, builtin_id)
-    }
-
     /// Pop two values; push `Ok` if they are structurally equal, nil otherwise. The
     /// result is a truth flag rather than the compared value, so equal nils stay
     /// distinguishable from a failed comparison.
     pub fn equal() -> Instruction {
         Instruction::bare(Opcode::Equal)
-    }
-
-    /// Pop a value; push `Ok` if it is nil, nil otherwise.
-    pub fn not() -> Instruction {
-        Instruction::bare(Opcode::Not)
     }
 
     /// Pop an annotation value, then a tuple/function carrier; push the carrier with the
@@ -1068,11 +1043,13 @@ impl Instruction {
         Instruction::bare(Opcode::Reclaimed)
     }
 
-    /// Keep the top of the stack and drop the `count` values beneath it — how a failure leaves
-    /// a half-built expression (a tuple's earlier fields, a call's callee) for its step, with
-    /// only the failing nil where the step's value belongs.
-    pub fn squash(count: usize) -> Instruction {
-        Instruction::with_id(Opcode::Squash, count)
+    /// Keep the top of the stack and drop the `count` values beneath it — unlike
+    /// [`Instruction::pop`], which drops the top itself. How a failure leaves a half-built
+    /// expression (a tuple's earlier fields, a call's callee) for its step, with only the
+    /// failing nil where the step's value belongs, and how a value is discarded from under
+    /// the one computed above it.
+    pub fn drop(count: usize) -> Instruction {
+        Instruction::with_id(Opcode::Drop, count)
     }
 }
 

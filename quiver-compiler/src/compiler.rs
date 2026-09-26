@@ -3333,7 +3333,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn emit_unwind(&mut self, gating: bool) {
         if !gating {
             self.pending_unwinds.push(self.codegen.instructions.len());
-            self.codegen.add_instruction(Instruction::squash(0));
+            self.codegen.add_instruction(Instruction::drop(0));
         }
     }
 
@@ -4615,7 +4615,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let count = usize::try_from(depth - 1).map_err(|_| Error::InternalError {
                 message: format!("unwind at {addr} has depth {depth}, below its nil"),
             })?;
-            self.codegen.instructions[addr] = Instruction::squash(count);
+            self.codegen.instructions[addr] = Instruction::drop(count);
         }
         Ok(())
     }
@@ -5485,17 +5485,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             omittable: Vec::new(),
         });
         let mut bytecode = self.program.to_bytecode(None);
-        // The content constant goes into the *temporary* bytecode only: registering it on the
-        // program would permanently ship every invocation's brace content as dead data.
+        // The content constant (with the callbacks beside it) goes into the *temporary*
+        // bytecode only: registering it on the program would permanently ship every
+        // invocation's brace content as dead data.
         let constant = bytecode.constants.len();
-        bytecode
-            .constants
-            .push(Constant::Binary(content.clone().into_bytes()));
+        bytecode.constants.extend([
+            Constant::Binary(content.clone().into_bytes()),
+            Constant::Builtin { id: term_builtin },
+            Constant::Builtin { id: chain_builtin },
+        ]);
         let mut instructions = vec![
             Instruction::constant(constant),
             Instruction::tuple(str_tuple),
-            Instruction::builtin(term_builtin),
-            Instruction::builtin(chain_builtin),
+            Instruction::constant(constant + 1),
+            Instruction::constant(constant + 2),
             Instruction::tuple(context_tuple),
         ];
         instructions.push(Instruction::constant(function_constant));
@@ -7512,14 +7515,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         summary
     }
 
+    /// Push a builtin value. It is a constant like any other; a type-consuming builtin's
+    /// explicit type argument belongs to the builtin-table entry `builtin` names.
+    fn emit_builtin(&mut self, builtin: usize) {
+        let constant = self
+            .program
+            .register_constant(Constant::Builtin { id: builtin });
+        self.codegen
+            .add_instruction(Instruction::constant(constant));
+    }
+
     /// Emit the elided form of a forwarder call. Stack: `[argument]` -> `[result]`,
     /// exactly what push-callee + `Call` would leave.
     fn emit_elided_forwarder(&mut self, forwarder: &elision::Forwarder) {
         if !self.fuse_argument_build(forwarder) {
             self.rebuild_argument(&forwarder.argument);
         }
-        self.codegen
-            .add_instruction(Instruction::builtin(forwarder.builtin));
+        self.emit_builtin(forwarder.builtin);
         self.codegen.add_instruction(Instruction::call());
         for wrap in &forwarder.wraps {
             self.codegen.add_instruction(Instruction::tuple(*wrap));
@@ -8033,8 +8045,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.builtins,
         );
 
-        self.codegen
-            .add_instruction(Instruction::builtin(builtin_index));
+        self.emit_builtin(builtin_index);
 
         let never_id = self.program.never();
         let callable_type_id = self.program.register_type(Type::Callable {
@@ -8219,7 +8230,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // itself need not know about: keep the entry when it matches, else discard
                 // it for nil.
                 if let Some(type_id) = check {
-                    self.codegen.add_instruction(Instruction::duplicate());
+                    self.codegen.add_instruction(Instruction::pick(0));
                     self.codegen.add_instruction(Instruction::is_type(type_id));
                     let fits = self.codegen.emit_jump_if_placeholder();
                     self.codegen.add_instruction(Instruction::pop());

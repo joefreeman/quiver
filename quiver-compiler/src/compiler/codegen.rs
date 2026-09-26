@@ -40,8 +40,10 @@ impl InstructionBuilder {
     /// to travel with it, and a rewrite reading a stale one would be silently wrong.
     pub fn rewritable_from(&self, addr: usize) -> bool {
         !self.instructions[..addr].iter().enumerate().any(|(a, i)| {
-            matches!(i.opcode(), Opcode::Jump | Opcode::JumpIf)
-                && (a as Offset) + 1 + i.offset() > addr as Offset
+            matches!(
+                i.opcode(),
+                Opcode::Jump | Opcode::JumpIf | Opcode::JumpUnless
+            ) && (a as Offset) + 1 + i.offset() > addr as Offset
         })
     }
 
@@ -59,6 +61,13 @@ impl InstructionBuilder {
         addr
     }
 
+    /// Emits a conditional jump placeholder and returns the address to patch later (jumps on nil)
+    pub fn emit_jump_unless_placeholder(&mut self) -> usize {
+        let addr = self.instructions.len();
+        self.add_instruction(Instruction::jump_unless(0));
+        addr
+    }
+
     /// Patches a jump instruction to target the current instruction address
     pub fn patch_jump_to_here(&mut self, jump_addr: usize) {
         let target_addr = self.instructions.len();
@@ -71,6 +80,7 @@ impl InstructionBuilder {
         self.instructions[jump_addr] = match self.instructions[jump_addr].opcode() {
             Opcode::Jump => Instruction::jump(offset),
             Opcode::JumpIf => Instruction::jump_if(offset),
+            Opcode::JumpUnless => Instruction::jump_unless(offset),
             other => panic!("Cannot patch non-jump instruction {other:?}"),
         };
     }
@@ -82,37 +92,26 @@ impl InstructionBuilder {
         self.add_instruction(Instruction::jump(offset));
     }
 
-    /// Emits a conditional jump that immediately targets the given address
-    pub fn emit_jump_if_to_addr(&mut self, addr: usize) {
+    /// Emits a jump on nil that immediately targets the given address
+    pub fn emit_jump_unless_to_addr(&mut self, addr: usize) {
         let current_addr = self.instructions.len();
         let offset = (addr as Offset) - (current_addr as Offset) - 1;
-        self.add_instruction(Instruction::jump_if(offset));
+        self.add_instruction(Instruction::jump_unless(offset));
     }
 
-    /// Emits the common pattern Duplicate -> Not -> JumpIf (returns the jump address for patching),
-    /// keeping the tested value on the stack on both paths. Used to short-circuit a sequence on a
-    /// nil step while threading the (non-nil) value into the next step, and to keep a condition's
-    /// value available to its consequence.
+    /// Emits Pick(0) -> JumpUnless (returns the jump address for patching), keeping the tested
+    /// value on the stack on both paths. Used to short-circuit a sequence on a nil step while
+    /// threading the (non-nil) value into the next step, and to keep a condition's value
+    /// available to its consequence.
     pub fn emit_duplicate_jump_if_nil(&mut self) -> usize {
-        self.add_instruction(Instruction::duplicate());
-        self.add_instruction(Instruction::not());
-        self.emit_jump_if_placeholder()
+        self.add_instruction(Instruction::pick(0));
+        self.emit_jump_unless_placeholder()
     }
 
     /// Emits Rotate followed by Pop - common pattern for cleaning up stack values
     pub fn emit_rotate_pop(&mut self, rotate_count: usize) {
         self.add_instruction(Instruction::rotate(rotate_count));
         self.add_instruction(Instruction::pop());
-    }
-
-    /// Emits type check and branch pattern: Pick -> IsType -> Not -> JumpIf
-    /// Returns the jump address for patching later
-    /// Used when branching based on type matching
-    pub fn emit_type_check_branch(&mut self, depth: usize, type_id: usize) -> usize {
-        self.add_instruction(Instruction::pick(depth));
-        self.add_instruction(Instruction::is_type(type_id));
-        self.add_instruction(Instruction::not());
-        self.emit_jump_if_placeholder()
     }
 }
 
@@ -122,12 +121,10 @@ fn stack_effect(instruction: Instruction, program: &Program) -> Result<Option<is
     let operand = instruction.operand() as usize;
     Ok(Some(match instruction.opcode() {
         Opcode::Constant
-        | Opcode::Duplicate
         | Opcode::Pick
         | Opcode::Load
         | Opcode::Nil
         | Opcode::Ok
-        | Opcode::Builtin
         | Opcode::Self_ => 1,
         Opcode::Rotate
         | Opcode::Reset
@@ -135,7 +132,6 @@ fn stack_effect(instruction: Instruction, program: &Program) -> Result<Option<is
         | Opcode::GetNamed
         | Opcode::IsType
         | Opcode::Jump
-        | Opcode::Not
         | Opcode::GetAnnotation
         | Opcode::Stamp
         | Opcode::Select
@@ -144,6 +140,7 @@ fn stack_effect(instruction: Instruction, program: &Program) -> Result<Option<is
         Opcode::Pop
         | Opcode::Store
         | Opcode::JumpIf
+        | Opcode::JumpUnless
         | Opcode::Call
         | Opcode::Equal
         | Opcode::Annotate
@@ -160,7 +157,7 @@ fn stack_effect(instruction: Instruction, program: &Program) -> Result<Option<is
                 .ok_or_else(|| format!("unknown function {operand}"))?;
             1 - function.captures as isize
         }
-        Opcode::Squash => -(operand as isize),
+        Opcode::Drop => -(operand as isize),
         Opcode::TailCall | Opcode::Recurse | Opcode::Reclaimed => return Ok(None),
     }))
 }
@@ -200,7 +197,7 @@ pub fn operand_depths(
         match instruction.opcode() {
             Opcode::Jump if exits.contains(&addr) => {}
             Opcode::Jump => work.push((target(), after)),
-            Opcode::JumpIf => {
+            Opcode::JumpIf | Opcode::JumpUnless => {
                 work.push((addr + 1, after));
                 if !exits.contains(&addr) {
                     work.push((target(), after));

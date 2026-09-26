@@ -82,9 +82,8 @@ pub fn compile_entry(
     // other failure, stamp intact — instead of an opaque call-on-nil type error.
     let fallible = type_contains_nil(&program, compilation_result.result_type);
     if fallible {
-        entry_instructions.push(Instruction::duplicate());
-        entry_instructions.push(Instruction::not());
-        entry_instructions.push(Instruction::jump_if(3));
+        entry_instructions.push(Instruction::pick(0));
+        entry_instructions.push(Instruction::jump_unless(3));
     }
     entry_instructions.push(Instruction::tuple(quiver_core::types::NIL));
     entry_instructions.push(Instruction::rotate(2));

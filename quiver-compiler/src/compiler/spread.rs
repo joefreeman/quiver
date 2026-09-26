@@ -572,9 +572,8 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
                 compiler
                     .codegen
                     .add_instruction(Instruction::is_type(type_id));
-                compiler.codegen.add_instruction(Instruction::not());
 
-                let fail_jump = compiler.codegen.emit_jump_if_placeholder();
+                let fail_jump = compiler.codegen.emit_jump_unless_placeholder();
                 fail_jumps.push(fail_jump);
             }
 

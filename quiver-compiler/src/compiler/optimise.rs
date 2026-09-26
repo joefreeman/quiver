@@ -48,7 +48,7 @@ fn decode(instructions: &[Instruction]) -> Vec<Op> {
         .iter()
         .enumerate()
         .map(|(index, &instruction)| {
-            let target = matches!(instruction.opcode(), Opcode::Jump | Opcode::JumpIf).then(|| {
+            let target = is_jump(instruction.opcode()).then(|| {
                 let target = index as Offset + 1 + instruction.offset();
                 assert!(
                     (0..=instructions.len() as Offset).contains(&target),
@@ -73,6 +73,7 @@ fn encode(ops: &[Op]) -> Vec<Instruction> {
                 match op.instruction.opcode() {
                     Opcode::Jump => Instruction::jump(offset),
                     Opcode::JumpIf => Instruction::jump_if(offset),
+                    Opcode::JumpUnless => Instruction::jump_unless(offset),
                     other => unreachable!("{other:?} carries no jump target"),
                 }
             }
@@ -109,8 +110,22 @@ fn compact(ops: &mut Vec<Op>, removed: &[bool]) -> bool {
     true
 }
 
+fn is_jump(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::Jump | Opcode::JumpIf | Opcode::JumpUnless)
+}
+
+/// The conditional jump taken exactly when `opcode`'s is not (its target is set on encoding).
+fn inverse(opcode: Opcode) -> Option<Instruction> {
+    match opcode {
+        Opcode::JumpIf => Some(Instruction::jump_unless(0)),
+        Opcode::JumpUnless => Some(Instruction::jump_if(0)),
+        _ => None,
+    }
+}
+
 /// Point every jump past the unconditional jumps it lands on, then drop a jump to the very
-/// next instruction: an unconditional one does nothing, and a conditional one only pops.
+/// next instruction — an unconditional one does nothing, and a conditional one only pops —
+/// and fold a conditional jump over an unconditional one into the opposite condition.
 fn thread_jumps(ops: &mut Vec<Op>) -> bool {
     let mut changed = false;
     for index in 0..ops.len() {
@@ -134,10 +149,14 @@ fn thread_jumps(ops: &mut Vec<Op>) -> bool {
             changed = true;
         }
     }
+    let targeted = targeted(ops);
     let mut removed = vec![false; ops.len()];
-    for index in 0..ops.len() {
-        if ops[index].target == Some(index + 1) {
-            match ops[index].instruction.opcode() {
+    let mut index = 0;
+    while index < ops.len() {
+        let opcode = ops[index].instruction.opcode();
+        let target = ops[index].target;
+        if target == Some(index + 1) {
+            match opcode {
                 Opcode::Jump => removed[index] = true,
                 _ => {
                     ops[index] = Op {
@@ -147,7 +166,20 @@ fn thread_jumps(ops: &mut Vec<Op>) -> bool {
                     changed = true;
                 }
             }
+        } else if let Some(inverted) = inverse(opcode)
+            && target == Some(index + 2)
+            && ops[index + 1].instruction.opcode() == Opcode::Jump
+            && !targeted[index + 1]
+        {
+            // `JumpUnless L; Jump M; L:` is `JumpIf M; L:`.
+            ops[index] = Op {
+                instruction: inverted,
+                target: ops[index + 1].target,
+            };
+            removed[index + 1] = true;
+            index += 1;
         }
+        index += 1;
     }
     compact(ops, &removed) || changed
 }
@@ -164,7 +196,9 @@ fn remove_unreachable(ops: &mut Vec<Op>) -> bool {
         let op = ops[index];
         match op.instruction.opcode() {
             Opcode::Jump => work.extend(op.target),
-            Opcode::JumpIf => work.extend([index + 1].into_iter().chain(op.target)),
+            Opcode::JumpIf | Opcode::JumpUnless => {
+                work.extend([index + 1].into_iter().chain(op.target))
+            }
             Opcode::TailCall | Opcode::Recurse | Opcode::Reclaimed => {}
             _ => work.push(index + 1),
         }
@@ -221,19 +255,21 @@ fn rewrite_run(run: &[Instruction]) -> Option<Rewrite> {
         })
     };
     match opcodes.as_slice() {
-        [Opcode::Squash, ..] if operand(run[0]) == 0 => rewrite(1, None),
+        [Opcode::Drop, ..] if operand(run[0]) == 0 => rewrite(1, None),
         // Storing a copy and dropping the original stores the original.
-        [Opcode::Duplicate, Opcode::Store, Opcode::Pop] => rewrite(3, Some(Instruction::store())),
+        [Opcode::Pick, Opcode::Store, Opcode::Pop] if operand(run[0]) == 0 => {
+            rewrite(3, Some(Instruction::store()))
+        }
         // Bringing the second value to the top and popping it drops it from under the top.
         [Opcode::Rotate, Opcode::Pop, ..] if operand(run[0]) == 2 => {
-            rewrite(2, Some(Instruction::squash(1)))
+            rewrite(2, Some(Instruction::drop(1)))
         }
         [Opcode::Rotate, Opcode::Rotate, ..] if operand(run[0]) == 2 && operand(run[1]) == 2 => {
             rewrite(2, None)
         }
-        [Opcode::Squash, Opcode::Squash, ..] => rewrite(
+        [Opcode::Drop, Opcode::Drop, ..] => rewrite(
             2,
-            Some(Instruction::squash(operand(run[0]) + operand(run[1]))),
+            Some(Instruction::drop(operand(run[0]) + operand(run[1]))),
         ),
         // Truncating the locals further subsumes the first truncation.
         [Opcode::Reset, Opcode::Reset, ..] if operand(run[1]) <= operand(run[0]) => {
@@ -251,7 +287,7 @@ fn targeted(ops: &[Op]) -> Vec<bool> {
     targeted
 }
 
-/// Remove values that are pushed only to be dropped. For each value a `Pop` or `Squash`
+/// Remove values that are pushed only to be dropped. For each value a `Pop` or `Drop`
 /// discards, walk back through the straight-line code before it to the instruction that
 /// produced it; if that is a pure push — through any pure transforms of it — the push, the
 /// transforms and the drop all go.
@@ -267,7 +303,7 @@ fn remove_dead_values(ops: &mut Vec<Op>, program: &Program) -> bool {
         let instruction = ops[index].instruction;
         let depth = match instruction.opcode() {
             Opcode::Pop => 0,
-            Opcode::Squash if instruction.operand() > 0 => 1,
+            Opcode::Drop if instruction.operand() > 0 => 1,
             _ => continue,
         };
         let Some(dead) = trace_dead_value(ops, &removed, &targeted, program, index, depth) else {
@@ -280,8 +316,8 @@ fn remove_dead_values(ops: &mut Vec<Op>, program: &Program) -> bool {
             ops[at].instruction = Instruction::pick(depth);
         }
         match instruction.opcode() {
-            Opcode::Squash if instruction.operand() > 1 => {
-                ops[index].instruction = Instruction::squash(instruction.operand() as usize - 1)
+            Opcode::Drop if instruction.operand() > 1 => {
+                ops[index].instruction = Instruction::drop(instruction.operand() as usize - 1)
             }
             _ => removed[index] = true,
         }
@@ -325,18 +361,15 @@ fn trace_dead_value(
         let opcode = instruction.opcode();
         let (pops, pushes) = stack_effect(instruction, program)?;
         if depth >= pushes {
-            // Passing over: the instruction works above the value, or reads past it.
-            match opcode {
-                Opcode::Duplicate if depth == pushes => return None,
-                Opcode::Pick => {
-                    let reach = instruction.operand() as usize;
-                    match reach.cmp(&(depth - pushes)) {
-                        std::cmp::Ordering::Less => {}
-                        std::cmp::Ordering::Equal => return None,
-                        std::cmp::Ordering::Greater => dead.picks.push((index, reach - 1)),
-                    }
+            // Passing over: the instruction works above the value, or a `Pick` reads it or
+            // past it.
+            if opcode == Opcode::Pick {
+                let reach = instruction.operand() as usize;
+                match reach.cmp(&(depth - pushes)) {
+                    std::cmp::Ordering::Less => {}
+                    std::cmp::Ordering::Equal => return None,
+                    std::cmp::Ordering::Greater => dead.picks.push((index, reach - 1)),
                 }
-                _ => {}
             }
             depth = depth - pushes + pops;
             continue;
@@ -359,21 +392,18 @@ fn stack_effect(instruction: Instruction, program: &Program) -> Option<(usize, u
     let operand = instruction.operand() as usize;
     Some(match instruction.opcode() {
         Opcode::Constant
-        | Opcode::Duplicate
         | Opcode::Pick
         | Opcode::Load
         | Opcode::Nil
         | Opcode::Ok
-        | Opcode::Builtin
         | Opcode::Self_ => (0, 1),
         Opcode::Pop | Opcode::Store => (1, 0),
         Opcode::Reset => (0, 0),
         Opcode::Rotate => (operand, operand),
-        Opcode::Squash => (operand + 1, 1),
+        Opcode::Drop => (operand + 1, 1),
         Opcode::GetPositional
         | Opcode::GetNamed
         | Opcode::IsType
-        | Opcode::Not
         | Opcode::GetAnnotation
         | Opcode::Stamp
         | Opcode::Select
@@ -382,9 +412,12 @@ fn stack_effect(instruction: Instruction, program: &Program) -> Option<(usize, u
         Opcode::Equal | Opcode::Annotate | Opcode::Call | Opcode::Spawn => (2, 1),
         Opcode::Tuple => (program.lookup_tuple(operand)?.fields.len(), 1),
         Opcode::Function => (program.get_function(operand)?.captures, 1),
-        Opcode::Jump | Opcode::JumpIf | Opcode::TailCall | Opcode::Recurse | Opcode::Reclaimed => {
-            return None;
-        }
+        Opcode::Jump
+        | Opcode::JumpIf
+        | Opcode::JumpUnless
+        | Opcode::TailCall
+        | Opcode::Recurse
+        | Opcode::Reclaimed => return None,
     })
 }
 
@@ -392,13 +425,7 @@ fn stack_effect(instruction: Instruction, program: &Program) -> Option<(usize, u
 fn pushes_purely(opcode: Opcode) -> bool {
     matches!(
         opcode,
-        Opcode::Constant
-            | Opcode::Nil
-            | Opcode::Ok
-            | Opcode::Load
-            | Opcode::Duplicate
-            | Opcode::Pick
-            | Opcode::Builtin
+        Opcode::Constant | Opcode::Nil | Opcode::Ok | Opcode::Load | Opcode::Pick
     )
 }
 
@@ -406,11 +433,7 @@ fn pushes_purely(opcode: Opcode) -> bool {
 fn transforms_purely(opcode: Opcode) -> bool {
     matches!(
         opcode,
-        Opcode::GetPositional
-            | Opcode::GetNamed
-            | Opcode::IsType
-            | Opcode::Not
-            | Opcode::GetAnnotation
+        Opcode::GetPositional | Opcode::GetNamed | Opcode::IsType | Opcode::GetAnnotation
     )
 }
 
@@ -427,7 +450,7 @@ mod tests {
         assert_eq!(
             run(vec![
                 Instruction::load(0),
-                Instruction::duplicate(),
+                Instruction::pick(0),
                 Instruction::pop(),
                 Instruction::pick(1),
                 Instruction::pop(),
@@ -450,8 +473,8 @@ mod tests {
     }
 
     #[test]
-    fn rotate_pop_becomes_squash() {
-        // A call's result isn't a pure push, so it survives as a squash.
+    fn rotate_pop_becomes_drop() {
+        // A call's result isn't a pure push, so it survives as a drop.
         assert_eq!(
             run(vec![
                 Instruction::load(0),
@@ -466,7 +489,7 @@ mod tests {
                 Instruction::load(1),
                 Instruction::call(),
                 Instruction::load(2),
-                Instruction::squash(1)
+                Instruction::drop(1)
             ]
         );
     }
@@ -481,11 +504,11 @@ mod tests {
                 Instruction::pick(1),
                 Instruction::constant(0),
                 Instruction::equal(),
-                Instruction::squash(1),
+                Instruction::drop(1),
             ]),
             vec![
                 Instruction::load(1),
-                Instruction::duplicate(),
+                Instruction::pick(0),
                 Instruction::constant(0),
                 Instruction::equal(),
             ]
@@ -496,8 +519,8 @@ mod tests {
     fn keeps_a_value_read_before_it_is_dropped() {
         let body = vec![
             Instruction::load(0),
-            Instruction::duplicate(),
-            Instruction::squash(1),
+            Instruction::pick(0),
+            Instruction::drop(1),
         ];
         assert_eq!(run(body.clone()), body);
     }
@@ -507,7 +530,7 @@ mod tests {
         let body = vec![
             Instruction::load(0),
             Instruction::jump_if(1),
-            Instruction::duplicate(),
+            Instruction::pick(0),
             Instruction::pop(),
         ];
         assert_eq!(run(body.clone()), body);
@@ -535,6 +558,27 @@ mod tests {
     }
 
     #[test]
+    fn a_conditional_jump_over_a_jump_takes_the_opposite_condition() {
+        assert_eq!(
+            run(vec![
+                Instruction::load(0),
+                Instruction::jump_unless(1), // → 3
+                Instruction::jump(2),        // → 5
+                Instruction::load(1),
+                Instruction::call(),
+                Instruction::load(2),
+            ]),
+            vec![
+                Instruction::load(0),
+                Instruction::jump_if(2), // → the final load
+                Instruction::load(1),
+                Instruction::call(),
+                Instruction::load(2),
+            ]
+        );
+    }
+
+    #[test]
     fn a_conditional_jump_to_the_next_instruction_only_pops() {
         assert_eq!(
             run(vec![
@@ -548,7 +592,7 @@ mod tests {
 
     #[test]
     fn a_body_is_never_emptied() {
-        let body = vec![Instruction::duplicate(), Instruction::pop()];
+        let body = vec![Instruction::pick(0), Instruction::pop()];
         assert_eq!(run(body.clone()), body);
     }
 }

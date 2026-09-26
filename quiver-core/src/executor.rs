@@ -1741,10 +1741,9 @@ impl<E: Effect> Executor<E> {
         match instruction.opcode() {
             Opcode::Constant => self.handle_constant(proc, operand),
             Opcode::Pop => self.handle_pop(proc),
-            Opcode::Duplicate => self.handle_duplicate(proc),
             Opcode::Pick => self.handle_pick(proc, operand),
             Opcode::Rotate => self.handle_rotate(proc, operand),
-            Opcode::Squash => self.handle_squash(proc, operand),
+            Opcode::Drop => self.handle_drop(proc, operand),
             Opcode::Load => self.handle_load(proc, operand),
             Opcode::Store => self.handle_store(proc),
             Opcode::Tuple => self.handle_tuple(proc, operand),
@@ -1754,15 +1753,14 @@ impl<E: Effect> Executor<E> {
             Opcode::GetNamed => self.handle_get_named(proc, operand),
             Opcode::IsType => self.handle_is_type(proc, operand),
             Opcode::Jump => self.handle_jump(proc, instruction.offset() as isize),
-            Opcode::JumpIf => self.handle_jump_if(proc, instruction.offset() as isize),
+            Opcode::JumpIf => self.handle_jump_if(proc, instruction.offset() as isize, true),
+            Opcode::JumpUnless => self.handle_jump_if(proc, instruction.offset() as isize, false),
             Opcode::Call => self.handle_call(proc, pid),
             Opcode::TailCall => self.handle_tail_call(proc),
             Opcode::Recurse => self.handle_recurse(proc),
             Opcode::Function => self.handle_function(proc, operand),
             Opcode::Reset => self.handle_reset(proc, operand),
-            Opcode::Builtin => self.handle_builtin(proc, operand),
             Opcode::Equal => self.handle_equal(proc),
-            Opcode::Not => self.handle_not(proc),
             Opcode::Annotate => self.handle_annotate(proc, operand),
             Opcode::GetAnnotation => self.handle_get_annotation(proc, operand),
             Opcode::Stamp => self.handle_stamp(proc, operand),
@@ -1923,16 +1921,6 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_duplicate(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
-        let value = proc.stack.last().ok_or(Error::StackUnderflow)?.clone();
-        self.push_value(proc, value);
-
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
-        Ok(None)
-    }
-
     fn handle_pick(&mut self, proc: &mut Process, n: usize) -> Result<Option<Action<E>>, Error> {
         if proc.stack.len() <= n {
             return Err(Error::StackUnderflow);
@@ -1947,7 +1935,7 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_squash(
+    fn handle_drop(
         &mut self,
         proc: &mut Process,
         count: usize,
@@ -2278,33 +2266,30 @@ impl<E: Effect> Executor<E> {
         offset: isize,
     ) -> Result<Option<Action<E>>, Error> {
         if let Some(frame) = proc.frames.last_mut() {
-            // Jump modifies counter directly
-            // Add 1 to offset because in the old code, Jump got the centralized increment
+            // A jump counts from the instruction after it.
             frame.counter = frame.counter.wrapping_add_signed(offset + 1);
         }
         Ok(None)
     }
 
+    /// A conditional jump: `JumpIf` (`when_present`) jumps on a non-nil value, `JumpUnless`
+    /// on nil.
     fn handle_jump_if(
         &mut self,
         proc: &mut Process,
         offset: isize,
+        when_present: bool,
     ) -> Result<Option<Action<E>>, Error> {
         let condition = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
-
-        let should_jump = !condition.is_nil();
-
         if let Some(frame) = proc.frames.last_mut() {
-            if should_jump {
-                // Jump modifies counter directly
-                // Add 1 to offset because in the old code, JumpIf got the centralized increment
-                frame.counter = frame.counter.wrapping_add_signed(offset + 1);
+            // A jump counts from the instruction after it.
+            let step = if condition.is_nil() != when_present {
+                offset + 1
             } else {
-                // Not jumping, increment normally
-                frame.counter += 1;
-            }
+                1
+            };
+            frame.counter = frame.counter.wrapping_add_signed(step);
         }
-
         Ok(None)
     }
 
@@ -2653,26 +2638,6 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_builtin(
-        &mut self,
-        proc: &mut Process,
-        index: usize,
-    ) -> Result<Option<Action<E>>, Error> {
-        // Verify builtin exists
-        if index >= self.builtins.len() {
-            return Err(Error::BuiltinUndefined(index));
-        }
-        // Push builtin by index (no heap references). The entry's type argument, if it is
-        // an instantiated type-consuming builtin, rides the value to its eventual call.
-        let type_argument = self.builtin_type_arguments[index];
-        self.push_value(proc, Value::builtin_typed(index, type_argument));
-
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
-        Ok(None)
-    }
-
     fn handle_equal(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
         let right = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
         let left = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
@@ -2682,23 +2647,6 @@ impl<E: Effect> Executor<E> {
         // values are themselves nil — pushing the compared value would make "equal
         // nils" indistinguishable from "not equal".
         let result = if self.values_equal(&left, &right) {
-            Value::ok()
-        } else {
-            Value::nil()
-        };
-
-        self.push_value(proc, result);
-
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
-        Ok(None)
-    }
-
-    fn handle_not(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
-        let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
-
-        let result = if value.is_nil() {
             Value::ok()
         } else {
             Value::nil()

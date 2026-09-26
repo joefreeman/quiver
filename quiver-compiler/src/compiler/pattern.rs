@@ -340,11 +340,10 @@ pub fn generate_pattern_code(
         // Check all requirements for this binding set
         for requirement in &binding_set.requirements {
             emit_requirement(codegen, program, scopes, requirement)?;
-            codegen.add_instruction(Instruction::not());
             if is_last {
-                codegen.emit_jump_if_to_addr(fail_addr);
+                codegen.emit_jump_unless_to_addr(fail_addr);
             } else {
-                let skip = codegen.emit_jump_if_placeholder();
+                let skip = codegen.emit_jump_unless_placeholder();
                 next_set_jumps.push(skip);
             }
         }
@@ -398,7 +397,7 @@ fn emit_requirement(
 ) -> Result<(), Error> {
     match &requirement.check {
         RuntimeCheck::Path(other_path) => {
-            codegen.add_instruction(Instruction::duplicate());
+            codegen.add_instruction(Instruction::pick(0));
             for &access in &requirement.path {
                 emit_access(codegen, access);
             }
@@ -452,8 +451,7 @@ fn emit_requirement(
                 let mut next_set_jumps = Vec::new();
                 for requirement in requirements {
                     emit_requirement(codegen, program, scopes, requirement)?;
-                    codegen.add_instruction(Instruction::not());
-                    next_set_jumps.push(codegen.emit_jump_if_placeholder());
+                    next_set_jumps.push(codegen.emit_jump_unless_placeholder());
                 }
                 codegen.add_instruction(Instruction::tuple(NIL));
                 end_jumps.push(codegen.emit_jump_placeholder());
@@ -471,7 +469,7 @@ fn emit_requirement(
 }
 
 fn generate_value_access(codegen: &mut InstructionBuilder, path: &AccessPath) {
-    codegen.add_instruction(Instruction::duplicate());
+    codegen.add_instruction(Instruction::pick(0));
     for &access in path {
         emit_access(codegen, access);
     }
