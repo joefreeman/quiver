@@ -579,7 +579,7 @@ impl Collector {
                 }
             }
             ast::Match::Type(type_def) => self.type_def(type_def),
-            ast::Match::As(head, ..) => self.pattern(head),
+            ast::Match::As(head, ..) | ast::Match::Not(head) => self.pattern(head),
         }
     }
 

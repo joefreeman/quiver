@@ -132,6 +132,9 @@ module.exports = grammar({
     // is possible, and they match the same values.
     [$.placeholder, $.top_type],
     [$.pattern_partial, $.partial_type],
+    // `(\\P` opens either an alternation (`(\\P | Q)`) or a lone negation heading an
+    // ascription (`(\\P)x`); the `|` or `)` decides, via GLR.
+    [$._pattern, $._paren_negation],
     // `(a, b)` may be a punned tuple (value position) or a partial pattern (before a `=`,
     // or after one as `=(a, b)`); the surrounding position decides, via GLR.
     [$.pun, $._partial_field],
@@ -282,6 +285,7 @@ module.exports = grammar({
       $.pattern_tuple,
       $.pattern_partial,
       $.pattern_ascription,
+      $.pattern_negation,
       $.star,
       $.placeholder,
     ),
@@ -612,6 +616,7 @@ module.exports = grammar({
     bind_match: $ => seq('=', $._pattern),
 
     _pattern: $ => choice(
+      $.pattern_negation,
       $.pattern_pin,
       $.pattern_ascription,
       $.multiline_string,
@@ -648,9 +653,14 @@ module.exports = grammar({
     // The type reading wins where both are live, as it does without the binder, so the positive
     // dynamic precedence mirrors the `prec.dynamic(-1, …)` that tips `=(A[x] | B[x])` the other way.
     pattern_ascription: $ => seq(
-      choice(prec.dynamic(1, $._paren_type), $.pattern_or),
+      choice(prec.dynamic(1, $._paren_type), $.pattern_or, $._paren_negation),
       field('binding', alias($._identifier_immediate, $.identifier)),
     ),
+    // A negated pattern: `\\P` matches exactly when `P` doesn't (`\\[]`, `\\'int`, `\\&x`). The
+    // real parser requires the `\\` glued to its pattern; this grammar is looser.
+    pattern_negation: $ => seq('\\', $._pattern),
+    // A lone negation in parentheses heads an ascription: `(\\[])x`.
+    _paren_negation: $ => seq('(', optional($._nl), $.pattern_negation, optional($._nl), ')'),
     _identifier_immediate: _ => token.immediate(/[a-z][a-zA-Z0-9_]*\??!?/),
     // `*` binds every named field; `Name*` additionally requires the tuple's name. The `*`
     // is glued to the name, as a tuple pattern's name is glued to its bracket.

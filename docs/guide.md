@@ -50,6 +50,7 @@ Quiver uses a keyword-less syntax. The table below gives an overview of the symb
 | `$` | the function's parameter | `#'int { $ }` |
 | `$$` | the *enclosing* function's parameter | `#'int { #'int { $$ } }` |
 | `&` | pin: match against an existing value | `5 ~> =&x` |
+| `\` | negate a pattern | `5 ~> =\[]` |
 | `=` | bind, or match | `x = 5` / `5 ~> =x` |
 | `\|` | separates branches; union members; pattern alternatives | `{ =A => 1 \| 2 }` |
 | `=>` | separates condition from consequence | `{ =0 => "zero" \| "other" }` |
@@ -514,6 +515,30 @@ union:
 [[], 2] ~> =([x, []] | [[], x])p; p   //= [[], 2]
 ```
 
+### Negation
+
+`\` negates a pattern: `\P` matches exactly when `P` does not. It applies to any pattern,
+nested anywhere a pattern can be.
+
+```quiver
+5 ~> =\[]                         //= Ok // not nil
+<01> ~> =\'int                    //= Ok
+42 ~> =\42                        //= []
+A[b: <01>] ~> =A[b: \'int]         //= Ok
+2 ~> =\(0 | 1)                    //= Ok
+```
+
+When a negation matches, its pattern didn't, so there is nothing to bind inside one. A
+binder outside it is fine, and a negated type narrows to what is left: `(\[])x` binds `x`
+and fails if the value is nil, without having to name the value's type.
+
+```quiver
+succ = #('int | []) { (\[])n = $; %num.add [n, 1] }
+succ 4                        //= 5
+succ []                       //= []
+5 ~> =\x                      //! cannot bind
+```
+
 ### Where a match may appear
 
 A match that can fail must be the **last term of its chain**, because nothing
@@ -592,13 +617,10 @@ Square[side: 2] ~> size ~       //= "small"
 Circle[radius: 1] ~> size ~     //= "small"
 ```
 
-To test that a pattern does *not* match, let a committed branch answer nil:
+To test that a pattern does *not* match, [negate](#negation) it:
 
 ```quiver
-not_square? = #'shape {
-  | =Square() => []
-  | Ok
-}
+not_square? = #'shape { =\Square() }
 Circle[radius: 1] ~> not_square? ~   //= Ok
 Square[side: 1] ~> not_square? ~     //= []
 ```

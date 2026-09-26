@@ -128,6 +128,15 @@ pub enum Error {
         expected: Vec<String>,
         found: Vec<String>,
     },
+    /// A negated pattern binds a variable: when it matches, its inner pattern didn't, so there
+    /// is nothing to bind.
+    NegatedPatternBindings {
+        bindings: Vec<String>,
+    },
+    /// `\_`: a negation that can never match.
+    NegatedWildcard,
+    /// `\\P`: a double negation, which is just `P` without its bindings.
+    DoubleNegation,
 
     // Positional access
     PositionalIndexOutOfBounds {
@@ -422,6 +431,16 @@ impl std::fmt::Display for Error {
                     f,
                     "Alternatives of an or-pattern must bind the same variables (expected {expected:?}, found {found:?})"
                 )
+            }
+            Error::NegatedPatternBindings { bindings } => {
+                write!(
+                    f,
+                    "A negated pattern cannot bind variables (found {bindings:?}); bind outside it, as in `(\\[])x`"
+                )
+            }
+            Error::NegatedWildcard => write!(f, "`\\_` never matches"),
+            Error::DoubleNegation => {
+                write!(f, "A double negation `\\\\P` is just `P`; write `P`")
             }
             Error::PositionalIndexOutOfBounds { index } => {
                 write!(f, "Positional index {index} out of bounds")
@@ -966,7 +985,7 @@ fn collect_pin_targets<'m>(pattern: &'m ast::Match, out: &mut Vec<&'m ast::PinTa
                 collect_pin_targets(alternative, out);
             }
         }
-        ast::Match::As(head, _, _) => collect_pin_targets(head, out),
+        ast::Match::As(head, _, _) | ast::Match::Not(head) => collect_pin_targets(head, out),
         _ => {}
     }
 }

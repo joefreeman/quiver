@@ -258,6 +258,10 @@
             "named": true
           },
           {
+            "type": "pattern_negation",
+            "named": true
+          },
+          {
             "type": "pattern_or",
             "named": true
           },
@@ -363,6 +367,10 @@
         },
         {
           "type": "pattern_ascription",
+          "named": true
+        },
+        {
+          "type": "pattern_negation",
           "named": true
         },
         {
@@ -508,6 +516,10 @@
           },
           {
             "type": "pattern_ascription",
+            "named": true
+          },
+          {
+            "type": "pattern_negation",
             "named": true
           },
           {
@@ -1506,6 +1518,10 @@
           "named": true
         },
         {
+          "type": "pattern_negation",
+          "named": true
+        },
+        {
           "type": "pattern_or",
           "named": true
         },
@@ -1519,6 +1535,117 @@
         },
         {
           "type": "self_default_type",
+          "named": true
+        },
+        {
+          "type": "top_type",
+          "named": true
+        },
+        {
+          "type": "tuple_type",
+          "named": true
+        },
+        {
+          "type": "type_identifier",
+          "named": true
+        },
+        {
+          "type": "union_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "pattern_negation",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "binary",
+          "named": true
+        },
+        {
+          "type": "cycle_type",
+          "named": true
+        },
+        {
+          "type": "function_type",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "intersection_type",
+          "named": true
+        },
+        {
+          "type": "module_type",
+          "named": true
+        },
+        {
+          "type": "multiline_string",
+          "named": true
+        },
+        {
+          "type": "partial_type",
+          "named": true
+        },
+        {
+          "type": "pattern_ascription",
+          "named": true
+        },
+        {
+          "type": "pattern_negation",
+          "named": true
+        },
+        {
+          "type": "pattern_or",
+          "named": true
+        },
+        {
+          "type": "pattern_partial",
+          "named": true
+        },
+        {
+          "type": "pattern_pin",
+          "named": true
+        },
+        {
+          "type": "pattern_tuple",
+          "named": true
+        },
+        {
+          "type": "placeholder",
+          "named": true
+        },
+        {
+          "type": "process_type",
+          "named": true
+        },
+        {
+          "type": "resource_type",
+          "named": true
+        },
+        {
+          "type": "self_default_type",
+          "named": true
+        },
+        {
+          "type": "star",
+          "named": true
+        },
+        {
+          "type": "string",
           "named": true
         },
         {
@@ -1586,6 +1713,10 @@
         },
         {
           "type": "pattern_ascription",
+          "named": true
+        },
+        {
+          "type": "pattern_negation",
           "named": true
         },
         {
@@ -1708,6 +1839,10 @@
         },
         {
           "type": "pattern_ascription",
+          "named": true
+        },
+        {
+          "type": "pattern_negation",
           "named": true
         },
         {
@@ -1864,6 +1999,10 @@
         },
         {
           "type": "pattern_ascription",
+          "named": true
+        },
+        {
+          "type": "pattern_negation",
           "named": true
         },
         {

@@ -276,6 +276,8 @@ impl<'a> FreeVariableCollector<'a> {
                 // hold pins (`=(&a | &b)v`).
                 self.visit_match(head);
             }
+            // A negation can't bind, but may pin (`=\&x`).
+            ast::Match::Not(inner) => self.visit_match(inner),
             // These don't contain nested patterns or variable references.
             ast::Match::Identifier(_, _)
             | ast::Match::Literal(_)

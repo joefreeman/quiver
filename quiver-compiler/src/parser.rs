@@ -1248,6 +1248,9 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
     // We use a limited pattern parser here to avoid left recursion
     fn nested_pattern(input: Span) -> IResult<Span, Match> {
         alt((
+            map(preceded(char('\\'), nested_pattern), |p| {
+                Match::Not(Box::new(p))
+            }),
             // Pin with & prefix (a variable- or `$`-rooted access path)
             pin_pattern,
             // String literal
@@ -2835,6 +2838,8 @@ fn type_or_alternation(input: Span) -> IResult<Span, Match> {
     alt((
         map(inline_type_expression, Match::Type),
         map(or_pattern, Match::Or),
+        // A lone negation is a head too, so `(\[])x` binds a value required to be non-nil.
+        delimited(pair(char('('), wsc), negated_pattern, pair(wsc, char(')'))),
     ))(input)
 }
 
@@ -2853,6 +2858,14 @@ fn as_pattern(input: Span) -> IResult<Span, Match> {
     Ok((input, Match::As(Box::new(head), name, Spanned(Some(span)))))
 }
 
+/// A negated pattern: `\` glued to the pattern it negates (`\[]`, `\'int`, `\&x`,
+/// `\(A | B)`).
+fn negated_pattern(input: Span) -> IResult<Span, Match> {
+    map(preceded(char('\\'), match_pattern), |p| {
+        Match::Not(Box::new(p))
+    })(input)
+}
+
 fn match_pattern(input: Span) -> IResult<Span, Match> {
     // Patterns recur through their own functions rather than through `primary`, and a step
     // tries the binding spelling (`P = value`) before anything else, so a deeply nested
@@ -2865,6 +2878,7 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
         )));
     };
     alt((
+        negated_pattern,
         // Pin with & prefix: a variable- or `$`-rooted access path to check the value against.
         pin_pattern,
         // Try string literals first (before tuples and literals)

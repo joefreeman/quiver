@@ -4,12 +4,15 @@ use crate::ast;
 use quiver_core::{
     bytecode::{Constant, Instruction},
     program::Program,
-    types::{Type, TypeLookup},
+    types::{NIL, OK, Type, TypeLookup},
 };
 
 use super::{
-    Error, codegen::InstructionBuilder, narrowing::intersect_types, type_queries,
-    typing::union_type_ids,
+    Error,
+    codegen::InstructionBuilder,
+    narrowing::{self, intersect_types},
+    type_queries,
+    typing::{self, union_type_ids},
 };
 
 // Type aliases for complex pattern matching types (using type IDs)
@@ -70,6 +73,9 @@ enum RuntimeCheck {
         steps: Vec<Access>,
     },
     Path(AccessPath),
+    /// A negated pattern (`\\P`): holds exactly when no set of `P`'s requirements all hold.
+    /// Each inner set's requirements carry their own (absolute) paths.
+    Not(Vec<Vec<Requirement>>),
 }
 
 /// How a pin's root value is loaded at codegen.
@@ -197,6 +203,9 @@ pub fn prevents_complement_narrowing(binding_sets: &[BindingSet], program: &Prog
             match &req.check {
                 // Value-based checks prevent complement narrowing
                 RuntimeCheck::Literal(_) | RuntimeCheck::Pin { .. } | RuntimeCheck::Path(_) => true,
+                // A negation's narrowed type (the complement of its inner pattern's) is only
+                // ever an over-approximation, so its own complement would under-approximate.
+                RuntimeCheck::Not(_) => true,
                 // Concrete type checks — at any depth — are fine: `compute_complement` is
                 // structural over tuple fields (and sound on recursive types), so a failed inner
                 // check soundly refines the outer type. Partial checks remain an exception, as
@@ -299,57 +308,7 @@ pub fn generate_pattern_code(
 
         // Check all requirements for this binding set
         for requirement in &binding_set.requirements {
-            match &requirement.check {
-                RuntimeCheck::Path(other_path) => {
-                    codegen.add_instruction(Instruction::duplicate());
-                    for &access in &requirement.path {
-                        emit_access(codegen, access);
-                    }
-                    codegen.add_instruction(Instruction::pick(1));
-                    for &access in other_path {
-                        emit_access(codegen, access);
-                    }
-                    codegen.add_instruction(Instruction::equal());
-                }
-                RuntimeCheck::TypeId(type_id) => {
-                    generate_value_access(codegen, &requirement.path);
-                    codegen.add_instruction(Instruction::is_type(*type_id));
-                }
-                RuntimeCheck::Literal(literal) => {
-                    generate_value_access(codegen, &requirement.path);
-                    match literal {
-                        ast::Literal::Integer(val) => {
-                            let idx = program.register_constant(Constant::Integer(val.clone()));
-                            codegen.add_instruction(Instruction::constant(idx));
-                        }
-                        ast::Literal::Binary(binary) => {
-                            let idx = program
-                                .register_constant(Constant::Binary(binary.bytes().to_vec()));
-                            codegen.add_instruction(Instruction::constant(idx));
-                        }
-                    }
-                    codegen.add_instruction(Instruction::equal());
-                }
-                RuntimeCheck::Pin { load, steps } => {
-                    generate_value_access(codegen, &requirement.path);
-                    let index = match load {
-                        PinLoad::Variable(name, accessors) => {
-                            super::scopes::lookup_variable(scopes, name, accessors)
-                                .ok_or_else(|| Error::InternalError {
-                                    message: format!("Pin variable '{}' not found in scope", name),
-                                })?
-                                .1
-                        }
-                        PinLoad::Parameter => super::scopes::get_function_parameter(scopes)?.1,
-                    };
-                    codegen.add_instruction(Instruction::load(index));
-                    for &step in steps {
-                        emit_access(codegen, step);
-                    }
-                    codegen.add_instruction(Instruction::equal());
-                }
-            }
-
+            emit_requirement(codegen, program, scopes, requirement)?;
             codegen.add_instruction(Instruction::not());
             if is_last {
                 codegen.emit_jump_if_to_addr(fail_addr);
@@ -386,6 +345,88 @@ pub fn generate_pattern_code(
         codegen.patch_jump_to_here(end_jump);
     }
 
+    Ok(())
+}
+
+/// Emit the test for one requirement, leaving its truthiness (`Ok` or nil) on the stack above the
+/// scrutinee, which it leaves in place.
+fn emit_requirement(
+    codegen: &mut InstructionBuilder,
+    program: &mut Program,
+    scopes: &[super::scopes::Scope],
+    requirement: &Requirement,
+) -> Result<(), Error> {
+    match &requirement.check {
+        RuntimeCheck::Path(other_path) => {
+            codegen.add_instruction(Instruction::duplicate());
+            for &access in &requirement.path {
+                emit_access(codegen, access);
+            }
+            codegen.add_instruction(Instruction::pick(1));
+            for &access in other_path {
+                emit_access(codegen, access);
+            }
+            codegen.add_instruction(Instruction::equal());
+        }
+        RuntimeCheck::TypeId(type_id) => {
+            generate_value_access(codegen, &requirement.path);
+            codegen.add_instruction(Instruction::is_type(*type_id));
+        }
+        RuntimeCheck::Literal(literal) => {
+            generate_value_access(codegen, &requirement.path);
+            match literal {
+                ast::Literal::Integer(val) => {
+                    let idx = program.register_constant(Constant::Integer(val.clone()));
+                    codegen.add_instruction(Instruction::constant(idx));
+                }
+                ast::Literal::Binary(binary) => {
+                    let idx = program.register_constant(Constant::Binary(binary.bytes().to_vec()));
+                    codegen.add_instruction(Instruction::constant(idx));
+                }
+            }
+            codegen.add_instruction(Instruction::equal());
+        }
+        RuntimeCheck::Pin { load, steps } => {
+            generate_value_access(codegen, &requirement.path);
+            let index = match load {
+                PinLoad::Variable(name, accessors) => {
+                    super::scopes::lookup_variable(scopes, name, accessors)
+                        .ok_or_else(|| Error::InternalError {
+                            message: format!("Pin variable '{}' not found in scope", name),
+                        })?
+                        .1
+                }
+                PinLoad::Parameter => super::scopes::get_function_parameter(scopes)?.1,
+            };
+            codegen.add_instruction(Instruction::load(index));
+            for &step in steps {
+                emit_access(codegen, step);
+            }
+            codegen.add_instruction(Instruction::equal());
+        }
+        RuntimeCheck::Not(sets) => {
+            // `Ok` exactly when no inner set's requirements all hold: an inner set that
+            // passes every test answers nil; running out of sets answers `Ok`.
+            let mut end_jumps = Vec::new();
+            for requirements in sets {
+                let mut next_set_jumps = Vec::new();
+                for requirement in requirements {
+                    emit_requirement(codegen, program, scopes, requirement)?;
+                    codegen.add_instruction(Instruction::not());
+                    next_set_jumps.push(codegen.emit_jump_if_placeholder());
+                }
+                codegen.add_instruction(Instruction::tuple(NIL));
+                end_jumps.push(codegen.emit_jump_placeholder());
+                for jump in next_set_jumps {
+                    codegen.patch_jump_to_here(jump);
+                }
+            }
+            codegen.add_instruction(Instruction::tuple(OK));
+            for jump in end_jumps {
+                codegen.patch_jump_to_here(jump);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -516,6 +557,15 @@ fn analyze_match_pattern(
             }
             Ok((sets, narrowed_type_id))
         }
+        ast::Match::Not(inner) => analyze_negated_pattern(
+            env,
+            program,
+            inner,
+            value_type_id,
+            path,
+            scopes,
+            value_provenance,
+        ),
         ast::Match::Star(name) => {
             analyze_star_pattern(program, name.as_ref(), value_type_id, path, identifiers)
         }
@@ -673,6 +723,87 @@ fn type_check_requirements(
         narrowed = next;
     }
     Ok((requirements, narrowed))
+}
+
+/// Analyze a negated pattern `\\P`: a single requirement that none of `P`'s binding sets holds.
+///
+/// `P` may not bind: when the negation matches, `P` didn't, so its bindings would be unset. A name
+/// inside a negation can only be a binder (pins are `&`), so `P` is analyzed in a fresh identifier
+/// scope and any binding is rejected. The narrowed type is the complement of `P`'s — exact for a
+/// pure type test on non-recursive positions, as for complement narrowing across branches — and
+/// otherwise the value's type unchanged (a value test like `\\42` or `\\&x` narrows nothing).
+fn analyze_negated_pattern(
+    env: &mut super::typing::TypeEnv,
+    program: &mut Program,
+    inner: &ast::Match,
+    value_type_id: usize,
+    path: AccessPath,
+    scopes: &[super::scopes::Scope],
+    value_provenance: &super::provenance::Provenance,
+) -> Result<(Vec<BindingSet>, usize), Error> {
+    match inner {
+        ast::Match::Placeholder | ast::Match::Type(ast::Type::Top) => {
+            return Err(Error::NegatedWildcard);
+        }
+        ast::Match::Not(_) => return Err(Error::DoubleNegation),
+        _ => {}
+    }
+    let (sets, inner_narrowed) = analyze_match_pattern(
+        env,
+        program,
+        inner,
+        value_type_id,
+        path.clone(),
+        &mut HashMap::new(),
+        scopes,
+        value_provenance,
+    )?;
+    let mut bindings: Vec<String> = sets
+        .iter()
+        .flat_map(|set| set.bindings.iter().map(|binding| binding.name.clone()))
+        .collect();
+    if !bindings.is_empty() {
+        bindings.sort();
+        bindings.dedup();
+        return Err(Error::NegatedPatternBindings { bindings });
+    }
+
+    let always_matches = || {
+        vec![BindingSet {
+            requirements: vec![],
+            bindings: vec![],
+        }]
+    };
+    // `P` can never match this value, so the negation always does.
+    if sets.is_empty() {
+        return Ok((always_matches(), value_type_id));
+    }
+    // `P` always matches, so the negation never does.
+    if is_irrefutable(&sets) {
+        return Ok((vec![], program.never()));
+    }
+
+    let exact = !prevents_complement_narrowing(&sets, program)
+        && !narrowing::pattern_constrains_recursive_field(inner, value_type_id, program)
+        && !typing::contains_variables(value_type_id, &*program);
+    let narrowed_type_id = if exact {
+        narrowing::compute_complement(value_type_id, inner_narrowed, program)
+    } else {
+        value_type_id
+    };
+    if is_never(narrowed_type_id, program) {
+        return Ok((vec![], narrowed_type_id));
+    }
+    Ok((
+        vec![BindingSet {
+            requirements: vec![Requirement {
+                path,
+                check: RuntimeCheck::Not(sets.into_iter().map(|set| set.requirements).collect()),
+            }],
+            bindings: vec![],
+        }],
+        narrowed_type_id,
+    ))
 }
 
 /// Analyze an alternation pattern `(p | q | …)`. Each alternative is analyzed independently and

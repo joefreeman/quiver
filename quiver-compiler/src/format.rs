@@ -1718,6 +1718,7 @@ fn match_doc(pattern: &Match) -> Doc {
     match pattern {
         Match::Tuple(tuple) if !tuple.fields.is_empty() => match_tuple_doc(tuple),
         Match::Partial(partial) if !partial.fields.is_empty() => partial_pattern_doc(partial),
+        Match::Not(inner) => pretty::concat(vec![pretty::text("\\"), match_doc(inner)]),
         other => pretty::text(render_match_flat(other)),
     }
 }
@@ -1738,6 +1739,7 @@ fn render_match_flat(pattern: &Match) -> String {
         Match::Star(None) => "*".to_string(),
         Match::Star(Some(name)) => format!("{}*", name),
         Match::Placeholder => "_".to_string(),
+        Match::Not(inner) => format!("\\{}", render_match(inner)),
         Match::Pin(target) => {
             let mut out = String::from("&");
             // As in `render_access`, a first accessor on `$` is written dotless (`&$x`, `&$0`).
@@ -2940,6 +2942,12 @@ mod tests {
             "=(+File)fd",
             "('bin)ip = f x; ip",
             "=([a] | [b])",
+            // Negation glues to what it negates, and a lone negation heads a binder.
+            "=\\[]",
+            "=A[b: \\'int, c: \\&y]",
+            "=\\(0 | 1)",
+            "=(\\[])n",
+            "(\\[])n = f x; n",
             // An alternation head renders its own pair, and takes a binder like a type head.
             "=(32 | 9 | 10 | 13)b",
             "=([a, _] | [_, a])whole",

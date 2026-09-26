@@ -590,6 +590,10 @@ pub enum Match {
     /// (`A[a: ('int)x]`), so it can narrow-and-capture a union variant in one step. The `Spanned`
     /// covers the binding identifier.
     As(Box<Match>, String, Spanned),
+    /// A negated pattern `\P`: matches exactly when `P` does not. `P` may not bind (nothing
+    /// matched, so there is nothing to bind), but may pin, test types, and nest anywhere a pattern
+    /// can (`=A[b: \'int]`). `(\[])x` binds `x` while requiring it to be non-nil.
+    Not(Box<Match>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -306,3 +306,54 @@ Point* = p
         name: (tuple_name))
       (access
         source: (identifier)))))
+
+==================
+negated patterns
+==================
+
+x ~> =\[]
+x ~> =A[b: \'int, c: \&y]
+x ~> =\(A | B)
+(\[])n = x
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (access
+        (identifier))
+      (bind_match
+        (pattern_negation
+          (pattern_tuple))))
+    (chain
+      (access
+        (identifier))
+      (bind_match
+        (pattern_tuple
+          (tuple_name)
+          (identifier)
+          (pattern_negation
+            (type_identifier
+              (type_name)))
+          (identifier)
+          (pattern_negation
+            (pattern_pin
+              (identifier))))))
+    (chain
+      (access
+        (identifier))
+      (bind_match
+        (pattern_negation
+          (union_type
+            (tuple_type
+              (tuple_name))
+            (tuple_type
+              (tuple_name))))))
+    (chain
+      (pattern_ascription
+        (pattern_negation
+          (pattern_tuple))
+        (identifier))
+      (access
+        (identifier)))))

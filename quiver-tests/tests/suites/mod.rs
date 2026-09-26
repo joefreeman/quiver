@@ -37,6 +37,7 @@ mod live_socket;
 mod matching;
 mod module_cache;
 mod narrowing;
+mod negation;
 mod nil_match;
 mod num;
 mod optional_fields;
