@@ -63,7 +63,7 @@ Quiver uses a keyword-less syntax. The table below gives an overview of the symb
 | `.` | field access | `p.x` |
 | `...` | spread operator | `[...p, y: 3]` |
 | `\` | identifies a resource type | `\File` |
-| `_` | ignore value in a pattern | `=[x, _]` |
+| `_` | ignore value in a pattern; the top type | `=[x, _]`, `#'int -> _` |
 | `*` | bind every named field | `* = p` |
 
 ## Values
@@ -689,6 +689,40 @@ nudge Point[x: 1, y: 2, z: 3]   //= 2
 ```
 
 `()` matches any tuple, and `Point()` any tuple named `Point`.
+
+### The top type
+
+`_` is the type of every value — the type-level reading of the `_` that ignores a value in
+a pattern. It is written where a type does not matter, most often the result of a callback
+that is only tested for nil:
+
+```quiver
+keep? = #[(x): 'int, (pred): #'int -> _] { | $pred $x => Kept | Dropped }
+keep? [3, #{ %num.gt? [$, 2] }]   //= Kept
+keep? [3, #{ "any answer" }]      //= Kept
+keep? [3, #{ [] }]                //= Dropped
+```
+
+Nothing is known about a `_` value, so it cannot be used as anything narrower. It can be
+passed on, or matched, which is how it is narrowed back to something usable. A tuple
+pattern tests for its own shape:
+
+```quiver
+describe = #_ {
+  | =('int)n => %num.add [n, 1]
+  | =Point[x: ('int)x, y: _] => x
+  | 0
+}
+describe 5                        //= 6
+describe Point[x: 1, y: 2]        //= 1
+describe <01>                     //= 0
+
+id = #_ { $ }
+id 5 ~> %num.add [~, 1]           //! Type mismatch
+```
+
+Nil is a member, so a `_` result short-circuits a sequence like any fallible one. `_`
+absorbs any union it is part of, and leaves any type it is intersected with unchanged.
 
 ### Recursive types
 

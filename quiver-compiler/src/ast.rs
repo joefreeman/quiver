@@ -621,6 +621,8 @@ pub enum Type {
     Cycle(Option<usize>),
     Process(ProcessType),
     Resource(String),
+    /// The top type `_`, which every value belongs to.
+    Top,
     /// A type reached through a module's type namespace: `'%mod` (the module's default
     /// type, `member: None`) or `'%mod.name` (a named type). `arguments` are type
     /// arguments applied to the referenced (parameterised) type, e.g. `'%list<'int>`.

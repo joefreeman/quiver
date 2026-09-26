@@ -4460,6 +4460,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "top_type"
+        },
+        {
+          "type": "SYMBOL",
           "name": "cycle_type"
         },
         {
@@ -5581,6 +5585,10 @@
       "type": "PATTERN",
       "value": "\\\\[A-Z][a-zA-Z0-9_]*"
     },
+    "top_type": {
+      "type": "STRING",
+      "value": "_"
+    },
     "cycle_type": {
       "type": "PREC_RIGHT",
       "value": 0,
@@ -5900,6 +5908,10 @@
     [
       "_pattern",
       "_type_atom"
+    ],
+    [
+      "placeholder",
+      "top_type"
     ],
     [
       "pattern_partial",

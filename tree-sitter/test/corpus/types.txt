@@ -389,3 +389,30 @@ intersection binds tighter than union
               name: (type_name))))
         (tuple_type
           name: (tuple_name))))))
+
+==================
+top type
+==================
+
+'pred = #'int -> _
+'pair = [_, '%list<_>]
+
+---
+
+(source_file
+  (sequence
+    (type_alias
+      (type_name)
+      (function_type
+        (type_identifier
+          (type_name))
+        (top_type)))
+    (type_alias
+      (type_name)
+      (tuple_type
+        (top_type)
+        (module_type
+          (import
+            (identifier))
+          (type_arguments
+            (top_type)))))))

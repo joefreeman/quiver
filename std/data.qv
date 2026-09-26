@@ -10,7 +10,7 @@
 // failed match.
 
 [
-  encode: #<'t>'t {
+  encode: #_ {
     :doc "Encodes a data value (integers, binaries, tuples — no refs, pids, functions, or resources, which are runtime errors) as Quiver data notation. `decode` reads it back."
     __data_encode__ $ ~> Str[~]
   },

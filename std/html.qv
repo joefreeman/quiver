@@ -742,7 +742,7 @@ html_dialect = #(content: '%str, term: '%meta.cb) {
 
 // Append rendered attributes onto `acc`: ` name`, ` name="escaped value"`; nil omits.
 // A `Data` value renders as its %data notation — the attribute text a client echoes back.
-render_attrs = #<'d>[(items): 'attrs<'d>, (acc): 'bin] {
+render_attrs = #[(items): 'attrs<_>, (acc): 'bin] {
   $items ~> {
     | =Nil => $acc
     | =Cons[[Str[n], v], rest] => {
@@ -770,7 +770,7 @@ render_attrs = #<'d>[(items): 'attrs<'d>, (acc): 'bin] {
 }
 
 // Render a list of nodes onto `acc`, self-passed to recurse into children.
-render_list = #<'e>[(self): ^, (items): 'nodes<'e>, (acc): 'bin] -> 'bin {
+render_list = #[(self): ^, (items): 'nodes<_>, (acc): 'bin] -> 'bin {
   $items ~> {
     | =Nil => $acc
     | =Cons[node, rest] => {
@@ -800,12 +800,12 @@ render_list = #<'e>[(self): ^, (items): 'nodes<'e>, (acc): 'bin] -> 'bin {
   }
 }
 
-render = #<'e>'<'e> {
+render = #'<_> {
   :doc "Renders a node tree to its HTML string: Text nodes and attribute values are escaped, Raw nodes are emitted verbatim, nil-valued attributes are omitted, Ok-valued attributes render bare, and event values render as their %data notation."
   render_list [render_list, Cons[$, Nil], <>] ~> Str[~]
 }
 
-page = #<'e>'<'e> {
+page = #'<_> {
   :doc "Renders a node tree as a whole page: the doctype followed by the rendered tree."
   %str.concat ["<!doctype html>", render $]
 }

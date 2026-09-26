@@ -765,15 +765,15 @@ fn compute_compatible_concrete_types(
     // A primitive is testable only through a type-table entry representing it (the
     // `TypeIndex` slot): a pattern that could match a primitive names it, so the
     // entry exists whenever the verdict could be positive. No fallback — in
-    // particular an empty union matches nothing, consistent with `is_compatible`.
+    // particular an empty union matches nothing, consistent with `is_compatible`. The
+    // top type is the exception, admitting a primitive it does not name.
+    let top = matches!(lookup.lookup_type(pattern_id), Some(Type::Top));
     for (slot, concrete) in [
         (index.integer, ConcreteType::Integer),
         (index.binary, ConcreteType::Binary),
         (index.reference, ConcreteType::Reference),
     ] {
-        if let Some(type_id) = slot
-            && is_compatible(type_id, pattern_id, lookup)
-        {
+        if top || slot.is_some_and(|type_id| is_compatible(type_id, pattern_id, lookup)) {
             compat_set.insert(concrete);
         }
     }

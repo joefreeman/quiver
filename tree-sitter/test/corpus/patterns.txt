@@ -118,7 +118,7 @@ $y ~> =&$x.q
 or-pattern
 ==================
 
-x ~> =([[], _] | [_, []])
+x ~> =([[], y] | [y, []])
 
 ---
 
@@ -131,10 +131,32 @@ x ~> =([[], _] | [_, []])
         (pattern_or
           (pattern_tuple
             (pattern_tuple)
-            (placeholder))
+            (identifier))
           (pattern_tuple
-            (placeholder)
+            (identifier)
             (pattern_tuple)))))))
+
+==================
+parenthesised underscore reads as a type
+==================
+
+x ~> =([[], _] | [_, []])
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (access
+        source: (identifier))
+      (bind_match
+        (union_type
+          (tuple_type
+            (tuple_type)
+            (top_type))
+          (tuple_type
+            (top_type)
+            (tuple_type)))))))
 
 ==================
 default type pattern

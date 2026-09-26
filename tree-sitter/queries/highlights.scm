@@ -24,6 +24,7 @@
 (resource_type) @type
 (tuple_name) @constructor
 (cycle_type) @type.builtin
+(top_type) @type.builtin
 ; The bare `'` of a module's nameless default-type marker (`' = ...`).
 (default_type_name) @type
 ; A bare `'` referring to the module's own default type, in a type position.

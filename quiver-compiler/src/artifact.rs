@@ -757,6 +757,7 @@ fn fingerprint_type(type_id: usize, program: &Program, memo: &mut HashMap<usize,
             5u8.hash(&mut hasher);
             name.hash(&mut hasher);
         }
+        Type::Top => 12u8.hash(&mut hasher),
         Type::Tuple(tuple_id) => {
             6u8.hash(&mut hasher);
             let info = &program.get_tuples()[*tuple_id];
@@ -1356,6 +1357,7 @@ fn type_children(ty: &Type) -> Vec<usize> {
         | Type::Cycle(_)
         | Type::Resource(_)
         | Type::Variable(_)
+        | Type::Top
         | Type::Tuple(_) => Vec::new(),
         Type::Union(members) => members.clone(),
         Type::Partial { fields, .. } => fields.iter().map(|(_, id)| *id).collect(),
@@ -1729,7 +1731,8 @@ fn collect_type_children(ty: &Type, closure: &mut Closure, queue: &mut Vec<Item>
         | Type::Reference
         | Type::Cycle(_)
         | Type::Resource(_)
-        | Type::Variable(_) => {}
+        | Type::Variable(_)
+        | Type::Top => {}
         Type::Tuple(tuple_id) => add_tuple(*tuple_id, closure, queue),
         Type::Partial { fields, .. } => {
             for (_, type_id) in fields {
@@ -1911,7 +1914,8 @@ fn type_refs(ty: &Type) -> Vec<TypeRef> {
         | Type::Reference
         | Type::Cycle(_)
         | Type::Resource(_)
-        | Type::Variable(_) => Vec::new(),
+        | Type::Variable(_)
+        | Type::Top => Vec::new(),
     }
 }
 

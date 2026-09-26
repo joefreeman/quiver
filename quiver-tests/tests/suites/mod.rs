@@ -67,6 +67,7 @@ mod tail_calls;
 mod time;
 mod tls;
 mod tls_leaks;
+mod top_type;
 mod tuples;
 mod types;
 mod units;

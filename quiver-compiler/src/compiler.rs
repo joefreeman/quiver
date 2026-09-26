@@ -1491,7 +1491,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 Ok(())
             }
-            ast::Type::Primitive(_) | ast::Type::Cycle(_) | ast::Type::Resource(_) => Ok(()),
+            ast::Type::Primitive(_)
+            | ast::Type::Cycle(_)
+            | ast::Type::Resource(_)
+            | ast::Type::Top => Ok(()),
         }
     }
 

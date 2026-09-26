@@ -128,6 +128,9 @@ module.exports = grammar({
     // patterns) or as a parenthesised type union; both are accepted for editor purposes.
     [$.pattern_tuple, $.tuple_type],
     [$._pattern, $._type_atom],
+    // `_` is a pattern's placeholder and the top type alike; inside `( … )` either reading
+    // is possible, and they match the same values.
+    [$.placeholder, $.top_type],
     [$.pattern_partial, $.partial_type],
     // `(a, b)` may be a punned tuple (value position) or a partial pattern (before a `=`,
     // or after one as `=(a, b)`); the surrounding position decides, via GLR.
@@ -724,6 +727,7 @@ module.exports = grammar({
       $.tuple_type,
       $.partial_type,
       $.resource_type,
+      $.top_type,
       $.cycle_type,
       $.process_type,
       $.module_type,
@@ -819,6 +823,9 @@ module.exports = grammar({
     type_spread: $ => seq('...', optional(seq($.type_name, optional($.type_arguments)))),
 
     resource_type: $ => /\\[A-Z][a-zA-Z0-9_]*/,
+
+    // The top type: every value belongs to it. The same token as a pattern's placeholder.
+    top_type: _ => '_',
     cycle_type: $ => prec.right(seq('^', optional($.index))),
 
     // Process type: each grant spelled as the operation that exercises it — a glued

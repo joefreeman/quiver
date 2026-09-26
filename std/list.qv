@@ -73,7 +73,7 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
     =Cons[_, tail] => tail
   },
 
-  empty?: #<'t>'<'t> {
+  empty?: #'<_> {
     :doc "Whether the list is empty."
     =Nil => Ok
   },
@@ -120,7 +120,7 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
     to_iter $list ~> %iter.map [~, $f] ~> from_iter ~
   },
 
-  filter: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
+  filter: #<'t>[(list): '<'t>, (pred): #'t -> _] {
     :doc "The elements for which the predicate is non-nil."
     to_iter $list ~> %iter.filter [~, $pred] ~> from_iter ~
   },
@@ -135,12 +135,12 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
     to_iter $list ~> %iter.drop [~, $n] ~> from_iter ~
   },
 
-  take_while: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
+  take_while: #<'t>[(list): '<'t>, (pred): #'t -> _] {
     :doc "The leading elements for which the predicate is non-nil."
     to_iter $list ~> %iter.take_while [~, $pred] ~> from_iter ~
   },
 
-  drop_while: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
+  drop_while: #<'t>[(list): '<'t>, (pred): #'t -> _] {
     :doc "The list without its leading elements for which the predicate is non-nil."
     to_iter $list ~> %iter.drop_while [~, $pred] ~> from_iter ~
   },
@@ -181,7 +181,7 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
     to_iter $list ~> %iter.fold [~, $init, $f]
   },
 
-  count: #<'t>'<'t> {
+  count: #'<_> {
     :doc "The number of elements in the list."
     to_iter ~ ~> %iter.count ~
   },
@@ -191,22 +191,22 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
     to_iter $list ~> %iter.nth [~, $n]
   },
 
-  find: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
+  find: #<'t>[(list): '<'t>, (pred): #'t -> _] {
     :doc "The first element for which the predicate is non-nil, or nil when none matches."
     to_iter $list ~> %iter.find [~, $pred]
   },
 
-  find_index: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
+  find_index: #<'t>[(list): '<'t>, (pred): #'t -> _] {
     :doc "The zero-based index of the first matching element, or nil when none matches."
     to_iter $list ~> %iter.find_index [~, $pred]
   },
 
-  any?: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
+  any?: #<'t>[(list): '<'t>, (pred): #'t -> _] {
     :doc "Whether any element satisfies the predicate."
     to_iter $list ~> %iter.any? [~, $pred]
   },
 
-  all?: #<'t, 'r>[(list): '<'t>, (pred): #'t -> 'r] {
+  all?: #<'t>[(list): '<'t>, (pred): #'t -> _] {
     :doc "Whether every element satisfies the predicate."
     to_iter $list ~> %iter.all? [~, $pred]
   },

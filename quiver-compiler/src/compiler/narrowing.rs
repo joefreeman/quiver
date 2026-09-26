@@ -500,8 +500,11 @@ fn intersect_variants(a_id: usize, b_id: usize, stacks: &mut Walk, program: &mut
         for &bv in &b_variants {
             let piece = intersect_pair(av, bv, stacks, program);
             if piece != never {
-                let from_b = matches!(program.lookup_type(av), Some(Type::Partial { .. }))
-                    && matches!(program.lookup_type(bv), Some(Type::Tuple(_)));
+                let from_b = match (program.lookup_type(av), program.lookup_type(bv)) {
+                    (Some(Type::Partial { .. }), Some(Type::Tuple(_))) => true,
+                    (Some(Type::Top), Some(bt)) => !matches!(bt, Type::Top),
+                    _ => false,
+                };
                 pieces.push((piece, if from_b { b_id } else { a_id }));
             }
         }
@@ -534,6 +537,10 @@ fn intersect_pair(a: usize, b: usize, stacks: &mut Walk, program: &mut Program) 
     };
 
     match (&ta, &tb) {
+        // Everything is in the top type, so it leaves the other side as it is. A reference
+        // meeting it is resolved first, below, as it is against any concrete type.
+        (Type::Top, tb) if !matches!(tb, Type::Cycle(_)) => b,
+        (ta, Type::Top) if !matches!(ta, Type::Cycle(_)) => a,
         // A type variable is opaque; keep the value's own type rather than discard genericity.
         (Type::Variable(_), _) | (_, Type::Variable(_)) => a,
         // A concrete type meeting `b`'s recursive reference meets the union it names — keeping

@@ -111,14 +111,14 @@ ws = #' {
   }
 }
 
-tw_end = #<'t>[(data): 'bin, (pos): 'int, (len): 'int, (pred): 'pred<'t>] {
+tw_end = #[(data): 'bin, (pos): 'int, (len): 'int, (pred): 'pred<_>] {
   | __integer_compare__ [$pos, $len] ~> =-1
     %bin.get_byte [$data, $pos] ~> $pred ~ => ^ [$data, __integer_add__ [$pos, 1], $len, $pred]
   | $pos
 }
 
 // The longest (possibly empty) run of bytes satisfying `pred`, as a slice.
-take_while = #<'t>'pred<'t> {
+take_while = #'pred<_> {
   :doc "A parser for the longest (possibly empty) run of bytes satisfying the predicate, as a slice."
   =pred
   #' { end = tw_end [$data, $pos, $len, pred]; [%bin.slice [$data, $pos, end], $[..., pos: end]] }
@@ -266,17 +266,17 @@ then = #<'t, 'u>['p<'t>, 'p<'u>] {
 // Both in sequence, keeping only the first / only the second value.
 // (Implemented directly rather than as `then`+`map` with an inferred `#{ $0 }`: inside a
 // generic body the literal's parameter inference has no concrete pin and misbehaves.)
-left = #<'t, 'u>['p<'t>, 'p<'u>] {
+left = #<'t>['p<'t>, 'p<_>] {
   :doc "Both in sequence, keeping only the first value."
   =[p, q]; #' { p $ ~> =[v, st]; q st ~> =[_, st2]; [v, st2] }
 }
-right = #<'t, 'u>['p<'t>, 'p<'u>] {
+right = #<'u>['p<_>, 'p<'u>] {
   :doc "Both in sequence, keeping only the second value."
   =[p, q]; #' { p $ ~> =[_, st]; q st ~> =[w, st2]; [w, st2] }
 }
 
 // `p` between `open` and `close`, keeping `p`'s value.
-between = #<'o, 't, 'c>['p<'o>, 'p<'t>, 'p<'c>] {
+between = #<'t>['p<_>, 'p<'t>, 'p<_>] {
   :doc "The middle parser between the other two, keeping its value."
   =[open, p, close]; inner = right [open, p]; left [inner, close]
 }
@@ -333,7 +333,7 @@ many0 = #<'t>'p<'t> {
   =p; #' { many_run [p, $, Nil] }
 }
 
-sep_run = #<'t, 's>[(p): 'p<'t>, (sep): 'p<'s>, (st): ', (acc): 'items<'t>] {
+sep_run = #<'t>[(p): 'p<'t>, (sep): 'p<_>, (st): ', (acc): 'items<'t>] {
   r = $sep $st
   {
     | r ~> =[_, st1] => {
@@ -357,7 +357,7 @@ sep_run = #<'t, 's>[(p): 'p<'t>, (sep): 'p<'s>, (st): ', (acc): 'items<'t>] {
 // Zero or more of `p` separated by `sep`, as a list of `p`'s values. Backtracking: a
 // `sep` not followed by a `p` is left unconsumed (so a trailing separator can be handled
 // with `opt` afterwards).
-sep_by = #<'t, 's>['p<'t>, 'p<'s>] {
+sep_by = #<'t>['p<'t>, 'p<_>] {
   :doc "Zero or more of a parser separated by another, as a list of values; a trailing separator is left unconsumed."
   =[p, sep]
   #' {
@@ -384,7 +384,7 @@ opt = #<'t>'p<'t> {
 
 // Zero or more of `p` separated by `sep`, tolerating a single optional trailing `sep`, as
 // a list of `p`'s values. `sep_by` leaves a trailing separator unconsumed; this consumes it.
-sep_end_by = #<'t, 's>['p<'t>, 'p<'s>] {
+sep_end_by = #<'t>['p<'t>, 'p<_>] {
   :doc "Zero or more of a parser separated by another, tolerating an optional trailing separator, as a list of values."
   =[p, sep]; body = sep_by [p, sep]; left [body, opt sep]
 }

@@ -1939,6 +1939,7 @@ fn render_type_flat(type_def: &Type) -> String {
         Type::Cycle(Some(level)) => format!("^{}", level),
         Type::Process(process_type) => render_process_type(process_type),
         Type::Resource(name) => format!("\\{}", name),
+        Type::Top => "_".to_string(),
         Type::ModuleType {
             module,
             member,

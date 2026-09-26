@@ -277,7 +277,8 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
             | Type::Process { .. }
             | Type::Resource(_)
             | Type::Reference
-            | Type::Variable(_) => Ok(None),
+            | Type::Variable(_)
+            | Type::Top => Ok(None),
         }
     }
 

@@ -105,6 +105,12 @@ pub enum Type {
     Resource(String),
     #[serde(rename = "var")]
     Variable(String),
+    /// The top type, written `_`: every value belongs to it. Sound rather than permissive —
+    /// nothing may be done with a `_` value but pass it on to another `_` or match it, which
+    /// is how it is narrowed back to something usable. Nil is a member, so a `_` result can
+    /// short-circuit like any other nilable one.
+    #[serde(rename = "top")]
+    Top,
 }
 
 impl Type {
@@ -114,7 +120,9 @@ impl Type {
     pub fn remap_ids(&self, remaps: &crate::bytecode::IdRemaps) -> Type {
         let ty = |id: &usize| crate::bytecode::IdRemaps::map(&remaps.types, "type", *id);
         match self {
-            Type::Integer | Type::Binary | Type::Reference | Type::Cycle(_) => self.clone(),
+            Type::Integer | Type::Binary | Type::Reference | Type::Cycle(_) | Type::Top => {
+                self.clone()
+            }
             Type::Resource(_) | Type::Variable(_) => self.clone(),
             Type::Tuple(tuple_id) => Type::Tuple(crate::bytecode::IdRemaps::map(
                 &remaps.tuples,
@@ -288,6 +296,8 @@ enum TypeRepr {
     Resource(String),
     #[serde(rename = "var")]
     Variable(String),
+    #[serde(rename = "top")]
+    Top,
 }
 
 impl From<Type> for TypeRepr {
@@ -319,6 +329,7 @@ impl From<Type> for TypeRepr {
             } => TypeRepr::Process(send, receive, state),
             Type::Resource(name) => TypeRepr::Resource(name),
             Type::Variable(name) => TypeRepr::Variable(name),
+            Type::Top => TypeRepr::Top,
         }
     }
 }
@@ -352,6 +363,7 @@ impl From<TypeRepr> for Type {
             },
             TypeRepr::Resource(name) => Type::Resource(name),
             TypeRepr::Variable(name) => Type::Variable(name),
+            TypeRepr::Top => Type::Top,
         }
     }
 }
@@ -423,7 +435,8 @@ impl Type {
             | Type::Integer
             | Type::Binary
             | Type::Reference
-            | Type::Resource(_) => Vec::new(),
+            | Type::Resource(_)
+            | Type::Top => Vec::new(),
         }
     }
 
@@ -481,22 +494,25 @@ impl Type {
     }
 
     /// Check if this type contains NIL (either is NIL or contains NIL in union).
-    /// Sees through annotation rows: annotated nil is nil for control flow.
+    /// Sees through annotation rows: annotated nil is nil for control flow. The top type
+    /// holds every value, nil included.
     pub fn contains_nil<T: TypeLookup>(&self, lookup: &T) -> bool {
         match self {
             Type::Tuple(id) if *id == NIL => true,
+            Type::Top => true,
             Type::Annotated { .. } => self.is_nil_deep(lookup),
             Type::Union(type_ids) => type_ids.iter().any(|&id| {
                 lookup
                     .lookup_type(id)
-                    .map(|t| t.is_nil_deep(lookup))
+                    .map(|t| matches!(t, Type::Top) || t.is_nil_deep(lookup))
                     .unwrap_or(false)
             }),
             _ => false,
         }
     }
 
-    /// Return a type without NIL variants (annotated nils count as nil).
+    /// Return a type without NIL variants (annotated nils count as nil). The top type has no
+    /// spelling for "everything but nil", so it stays whole.
     pub fn without_nil<T: TypeLookup>(&self, lookup: &T) -> Type {
         match self {
             Type::Tuple(id) if *id == NIL => Type::never(),
@@ -666,6 +682,10 @@ fn check_type_relation<T: TypeLookup>(
             }
         }
 
+        // Every value belongs to the top type, so everything is assignable to it, and every
+        // inhabited type (never is handled above) overlaps it.
+        (_, Type::Top) => true,
+
         // Basic types must match exactly
         (Type::Integer, Type::Integer) => true,
         (Type::Binary, Type::Binary) => true,
@@ -803,6 +823,10 @@ fn check_type_relation<T: TypeLookup>(
             stacks.right.leave(pattern_id);
             result
         }
+
+        // The top type fits nothing narrower (`_` on the right, and unions and references
+        // that may reach it, are handled above), but it overlaps anything inhabited.
+        (Type::Top, _) => mode == UnionMode::Any,
 
         // Tuple vs Tuple: structural in both modes. Two tuples are related iff they share a
         // name and arity and every field pair is related under the same mode — for ALL that

@@ -1345,6 +1345,17 @@ fn resource_type(input: Span) -> IResult<Span, Type> {
     map(preceded(char('\\'), resource_type_name), Type::Resource)(input)
 }
 
+/// The top type: a lone `_`, not the start of a longer name.
+fn top_type(input: Span) -> IResult<Span, Type> {
+    nom_value(
+        Type::Top,
+        terminated(
+            char('_'),
+            not(satisfy(|c: char| c.is_ascii_alphanumeric() || c == '_')),
+        ),
+    )(input)
+}
+
 /// A field's default value: ` = <chain>`, glued to nothing and spaced like a binding. A
 /// chain ends at the `,` or `]` closing the field, so no delimiter guard is needed. Only
 /// meaningful in a function literal's parameter spelling; anywhere else the compiler
@@ -1849,6 +1860,7 @@ fn function_input_type(input: Span) -> IResult<Span, Type> {
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
         resource_type,
+        top_type,
         type_cycle,
         process_type,
         module_type, // Must come before type_identifier to match '% before trying identifier
@@ -1863,6 +1875,7 @@ fn function_output_type(input: Span) -> IResult<Span, Type> {
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         tuple_type,
         resource_type,
+        top_type,
         type_cycle,
         // Head only: a trailing `!`/`?` clause after the output is the function's.
         process_type_head,
@@ -1877,6 +1890,7 @@ fn base_type(input: Span) -> IResult<Span, Type> {
         tuple_type,
         partial_type,  // Must come before grouping parentheses to have priority
         resource_type, // Must come before type_identifier to match \Resource
+        top_type,
         type_cycle,
         process_type,
         type_parameter, // Must come before type_identifier to match <'t> before trying identifier

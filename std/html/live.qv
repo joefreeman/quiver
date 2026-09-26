@@ -298,7 +298,7 @@ key_opts = #[
 
 // Encode an attribute value for its frame slot: an event becomes its %data notation —
 // the string the client echoes back — and literal values pass through.
-enc_attr = #<'e>'%html.attr_val<'e> {
+enc_attr = #'%html.attr_val<_> {
   | =Str[b] => Str[b]
   | =Ok => Ok
   | =Data[payload] => %data.encode payload
@@ -306,9 +306,9 @@ enc_attr = #<'e>'%html.attr_val<'e> {
 }
 
 // A node's frame; self-passed to recurse into template slots.
-frame_of = #<'e>[(self): ^, (node): '%html<'e>] -> 'frame {
+frame_of = #[(self): ^, (node): '%html<_>] -> 'frame {
   | $node:('bnd)boundary ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: st]
-  | $node:('%html.tmpl<'e>)template ~> =(statics: s, holes: h) => {
+  | $node:('%html.tmpl<_>)template ~> =(statics: s, holes: h) => {
     slots = %list.map [
       h,
       #{
@@ -330,7 +330,7 @@ frame_of = #<'e>[(self): ^, (node): '%html<'e>] -> 'frame {
   | Opaque[%html.render $node]
 }
 
-frame = #<'e>'%html<'e> {
+frame = #'%html<_> {
   :doc "Derives a node tree's frame — the diffable shape of one render — from the :template provenance %html expansions attach. Un-annotated subtrees become Opaque (compared and replaced whole); event attribute values are encoded to their %data notation, so frames are event-type-erased."
   frame_of [frame_of, $]
 }

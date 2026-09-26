@@ -198,6 +198,7 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
         // A `#N` suffix is the compiler's per-definition uniquifier, not part of the
         // source-level name.
         Type::Variable(name) => format!("'{}", name.split('#').next().unwrap_or(name)),
+        Type::Top => "_".to_string(),
     }
 }
 

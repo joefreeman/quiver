@@ -251,9 +251,10 @@ fn walk_checked(
         ) => {
             *any_nil = true;
         }
-        // A plain carrier is an open-empty row; a bare variable could be anything.
+        // A plain carrier is an open-empty row; a bare variable or the top type could be
+        // anything.
         Some(Type::Tuple(_) | Type::Partial { .. } | Type::Callable { .. } | Type::Cycle(_))
-        | Some(Type::Variable(_))
+        | Some(Type::Variable(_) | Type::Top)
         | None => {
             contributions.push(asked);
             *needs_check = true;
@@ -307,8 +308,9 @@ fn walk_retrieval(
         Some(Type::Tuple(_) | Type::Partial { .. } | Type::Callable { .. } | Type::Cycle(_)) => {
             Err(erased_error(program, member, name))
         }
-        // A bare type variable could be instantiated with anything.
-        Some(Type::Variable(_)) | None => Err(erased_error(program, member, name)),
+        // A bare type variable could be instantiated with anything, and the top type holds
+        // anything.
+        Some(Type::Variable(_) | Type::Top) | None => Err(erased_error(program, member, name)),
     }
 }
 

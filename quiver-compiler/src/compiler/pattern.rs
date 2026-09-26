@@ -764,7 +764,9 @@ fn analyze_match_tuple_pattern(
     // same-shaped member where one exists, since a complement-narrowed member's field types
     // would wrongly reject a value whose tuple id carries the declared (wider) field type (see
     // `declared_shape_witness`), and the member itself otherwise.
-    let needs_tuple_check = is_union(value_type_id, program) || matching_types.len() > 1;
+    let needs_tuple_check = is_union(value_type_id, program)
+        || is_top(value_type_id, program)
+        || matching_types.len() > 1;
     let mut witnesses = Vec::new();
     for (tuple_id, _) in &matching_types {
         let witness = if needs_tuple_check {
@@ -991,6 +993,20 @@ fn find_matching_match_tuples(
     tuple: &ast::MatchTuple,
     value_type_id: usize,
 ) -> Result<TupleMatchResult, Error> {
+    // A `_` value may be any tuple at all, so the pattern's own shape — every field `_` — is
+    // the one member it is tested for.
+    if is_top(value_type_id, program) {
+        let top = program.register_type(Type::Top);
+        let fields = tuple
+            .fields
+            .iter()
+            .map(|field| (field.name.clone(), top))
+            .collect();
+        let tuple_id = program.register_tuple(tuple.name.clone(), fields);
+        let field_mappings = (0..tuple.fields.len()).map(|i| (i, i)).collect();
+        return Ok(vec![(tuple_id, field_mappings)]);
+    }
+
     let mut matching_types = Vec::new();
 
     let tuple_ids = extract_tuple_ids(program, value_type_id);
@@ -1531,6 +1547,17 @@ fn find_types_with_fields_and_name(
     type_name: Option<&String>,
     value_type_id: usize,
 ) -> Result<Vec<FieldMatch>, Error> {
+    // A `_` value may be any tuple at all, so the pattern's own constraint — its fields at
+    // `_` — is the one member it is tested for.
+    if is_top(value_type_id, program) {
+        let top = program.register_type(Type::Top);
+        return Ok(vec![FieldMatch::Partial {
+            name: type_name.cloned(),
+            fields: field_names.iter().map(|name| (name.clone(), top)).collect(),
+            field_indices: (0..field_names.len()).collect(),
+        }]);
+    }
+
     let mut matches = Vec::new();
 
     let field_sources = extract_field_sources(program, value_type_id);
@@ -1683,6 +1710,11 @@ fn extract_tuple_ids(program: &Program, type_id: usize) -> Vec<usize> {
 /// Check if a type is a union
 fn is_union(type_id: usize, program: &Program) -> bool {
     matches!(program.lookup_type(type_id), Some(Type::Union(_)))
+}
+
+/// Check if a type is the top type
+fn is_top(type_id: usize, program: &Program) -> bool {
+    matches!(program.lookup_type(type_id), Some(Type::Top))
 }
 
 /// Check if a type is the never type (empty union)

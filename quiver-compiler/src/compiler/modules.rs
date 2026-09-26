@@ -588,7 +588,10 @@ impl Collector {
             return;
         }
         match type_def {
-            ast::Type::Primitive(_) | ast::Type::Cycle(_) | ast::Type::Resource(_) => {}
+            ast::Type::Primitive(_)
+            | ast::Type::Cycle(_)
+            | ast::Type::Resource(_)
+            | ast::Type::Top => {}
             ast::Type::Tuple(tuple) => {
                 for field in &tuple.fields {
                     match field {

@@ -24,7 +24,7 @@
 '<'k, 'v> = Empty | Leaf['int, 'k, 'v] | Collision['int, 'list<['k, 'v]>] | Node['int, 'list<^>]
 
 // --- key hashing -------------------------------------------------------------
-hash = #<'k>'k { __data_encode__ ~ ~> __binary_hash32__ ~ }
+hash = #_ { __data_encode__ ~ ~> __binary_hash32__ ~ }
 
 // 5-bit hash fragment at `shift` bits, and the compact child index for a slot bit.
 fragment = #[(hash): 'int, (shift): 'int] {
@@ -43,7 +43,7 @@ revcat = #<'t>[(acc): 'list<'t>, (rest): 'list<'t>] {
   }
 }
 
-length = #<'t>[(list): 'list<'t>, (n): 'int] {
+length = #[(list): 'list<_>, (n): 'int] {
   $list ~> {
     | =Nil => $n
     | =Cons[_, t] => ^ [t, %num.add [$n, 1]]
@@ -417,12 +417,12 @@ dict_dialect = #(content: '%str, chain: '%meta.cb) {
     remove [remove, $dict, $key, hash $key, 0]
   },
 
-  has?: #<'k, 'v>[(dict): '<'k, 'v>, (key): 'k] {
+  has?: #<'k>[(dict): '<'k, _>, (key): 'k] {
     :doc "Whether the dict contains the key."
     get [$dict, $key, hash $key, 0]; Ok
   },
 
-  count: #<'k, 'v>'<'k, 'v> {
+  count: #'<_, _> {
     :doc "The number of entries in the dict."
     Cons[~, Nil] ~> entries [~, Nil] ~> length [~, 0]
   },
@@ -456,7 +456,7 @@ dict_dialect = #(content: '%str, chain: '%meta.cb) {
     to_iter $dict ~> %iter.map [~, $f] ~> from_iter ~
   },
 
-  filter: #<'k, 'v, 'r>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> 'r] {
+  filter: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
     :doc "A dict keeping only the entries for which the predicate is non-nil."
     to_iter $dict ~> %iter.filter [~, $pred] ~> from_iter ~
   },
@@ -466,17 +466,17 @@ dict_dialect = #(content: '%str, chain: '%meta.cb) {
     to_iter $dict ~> %iter.fold [~, $init, $f]
   },
 
-  find: #<'k, 'v, 'r>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> 'r] {
+  find: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
     :doc "An entry for which the predicate is non-nil, or nil when none matches (unspecified order)."
     to_iter $dict ~> %iter.find [~, $pred]
   },
 
-  any?: #<'k, 'v, 'r>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> 'r] {
+  any?: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
     :doc "Whether any [key, value] entry satisfies the predicate."
     to_iter $dict ~> %iter.any? [~, $pred]
   },
 
-  all?: #<'k, 'v, 'r>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> 'r] {
+  all?: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
     :doc "Whether every [key, value] entry satisfies the predicate."
     to_iter $dict ~> %iter.all? [~, $pred]
   },

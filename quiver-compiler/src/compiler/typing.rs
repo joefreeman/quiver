@@ -33,6 +33,14 @@ pub enum TupleAccessor {
 /// union is spliced with its references to its own root closed (`splice_union_members`), so a
 /// recursive member keeps meaning the union it was written in.
 pub fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
+    // The top type already holds every other member.
+    let is_top = |id: usize| matches!(program.lookup_type(id), Some(Type::Top));
+    if type_ids.iter().any(|&id| {
+        is_top(id)
+            || matches!(program.lookup_type(id), Some(Type::Union(members)) if members.iter().any(|&m| is_top(m)))
+    }) {
+        return program.register_type(Type::Top);
+    }
     let is_union = |id: &usize| matches!(program.lookup_type(*id), Some(Type::Union(_)));
     if type_ids.iter().any(is_union) {
         let plain = distinct_members(
@@ -269,7 +277,12 @@ fn productivity_pass(
         // Unresolvable ids are not this check's concern.
         None => true,
         Some(
-            Type::Integer | Type::Binary | Type::Reference | Type::Resource(_) | Type::Variable(_),
+            Type::Integer
+            | Type::Binary
+            | Type::Reference
+            | Type::Resource(_)
+            | Type::Variable(_)
+            | Type::Top,
         ) => true,
         // Guarded: closures and process ids are finite values however recursive their types.
         Some(Type::Callable { .. } | Type::Process { .. }) => true,
@@ -994,6 +1007,7 @@ fn resolve_ast_type_impl(
         ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(program.register_type(Type::Binary)),
         ast::Type::Primitive(ast::PrimitiveType::Ref) => Ok(program.register_type(Type::Reference)),
         ast::Type::Resource(name) => Ok(program.register_type(Type::Resource(name))),
+        ast::Type::Top => Ok(program.register_type(Type::Top)),
         // Not a parameter position: a mark written here could never grant anything.
         ast::Type::Tuple(tuple) => Ok(resolve_tuple_ast(
             recursion_depth,
@@ -1361,9 +1375,12 @@ pub fn contains_variables(type_id: usize, lookup: &impl TypeLookup) -> bool {
                     .iter()
                     .any(|(_, value_type)| contains_variables(*value_type, lookup))
         }
-        Type::Integer | Type::Binary | Type::Reference | Type::Cycle(_) | Type::Resource(_) => {
-            false
-        }
+        Type::Integer
+        | Type::Binary
+        | Type::Reference
+        | Type::Cycle(_)
+        | Type::Resource(_)
+        | Type::Top => false,
     }
 }
 
@@ -1430,7 +1447,12 @@ pub fn collect_type_variables(type_id: usize, lookup: &impl TypeLookup, names: &
                 collect_type_variables(value_type, lookup, names);
             }
         }
-        Type::Integer | Type::Binary | Type::Reference | Type::Cycle(_) | Type::Resource(_) => {}
+        Type::Integer
+        | Type::Binary
+        | Type::Reference
+        | Type::Cycle(_)
+        | Type::Resource(_)
+        | Type::Top => {}
     }
 }
 
@@ -2151,6 +2173,9 @@ fn unify_bounded(
             }
             Ok(())
         }
+
+        // Everything fits the top type, and it has no variables to bind.
+        (Type::Top, _) => Ok(()),
 
         // Annotation rows are transparent to structural unification: a `'t` pattern binds
         // the whole annotated type (the Variable arm above fires first), but a structural

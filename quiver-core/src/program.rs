@@ -687,7 +687,8 @@ impl Program {
             | Type::Integer
             | Type::Binary
             | Type::Reference
-            | Type::Resource(_) => unreachable!("a type without parts is unchanged"),
+            | Type::Resource(_)
+            | Type::Top => unreachable!("a type without parts is unchanged"),
         };
         assert!(parts.next().is_none(), "more parts than the type has");
         self.register_type(rebuilt)
