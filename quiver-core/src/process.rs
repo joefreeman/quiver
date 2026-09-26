@@ -436,15 +436,14 @@ impl ArmedResources {
 /// the process past the instruction that parked it — except a select, which runs again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wait {
-    /// The pid of a process it spawned.
-    Spawn,
+    /// A value the environment answers with: a spawned process's pid, a remote `?` sample,
+    /// or the reply to a routed request.
+    Reply,
     /// Anything its select may complete on: a message, an awaited result, a stream event,
     /// or its timeout.
     Select,
     /// The result of an effect the host performs.
     Effect,
-    /// A value the environment answers with: a remote `?` sample, or a routed request.
-    Sample,
 }
 
 #[derive(Debug)]
@@ -528,6 +527,18 @@ impl Process {
             tracking: None,
             resource_events: ResourceEvents::default(),
             armed_resources: ArmedResources::default(),
+        }
+    }
+
+    /// Register `subscriber` as a reactive subscriber of this process (a tracked `?`
+    /// sample), keeping `subscriber_count` in step. Idempotent — one entry per subscriber —
+    /// and a no-op once the process has terminated: its state can no longer change, so a
+    /// subscription would never fire.
+    pub(crate) fn add_subscriber(&mut self, subscriber: ProcessId) {
+        let entry = Watcher::Subscriber { pid: subscriber };
+        if self.result.is_none() && !self.watchers.contains(&entry) {
+            self.watchers.push(entry);
+            self.subscriber_count += 1;
         }
     }
 

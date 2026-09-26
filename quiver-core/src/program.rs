@@ -481,7 +481,7 @@ impl Program {
 
     /// Register a builtin, optionally at an explicit type argument. Each distinct
     /// instantiation of a type-consuming builtin is its own entry, so that the id alone
-    /// tells the runtime which one a `Builtin` instruction means.
+    /// tells the runtime which one a builtin constant means.
     pub fn register_builtin_instantiated<E: crate::effects::Effect>(
         &mut self,
         name: String,

@@ -35,12 +35,7 @@ impl CodeTables for Program {
 pub fn stack_effect(instruction: Instruction, tables: &impl CodeTables) -> Option<(usize, usize)> {
     let operand = instruction.operand() as usize;
     Some(match instruction.opcode() {
-        Opcode::Constant
-        | Opcode::Pick
-        | Opcode::Load
-        | Opcode::Nil
-        | Opcode::Ok
-        | Opcode::Self_ => (0, 1),
+        Opcode::Constant | Opcode::Pick | Opcode::Load | Opcode::Nil | Opcode::Ok => (0, 1),
         Opcode::Pop | Opcode::Store | Opcode::JumpIf | Opcode::JumpUnless | Opcode::Recurse => {
             (1, 0)
         }
@@ -53,9 +48,8 @@ pub fn stack_effect(instruction: Instruction, tables: &impl CodeTables) -> Optio
         | Opcode::GetAnnotation
         | Opcode::Stamp
         | Opcode::Select
-        | Opcode::Process
-        | Opcode::State => (1, 1),
-        Opcode::Equal | Opcode::Annotate | Opcode::Call | Opcode::Spawn => (2, 1),
+        | Opcode::Process => (1, 1),
+        Opcode::Equal | Opcode::Annotate | Opcode::Call => (2, 1),
         Opcode::TailCall => (2, 0),
         Opcode::Tuple => (tables.tuple_arity(operand)?, 1),
         Opcode::Function => (tables.function_captures(operand)?, 1),

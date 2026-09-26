@@ -705,11 +705,8 @@ pub enum Opcode {
     Annotate,
     GetAnnotation,
     Stamp,
-    Spawn,
-    Self_,
     Select,
     Process,
-    State,
     Reclaimed,
 }
 
@@ -737,10 +734,7 @@ impl Opcode {
             | Opcode::TailCall
             | Opcode::Recurse
             | Opcode::Equal
-            | Opcode::Spawn
-            | Opcode::Self_
             | Opcode::Select
-            | Opcode::State
             | Opcode::Reclaimed => OperandKind::None,
             _ => OperandKind::Id,
         }
@@ -748,7 +742,7 @@ impl Opcode {
 
     /// Every opcode, in discriminant order — `ALL[op as usize] == op` (asserted in tests),
     /// which is what makes the decode below a single indexed load.
-    pub const ALL: [Opcode; 31] = [
+    pub const ALL: [Opcode; 28] = [
         Opcode::Constant,
         Opcode::Pop,
         Opcode::Pick,
@@ -774,11 +768,8 @@ impl Opcode {
         Opcode::Annotate,
         Opcode::GetAnnotation,
         Opcode::Stamp,
-        Opcode::Spawn,
-        Opcode::Self_,
         Opcode::Select,
         Opcode::Process,
-        Opcode::State,
         Opcode::Reclaimed,
     ];
 }
@@ -1008,16 +999,6 @@ impl Instruction {
         Instruction::with_id(Opcode::Stamp, site_id)
     }
 
-    /// Pop a function value, then an argument; spawn a process and push its pid.
-    pub fn spawn() -> Instruction {
-        Instruction::bare(Opcode::Spawn)
-    }
-
-    /// Push the running process's own pid.
-    pub fn self_() -> Instruction {
-        Instruction::bare(Opcode::Self_)
-    }
-
     /// Pop a source or tuple of sources; race them and push the winner's result.
     pub fn select() -> Instruction {
         Instruction::bare(Opcode::Select)
@@ -1029,12 +1010,6 @@ impl Instruction {
     /// rides the constants table that linking already remaps.
     pub fn process(function_id: usize) -> Instruction {
         Instruction::with_id(Opcode::Process, function_id)
-    }
-
-    /// Pop a process value; push its current state (`?p`). No runtime test — the state
-    /// type is statically known.
-    pub fn state() -> Instruction {
-        Instruction::bare(Opcode::State)
     }
 
     /// A point execution never reaches, which aborts the process loudly if it does rather than

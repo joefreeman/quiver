@@ -475,11 +475,7 @@ impl<E: Effect> Executor<E> {
     /// longer change, so a subscription would never fire.
     pub fn add_subscriber(&mut self, target: ProcessId, subscriber: ProcessId) {
         if let Some(process) = self.get_process_mut(target) {
-            let entry = Watcher::Subscriber { pid: subscriber };
-            if process.result.is_none() && !process.watchers.contains(&entry) {
-                process.watchers.push(entry);
-                process.subscriber_count += 1;
-            }
+            process.add_subscriber(subscriber);
         }
     }
 
@@ -912,7 +908,7 @@ impl<E: Effect> Executor<E> {
         if let Some(process) = self.processes.get_mut(&id) {
             // The spawn's result: the process resumes past it with the pid on the stack.
             process.stack.push(pid);
-            self.wake(id, Wait::Spawn);
+            self.wake(id, Wait::Reply);
         }
     }
 
@@ -923,7 +919,7 @@ impl<E: Effect> Executor<E> {
 
         if let Some(process) = self.get_process_mut(id) {
             process.stack.push(sample);
-            self.wake(id, Wait::Sample);
+            self.wake(id, Wait::Reply);
         }
         Ok(())
     }
@@ -1669,10 +1665,7 @@ impl<E: Effect> Executor<E> {
     /// Whether an instruction is a "cold" control/concurrency op handled via the process map
     /// (rather than the hot, process-as-local fast path).
     fn is_cold(instruction: Instruction) -> bool {
-        matches!(
-            instruction.opcode(),
-            Opcode::Spawn | Opcode::Self_ | Opcode::Select | Opcode::Process | Opcode::State
-        )
+        matches!(instruction.opcode(), Opcode::Select | Opcode::Process)
     }
 
     /// The instruction at the current frame's counter, without a process-map lookup.
@@ -1741,7 +1734,7 @@ impl<E: Effect> Executor<E> {
                  a pattern its types said could not fail)"
                     .to_string(),
             )),
-            Opcode::Spawn | Opcode::Self_ | Opcode::Select | Opcode::Process | Opcode::State => {
+            Opcode::Select | Opcode::Process => {
                 unreachable!("cold instruction routed to execute_hot")
             }
         }
@@ -1756,11 +1749,8 @@ impl<E: Effect> Executor<E> {
         current_time_ms: u64,
     ) -> Result<Option<Action<E>>, Error> {
         match instruction.opcode() {
-            Opcode::Spawn => self.handle_spawn(pid),
-            Opcode::Self_ => self.handle_self(pid),
             Opcode::Select => self.handle_select(pid, current_time_ms),
             Opcode::Process => self.handle_process_ref(pid, instruction.operand() as usize),
-            Opcode::State => self.handle_state(pid),
             _ => unreachable!("hot instruction routed to execute_cold"),
         }
     }
@@ -2375,7 +2365,7 @@ impl<E: Effect> Executor<E> {
                             action.is_some(),
                             "a suspending builtin must queue the action that answers it"
                         );
-                        proc.wait = Some(Wait::Sample);
+                        proc.wait = Some(Wait::Reply);
                         Ok(action)
                     }
                     crate::builtins::Completion::Call { function, captures } => {
@@ -2578,69 +2568,6 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    /// Reject `operation` in a restricted context — a receive filter or a `%proc.track`
-    /// render. Both may be re-evaluated, so they must stay pure:
-    /// spawns, sends, effects, and selects are rejected. (`?` sampling is allowed in a
-    /// tracked render — it is a read, and is what tracking is for.)
-    fn check_not_restricted(&self, pid: ProcessId, operation: Operation) -> Result<(), Error> {
-        match self.get_process(pid).and_then(Process::restricted_context) {
-            Some(context) => Err(Error::OperationNotAllowed { operation, context }),
-            None => Ok(()),
-        }
-    }
-
-    fn handle_spawn(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
-        self.check_not_restricted(pid, Operation::Spawn)?;
-
-        let (function_value, argument) = {
-            let process = self
-                .get_process_mut(pid)
-                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-            let function_value = process.stack.pop().ok_or(Error::StackUnderflow)?;
-            let argument = process.stack.pop().ok_or(Error::StackUnderflow)?;
-            (function_value, argument)
-        };
-        // Both leave this process's stack — carried by the Spawn action and re-injected into the
-        // new process by `spawn_process`. Release here so the caller's counts drop.
-
-        let (function_index, captures) = match function_value {
-            Value::Function(idx, caps) => (idx, caps),
-            _ => {
-                return Err(Error::TypeMismatch {
-                    expected: "function".to_string(),
-                    found: function_value.type_name().to_string(),
-                });
-            }
-        };
-
-        // Mark caller as spawning - will be notified with Value::Pid(new_pid)
-        self.park(pid, Wait::Spawn);
-
-        // Return routing request for scheduler to handle
-        // The pid arrives via notify_spawn, which pushes it for the process to resume with.
-        Ok(Some(Action::Spawn {
-            caller: pid,
-            function_index,
-            captures: captures.to_vec(),
-            argument,
-        }))
-    }
-
-    fn handle_self(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
-        let process = self
-            .get_process_mut(pid)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-
-        let function_index = process
-            .frames
-            .first()
-            .ok_or(Error::FrameUnderflow)?
-            .function_index;
-        process.stack.push(Value::Process(pid, function_index));
-
-        Ok(None)
-    }
-
     /// Push a named process value (`@1` in the REPL): the target's id is on the stack as
     /// an integer, the root function index is the operand.
     fn handle_process_ref(
@@ -2666,56 +2593,6 @@ impl<E: Effect> Executor<E> {
             .push(Value::Process(process_id, function_index));
 
         Ok(None)
-    }
-
-    /// Sample a process's current state (`?` — a snapshot, never a wait). A local target
-    /// answers synchronously; a remote one parks the caller and routes like an await.
-    fn handle_state(&mut self, pid: ProcessId) -> Result<Option<Action<E>>, Error> {
-        let target_value = {
-            let process = self
-                .get_process_mut(pid)
-                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-            process.stack.pop().ok_or(Error::StackUnderflow)?
-        };
-
-        let Value::Process(target, _) = target_value else {
-            return Err(Error::TypeMismatch {
-                expected: "process".to_string(),
-                found: target_value.type_name().to_string(),
-            });
-        };
-
-        // A sample inside a `%proc.track` render records the dependency and subscribes the
-        // caller. Recording the intent now — before the local/remote
-        // split — is what lets reconciliation see it whichever path serves the read.
-        let tracking = self.get_process(pid).is_some_and(Process::is_tracking);
-        if tracking && let Some(t) = self.get_process_mut(pid).and_then(|p| p.tracking.as_mut()) {
-            t.sampled.insert(target);
-        }
-
-        if let Some(target_process) = self.get_process(target) {
-            // Local: snapshot the state cell.
-            let sample = target_process.state.clone();
-            // Subscribe atomically with the read (idempotent; no-op on a terminated target).
-            if tracking {
-                self.add_subscriber(target, pid);
-            }
-            let process = self
-                .get_process_mut(pid)
-                .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-            process.stack.push(sample);
-            return Ok(None);
-        }
-
-        // Remote: park and route through the environment. Ownership of any resource
-        // handles in the state does NOT transfer (a sample is a read, not a message). When
-        // tracking, the target's worker registers the subscription as it serves the read.
-        self.park(pid, Wait::Sample);
-        Ok(Some(Action::ReadState {
-            caller: pid,
-            target,
-            subscribe: tracking,
-        }))
     }
 
     /// Check if we're continuing from a receive function call and pop result if needed

@@ -5967,7 +5967,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             });
         }
 
-        self.codegen.add_instruction(Instruction::spawn());
+        // The builtin takes `[function, init]`; the init went on the stack first.
+        self.codegen.add_instruction(Instruction::rotate(2));
+        let pair = self
+            .program
+            .register_tuple(None, vec![(None, fn_type_id), (None, arg_type)]);
+        self.codegen.add_instruction(Instruction::tuple(pair));
+        self.emit_builtin_call("process_spawn");
 
         Ok(self.program.register_type(Type::Process {
             send: Some(receive),
@@ -7105,7 +7111,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             ast::Term::Self_ => {
                 // `@` names the current process; sending to it is `%proc.send [@, x]`.
                 self.drop_flowing_value(value_type);
-                self.codegen.add_instruction(Instruction::self_());
+                self.codegen.add_instruction(Instruction::nil());
+                self.emit_builtin_call("process_self");
                 // Return a process type with the current function's receive type.
                 // Return type is None since a process can't know its own return type;
                 // state is None too — the enclosing *function's* states union is not the
@@ -7197,7 +7204,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     });
                 };
 
-                self.codegen.add_instruction(Instruction::state());
+                self.emit_builtin_call("process_state");
 
                 self.record_typed(span.get(), result, SymbolKind::Expression, None);
                 Ok((result, Provenance::Unknown))
@@ -7491,6 +7498,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .register_constant(Constant::Builtin { id: builtin });
         self.codegen
             .add_instruction(Instruction::constant(constant));
+    }
+
+    /// Call the named builtin with the argument on top of the stack — for syntax that types
+    /// itself (`@`, `?p`, `@f x`) and lowers to a builtin call.
+    fn emit_builtin_call(&mut self, name: &str) {
+        let builtin = self
+            .program
+            .register_builtin(name.to_string(), self.builtins);
+        self.emit_builtin(builtin);
+        self.codegen.add_instruction(Instruction::call());
     }
 
     /// Emit the elided form of a forwarder call. Stack: `[argument]` -> `[result]`,

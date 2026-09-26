@@ -187,6 +187,68 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
     /// routes through the environment while the caller carries on, and a send to a
     /// terminated process is a no-op. Refused in restricted contexts: a filter or a
     /// tracked render may be re-evaluated, and a send is not idempotent.
+    /// The calling process as a value (`@`): its pid, carrying its root function's index as
+    /// every pid value does.
+    pub fn self_process(&self) -> Result<Value, Error> {
+        let root = self.process.frames.first().ok_or(Error::FrameUnderflow)?;
+        Ok(Value::Process(self.pid, root.function_index))
+    }
+
+    /// Sample `target`'s state (`?p`) — a snapshot, never a wait. Answers the sample when
+    /// the target is on this worker, and otherwise queues the read and answers `None`, for
+    /// the caller to park until the environment delivers it. Inside a `%proc.track` render
+    /// the sample also records the dependency and subscribes the caller, atomically with
+    /// the read. Allowed in restricted contexts: a sample is a read, and what tracking is
+    /// for.
+    pub fn sample_state(&mut self, target: ProcessId) -> Result<Option<Value>, Error> {
+        let tracking = self.process.is_tracking();
+        if let Some(tracking) = self.process.tracking.as_mut() {
+            tracking.sampled.insert(target);
+        }
+        // The caller is out of the process map while it runs, so a self-sample reads it here.
+        if target == self.pid {
+            if tracking {
+                self.process.add_subscriber(self.pid);
+            }
+            return Ok(Some(self.process.state.clone()));
+        }
+        if let Some(target_process) = self.executor.get_process_mut(target) {
+            let sample = target_process.state.clone();
+            if tracking {
+                target_process.add_subscriber(self.pid);
+            }
+            return Ok(Some(sample));
+        }
+        // Remote: ownership of any resource handles in the state does not transfer (a
+        // sample is a read, not a message). When tracking, the target's worker registers
+        // the subscription as it serves the read.
+        self.queue(Action::ReadState {
+            caller: self.pid,
+            target,
+            subscribe: tracking,
+        });
+        Ok(None)
+    }
+
+    /// Spawn a process running `function` (with its `captures`) on `argument` (`@f x`),
+    /// owned by the caller. The environment allocates the pid, so the caller parks until
+    /// it answers with it.
+    pub fn spawn(
+        &mut self,
+        function: usize,
+        captures: Vec<Value>,
+        argument: Value,
+    ) -> Result<(), Error> {
+        self.allow(Operation::Spawn)?;
+        self.queue(Action::Spawn {
+            caller: self.pid,
+            function_index: function,
+            captures,
+            argument,
+        });
+        Ok(())
+    }
+
     pub fn send(&mut self, target: ProcessId, message: Value) -> Result<(), Error> {
         self.allow(Operation::Send)?;
         self.queue(Action::Deliver {
@@ -310,6 +372,9 @@ pub enum TypeSpec {
         parameter: Box<TypeSpec>,
         result: Box<TypeSpec>,
     },
+    /// The top type `_`: any value. For a result nothing more can be said of statically,
+    /// which a caller must match to use.
+    Top,
     /// A recursive back-reference, mirroring [`Type::Cycle`]: reads `depth` union
     /// boundaries up from the reference (1 is the nearest enclosing union). Lets a
     /// spec spell a recursive type like `'%json`.
@@ -378,6 +443,7 @@ impl TypeSpec {
                 }
             }
             TypeSpec::Cycle(depth) => Type::Cycle(*depth),
+            TypeSpec::Top => Type::Top,
         }
     }
 }
@@ -1095,9 +1161,82 @@ pub fn builtin_track<E: Effect>(
 }
 
 /// Register the process-management builtins (`%proc`).
+/// `@`: the calling process.
+pub fn builtin_process_self<E: Effect>(
+    _: &Value,
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    Ok(Completion::Value(ctx.self_process()?))
+}
+
+/// `?p`: a process's current state — answered at once for a process on this worker,
+/// otherwise once the environment delivers it.
+pub fn builtin_process_state<E: Effect>(
+    arg: &Value,
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    let Value::Process(target, _) = arg else {
+        return Err(Error::TypeMismatch {
+            expected: "process".to_string(),
+            found: arg.type_name().to_string(),
+        });
+    };
+    Ok(match ctx.sample_state(*target)? {
+        Some(sample) => Completion::Value(sample),
+        None => Completion::Suspend,
+    })
+}
+
+/// `@f x`: spawn `f` on `x`, answering the new process's pid.
+pub fn builtin_process_spawn<E: Effect>(
+    arg: &Value,
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    let Value::Tuple(_, payload) = arg else {
+        return Err(Error::TypeMismatch {
+            expected: "[function, argument]".to_string(),
+            found: arg.type_name().to_string(),
+        });
+    };
+    let [function, argument] = &payload[..] else {
+        return Err(Error::ArityMismatch {
+            expected: 2,
+            found: payload.len(),
+        });
+    };
+    let Value::Function(function, captures) = function else {
+        return Err(Error::TypeMismatch {
+            expected: "function".to_string(),
+            found: function.type_name().to_string(),
+        });
+    };
+    ctx.spawn(*function, captures.to_vec(), argument.clone())?;
+    Ok(Completion::Suspend)
+}
+
 pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     let pid = TypeSpec::Process(None, None);
     let ok = TypeSpec::Tuple(Some("Ok"), vec![]);
+    // `@`, `?p` and `@f x` type themselves at the syntax; these signatures serve a direct
+    // call, and grant only what they can promise for any process: identity for the pids
+    // they answer, and nothing about a state but that it is a value.
+    register_builtin!(registry, "process_self", builtin_process_self, Purity::Process, TypeSpec::Tuple(None, vec![]) => pid.clone());
+    register_builtin!(registry, "process_state", builtin_process_state, Purity::Process, pid.clone() => TypeSpec::Top);
+    // The shared `'a` checks the init against the function's parameter.
+    let spawn_param = TypeSpec::Tuple(
+        None,
+        vec![
+            (
+                None,
+                TypeSpec::Callable {
+                    parameter: Box::new(TypeSpec::Var("a")),
+                    result: Box::new(TypeSpec::Var("r")),
+                },
+            ),
+            (None, TypeSpec::Var("a")),
+        ],
+    );
+    register_builtin!(registry, "process_spawn", builtin_process_spawn, Purity::Process, spawn_param => pid.clone());
     // `send`'s polymorphic type `#[@'m, 'm] -> Ok`: the target's send grant fixes `'m`,
     // and the message is then checked against it by the ordinary generic-call path —
     // which is the whole of the send type rule, with no special case in `Apply`.
