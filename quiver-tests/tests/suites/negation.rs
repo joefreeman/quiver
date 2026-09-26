@@ -78,12 +78,28 @@ fn test_value_negation_does_not_narrow() {
 }
 
 #[test]
-fn test_negation_does_not_narrow_later_branches() {
-    // Falling through `\[]` means the value was nil, but that isn't recorded (a negation's
-    // complement would under-approximate in general), so later branches keep the full type.
+fn test_exact_negation_narrows_later_branches() {
+    // Falling through `\[]` means the value was nil, so a later branch sees it as nil: `g`
+    // takes only nil.
+    quiver()
+        .evaluate(
+            "g = #[] { Nil }
+             f = #('int | []) { | =\\[] => A | g $ }
+             [f 1, f []]",
+        )
+        .expect("[A, Nil]");
     quiver()
         .evaluate("f = #('int | []) { | =\\[] => A | ='int => B | C }; [f 1, f []]")
         .expect("[A, C]");
+}
+
+#[test]
+fn test_inexact_negation_does_not_narrow_later_branches() {
+    // Falling through `\42` says only that the value was 42, which no type expresses: a later
+    // branch keeps the full `'int` rather than being narrowed away.
+    quiver()
+        .evaluate("f = #'int { | =\\42 => A | %num.add [$, 1] }; [f 1, f 42]")
+        .expect("[A, 43]");
 }
 
 #[test]
@@ -171,19 +187,44 @@ fn test_nested_negation() {
              [f A[b: 1], f A[b: <01>], f B, f 5]",
         )
         .expect("[Yes, No, Yes, Yes]");
-    // An inner negation's narrowing is only an over-approximation, so an outer negation over
-    // it narrows nothing: `$` keeps its full type.
+    // The inner negation is exact, so the outer one narrows too: `$` is `A[b: 'int] | B | []`
+    // in the first branch, which `g` takes.
     quiver()
         .evaluate(
             "g = #(A[b: 'int] | B | []) { Ok }
              f = #(A[b: ('int | 'bin)] | B | []) { | =\\A[b: \\'int] => g $ | No }
-             f B",
+             [f A[b: 1], f A[b: <01>], f B]",
         )
-        .expect_type_mismatch();
+        .expect("[Ok, No, Ok]");
+    // Over an inexact inner negation (a value test), the outer one narrows nothing.
+    quiver()
+        .evaluate(
+            "g = #(A[b: 'int] | B | []) { Ok }
+             f = #(A[b: 'int] | B | []) { | =\\A[b: \\5] => g $ | No }
+             [f A[b: 1], f A[b: 5], f B]",
+        )
+        .expect("[No, Ok, Ok]");
     // Nor can a binder appear inside the inner negation, however deep.
     quiver()
         .evaluate("f = #(A[b: ('int | 'bin)] | B) { | =\\A[b: (\\'int)x] => x | No }; f B")
         .expect_compile_error(Error::NegatedPatternBindings {
             bindings: vec!["x".to_string()],
         });
+}
+
+#[test]
+fn test_negation_over_the_top_type_stays_a_runtime_test() {
+    // `_` less `'int` is still `_`, so the complement is inexact: the test must stay at runtime
+    // rather than the pattern being judged irrefutable.
+    quiver()
+        .evaluate("f = #_ { | =\\'int => Other | Int }; [f 1, f <01>, f []]")
+        .expect("[Int, Other, Other]");
+    // Over a recursive type the complement keeps members whole, so a later branch is not
+    // narrowed by it either.
+    quiver()
+        .evaluate(
+            "f = #'%list<'int> { | =\\Nil => $.0 | 0 }
+             [f %list{7}, f Nil]",
+        )
+        .expect("[7, 0]");
 }

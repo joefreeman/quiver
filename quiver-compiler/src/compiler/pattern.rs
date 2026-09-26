@@ -74,8 +74,12 @@ enum RuntimeCheck {
     },
     Path(AccessPath),
     /// A negated pattern (`\\P`): holds exactly when no set of `P`'s requirements all hold.
-    /// Each inner set's requirements carry their own (absolute) paths.
-    Not(Vec<Vec<Requirement>>),
+    /// Each inner set's requirements carry their own (absolute) paths. `exact` when the
+    /// negation's narrowed type is exactly what it matches (see `analyze_negated_pattern`).
+    Not {
+        sets: Vec<Vec<Requirement>>,
+        exact: bool,
+    },
 }
 
 /// How a pin's root value is loaded at codegen.
@@ -203,9 +207,9 @@ pub fn prevents_complement_narrowing(binding_sets: &[BindingSet], program: &Prog
             match &req.check {
                 // Value-based checks prevent complement narrowing
                 RuntimeCheck::Literal(_) | RuntimeCheck::Pin { .. } | RuntimeCheck::Path(_) => true,
-                // A negation's narrowed type (the complement of its inner pattern's) is only
-                // ever an over-approximation, so its own complement would under-approximate.
-                RuntimeCheck::Not(_) => true,
+                // An inexact negation's narrowed type over-approximates what it matches, so its
+                // own complement would under-approximate what fails it.
+                RuntimeCheck::Not { exact, .. } => !exact,
                 // Concrete type checks — at any depth — are fine: `compute_complement` is
                 // structural over tuple fields (and sound on recursive types), so a failed inner
                 // check soundly refines the outer type. Partial checks remain an exception, as
@@ -404,7 +408,7 @@ fn emit_requirement(
             }
             codegen.add_instruction(Instruction::equal());
         }
-        RuntimeCheck::Not(sets) => {
+        RuntimeCheck::Not { sets, .. } => {
             // `Ok` exactly when no inner set's requirements all hold: an inner set that
             // passes every test answers nil; running out of sets answers `Ok`.
             let mut end_jumps = Vec::new();
@@ -731,7 +735,9 @@ fn type_check_requirements(
 /// inside a negation can only be a binder (pins are `&`), so `P` is analyzed in a fresh identifier
 /// scope and any binding is rejected. The narrowed type is the complement of `P`'s — exact for a
 /// pure type test on non-recursive positions, as for complement narrowing across branches — and
-/// otherwise the value's type unchanged (a value test like `\\42` or `\\&x` narrows nothing).
+/// otherwise the value's type unchanged (a value test like `\\42` or `\\&x` narrows nothing). An
+/// exact negation is itself a pure type test in this sense, so a negation over one (`\\A[b: \\'int]`)
+/// and complement narrowing past one (`| =\\[] => … | …`) both stay exact.
 fn analyze_negated_pattern(
     env: &mut super::typing::TypeEnv,
     program: &mut Program,
@@ -783,10 +789,15 @@ fn analyze_negated_pattern(
         return Ok((vec![], program.never()));
     }
 
-    let exact = !prevents_complement_narrowing(&sets, program)
+    // Narrowable: the complement is a sound over-approximation of what the negation matches.
+    // Exact: it is precisely that, which needs a value type the complement can express exactly —
+    // no top type (`_` less `'int` is still `_`), and no recursion or partials, where it keeps
+    // members whole. Only an exact negation may be complemented again.
+    let narrowable = !prevents_complement_narrowing(&sets, program)
         && !narrowing::pattern_constrains_recursive_field(inner, value_type_id, program)
         && !typing::contains_variables(value_type_id, &*program);
-    let narrowed_type_id = if exact {
+    let exact = narrowable && complement_is_exact_over(value_type_id, program);
+    let narrowed_type_id = if narrowable {
         narrowing::compute_complement(value_type_id, inner_narrowed, program)
     } else {
         value_type_id
@@ -798,7 +809,10 @@ fn analyze_negated_pattern(
         vec![BindingSet {
             requirements: vec![Requirement {
                 path,
-                check: RuntimeCheck::Not(sets.into_iter().map(|set| set.requirements).collect()),
+                check: RuntimeCheck::Not {
+                    sets: sets.into_iter().map(|set| set.requirements).collect(),
+                    exact,
+                },
             }],
             bindings: vec![],
         }],
@@ -1838,6 +1852,25 @@ fn extract_tuple_ids(program: &Program, type_id: usize) -> Vec<usize> {
 /// Check if a type is a union
 fn is_union(type_id: usize, program: &Program) -> bool {
     matches!(program.lookup_type(type_id), Some(Type::Union(_)))
+}
+
+/// Whether `compute_complement` is exact over values of this type: it holds no top type, type
+/// variable, partial or recursion anywhere, any of which the complement keeps whole.
+fn complement_is_exact_over(type_id: usize, program: &Program) -> bool {
+    match program.lookup_type(type_id) {
+        Some(Type::Integer | Type::Binary | Type::Reference) => true,
+        Some(Type::Union(members)) => members
+            .iter()
+            .all(|&member| complement_is_exact_over(member, program)),
+        Some(Type::Annotated { base, .. }) => complement_is_exact_over(*base, program),
+        Some(Type::Tuple(tuple_id)) => program.lookup_tuple(*tuple_id).is_some_and(|tuple| {
+            tuple
+                .fields
+                .iter()
+                .all(|(_, field)| complement_is_exact_over(*field, program))
+        }),
+        _ => false,
+    }
 }
 
 /// Check if a type is the top type
