@@ -44,6 +44,7 @@ use crate::compiler::{
     TypeAliasDef, collect_module_references,
 };
 use crate::resolver::{ModuleId, ModuleResolver, PackageId, PackageResolver, std_module_names};
+use crate::verify::{self, Locals};
 use quiver_core::builtins::BuiltinRegistry;
 use quiver_core::bytecode::{Function, IdRemaps, Instruction, Opcode, Site};
 use quiver_core::effects::Effect;
@@ -1979,6 +1980,56 @@ fn check_types_acyclic(unit: &CompiledUnit, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A unit's tables as the verifier reads them: its own, plus the capture counts of the
+/// functions it imports, which only the host that resolved them knows.
+struct UnitTables<'a> {
+    unit: &'a CompiledUnit,
+    import_captures: &'a [usize],
+}
+
+impl verify::CodeTables for UnitTables<'_> {
+    fn tuple_arity(&self, tuple: usize) -> Option<usize> {
+        self.unit.tuples.get(tuple).map(|info| info.fields.len())
+    }
+
+    fn function_captures(&self, function: usize) -> Option<usize> {
+        match self.unit.functions.get(function) {
+            Some(function) => Some(function.captures),
+            None => self
+                .import_captures
+                .get(function - self.unit.functions.len())
+                .copied(),
+        }
+    }
+}
+
+/// Verify every function body in a unit (see [`verify`]): control flow, stack discipline
+/// and local initialisation. The second half of what a trust boundary checks, after
+/// [`validate_unit`] and once imports are resolved: `import_captures` gives each imported
+/// function's capture count, in the unit's import order, which a closure over one pops.
+pub fn validate_unit_bodies(
+    unit: &CompiledUnit,
+    label: &str,
+    import_captures: &[usize],
+) -> Result<(), String> {
+    let tables = UnitTables {
+        unit,
+        import_captures,
+    };
+    for (position, function) in unit.functions.iter().enumerate() {
+        // The entry runs in a frame whose earlier bindings (a REPL session's) the unit
+        // cannot see; every other function's frame starts with just its captures.
+        let locals = if unit.entry == Some(position) {
+            Locals::Unknown
+        } else {
+            Locals::Filled(function.captures)
+        };
+        verify::function(&function.instructions, locals, &tables)
+            .map_err(|problem| format!("{label}: function {position}: {problem}"))?;
+    }
+    Ok(())
+}
+
 /// Structural well-formedness of a unit: every reference inside it must land inside its
 /// tables, the type graph must be acyclic, function references must point strictly
 /// backward, and the entry (when present) must be one of its own functions. This is the
@@ -1986,9 +2037,11 @@ fn check_types_acyclic(unit: &CompiledUnit, label: &str) -> Result<(), String> {
 /// would panic mid-link, recurse until the native stack overflows, or silently corrupt a
 /// session, and a host must refuse it as a bad request instead.
 ///
-/// Scope: link-time soundness, plus the instruction operands whose own decoding is
-/// unchecked. Validated bytecode can still misbehave at runtime (stack discipline is not
-/// analysed here); who may submit code at all is the host's authentication model.
+/// Scope: link-time soundness, and the instruction operands whose own decoding is
+/// unchecked. The function bodies' structure is checked separately, once imports are
+/// resolved, by [`validate_unit_bodies`]. Validated bytecode can still fail at runtime the
+/// way any program can (a type mismatch in a builtin's argument, say); who may submit code
+/// at all is the host's authentication model.
 pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
     let function_space = unit.function_space();
     let check = |what: &str, id: usize, len: usize| -> Result<(), String> {
@@ -2084,14 +2137,6 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
                     check("annotation key", id, unit.annotation_keys.len())?
                 }
                 Opcode::Stamp => check("site", id, unit.sites.len())?,
-                // Not a table id, but not free either: a rotate names the top `id` stack
-                // slots, and fewer than two is not an operation — a rotate of nothing
-                // reaches one slot past the top of the stack.
-                Opcode::Rotate if id < 2 => {
-                    return Err(format!(
-                        "{label}: function {position} rotates {id} stack slots (a rotate names at least 2)"
-                    ));
-                }
                 _ => {}
             }
         }

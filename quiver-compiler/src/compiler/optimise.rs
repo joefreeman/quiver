@@ -11,7 +11,6 @@
 
 use quiver_core::bytecode::{Instruction, Offset, Opcode};
 use quiver_core::program::Program;
-use quiver_core::types::TypeLookup;
 
 /// An instruction with its jump target (if it has one) held as an absolute index, so
 /// instructions around it can be removed without disturbing it. A target may equal the
@@ -359,7 +358,11 @@ fn trace_dead_value(
         }
         let instruction = ops[index].instruction;
         let opcode = instruction.opcode();
-        let (pops, pushes) = stack_effect(instruction, program)?;
+        // Tracing stops at control flow: the value's history is no longer straight-line.
+        if is_jump(opcode) || crate::verify::ends_flow(opcode) {
+            return None;
+        }
+        let (pops, pushes) = crate::verify::stack_effect(instruction, program)?;
         if depth >= pushes {
             // Passing over: the instruction works above the value, or a `Pick` reads it or
             // past it.
@@ -384,41 +387,6 @@ fn trace_dead_value(
         }
         // A pure transform of a value is dead with it: trace its input instead.
     }
-}
-
-/// How many values an instruction pops and pushes, or `None` for one this pass doesn't
-/// trace through (control flow).
-fn stack_effect(instruction: Instruction, program: &Program) -> Option<(usize, usize)> {
-    let operand = instruction.operand() as usize;
-    Some(match instruction.opcode() {
-        Opcode::Constant
-        | Opcode::Pick
-        | Opcode::Load
-        | Opcode::Nil
-        | Opcode::Ok
-        | Opcode::Self_ => (0, 1),
-        Opcode::Pop | Opcode::Store => (1, 0),
-        Opcode::Reset => (0, 0),
-        Opcode::Rotate => (operand, operand),
-        Opcode::Drop => (operand + 1, 1),
-        Opcode::GetPositional
-        | Opcode::GetNamed
-        | Opcode::IsType
-        | Opcode::GetAnnotation
-        | Opcode::Stamp
-        | Opcode::Select
-        | Opcode::Process
-        | Opcode::State => (1, 1),
-        Opcode::Equal | Opcode::Annotate | Opcode::Call | Opcode::Spawn => (2, 1),
-        Opcode::Tuple => (program.lookup_tuple(operand)?.fields.len(), 1),
-        Opcode::Function => (program.get_function(operand)?.captures, 1),
-        Opcode::Jump
-        | Opcode::JumpIf
-        | Opcode::JumpUnless
-        | Opcode::TailCall
-        | Opcode::Recurse
-        | Opcode::Reclaimed => return None,
-    })
 }
 
 /// Opcodes that push one value, read nothing beneath it, and have no other effect.

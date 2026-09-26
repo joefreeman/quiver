@@ -1,7 +1,6 @@
 use quiver_core::{
     bytecode::{Instruction, Offset, Opcode},
     program::Program,
-    types::TypeLookup,
 };
 
 /// Helper struct for managing instruction generation and jumps
@@ -118,50 +117,13 @@ impl InstructionBuilder {
 /// How an instruction changes the operand stack's depth, or `None` for one that ends the
 /// function's flow here (a tail call, a self-recursion, a reclaimed trap).
 fn stack_effect(instruction: Instruction, program: &Program) -> Result<Option<isize>, String> {
-    let operand = instruction.operand() as usize;
-    Ok(Some(match instruction.opcode() {
-        Opcode::Constant
-        | Opcode::Pick
-        | Opcode::Load
-        | Opcode::Nil
-        | Opcode::Ok
-        | Opcode::Self_ => 1,
-        Opcode::Rotate
-        | Opcode::Reset
-        | Opcode::GetPositional
-        | Opcode::GetNamed
-        | Opcode::IsType
-        | Opcode::Jump
-        | Opcode::GetAnnotation
-        | Opcode::Stamp
-        | Opcode::Select
-        | Opcode::Process
-        | Opcode::State => 0,
-        Opcode::Pop
-        | Opcode::Store
-        | Opcode::JumpIf
-        | Opcode::JumpUnless
-        | Opcode::Call
-        | Opcode::Equal
-        | Opcode::Annotate
-        | Opcode::Spawn => -1,
-        Opcode::Tuple => {
-            let tuple = program
-                .lookup_tuple(operand)
-                .ok_or_else(|| format!("unknown tuple {operand}"))?;
-            1 - tuple.fields.len() as isize
-        }
-        Opcode::Function => {
-            let function = program
-                .get_function(operand)
-                .ok_or_else(|| format!("unknown function {operand}"))?;
-            1 - function.captures as isize
-        }
-        Opcode::Drop => -(operand as isize),
-        Opcode::TailCall | Opcode::Recurse | Opcode::Reclaimed => return Ok(None),
-    }))
+    if crate::verify::ends_flow(instruction.opcode()) {
+        return Ok(None);
+    }
+    let (pops, pushes) = crate::verify::stack_effect(instruction, program)
+        .ok_or_else(|| format!("{instruction:?} names an unknown tuple or function"))?;
+    Ok(Some(pushes as isize - pops as isize))
 }
-
 /// The operand-stack depth before each instruction from `start` on, relative to depth 0 at
 /// `start`; `None` where no path from `start` reaches. The jumps at `exits` leave the range —
 /// where they land is not this range's to say — as does any jump landing outside it. Codegen is

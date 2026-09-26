@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::verify::Locals;
+
 mod annotations;
 mod codegen;
 mod dialect;
@@ -1100,6 +1102,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .map(|variable| variable.index + 1)
             .max()
             .unwrap_or(0);
+        // The earlier lines' bindings are already in the frame the top level runs in.
+        let filled_locals = compiler.local_count;
 
         // Drop blocks that carry no runtime meaning before codegen: a single branchless branch with
         // no bindings needs no frame (whatever its step count) and acts only as a narrowing barrier,
@@ -1198,7 +1202,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         let body = std::mem::take(&mut compiler.codegen.instructions);
-        let instructions = match compiler.finish_body(body) {
+        let instructions = match compiler.finish_body(body, Locals::Filled(filled_locals)) {
             Ok(instructions) => instructions,
             Err(error) => {
                 return Err(LocatedError {
@@ -3151,7 +3155,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
 
         let body = std::mem::take(&mut self.codegen.instructions);
-        let function_instructions = self.finish_body(body)?;
+        let function_instructions =
+            self.finish_body(body, Locals::Filled(unique_captures.len()))?;
 
         // If every branch of the body was a pure parameter dispatch, record its case table so
         // calls can specialize the result type to the concrete argument (return-type dispatch).
@@ -3572,7 +3577,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // itself; otherwise the failure path is here.
         if on_no_match.is_none() {
             self.codegen.patch_jump_to_here(fail_jump_addr);
-            let carried_nil = self.emit_match_failure(value_type);
             // Nil in `result_type` is not by itself fallibility: a bare binder (`=x`) on a
             // nil-typed value *matches* the nil and binds it. A pattern is irrefutable when
             // some binding set has no runtime requirements, or when its sets together cover the
@@ -3590,9 +3594,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             narrowing::compute_complement(value_type, narrowed_type, self.program);
                         self.is_never(rest)
                     });
-            // An irrefutable pattern's failure path is unreachable: it falls through to the success
-            // path rather than report a failure that cannot happen.
-            if !irrefutable {
+            if irrefutable {
+                // The types say some binding set matches, so the failure path is unreachable.
+                // Trap there rather than carry on as if a set had matched and bound its names.
+                self.codegen.add_instruction(Instruction::reclaimed());
+            } else {
+                let carried_nil = self.emit_match_failure(value_type);
                 self.emit_unwind(gating);
                 let exit = self.codegen.emit_jump_placeholder();
                 let mut members = vec![annotations::closed_nil(self.program)];
@@ -4524,22 +4531,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     }
 
     /// A body's final form: checked, cleaned up (see [`optimise`]), and checked again, so a
-    /// rewrite that unbalances the operand stack fails the build rather than the program.
-    fn finish_body(&self, instructions: Vec<Instruction>) -> Result<Vec<Instruction>, Error> {
-        self.verify_operand_depths(&instructions)?;
+    /// rewrite that breaks the body fails the build rather than the program. `locals` says
+    /// which of the frame's locals are filled before the body runs.
+    fn finish_body(
+        &self,
+        instructions: Vec<Instruction>,
+        locals: Locals,
+    ) -> Result<Vec<Instruction>, Error> {
+        self.verify_body(&instructions, locals)?;
         let instructions = optimise::body(instructions, self.program);
-        self.verify_operand_depths(&instructions)?;
+        self.verify_body(&instructions, locals)?;
         Ok(instructions)
     }
 
-    /// Debug builds of the compiler: check that every path reaches each instruction at one
-    /// operand-stack depth. A mis-sized unwind (or any stack imbalance) shows up here, at a join,
-    /// rather than as values silently piling up at runtime.
-    fn verify_operand_depths(&self, instructions: &[Instruction]) -> Result<(), Error> {
+    /// Debug builds of the compiler: verify a body's structure (see [`crate::verify`]) — a
+    /// mis-sized unwind, a stack imbalance at a join, or a local read before it is written
+    /// shows up here rather than as a wrong value at runtime.
+    fn verify_body(&self, instructions: &[Instruction], locals: Locals) -> Result<(), Error> {
         if cfg!(debug_assertions) {
-            codegen::operand_depths(instructions, 0, &[], self.program).map_err(|message| {
+            crate::verify::function(instructions, locals, &*self.program).map_err(|message| {
                 Error::InternalError {
-                    message: format!("operand stack: {message}"),
+                    message: format!("malformed body: {message}"),
                 }
             })?;
         }
@@ -5183,7 +5195,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Get the compiled module instructions
         let body = std::mem::take(&mut self.codegen.instructions);
-        let module_instructions = self.finish_body(body)?;
+        let module_instructions = self.finish_body(body, Locals::Filled(0))?;
 
         // Restore original compiler state
         self.codegen.instructions = saved_instructions;

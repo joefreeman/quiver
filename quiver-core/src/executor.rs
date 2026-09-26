@@ -1764,12 +1764,12 @@ impl<E: Effect> Executor<E> {
             Opcode::Annotate => self.handle_annotate(proc, operand),
             Opcode::GetAnnotation => self.handle_get_annotation(proc, operand),
             Opcode::Stamp => self.handle_stamp(proc, operand),
-            // Liveness said nothing could reach this code; abort the process loudly
-            // rather than return garbage.
-            // Nothing should reach this: reclaimed code (a code-collection liveness bug) or the
-            // point after a call that never returns.
+            // Nothing should reach this: reclaimed code (a code-collection liveness bug), the
+            // point after a call that never returns, or an irrefutable pattern's failure path.
+            // Abort the process loudly rather than return garbage.
             Opcode::Reclaimed => Err(Error::Panic(
-                "unreachable code executed (reclaimed code, or past a call that never returns)"
+                "unreachable code executed (reclaimed code, past a call that never returns, or \
+                 a pattern its types said could not fail)"
                     .to_string(),
             )),
             Opcode::Spawn | Opcode::Self_ | Opcode::Select | Opcode::Process | Opcode::State => {

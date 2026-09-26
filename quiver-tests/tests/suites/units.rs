@@ -13,7 +13,7 @@ use quiver_compiler::compiler::{Bindings, CompileOptions, ModuleCache, SessionTa
 use quiver_compiler::resolver::ModuleId;
 use quiver_compiler::{ArtifactStore, PackageResolver, Registration};
 use quiver_core::builtins::BuiltinRegistry;
-use quiver_core::bytecode::Function;
+use quiver_core::bytecode::{Function, Instruction};
 use quiver_core::program::Program;
 use quiver_core::types::Type;
 use quiver_environment::{Environment, Repl, WorkerHandle};
@@ -1061,6 +1061,24 @@ fn a_malformed_unit_is_refused_and_the_environment_survives() {
             error,
             quiver_environment::EnvironmentError::InvalidUnit(ref message)
                 if message.contains("9999")
+        ),
+        "got {error:?}"
+    );
+
+    // A body that pops what was never pushed — every table reference in range, so only
+    // verifying the code itself catches it.
+    let mut bad_body = extract();
+    let entry = bad_body.entry.expect("an entry");
+    let instructions = &mut bad_body.functions[entry].instructions;
+    instructions.splice(0..0, [Instruction::pop(), Instruction::pop()]);
+    let error = environment
+        .start_process_unit(&bad_body, &builtins())
+        .expect_err("a body that underflows its stack must be refused");
+    assert!(
+        matches!(
+            error,
+            quiver_environment::EnvironmentError::InvalidUnit(ref message)
+                if message.contains("from a stack of 0")
         ),
         "got {error:?}"
     );

@@ -1039,8 +1039,9 @@ impl Instruction {
 
     /// A point execution never reaches, which aborts the process loudly if it does rather than
     /// return garbage: the body of a function whose code was reclaimed (liveness said nothing
-    /// could call it; written into stubbed slots by `Program::reclaim_code`), or the point after
-    /// a call that never returns (`__panic__`), which marks the flow as ending there.
+    /// could call it; written into stubbed slots by `Program::reclaim_code`), the point after
+    /// a call that never returns (`__panic__`), which marks the flow as ending there, or the
+    /// failure path of a pattern whose types say it cannot fail.
     pub fn reclaimed() -> Instruction {
         Instruction::bare(Opcode::Reclaimed)
     }

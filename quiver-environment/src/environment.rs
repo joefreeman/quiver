@@ -772,6 +772,7 @@ impl<E: Effect> Environment<E> {
             .entry
             .ok_or_else(|| EnvironmentError::Link("unit has no entry point".to_string()))?;
         let resolved = self.resolve_unit_imports(unit)?;
+        self.validate_unit_bodies(unit, "unit", &resolved)?;
         let own_map = self.link_and_ship(unit, "unit", &resolved, builtins)?;
         Ok(own_map[entry])
     }
@@ -845,6 +846,7 @@ impl<E: Effect> Environment<E> {
         let label = format!("module {key}");
         quiver_compiler::validate_unit(unit, &label).map_err(EnvironmentError::InvalidUnit)?;
         let resolved = self.resolve_unit_imports(unit)?;
+        self.validate_unit_bodies(unit, &label, &resolved)?;
         let own_map = self.link_and_ship(unit, &label, &resolved, builtins)?;
         self.linked_modules.insert(key, own_map);
         Ok(())
@@ -892,6 +894,29 @@ impl<E: Effect> Environment<E> {
                 error => EnvironmentError::InvalidUnit(error.to_string()),
             }
         })
+    }
+
+    /// Verify a unit's function bodies, now that its imports resolve to functions this
+    /// session holds and their capture counts are known.
+    fn validate_unit_bodies(
+        &self,
+        unit: &CompiledUnit,
+        label: &str,
+        resolved: &[usize],
+    ) -> Result<(), EnvironmentError> {
+        let import_captures: Vec<usize> = resolved
+            .iter()
+            .map(|&function| {
+                self.program
+                    .get_function(function)
+                    .map(|function| function.captures)
+                    .ok_or_else(|| {
+                        EnvironmentError::Link(format!("import resolved to no function {function}"))
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        quiver_compiler::validate_unit_bodies(unit, label, &import_captures)
+            .map_err(EnvironmentError::InvalidUnit)
     }
 
     /// Link a unit and ship whatever it added to the workers, answering the session ids
