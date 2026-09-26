@@ -619,10 +619,10 @@ mod tests {
 
     #[test]
     fn pin_pattern_resolves_to_the_binding() {
-        // A pattern pin (`=&x`) is a read reference: go-to-definition resolves it to the
+        // A pattern pin (`=^x`) is a read reference: go-to-definition resolves it to the
         // binding, and references from the binding include the pin — which is exactly what
         // document-highlight renders (the binding as WRITE, the pin as READ).
-        let text = "x = 5\n5 ~> =&x";
+        let text = "x = 5\n5 ~> =^x";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let pin_offset = text.rfind('x').unwrap();
@@ -642,7 +642,7 @@ mod tests {
     fn pin_path_components_resolve_separately() {
         // In `&p.x` the root and the accessor are recorded separately, as in an expression
         // access: `p` resolves to its binding, `.x` hovers as a field with its own type.
-        let text = "p = [x: 42]\n42 ~> =&p.x";
+        let text = "p = [x: 42]\n42 ~> =^p.x";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
         let root_offset = text.rfind("p.x").unwrap();
@@ -691,11 +691,11 @@ mod tests {
 
     #[test]
     fn parameter_pin_components_are_hoverable() {
-        // In `&$x` the `$` hovers as the parameter and `x` as a field, as in `$x` accesses.
-        let text = "f = #[x: 'int, y: 'int] { $y ~> =&$x }";
+        // In `^$x` the `$` hovers as the parameter and `x` as a field, as in `$x` accesses.
+        let text = "f = #[x: 'int, y: 'int] { $y ~> =^$x }";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         let semantics = analysis.semantics.expect("semantics");
-        let dollar_offset = text.rfind("&$").unwrap() + 1;
+        let dollar_offset = text.rfind("^$").unwrap() + 1;
         let field_offset = dollar_offset + 1;
 
         let dollar = semantics.at_offset(dollar_offset).expect("parameter entry");

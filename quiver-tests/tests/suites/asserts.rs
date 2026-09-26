@@ -105,7 +105,7 @@ fn test_pattern_vocabulary() {
     // Pins, types, tuples, and alternations all assert; none bind.
     quiver()
         .debug()
-        .evaluate("y = 2; 2 //= &y\nDone")
+        .evaluate("y = 2; 2 //= ^y\nDone")
         .expect("Done");
     quiver().debug().evaluate("5 //= 'int").expect("5");
     quiver()

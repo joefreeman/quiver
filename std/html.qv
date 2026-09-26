@@ -243,7 +243,7 @@ tag_name = #'%parse {
 }
 
 // Whether an attribute name already occurs in the accumulated list.
-seen? = #[(attrs): 'pattrs, (name): '%str] { %list.any? [$attrs, #{ =(name: &$$name) }] }
+seen? = #[(attrs): 'pattrs, (name): '%str] { %list.any? [$attrs, #{ =(name: ^$$name) }] }
 
 // Whether an attribute name starts with `data-q` — reserved for template instrumentation.
 reserved? = #'%str {
@@ -405,7 +405,7 @@ nodes_loop = #[
                       st6 = st5[..., pos: __integer_add__ [st5.pos, 2]]
                       tag_name st6 ~> =[ctag, st7]
                       {
-                        | ctag ~> =&tag => Ok
+                        | ctag ~> =^tag => Ok
                         | {
                           msg = %str.concat ["'</", tag] ~> %str.concat [~, ">'"]
 

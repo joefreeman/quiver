@@ -30,11 +30,11 @@ fn test_nil_match_of_prior_result() {
     // A verdict is inverted with a block, not a chained `=[]` (a fallible match must
     // end its chain): a failed equality falls to the Ok branch...
     quiver()
-        .evaluate("a = 1; 2 ~> { | =&a => [] | Ok }")
+        .evaluate("a = 1; 2 ~> { | =^a => [] | Ok }")
         .expect("Ok");
     // ...while a successful one takes the nil branch.
     quiver()
-        .evaluate("a = 42; 42 ~> { | =&a => [] | Ok }")
+        .evaluate("a = 42; 42 ~> { | =^a => [] | Ok }")
         .expect("[]");
 }
 
@@ -50,14 +50,14 @@ fn test_pin_of_nil_valued_variable_matches_nil() {
     // Pinning a variable whose value is nil must match a nil value — "equal nils" used to
     // answer nil and read as a failed match.
     quiver()
-        .evaluate("y = []; [] ~> { =&y => Matched | Missed }")
+        .evaluate("y = []; [] ~> { =^y => Matched | Missed }")
         .expect("Matched");
     quiver()
-        .evaluate("y = []; Ok ~> { =&y => Matched | Missed }")
+        .evaluate("y = []; Ok ~> { =^y => Matched | Missed }")
         .expect("Missed");
     // A nil-valued pin in field position binds its siblings.
     quiver()
-        .evaluate("y = []; [[], 7] ~> =[&y, n]; n")
+        .evaluate("y = []; [[], 7] ~> =[^y, n]; n")
         .expect("7");
 }
 
@@ -73,7 +73,7 @@ fn test_fallible_match_mid_chain_fails_its_step() {
         )
         .expect("[[T[1], 1], []]");
     quiver()
-        .evaluate("a = 1; [2 ~> { =&a ~> [~] => Went | Stopped }, 1 ~> =&a ~> [~]]")
+        .evaluate("a = 1; [2 ~> { =^a ~> [~] => Went | Stopped }, 1 ~> =^a ~> [~]]")
         .expect("[Stopped, [1]]");
     // A binding after the match is part of the same step.
     quiver()

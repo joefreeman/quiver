@@ -135,7 +135,7 @@ fn a_serializing_worker_reaches_the_same_state_as_a_shared_one() {
         ),
         // Structural equality across separately built tuples: canonical_tuples.
         ("q = Point[x: 3, y: 4]", None),
-        ("{ q ~> =&p; 1 | 0 }", Some("Int(1)")),
+        ("{ q ~> =^p; 1 | 0 }", Some("Int(1)")),
         // Closures through module combinators: function parameter rows.
         (
             "%list{1, 2, 3} ~> %list.map [~, #{ %num.mul [$, 2] }] ~> %list.fold [~, init: 0, f: %num.add]",

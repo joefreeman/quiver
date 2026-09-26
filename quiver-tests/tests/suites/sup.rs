@@ -30,7 +30,7 @@ fn test_supervisor_restarts_crashed_child() {
             p1 = !#(@'int)
 %proc.send [p1, 0]
             p2 = !#(@'int)
-            [p2] ~> { =[&p1] => "same pid" | "restarted" }
+            [p2] ~> { =[^p1] => "same pid" | "restarted" }
             "#,
         )
         .expect("\"restarted\"");
@@ -114,7 +114,7 @@ fn test_transient_child_restarts_on_crash() {
             p1 = !#(@'int)
 %proc.send [p1, 0]
             p2 = !#(@'int)
-            [p2] ~> { =[&p1] => "same pid" | "restarted" }
+            [p2] ~> { =[^p1] => "same pid" | "restarted" }
             "#,
         )
         .expect("\"restarted\"");
@@ -201,7 +201,7 @@ fn test_add_supervises_child_dynamically() {
             p1 = !#(@'int)
 %proc.send [p1, 0]
             p2 = !#(@'int)
-            [started?, [p2] ~> { =[&p1] => "same pid" | "restarted" }]
+            [started?, [p2] ~> { =[^p1] => "same pid" | "restarted" }]
             "#,
         )
         .expect(r#"[Ok, "restarted"]"#);
@@ -258,7 +258,7 @@ fn test_drop_forgets_and_id_is_reusable() {
             spurious = ![#(@'int), 100] ~> { =(@'int) => Spurious | Quiet }
 %proc.send [p2, 0]
             p3 = !#(@'int)
-            [v ~> { =Started[_] => Ok | [] }, spurious, [p3] ~> { =[&p2] => "same" | "fresh" }]
+            [v ~> { =Started[_] => Ok | [] }, spurious, [p3] ~> { =[^p2] => "same" | "fresh" }]
             "#,
         )
         .expect(r#"[Ok, Quiet, "fresh"]"#);

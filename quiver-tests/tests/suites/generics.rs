@@ -294,7 +294,7 @@ fn test_generic_unification_of_resource_and_reference_types() {
         .evaluate(
             r#"pick = #<'t>['t, 't] { $0 }
                r = %ref []
-               pick [r, r] ~> { =&r => Same | Distinct }"#,
+               pick [r, r] ~> { =^r => Same | Distinct }"#,
         )
         .expect("Same");
 }

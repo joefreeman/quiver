@@ -84,6 +84,10 @@ module.exports = grammar({
     // A leading token in a chain may begin either a binding pattern (`x = ...`,
     // `[a, b] = ...`) or a term; resolved with the `=` lookahead via GLR.
     [$._binding_target, $._access_source],
+    // `^x` at the start of a tuple may be a pin in a binding pattern (`[^x, y] = …`) or a
+    // tail call in a tuple expression; the `=` after the tuple decides.
+    [$.tail_call, $.pattern_pin],
+    [$._accessor, $.pattern_pin],
     [$.tuple, $.pattern_tuple],
     [$._pattern, $._access_source],
     [$._pattern, $._primary],
@@ -589,7 +593,7 @@ module.exports = grammar({
     ),
 
     // A punned tuple entry: an access path standing for both a field label and its value,
-    // so `(a, p.x)` builds `[a: &a, x: &p.x]`. Rooted at a variable, the parameter, or an
+    // so `(a, p.x)` builds `[a: a, x: p.x]`. Rooted at a variable, the parameter, or an
     // import; the label is the path's final named segment, so an index or annotation step
     // cannot end one, and a ripple root is not punnable.
     pun: $ => prec.right(seq(
@@ -635,12 +639,12 @@ module.exports = grammar({
       $.identifier,
     ),
 
-    // A pin: `&` + an access path rooted at a variable (`&x`, `&x.y.0`) or the parameter
-    // (`&$`, `&$x`, `&$0.y` — the parameter rule carries the glued first-accessor sugar).
+    // A pin: `^` + an access path rooted at a variable (`^x`, `^x.y.0`) or the parameter
+    // (`^$`, `^$x`, `^$0.y` — the parameter rule carries the glued first-accessor sugar).
     // Field/index steps only: a pin compares by value, so annotation retrieval has no
     // place in its target.
     pattern_pin: $ => prec.right(seq(
-      '&',
+      '^',
       choice($.identifier, $.parameter),
       repeat(seq('.', field('field', choice($.identifier, $.index)))),
     )),
@@ -656,7 +660,7 @@ module.exports = grammar({
       choice(prec.dynamic(1, $._paren_type), $.pattern_or, $._paren_negation),
       field('binding', alias($._identifier_immediate, $.identifier)),
     ),
-    // A negated pattern: `\\P` matches exactly when `P` doesn't (`\\[]`, `\\'int`, `\\&x`). The
+    // A negated pattern: `\\P` matches exactly when `P` doesn't (`\\[]`, `\\'int`, `\\^x`). The
     // real parser requires the `\\` glued to its pattern; this grammar is looser.
     pattern_negation: $ => seq('\\', $._pattern),
     // A lone negation in parentheses heads an ascription: `(\\[])x`.

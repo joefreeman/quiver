@@ -144,7 +144,7 @@ outer parameter sigil runs
 ==================
 
 f = #'int { [$, $$u, $$$] }
-g = #'int { 1 ~> =&$$k }
+g = #'int { 1 ~> =^$$k }
 
 ---
 

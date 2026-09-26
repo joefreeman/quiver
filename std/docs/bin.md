@@ -261,7 +261,7 @@ This is the readable form of a digest, and is what a hash is usually compared in
 ```quiver
 d = "abc" ~> .0 ~> %hash.sha256 ~
 %bin.to_hex d                           //= "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-%bin.to_hex d ~> %bin.from_hex ~        //= &d // the round trip is exact
+%bin.to_hex d ~> %bin.from_hex ~        //= ^d // the round trip is exact
 ```
 
 ## Base64

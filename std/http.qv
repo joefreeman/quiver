@@ -55,7 +55,7 @@ lower = #'%str {
 
 // The first value whose name matches case-insensitively, or nil.
 header_find = #[(pairs): 'pairs, (target): 'bin] {
-  %list.find [$pairs, #{ lower $0 ~> =Str[&$$target] }] ~> =[_, v]
+  %list.find [$pairs, #{ lower $0 ~> =Str[^$$target] }] ~> =[_, v]
 
   v
 }
@@ -67,7 +67,7 @@ header = #[(pairs): 'pairs, (name): '%str] {
 
 get = #[(pairs): 'pairs, (name): '%str] {
   :doc "The first value for an exact name (query or form pairs), or nil when absent."
-  %list.find [$pairs, #{ =[&$$name, _] }] ~> =[_, v]; v
+  %list.find [$pairs, #{ =[^$$name, _] }] ~> =[_, v]; v
 }
 
 // The numeric value of an ASCII hex digit, or nil.

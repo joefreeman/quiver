@@ -48,7 +48,7 @@ fn test_repeated_tls_sessions_hold_no_descriptors() {
             repeat [10, No]
             { ![100] | Ok }        // let the server thread finish its last teardown
             after = count_fds
-            { after ~> =&before => Ok | [before, after] }
+            { after ~> =^before => Ok | [before, after] }
             "#,
         ))
         .expect("Ok");

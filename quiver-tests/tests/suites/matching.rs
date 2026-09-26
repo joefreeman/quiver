@@ -2,54 +2,54 @@ use crate::common::*;
 
 #[test]
 fn test_pin_simple() {
-    quiver().evaluate("y = 2; 2 ~> =&y").expect("2");
-    quiver().evaluate("y = 2; 3 ~> =&y").expect("[]");
+    quiver().evaluate("y = 2; 2 ~> =^y").expect("2");
+    quiver().evaluate("y = 2; 3 ~> =^y").expect("[]");
 }
 
 #[test]
 fn test_pin_in_tuple() {
     quiver()
-        .evaluate("y = 2; Point[x, &y] = Point[1, 2]; x")
+        .evaluate("y = 2; Point[x, ^y] = Point[1, 2]; x")
         .expect("1");
     quiver()
-        .evaluate("y = 2; Point[x, &y] = Point[1, 3]")
+        .evaluate("y = 2; Point[x, ^y] = Point[1, 3]")
         .expect("[]");
 }
 
 #[test]
 fn test_pin_with_term_syntax() {
     quiver()
-        .evaluate("y = 2; Point[1, 2] ~> =Point[x, &y]; x")
+        .evaluate("y = 2; Point[1, 2] ~> =Point[x, ^y]; x")
         .expect("1");
     quiver()
-        .evaluate("y = 2; Point[1, 3] ~> =Point[x, &y]")
+        .evaluate("y = 2; Point[1, 3] ~> =Point[x, ^y]")
         .expect("[]");
 }
 
 #[test]
 fn test_mixed_pin_and_bind() {
     quiver()
-        .evaluate("y = 2; Point[1, 2] ~> =Point[x, &y]; x")
+        .evaluate("y = 2; Point[1, 2] ~> =Point[x, ^y]; x")
         .expect("1");
     quiver()
-        .evaluate("y = 2; Point[x, &y] = Point[1, 2]; x")
+        .evaluate("y = 2; Point[x, ^y] = Point[1, 2]; x")
         .expect("1");
 }
 
 #[test]
 fn test_nested_pin_and_bind() {
     quiver()
-        .evaluate("y = 2; A[1, B[2, C[3]]] ~> =A[x, B[&y, C[z]]]; [x, z]")
+        .evaluate("y = 2; A[1, B[2, C[3]]] ~> =A[x, B[^y, C[z]]]; [x, z]")
         .expect("[1, 3]");
 }
 
 #[test]
 fn test_pin_multiple_variables() {
     quiver()
-        .evaluate("x = 1; y = 2; [1, 2] ~> =[&x, &y]")
+        .evaluate("x = 1; y = 2; [1, 2] ~> =[^x, ^y]")
         .expect("[1, 2]");
     quiver()
-        .evaluate("x = 1; y = 2; [1, 3] ~> =[&x, &y]")
+        .evaluate("x = 1; y = 2; [1, 3] ~> =[^x, ^y]")
         .expect("[]");
 }
 
@@ -69,13 +69,13 @@ fn test_pin_against_partial() {
 
     // Pinning: (field_name: &var) checks field against variable value
     quiver()
-        .evaluate("x = 1; A[x: 1] ~> =(x: &x)")
+        .evaluate("x = 1; A[x: 1] ~> =(x: ^x)")
         .expect("A[x: 1]");
-    quiver().evaluate("x = 2; A[x: 1] ~> =(x: &x)").expect("[]");
+    quiver().evaluate("x = 2; A[x: 1] ~> =(x: ^x)").expect("[]");
 
     // Without variable for pin, should error: `&x` names an undefined binding.
     quiver()
-        .evaluate("A[x: 1] ~> =(x: &x)")
+        .evaluate("A[x: 1] ~> =(x: ^x)")
         .expect_compile_error(quiver_compiler::compiler::Error::VariableUndefined(
             "x".to_string(),
         ));
@@ -85,16 +85,16 @@ fn test_pin_against_partial() {
 fn test_pin_with_variable_and_repetition() {
     // When variable exists and identifier is repeated, check both Variable and FieldEquality
     quiver()
-        .evaluate("x = 5; [5, 5] ~> =[&x, &x]")
+        .evaluate("x = 5; [5, 5] ~> =[^x, ^x]")
         .expect("[5, 5]");
-    quiver().evaluate("x = 5; [5, 6] ~> =[&x, &x]").expect("[]"); // Fails field equality
-    quiver().evaluate("x = 5; [4, 4] ~> =[&x, &x]").expect("[]"); // Fails variable check
+    quiver().evaluate("x = 5; [5, 6] ~> =[^x, ^x]").expect("[]"); // Fails field equality
+    quiver().evaluate("x = 5; [4, 4] ~> =[^x, ^x]").expect("[]"); // Fails variable check
 }
 
 #[test]
 fn test_pin_without_variable_single_occurrence() {
     // Reference with no matching binding should error as an undefined variable.
-    quiver().evaluate("5 ~> =&x").expect_compile_error(
+    quiver().evaluate("5 ~> =^x").expect_compile_error(
         quiver_compiler::compiler::Error::VariableUndefined("x".to_string()),
     );
 }
@@ -103,10 +103,10 @@ fn test_pin_without_variable_single_occurrence() {
 fn test_pin_from_outer_scope() {
     // Pin pattern should be able to reference variables from outer scopes
     quiver()
-        .evaluate("x = 5; f = #[] { A[5] ~> =A[&x] }; [] ~> f ~")
+        .evaluate("x = 5; f = #[] { A[5] ~> =A[^x] }; [] ~> f ~")
         .expect("A[5]");
     quiver()
-        .evaluate("x = 5; f = #[] { A[6] ~> =A[&x] }; [] ~> f ~")
+        .evaluate("x = 5; f = #[] { A[6] ~> =A[^x] }; [] ~> f ~")
         .expect("[]");
 }
 
@@ -114,7 +114,7 @@ fn test_pin_from_outer_scope() {
 fn test_pin_mixed_repeated_and_single() {
     // References with no matching bindings should error as undefined variables.
     quiver()
-        .evaluate("[1, 1, 2] ~> =[&x, &x, &y]")
+        .evaluate("[1, 1, 2] ~> =[^x, ^x, ^y]")
         .expect_compile_error(quiver_compiler::compiler::Error::VariableUndefined(
             "x".to_string(),
         ));
@@ -145,35 +145,35 @@ fn test_pin_default_type() {
 fn test_pin_variable_field_path() {
     // A pin target may walk fields of an existing variable.
     quiver()
-        .evaluate("p = Point[x: 1, y: 2]; 1 ~> =&p.x")
+        .evaluate("p = Point[x: 1, y: 2]; 1 ~> =^p.x")
         .expect("1");
     quiver()
-        .evaluate("p = Point[x: 1, y: 2]; 2 ~> =&p.x")
+        .evaluate("p = Point[x: 1, y: 2]; 2 ~> =^p.x")
         .expect("[]");
     quiver()
-        .evaluate("p = [a: [b: 7]]; 7 ~> =&p.a.b")
+        .evaluate("p = [a: [b: 7]]; 7 ~> =^p.a.b")
         .expect("7");
-    quiver().evaluate("p = [3, 4]; 4 ~> =&p.1").expect("4");
+    quiver().evaluate("p = [3, 4]; 4 ~> =^p.1").expect("4");
 }
 
 #[test]
 fn test_pin_parameter() {
     // `&$` pins the whole parameter; `&$x` / `&$0` pin its fields (glued sugar, as in `$x`).
-    quiver().evaluate("f = #'int { 5 ~> =&$ }; f 5").expect("5");
+    quiver().evaluate("f = #'int { 5 ~> =^$ }; f 5").expect("5");
     quiver()
-        .evaluate("f = #'int { 5 ~> =&$ }; f 6")
+        .evaluate("f = #'int { 5 ~> =^$ }; f 6")
         .expect("[]");
     quiver()
-        .evaluate("f = #[x: 'int, y: 'int] { $y ~> =&$x }; f [x: 3, y: 3]")
+        .evaluate("f = #[x: 'int, y: 'int] { $y ~> =^$x }; f [x: 3, y: 3]")
         .expect("3");
     quiver()
-        .evaluate("f = #[x: 'int, y: 'int] { $y ~> =&$x }; f [x: 3, y: 4]")
+        .evaluate("f = #[x: 'int, y: 'int] { $y ~> =^$x }; f [x: 3, y: 4]")
         .expect("[]");
     quiver()
-        .evaluate("f = #['int, 'int] { $1 ~> =&$0 }; f [3, 3]")
+        .evaluate("f = #['int, 'int] { $1 ~> =^$0 }; f [3, 3]")
         .expect("3");
     quiver()
-        .evaluate("f = #[p: [q: 'int]] { 9 ~> =&$p.q }; f [p: [q: 9]]")
+        .evaluate("f = #[p: [q: 'int]] { 9 ~> =^$p.q }; f [p: [q: 9]]")
         .expect("9");
 }
 
@@ -182,16 +182,16 @@ fn test_pin_path_in_tuple_pattern() {
     // Path pins compose inside tuple patterns like plain pins.
     quiver()
         .evaluate(
-            "f = #[x: 'int, pair: ['int, 'int]] { $pair ~> =[&$x, b]; b }; f [x: 5, pair: [5, 9]]",
+            "f = #[x: 'int, pair: ['int, 'int]] { $pair ~> =[^$x, b]; b }; f [x: 5, pair: [5, 9]]",
         )
         .expect("9");
     quiver()
         .evaluate(
-            "f = #[x: 'int, pair: ['int, 'int]] { $pair ~> =[&$x, b]; b }; f [x: 5, pair: [6, 9]]",
+            "f = #[x: 'int, pair: ['int, 'int]] { $pair ~> =[^$x, b]; b }; f [x: 5, pair: [6, 9]]",
         )
         .expect("[]");
     quiver()
-        .evaluate("p = [limit: 10]; [v: 10] ~> =(v: &p.limit)")
+        .evaluate("p = [limit: 10]; [v: 10] ~> =(v: ^p.limit)")
         .expect("[v: 10]");
 }
 
@@ -199,10 +199,10 @@ fn test_pin_path_in_tuple_pattern() {
 fn test_pin_path_captured_in_closure() {
     // A pin path rooted at an outer variable is captured like the equivalent expression access.
     quiver()
-        .evaluate("p = [x: 42]; f = #'int { $ ~> =&p.x }; f 42")
+        .evaluate("p = [x: 42]; f = #'int { $ ~> =^p.x }; f 42")
         .expect("42");
     quiver()
-        .evaluate("p = [x: 42]; f = #'int { $ ~> =&p.x }; f 41")
+        .evaluate("p = [x: 42]; f = #'int { $ ~> =^p.x }; f 41")
         .expect("[]");
 }
 
@@ -211,7 +211,7 @@ fn test_pin_path_through_union_root() {
     // The field sits at different positions across the union's members, so the pin's
     // access step resolves by name at runtime.
     let src = "'u = A[pad: 'int, x: 'int] | B[x: 'int];\n\
-               f = #'u { { 5 ~> =&$x => Yes | No } };\n\
+               f = #'u { { 5 ~> =^$x => Yes | No } };\n\
                [f A[pad: 0, x: 5], f B[x: 5], f B[x: 6]]";
     quiver().evaluate(src).expect("[Yes, Yes, No]");
 }
@@ -219,7 +219,7 @@ fn test_pin_path_through_union_root() {
 #[test]
 fn test_pin_path_in_alternation() {
     // Path pins bind nothing, so alternatives stay balanced.
-    let src = "f = #[x: 'int, y: 'int] { { 3 ~> =(&$x | &$y) => Yes | No } };\n\
+    let src = "f = #[x: 'int, y: 'int] { { 3 ~> =(^$x | ^$y) => Yes | No } };\n\
                [f [x: 3, y: 9], f [x: 9, y: 3], f [x: 9, y: 9]]";
     quiver().evaluate(src).expect("[Yes, Yes, No]");
 }
@@ -229,13 +229,13 @@ fn test_pin_path_unknown_field() {
     // A pin path is resolved against the root's static type, so a missing field is a
     // compile error, not a failed match.
     quiver()
-        .evaluate("f = #[x: 'int] { 1 ~> =&$z }; f [x: 1]")
+        .evaluate("f = #[x: 'int] { 1 ~> =^$z }; f [x: 1]")
         .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
             field_name: "z".to_string(),
             target: "$".to_string(),
         });
     quiver()
-        .evaluate("p = [x: 1]; 1 ~> =&p.z")
+        .evaluate("p = [x: 1]; 1 ~> =^p.z")
         .expect_compile_error(quiver_compiler::compiler::Error::MemberFieldNotFound {
             field_name: "z".to_string(),
             target: "p".to_string(),
@@ -372,7 +372,7 @@ fn test_narrowing_partial_types() {
 fn test_narrowing_type_and_variable_pin() {
     // Combines structural narrowing with runtime variable check
     quiver()
-        .evaluate("y = 2; f = #(A['int] | B['int]) { =A[&y] => $ }; A[2] ~> f ~")
+        .evaluate("y = 2; f = #(A['int] | B['int]) { =A[^y] => $ }; A[2] ~> f ~")
         .expect_type("A['int] | []");
 }
 
@@ -705,7 +705,7 @@ fn test_as_pattern_over_binding_alternation() {
 #[test]
 fn test_as_pattern_over_alternation_of_pins() {
     // A pin inside an ascribed alternation still resolves against the enclosing scope.
-    let src = "f = #[x: 'int, y: 'int] { { 3 ~> =(&$x | &$y)v => v | No } };\n\
+    let src = "f = #[x: 'int, y: 'int] { { 3 ~> =(^$x | ^$y)v => v | No } };\n\
                [f [x: 3, y: 9], f [x: 9, y: 3], f [x: 9, y: 9]]";
     quiver().evaluate(src).expect("[3, 3, No]");
 }

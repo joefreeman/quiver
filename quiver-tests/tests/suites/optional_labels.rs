@@ -96,7 +96,7 @@ fn test_equality_across_spellings() {
             f = #[(foo): 'int] { $ }
             a = f [1]
             b = f [foo: 1]
-            { a ~> =&b => Same | Different }
+            { a ~> =^b => Same | Different }
             "#,
         )
         .expect("Same");

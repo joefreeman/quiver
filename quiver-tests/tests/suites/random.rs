@@ -25,7 +25,7 @@ fn test_hex_token() {
     quiver()
         .with_io()
         .evaluate(
-            "a = 16 ~> %random.hex ~; b = 16 ~> %random.hex ~; { | a ~> =&b => Same | Different }",
+            "a = 16 ~> %random.hex ~; b = 16 ~> %random.hex ~; { | a ~> =^b => Same | Different }",
         )
         .expect("Different");
 }

@@ -423,7 +423,7 @@ render_row = #'frame { "<!--r-->" ~> %str.concat [~, render $] ~> %str.concat [~
 // Whether every row carries a key.
 keyed_rows? = #'rows { %list.all? [~, #{ =(key: Str[_]) }] }
 
-key_in? = #[(rs): 'rows, (k): '%str] { %list.any? [$rs, #{ =(key: &$$k) }] }
+key_in? = #[(rs): 'rows, (k): '%str] { %list.any? [$rs, #{ =(key: ^$$k) }] }
 
 // The first list's elements (which arrive reversed) onto the front of the second.
 cat_rows = #[(a): 'rows, (b): 'rows] { %list.chain [%list.reverse $a, $b] }
@@ -440,7 +440,7 @@ take_row = #[(rs): 'rows, (k): '%str, (acc): 'rows, (j): 'int] -> ['taken, 'rows
     | =Cons[r, t] => {
       r ~> =(key: rk)
       {
-        | rk ~> =&k => [RHit[r, $j], cat_rows [$acc, t]]
+        | rk ~> =^k => [RHit[r, $j], cat_rows [$acc, t]]
         | ^ [t, k, Cons[r, $acc], __integer_add__ [$j, 1]]
       }
     }
@@ -499,21 +499,21 @@ diff_of = #[
   // `$self` term would call it.
   [$prev, $next] ~> {
     | =[Leaf[a], Leaf[b]] => {
-      | a ~> =&b => $acc
+      | a ~> =^b => $acc
       | Cons[SetText[path: %list.reverse $rpath, value: b], $acc]
     }
     | =[ALeaf[elem: e, name: n, value: a], ALeaf[elem: _, name: _, value: b]] => {
-        | a ~> =&b => $acc
+        | a ~> =^b => $acc
         | Cons[SetAttr[path: %list.reverse $rpath, elem: e, name: n, value: b], $acc]
       }
     | =[Opaque[a], Opaque[b]] => {
-      | a ~> =&b => $acc
+      | a ~> =^b => $acc
       | Cons[SetHtml[path: %list.reverse $rpath, html: b], $acc]
     }
     // Matching statics recurse slot-by-slot; mismatched statics fall through to the
     // final replacement arm.
     | =[Tmpl[statics: s1, slots: sl1], Tmpl[statics: s2, slots: sl2]]
-      s2 ~> =&s1 => {
+      s2 ~> =^s1 => {
         walk = #[(prev): 'frames, (next): 'frames, (i): 'int, (a): 'patches] {
           [$prev, $next] ~> {
             | =[Cons[p, pt], Cons[nx, nt]] => ^ [
@@ -574,7 +574,7 @@ diff_of = #[
               | =Cons[wr, wt] => {
                 wr ~> =(key: wk, row: wf)
                 {
-                  | wk ~> =&nk => {
+                  | wk ~> =^nk => {
                     a2 = $$self [$$self, wf, nf, Cons[$i, $$rpath], $a]
                     ^ [wt, nt, __integer_add__ [$i, 1], a2]
                   }
@@ -621,7 +621,7 @@ diff_of = #[
     // child view's own. A changed key falls through to the replacement arm — the
     // parent re-renders fresh (empty) markers and the new child's first frame fills
     // them.
-    | =[Boundary(key: k1), Boundary(key: k2)]; k2 ~> =&k1 => $acc
+    | =[Boundary(key: k1), Boundary(key: k2)]; k2 ~> =^k1 => $acc
     // A differing kind, a switched template (statics mismatch), or an Opaque next to
     // anything else: one replacement patch, subsuming the slot's descendants.
     | Cons[SetHtml[path: %list.reverse $rpath, html: render $next], $acc]
@@ -895,7 +895,7 @@ sync_redirect = #<'s>[(state): 's, (synced): ('%str | []), (app): @'app_msg] {
   app = $app
   m = $state:('%str)redirect
   {
-    | m ~> =&synced => synced
+    | m ~> =^synced => synced
     | m ~> =Str[p] => { %proc.send [app, Frame[url_sync Str[p]]]; Str[p] }
     | []
   }
@@ -966,21 +966,21 @@ collect_of = #[(self): ^, (f): 'frame, (acc): 'bounds] -> 'bounds {
 
 // Whether a key is already assigned (duplicate keys: first wins; the duplicate
 // boundary shares the vid, which the client resolves to the first marker).
-key_assigned? = #[(items): 'assigns, (k): '%str] { %list.any? [$items, #{ =(key: &$$k) }] }
+key_assigned? = #[(items): 'assigns, (k): '%str] { %list.any? [$items, #{ =(key: ^$$k) }] }
 
 'kid_hit = KFound['kid] | KMissing
 
 // A kid by key (reconcile) or by vid (crash reports).
 kid_of = #[(items): 'kids, (k): '%str] -> 'kid_hit {
   {
-    | %list.find [$items, #{ =(key: &$$k) }] ~> =('kid)kd => KFound[kd]
+    | %list.find [$items, #{ =(key: ^$$k) }] ~> =('kid)kd => KFound[kd]
     | KMissing
   }
 }
 
 kid_by_vid = #[(items): 'kids, (v): '%str] -> 'kid_hit {
   {
-    | %list.find [$items, #{ =(vid: &$$v) }] ~> =('kid)kd => KFound[kd]
+    | %list.find [$items, #{ =(vid: ^$$v) }] ~> =('kid)kd => KFound[kd]
     | KMissing
   }
 }
@@ -1011,7 +1011,7 @@ assign_bounds = #[(bs): 'bounds, (kids): 'kids, (vid): '%str, (n): 'int, (acc): 
 // The assigned vid for a key. Every boundary key was assigned from this same frame, so a miss
 // is a broken invariant.
 assigned_vid = #[(items): 'assigns, (k): '%str] {
-  %list.find [$items, #{ =(key: &$$k) }] ~> {
+  %list.find [$items, #{ =(key: ^$$k) }] ~> {
     | =(vid: av) => Str[av ~> .0]
     | __panic__ "boundary key missing from its assignment"
   }
@@ -1321,7 +1321,7 @@ take_entry = #[(items): 'reg_entries, (token): '%str, (acc): 'reg_entries] {
   $items ~> {
     | =Nil => [found: Missing, rest: $acc]
     | =Cons[e, t] => {
-      | e.token ~> =&token => [found: Found[e.pid], rest: %list.chain [%list.reverse $acc, t]]
+      | e.token ~> =^token => [found: Found[e.pid], rest: %list.chain [%list.reverse $acc, t]]
       | ^ [t, token, Cons[e, $acc]]
     }
   }
@@ -1403,12 +1403,12 @@ route_of = #[(rs): 'routes, (v): '%str] -> 'route_hit {
   // through an access in flow position, or bare in a field, would be *sent* the flowing
   // value.
   {
-    | %list.find [$rs, #{ =(vid: &$$v) }] ~> =(pid: rp) => RFound[rp]
+    | %list.find [$rs, #{ =(vid: ^$$v) }] ~> =(pid: rp) => RFound[rp]
     | RMissing
   }
 }
 
-del_route = #[(rs): 'routes, (v): '%str] { %list.filter [$rs, #{ =(vid: \&$$v) }] }
+del_route = #[(rs): 'routes, (v): '%str] { %list.filter [$rs, #{ =(vid: \^$$v) }] }
 
 // Fan a park/wake signal out to every routed view.
 tell_views = #[(routes): 'routes, (m): (Park | Wake)] {
@@ -1592,7 +1592,7 @@ unfilled_from = #[(page): '%str, (from): 'int] {
             | {
               seg = %str.slice [$page, closepos, nend]
               {
-                | seg ~> =&needle => Ok
+                | seg ~> =^needle => Ok
                 | ^ [$page, closepos]
               }
             }

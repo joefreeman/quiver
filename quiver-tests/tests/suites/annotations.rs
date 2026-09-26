@@ -65,7 +65,7 @@ fn test_annotated_nil_still_short_circuits() {
 #[test]
 fn test_annotations_invisible_to_equality() {
     quiver()
-        .evaluate("a = A[x: 1]; b = A[x: 1] ~> { :foo 9 }; a ~> =&b")
+        .evaluate("a = A[x: 1]; b = A[x: 1] ~> { :foo 9 }; a ~> =^b")
         .expect("A[x: 1]");
 }
 
@@ -312,7 +312,7 @@ fn test_annotations_are_invisible_to_pin_equality() {
     // An annotated nil pinned against a plain nil matches — equality ignores
     // annotations, and a pin of a nil-valued variable is an ordinary equality test.
     quiver()
-        .evaluate("x = [] ~> { :foo 1 }; [] ~> { =&x => Same | Different }")
+        .evaluate("x = [] ~> { :foo 1 }; [] ~> { =^x => Same | Different }")
         .expect("Same");
 }
 
@@ -550,7 +550,7 @@ fn test_builtin_attach_and_retrieve() {
 #[test]
 fn test_builtin_annotations_invisible_to_equality() {
     quiver()
-        .evaluate("a = __integer_add__; b = __integer_add__ ~> { :doc \"Adds.\" }; a ~> { =&b => Equal | Different }")
+        .evaluate("a = __integer_add__; b = __integer_add__ ~> { :doc \"Adds.\" }; a ~> { =^b => Equal | Different }")
         .expect("Equal");
 }
 

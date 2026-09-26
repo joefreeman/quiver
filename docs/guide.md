@@ -49,14 +49,14 @@ Quiver uses a keyword-less syntax. The table below gives an overview of the symb
 | `#` | function literal | `#'int { $ }` |
 | `$` | the function's parameter | `#'int { $ }` |
 | `$$` | the *enclosing* function's parameter | `#'int { #'int { $$ } }` |
-| `&` | pin: match against an existing value | `5 ~> =&x` |
+| `&` | type intersection | `'t & 'u` |
 | `\` | negate a pattern | `5 ~> =\[]` |
 | `=` | bind, or match | `x = 5` / `5 ~> =x` |
 | `\|` | separates branches; union members; pattern alternatives | `{ =A => 1 \| 2 }` |
 | `=>` | separates condition from consequence | `{ =0 => "zero" \| "other" }` |
 | `'` | identifies a type | `'int`, `'point` |
 | `%` | names a module | `%num.add` |
-| `^` | tail call; recursion inside a type | `^ [n, acc]` |
+| `^` | tail call; recursion inside a type; pin: match against an existing value | `^ [n, acc]` / `5 ~> =^x` |
 | `@` | spawn a process; the current process; a process type | `@worker`, `@`, `@'int` |
 | `!` | select operator (receive a message, awaits a process, etc) | `!'int`, `!p` |
 | `?` | sample a process's state | `?p` |
@@ -473,16 +473,16 @@ Literals inside a pattern test rather than bind:
 ### Testing types and pinning
 
 A type name is always a reference — types are never bound — so `='int` tests. To test
-against an existing *value*, prefix it with `&`.
+against an existing *value*, prefix it with `^`.
 
 ```quiver
 42 ~> ='int                   //= 42
 { <01> ~> ='int }             //= []
 
 y = 2
-2 ~> =&y                      //= 2
-{ 3 ~> =&y }                  //= []
-Point[1, 2] ~> =Point[x, &y]  //= Point[1, 2] // binds x, checks y is 2
+2 ~> =^y                      //= 2
+{ 3 ~> =^y }                  //= []
+Point[1, 2] ~> =Point[x, ^y]  //= Point[1, 2] // binds x, checks y is 2
 ```
 
 A pin's target may be any access path — a field of a variable, or of the enclosing
@@ -490,8 +490,8 @@ function's parameter via `$`.
 
 ```quiver
 p = Point[x: 1, y: 2]
-1 ~> =&p.x                    //= 1
-same? = #[x: 'int, y: 'int] { $y ~> =&$x }
+1 ~> =^p.x                    //= 1
+same? = #[x: 'int, y: 'int] { $y ~> =^$x }
 same? [x: 3, y: 3]            //= 3
 ```
 
@@ -1200,12 +1200,12 @@ fresh unique value of type `'ref`.
 
 ```quiver
 tag = %ref []
-[tag, 42] ~> =[&tag, x]; x    //= 42
+[tag, 42] ~> =[^tag, x]; x    //= 42
 ```
 
 ```quiver
 a = %ref []; b = %ref []
-{ a ~> =&b }                  //= [] // distinct refs are not equal
+{ a ~> =^b }                  //= [] // distinct refs are not equal
 ```
 
 ## Resources and failure

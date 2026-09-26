@@ -72,13 +72,13 @@ fn top_level_host_reads_run_at_boot() {
 fn top_level_ref_minting_runs_at_boot() {
     // Identity-freedom constrains *modules* (shared across importers); the program's
     // top level runs at boot, so a top-level ref is minted fresh each run.
-    expect_output("a = %ref []; #[] { [a, 1] ~> =[&a, x]; x }", "1");
+    expect_output("a = %ref []; #[] { [a, 1] ~> =[^a, x]; x }", "1");
 
     let out = quiv()
         .args([
             "run",
             "-e",
-            "mk = %ref; #[] { a = mk []; b = mk []; a ~> =&b => 1 | 2 }",
+            "mk = %ref; #[] { a = mk []; b = mk []; a ~> =^b => 1 | 2 }",
         ])
         .output()
         .unwrap();

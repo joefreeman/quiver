@@ -3341,7 +3341,7 @@
         "members": [
           {
             "type": "STRING",
-            "value": "&"
+            "value": "^"
           },
           {
             "type": "CHOICE",
@@ -5913,6 +5913,14 @@
     [
       "_binding_target",
       "_access_source"
+    ],
+    [
+      "tail_call",
+      "pattern_pin"
+    ],
+    [
+      "_accessor",
+      "pattern_pin"
     ],
     [
       "tuple",

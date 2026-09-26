@@ -11,7 +11,7 @@ fn test_ref_uniqueness() {
     // Multiple refs are unique
     quiver()
         .evaluate(
-            "[%ref [], %ref [], %ref []] ~> =[a, b, c]; [a ~> { =&b }, b ~> { =&c }, a ~> { =&c }]",
+            "[%ref [], %ref [], %ref []] ~> =[a, b, c]; [a ~> { =^b }, b ~> { =^c }, a ~> { =^c }]",
         )
         .expect("[[], [], []]");
 }
@@ -20,7 +20,7 @@ fn test_ref_uniqueness() {
 fn test_ref_via_reference_binding() {
     // Binding the function and calling it twice mints a fresh ref each time
     quiver()
-        .evaluate("ref = %ref; a = ref []; b = ref []; a ~> =&b")
+        .evaluate("ref = %ref; a = ref []; b = ref []; a ~> =^b")
         .expect("[]");
 }
 
@@ -28,7 +28,7 @@ fn test_ref_via_reference_binding() {
 fn test_ref_equality_same() {
     // Same ref compared to itself is equal
     quiver()
-        .evaluate("r = %ref []; r ~> { =&r => Equal | Different }")
+        .evaluate("r = %ref []; r ~> { =^r => Equal | Different }")
         .expect("Equal");
 }
 
@@ -36,7 +36,7 @@ fn test_ref_equality_same() {
 fn test_ref_equality_different() {
     // Different refs are not equal
     quiver()
-        .evaluate("a = %ref []; b = %ref []; a ~> =&b")
+        .evaluate("a = %ref []; b = %ref []; a ~> =^b")
         .expect("[]");
 }
 
@@ -52,7 +52,7 @@ fn test_ref_in_tuple() {
 fn test_ref_pattern_matching() {
     // Refs can be used in pattern matching with pinning
     quiver()
-        .evaluate("tag = %ref []; [tag: tag, data: 42] ~> =[tag: &tag, data: d]; d")
+        .evaluate("tag = %ref []; [tag: tag, data: 42] ~> =[tag: ^tag, data: d]; d")
         .expect("42");
 }
 
@@ -61,7 +61,7 @@ fn test_ref_pattern_matching_mismatch() {
     // Pattern match fails when ref doesn't match
     quiver()
         .evaluate(
-            "tag1 = %ref []; tag2 = %ref []; [tag: tag1, data: 42] ~> =[tag: &tag2, data: d]; d",
+            "tag1 = %ref []; tag2 = %ref []; [tag: tag1, data: 42] ~> =[tag: ^tag2, data: d]; d",
         )
         .expect("[]");
 }

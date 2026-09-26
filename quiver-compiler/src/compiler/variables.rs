@@ -238,8 +238,8 @@ impl<'a> FreeVariableCollector<'a> {
     fn visit_match(&mut self, pattern: &ast::Match) {
         match pattern {
             ast::Match::Pin(target) => {
-                // `&name` / `&name.field` reference an existing variable (with its access path,
-                // so a closure captures exactly what expression accesses would); `&$$x` is an
+                // `^name` / `^name.field` reference an existing variable (with its access path,
+                // so a closure captures exactly what expression accesses would); `^$$x` is an
                 // outer-parameter reference and captures like the expression `$$x`. An own-`$`
                 // pin reads the enclosing parameter and captures nothing.
                 match &target.root {
@@ -273,10 +273,10 @@ impl<'a> FreeVariableCollector<'a> {
             }
             ast::Match::As(head, _, _) => {
                 // The binder itself names no variable, but its head is an ordinary pattern and may
-                // hold pins (`=(&a | &b)v`).
+                // hold pins (`=(^a | ^b)v`).
                 self.visit_match(head);
             }
-            // A negation can't bind, but may pin (`=\&x`).
+            // A negation can't bind, but may pin (`=\^x`).
             ast::Match::Not(inner) => self.visit_match(inner),
             // These don't contain nested patterns or variable references.
             ast::Match::Identifier(_, _)

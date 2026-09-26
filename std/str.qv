@@ -13,7 +13,7 @@ skip_continuation = #[(data): 'bin, (byte_pos): 'int, (data_len): 'int] {
 // first byte (a native rope scan) and verify the rest there — so a scan skips the runs
 // between candidates instead of stepping a byte at a time.
 find_index = #[(haystack): 'bin, (needle): 'bin, (offset): 'int, (end): 'int] {
-  // The verification pins the needle (`=&needle`), and a pin checks a variable, so bind
+  // The verification pins the needle (`=^needle`), and a pin checks a variable, so bind
   // the field locally.
   needle = $needle
   {
@@ -24,7 +24,7 @@ find_index = #[(haystack): 'bin, (needle): 'bin, (offset): 'int, (end): 'int] {
         | %bin.length needle
           ~> %num.add [pos, ~]
           ~> %bin.slice [$haystack, pos, ~]
-          ~> =&needle => pos
+          ~> =^needle => pos
         | %num.add [pos, 1] ~> ^ [$haystack, needle, ~, $end]
       }
     | []
@@ -195,7 +195,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
     }
     %num.lt? [start, len]
     int_digits [data, start, len, 0] ~> =(n, end)
-    end ~> =&len
+    end ~> =^len
     { start ~> =1 => %num.sub [0, n] | n }
   },
 
@@ -226,7 +226,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
     target_len = %bin.length target
     %num.le? [prefix_len, target_len]
 
-    target ~> %bin.slice [~, 0, prefix_len] ~> =&prefix
+    target ~> %bin.slice [~, 0, prefix_len] ~> =^prefix
 
     Ok
   },
@@ -242,7 +242,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
     target_len
     ~> %num.sub [~, suffix_len]
     ~> %bin.slice [target, ~, target_len]
-    ~> =&suffix
+    ~> =^suffix
 
     Ok
   },

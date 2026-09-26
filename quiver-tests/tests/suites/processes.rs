@@ -340,7 +340,7 @@ fn test_receive_function_cannot_await() {
             p = @#[] { ![#'int { !q; Ok }] } [];
             %proc.send [p, 10];
             r = !p;
-            r:(Error(pid: (@)))crash ~> { =Error(pid: &p) => Matched | Missed }
+            r:(Error(pid: (@)))crash ~> { =Error(pid: ^p) => Matched | Missed }
             "#,
         )
         .expect("Matched");
@@ -539,7 +539,7 @@ fn test_late_await_of_crashed_process_yields_same_crash() {
             p = @#[] { "gone" ~> __panic__ ~ } [];
             { ![20] | Ok };
             r = !p;
-            r:(Panic(pid: (@), message: Str['bin]))crash ~> =(pid: &p, message: m);
+            r:(Panic(pid: (@), message: Str['bin]))crash ~> =(pid: ^p, message: m);
             m
             "#,
         )

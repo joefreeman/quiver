@@ -752,7 +752,7 @@ top_term = #['terms, ['int, 'int, 'int], ['int, 'coeff, 'int, 'int]] -> ['int, '
 rest_mag = #['terms, ['int, 'int, 'int], 'int, ('int | []), 'int] -> [('int | []), 'int] {
   | =[Nil, _, _, hi, n] => [hi, n]
   | =[Cons[[k, c], rest], l2, skip, hi, n] => {
-    | k ~> =&skip => ^ [rest, l2, skip, hi, n]
+    | k ~> =^skip => ^ [rest, l2, skip, hi, n]
     | term_mag [l2, k, c] ~> =[_, h] => ^ [
         rest,
         l2,

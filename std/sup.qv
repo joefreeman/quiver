@@ -108,7 +108,7 @@ loop = #'state {
     | =Down[id: i, pid: dp, outcome: o] => {
       // The row must hold the SAME incarnation the watcher awaited — a late report
       // for a reused id (drop, then add again) pin-fails and is dropped.
-      | %dict.get [$table, i] ~> =('row)r; r ~> =(pid: &dp) => {
+      | %dict.get [$table, i] ~> =('row)r; r ~> =(pid: ^dp) => {
         | restart? [r, o] => {
           now = %time.monotonic []
           allow? [stamps: r.restarts, now: now, max: $max, window: $window] ~> {

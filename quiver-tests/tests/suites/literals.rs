@@ -121,7 +121,7 @@ fn a_folded_literal_destructures_and_compares() {
         .evaluate("[1, 2] ~> =[x, y]; [y, x]")
         .expect("[2, 1]");
     quiver()
-        .evaluate("a = [1, 2]; [1, 2] ~> =&a")
+        .evaluate("a = [1, 2]; [1, 2] ~> =^a")
         .expect("[1, 2]");
 }
 

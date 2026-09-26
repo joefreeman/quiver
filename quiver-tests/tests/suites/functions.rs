@@ -516,7 +516,7 @@ fn test_outer_parameter_callable_field() {
 fn test_outer_parameter_pin() {
     quiver()
         .evaluate(
-            "f = #[k: 'int] { g = #'int { { $ ~> =&$$k => Yes | No } }; [g 5, g 6] }; f [k: 5]",
+            "f = #[k: 'int] { g = #'int { { $ ~> =^$$k => Yes | No } }; [g 5, g 6] }; f [k: 5]",
         )
         .expect("[Yes, No]");
 }

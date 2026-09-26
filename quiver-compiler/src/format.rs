@@ -790,7 +790,7 @@ fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
         return pretty::text(format!("{}[]", name));
     }
     // A punned tuple renders back to the spelling it was written as — `(a, p.x)` rather than the
-    // `[a: &a, x: &p.x]` the parser desugared it to. Entries carry their own trivia, so comments
+    // `[a: a, x: p.x]` the parser desugared it to. Entries carry their own trivia, so comments
     // and blank lines inside the parens survive as they do in any field list.
     if tuple.punned {
         return bracketed(
@@ -903,7 +903,7 @@ fn protect_trailing_spaces(line: String) -> String {
 }
 
 /// Render a punned entry back to the bare access path it was written as — the inverse of the
-/// parser's desugaring, whose shape (`name: &path`) is what makes the match exhaustive.
+/// parser's desugaring, whose shape (`name: path`) is what makes the match exhaustive.
 fn pun_doc(trivia: &Trivia, field: &TupleField) -> Doc {
     let FieldValue::Chain(chain) = &field.value else {
         unreachable!("a punned entry is a chain")
@@ -1741,8 +1741,8 @@ fn render_match_flat(pattern: &Match) -> String {
         Match::Placeholder => "_".to_string(),
         Match::Not(inner) => format!("\\{}", render_match(inner)),
         Match::Pin(target) => {
-            let mut out = String::from("&");
-            // As in `render_access`, a first accessor on `$` is written dotless (`&$x`, `&$0`).
+            let mut out = String::from("^");
+            // As in `render_access`, a first accessor on `$` is written dotless (`^$x`, `^$0`).
             let dotless_first = matches!(target.root, PinRoot::Parameter { .. });
             match &target.root {
                 PinRoot::Variable(name) => out.push_str(name),
@@ -2414,8 +2414,8 @@ mod tests {
     fn tall_steps_get_surrounding_blank_lines() {
         // A `~>` pipeline step is set off from its short neighbours with a blank line on each side…
         assert_formats(
-            "#{ first_step; target_len ~> [~, suffix_len] ~> %num.sub ~> [target, ~, target_len] ~> %bin.slice ~> =&suffix; last_step }",
-            "#{\n  first_step\n\n  target_len\n  ~> [~, suffix_len]\n  ~> %num.sub\n  ~> [target, ~, target_len]\n  ~> %bin.slice\n  ~> =&suffix\n\n  last_step\n}\n",
+            "#{ first_step; target_len ~> [~, suffix_len] ~> %num.sub ~> [target, ~, target_len] ~> %bin.slice ~> =^suffix; last_step }",
+            "#{\n  first_step\n\n  target_len\n  ~> [~, suffix_len]\n  ~> %num.sub\n  ~> [target, ~, target_len]\n  ~> %bin.slice\n  ~> =^suffix\n\n  last_step\n}\n",
         );
         // …but a body of only short steps stays packed (no imposed blanks).
         assert_formats("#{ aa; bb; cc }", "#{ aa; bb; cc }\n");
@@ -2894,7 +2894,7 @@ mod tests {
             "!(x: 'int)",
             "!Done",
             "!Reply['ref, 'bin]",
-            "!Reply['ref, 'bin] { =Reply[&id, _]; Ok }",
+            "!Reply['ref, 'bin] { =Reply[^id, _]; Ok }",
             "!#['int, 'int]",
             "@'%proc.changed { $ }",
             "@Done { $ }",
@@ -2933,7 +2933,7 @@ mod tests {
             "=Config*",
             "=*",
             "=_",
-            "=&y",
+            "=^y",
             "=('int)n",
             "=('int | 'bin)v",
             "=(x: 'int)p",
@@ -2944,7 +2944,7 @@ mod tests {
             "=([a] | [b])",
             // Negation glues to what it negates, and a lone negation heads a binder.
             "=\\[]",
-            "=A[b: \\'int, c: \\&y]",
+            "=A[b: \\'int, c: \\^y]",
             "=\\(0 | 1)",
             "=(\\[])n",
             "(\\[])n = f x; n",
@@ -2973,7 +2973,7 @@ mod tests {
             "#'int",
             "#'int -> 'bin { $ }",
             // --- multi-chain sequences & control flow ---
-            "tag = %ref; [tag, 42] ~> =[&tag, x]; x",
+            "tag = %ref; [tag, 42] ~> =[^tag, x]; x",
             "[]; 5",
             // --- type aliases: unions, intersections, partials, modules, recursion ---
             "'bool = True | False",

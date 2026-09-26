@@ -65,7 +65,7 @@ impl<'a> IdentifierScope<'a> {
 enum RuntimeCheck {
     TypeId(usize), // Type ID to check against
     Literal(ast::Literal),
-    /// A pin (`&name`, `&name.field`, `&$x`): load the referenced value and compare. The
+    /// A pin (`^name`, `^name.field`, `^$x`): load the referenced value and compare. The
     /// access steps are resolved against the root's static type at analysis; the root itself
     /// is looked up again at codegen, like every variable reference.
     Pin {
@@ -581,10 +581,10 @@ fn analyze_match_pattern(
             value_type_id,
         )),
         ast::Match::Pin(target) => {
-            // Pin pattern `&name` / `&name.field` / `&$x`: check the value equals the referenced
+            // Pin pattern `^name` / `^name.field` / `^$x`: check the value equals the referenced
             // value at runtime. A variable root must reference a binding already in scope — if it
             // isn't found it's undefined, e.g. a name bound by a *sibling* sub-pattern of the same
-            // compound pattern (`=[x, &x]`), which isn't visible yet.
+            // compound pattern (`=[x, ^x]`), which isn't visible yet.
             let accessors = &target.accessors;
             let (load, steps, pinned_type_id) = match &target.root {
                 ast::PinRoot::Variable(name) => {
@@ -621,7 +621,7 @@ fn analyze_match_pattern(
                     (PinLoad::Parameter, steps, accessed_type_id)
                 }
                 ast::PinRoot::Parameter { depth } => {
-                    // `&$$x`: an outer parameter is this function's capture — a local named
+                    // `^$$x`: an outer parameter is this function's capture — a local named
                     // by the sigil run — so the pin resolves like a variable-rooted one.
                     let name = super::variables::CaptureSource::OuterParameter(*depth).scope_name();
                     if let Some((capture_type_id, _)) =
@@ -732,10 +732,10 @@ fn type_check_requirements(
 /// Analyze a negated pattern `\\P`: a single requirement that none of `P`'s binding sets holds.
 ///
 /// `P` may not bind: when the negation matches, `P` didn't, so its bindings would be unset. A name
-/// inside a negation can only be a binder (pins are `&`), so `P` is analyzed in a fresh identifier
+/// inside a negation can only be a binder (pins are `^`), so `P` is analyzed in a fresh identifier
 /// scope and any binding is rejected. The narrowed type is the complement of `P`'s — exact for a
 /// pure type test on non-recursive positions, as for complement narrowing across branches — and
-/// otherwise the value's type unchanged (a value test like `\\42` or `\\&x` narrows nothing). An
+/// otherwise the value's type unchanged (a value test like `\\42` or `\\^x` narrows nothing). An
 /// exact negation is itself a pure type test in this sense, so a negation over one (`\\A[b: \\'int]`)
 /// and complement narrowing past one (`| =\\[] => … | …`) both stay exact.
 fn analyze_negated_pattern(

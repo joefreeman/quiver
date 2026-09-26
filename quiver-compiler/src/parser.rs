@@ -1196,12 +1196,12 @@ fn literal(input: Span) -> IResult<Span, Literal> {
 
 // Pattern parsers for terms
 
-/// Parse a pin pattern: `&` followed by an access path rooted at an existing variable
-/// (`&x`, `&x.y.0`) or the function parameter (`&$`, `&$x`, `&$0.y` — a single accessor may
+/// Parse a pin pattern: `^` followed by an access path rooted at an existing variable
+/// (`^x`, `^x.y.0`) or the function parameter (`^$`, `^$x`, `^$0.y` — a single accessor may
 /// be glued to the `$`, as usual). Only field/index accessors: a pin compares by value, so
 /// annotation retrieval has no place in its target.
 fn pin_pattern(input: Span) -> IResult<Span, Match> {
-    let (input, _) = char('&')(input)?;
+    let (input, _) = char('^')(input)?;
     let start = input;
     let (after_root, root) = alt((
         map(take_while1(|c| c == '$'), |s: Span| PinRoot::Parameter {
@@ -1251,7 +1251,7 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
             map(preceded(char('\\'), nested_pattern), |p| {
                 Match::Not(Box::new(p))
             }),
-            // Pin with & prefix (a variable- or `$`-rooted access path)
+            // Pin with ^ prefix (a variable- or `$`-rooted access path)
             pin_pattern,
             // String literal
             match_string,
@@ -2858,7 +2858,7 @@ fn as_pattern(input: Span) -> IResult<Span, Match> {
     Ok((input, Match::As(Box::new(head), name, Spanned(Some(span)))))
 }
 
-/// A negated pattern: `\` glued to the pattern it negates (`\[]`, `\'int`, `\&x`,
+/// A negated pattern: `\` glued to the pattern it negates (`\[]`, `\'int`, `\^x`,
 /// `\(A | B)`).
 fn negated_pattern(input: Span) -> IResult<Span, Match> {
     map(preceded(char('\\'), match_pattern), |p| {
@@ -2879,7 +2879,7 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
     };
     alt((
         negated_pattern,
-        // Pin with & prefix: a variable- or `$`-rooted access path to check the value against.
+        // Pin with ^ prefix: a variable- or `$`-rooted access path to check the value against.
         pin_pattern,
         // Try string literals first (before tuples and literals)
         match_string,
@@ -3088,7 +3088,7 @@ fn chain(input: Span) -> IResult<Span, Chain> {
 }
 
 /// A term is a primary optionally applied to a single argument by juxtaposition
-/// (`f x`, `f [args]`, `f &g`, `@f x`, `^f [args]`, `~ [args]`, `^~ arg`). The gap is horizontal
+/// (`f x`, `f [args]`, `@f x`, `^f [args]`, `~ [args]`, `^~ arg`). The gap is horizontal
 /// whitespace, so it doesn't cross the newline that ends a chain. Application by juxtaposition
 /// targets an *applicable* head: a looked-up callable `Access` (a variable, `$`, import member,
 /// builtin, tail call, or a ripple — whose head consumes the flowing value and the argument

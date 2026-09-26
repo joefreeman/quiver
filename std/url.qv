@@ -44,7 +44,7 @@ scan_to = #[(data): 'bin, (pos): 'int, (end): 'int, (set): 'bin] {
 last_index = #[(data): 'bin, (byte): 'int, (from): 'int] {
   {
     | __integer_compare__ [$from, 0] ~> =-1 => []
-    | %bin.get_byte [$data, $from] ~> =&$byte => $from
+    | %bin.get_byte [$data, $from] ~> =^$byte => $from
     | ^ [$data, $byte, __integer_subtract__ [$from, 1]]
   }
 }
@@ -53,7 +53,7 @@ last_index = #[(data): 'bin, (byte): 'int, (from): 'int] {
 starts_with? = #[(data): 'bin, (prefix): 'bin] {
   n = %bin.length $prefix
   __integer_compare__ [n, %bin.length $data] ~> =(-1 | 0)
-  %bin.slice [$data, 0, n] ~> =&$prefix
+  %bin.slice [$data, 0, n] ~> =^$prefix
   Ok
 }
 
@@ -139,7 +139,7 @@ parse = #'%str {
 authority = #' {
   =Url(scheme, host, port)
   {
-    | default_port scheme ~> =&port => "{host}"
+    | default_port scheme ~> =^port => "{host}"
     | "{host}:{%str.from_int port}"
   }
 }

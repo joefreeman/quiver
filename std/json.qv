@@ -410,7 +410,7 @@ stringify = #' {
 obj_get = #[(pairs): 'pairs, (key): '%str, (found): 'opt] {
   $pairs ~> {
     | =Nil => $found
-    | =Cons[[&$key, v], rest] => ^ [rest, $key, v]
+    | =Cons[[^$key, v], rest] => ^ [rest, $key, v]
     | =Cons[_, rest] => ^ [rest, $key, $found]
   }
 }
@@ -448,7 +448,7 @@ obj_set = #[(rest): 'pairs, (key): '%str, (new): ', (acc): 'pairs, (seen?): (Ok 
       | $seen? => %list.reverse $acc
       | %list.reverse Cons[[$key, $new], $acc]
     }
-    | =Cons[[&$key, _], tail] => {
+    | =Cons[[^$key, _], tail] => {
       | $seen? => ^ [tail, $key, $new, $acc, Ok]
       | ^ [tail, $key, $new, Cons[[$key, $new], $acc], Ok]
     }
@@ -504,7 +504,7 @@ update = #[(value): 'opt, (key): 'key, (f): #' -> 'opt] -> 'opt {
 obj_delete = #[(rest): 'pairs, (key): '%str, (acc): 'pairs] -> 'pairs {
   $rest ~> {
     | =Nil => %list.reverse $acc
-    | =Cons[[&$key, _], tail] => ^ [tail, $key, $acc]
+    | =Cons[[^$key, _], tail] => ^ [tail, $key, $acc]
     | =Cons[pair, tail] => ^ [tail, $key, Cons[pair, $acc]]
   }
 }

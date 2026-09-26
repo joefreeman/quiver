@@ -85,7 +85,7 @@ byte = #[(b): 'int, (what): Str['bin]] {
   b = $b
   what = $what
   #' {
-    | peek $ ~> =&b => [b, advance [$, 1]]
+    | peek $ ~> =^b => [b, advance [$, 1]]
     | fail_in [$, what]
   }
 }
@@ -167,11 +167,11 @@ ident_char? = #'int {
 
 // The position after an optional single byte `b` at `pos` (unchanged when absent).
 opt_byte_end = #[(data): 'bin, (pos): 'int, (len): 'int, (b): 'int] {
-  // Bound locally: the pattern pins against a variable (`=&b`), not a parameter field.
+  // Bound locally: the pattern pins against a variable (`=^b`), not a parameter field.
   b = $b
   {
     | __integer_compare__ [$pos, $len] ~> =-1
-      %bin.get_byte [$data, $pos] ~> =&b => __integer_add__ [$pos, 1]
+      %bin.get_byte [$data, $pos] ~> =^b => __integer_add__ [$pos, 1]
     | $pos
   }
 }
@@ -244,7 +244,7 @@ literal = #[(s): Str['bin], (what): Str['bin]] {
   #' {
     | end = __integer_add__ [$pos, n]
       __integer_compare__ [end, $len] ~> =(-1 | 0)
-      %bin.slice [$data, $pos, end] ~> =&expected => [Ok, advance [$, n]]
+      %bin.slice [$data, $pos, end] ~> =^expected => [Ok, advance [$, n]]
     | fail_in [$, what]
   }
 }

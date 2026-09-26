@@ -131,7 +131,7 @@ fn test_call_argument_span_evaluates_once() {
 Tuple[name: Nil, fields: Cons[call, Cons[call, Nil]]]"#,
             "[id: #'ref { $ }]",
         ))
-        .evaluate("ref = %ref; %m{ref []} ~> =[a, b]; a ~> { =&b => Same | Distinct }")
+        .evaluate("ref = %ref; %m{ref []} ~> =[a, b]; a ~> { =^b => Same | Distinct }")
         .expect("Same");
 }
 
@@ -528,7 +528,7 @@ fn test_unquote_duplicated_span_evaluates_once() {
             "Tuple[name: Nil, fields: Cons[Unquote[offset: 0, length: 3], Cons[Unquote[offset: 0, length: 3], Nil]]]",
             "Ok",
         ))
-        .evaluate("ref = %ref; %m{ref} ~> =[a, b]; a ~> { =&b => Same | Distinct }")
+        .evaluate("ref = %ref; %m{ref} ~> =[a, b]; a ~> { =^b => Same | Distinct }")
         .expect("Same");
 }
 

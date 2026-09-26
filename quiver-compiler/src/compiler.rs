@@ -964,7 +964,7 @@ fn collect_binding_spans(pattern: &ast::Match, out: &mut Vec<(String, SourceSpan
             }
         }
         ast::Match::As(head, name, span) => {
-            // The ascribed binder `(P)x` binds `x`, and its head may bind too (`=(&a | [b])v`).
+            // The ascribed binder `(P)x` binds `x`, and its head may bind too (`=(^a | [b])v`).
             collect_binding_spans(head, out);
             if let Some(span) = span.get() {
                 out.push((name.clone(), span));
@@ -3641,7 +3641,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Parameter guards of the branches that *faithfully* cover their type — i.e. whose
         // pattern narrows structurally (so its complement is a real type). Value-pattern
-        // branches (`=A[1]`, `=5`, `=&y`, partials) are excluded: their guard is the whole
+        // branches (`=A[1]`, `=5`, `=^y`, partials) are excluded: their guard is the whole
         // variant type but at runtime they match only a single value, so they don't actually
         // cover that region. Used to compute the uncovered (fall-through-to-nil) region for a
         // non-exhaustive enumeration's synthetic dispatch branch; see below.

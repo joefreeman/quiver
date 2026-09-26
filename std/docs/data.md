@@ -177,7 +177,7 @@ covers at once — a bignum, an escaped string, and a recursive list:
 ```quiver
 'pt = Point[x: 'int, y: Str['bin], z: (Nil | Cons['int, ^])]
 v = Point[x: -12345678901234567890123, y: "a\"b\\c\{d\ne", z: Cons[1, Cons[2, Nil]]]
-%data.encode v ~> %data.decode<'pt> ~   //= &v
+%data.encode v ~> %data.decode<'pt> ~   //= ^v
 ```
 
 ## Instantiation rides the value

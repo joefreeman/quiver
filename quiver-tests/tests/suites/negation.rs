@@ -19,7 +19,7 @@ fn test_negated_type_literal_and_pin() {
         .evaluate("f = #'int { | =\\42 => Other | Answer }; [f 42, f 1]")
         .expect("[Answer, Other]");
     quiver()
-        .evaluate("x = 3; f = #'int { | =\\&x => Other | Same }; [f 3, f 4]")
+        .evaluate("x = 3; f = #'int { | =\\^x => Other | Same }; [f 3, f 4]")
         .expect("[Same, Other]");
 }
 

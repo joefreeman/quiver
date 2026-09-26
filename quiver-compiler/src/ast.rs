@@ -412,7 +412,7 @@ pub struct Tuple {
     pub span: Spanned,
     /// Written with the punning spelling `(a, b)` / `Foo(a, b)`, where each entry is a *name*
     /// standing for both its own label and the value bound to it. The parser desugars a pun to
-    /// the labeled reference it abbreviates (`a` → `a: &a`), so the rest of the compiler sees an
+    /// the labeled reference it abbreviates (`a` → `a: a`), so the rest of the compiler sees an
     /// ordinary tuple; the flag records the spelling so the formatter can render it back — like
     /// [`Chain::binding`] and [`Term::String`]'s style. A punned tuple's fields are therefore
     /// always labeled, always [`FieldValue::Chain`], and always a lone [`Term::Access`].
@@ -536,7 +536,7 @@ pub struct PartialPattern {
 }
 
 /// The root of a pin pattern's target: an existing variable, or a function parameter —
-/// `depth` counts enclosing functions exactly as in `AccessSource::Parameter` (`&$x` is
+/// `depth` counts enclosing functions exactly as in `AccessSource::Parameter` (`^$x` is
 /// depth 0, `&$$x` depth 1, …).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PinRoot {
@@ -545,9 +545,9 @@ pub enum PinRoot {
 }
 
 /// A pin pattern's target: an access path rooted at a variable or the enclosing function's
-/// parameter (`&name.field`, `&$x.0`). `accessor_spans` parallels `accessors` and `base_span`
+/// parameter (`^name.field`, `^$x.0`). `accessor_spans` parallels `accessors` and `base_span`
 /// covers the root — as in `Access` — so the language server can hover/navigate each component
-/// separately; `span` covers the whole target after the `&`.
+/// separately; `span` covers the whole target after the `^`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinTarget {
     pub root: PinRoot,
@@ -573,7 +573,7 @@ pub enum Match {
     /// requires the value to be named, mirroring a named partial pattern.
     Star(Option<String>),
     Placeholder,
-    /// A pin against an existing value: `&name`, `&name.field`, `&$`, `&$x.0` — matches only
+    /// A pin against an existing value: `^name`, `^name.field`, `&$`, `^$x.0` — matches only
     /// if the value equals the referenced value. The target is an access path rooted at a
     /// variable or the enclosing function's parameter (with the parameter's usual glued first
     /// accessor, as in `$x`); annotation accessors are not part of a pin target.
