@@ -124,6 +124,11 @@ pub fn analyze(program: &Program, function_index: usize) -> Option<Forwarder> {
                 let value = stack.remove(index);
                 stack.push(value);
             }
+            Opcode::Squash => {
+                let top = stack.pop()?;
+                stack.truncate(stack.len().checked_sub(operand)?);
+                stack.push(top);
+            }
             Opcode::GetPositional => {
                 if stack.pop()? != Sym::Param {
                     return None;

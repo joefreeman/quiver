@@ -12,6 +12,7 @@ use narrowing::{
     Narrowing, analyze_tuple_pattern_for_complement, apply_narrowing, compute_complement,
     get_field_narrowing, get_field_type, get_type_for_provenance,
 };
+mod optimise;
 mod pattern;
 mod provenance;
 mod scopes;
@@ -1194,8 +1195,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             type_aliases: compiler.scopes[0].bindings.type_aliases.clone(),
         };
 
+        let body = std::mem::take(&mut compiler.codegen.instructions);
+        let instructions = match compiler.finish_body(body) {
+            Ok(instructions) => instructions,
+            Err(error) => {
+                return Err(LocatedError {
+                    error,
+                    span: compiler.current_span,
+                });
+            }
+        };
+
         Ok(Compiled {
-            instructions: compiler.codegen.instructions,
+            instructions,
             result_type: result_type_id,
             // Use the final receive type, which may have been widened during compilation
             // when calling functions that have receive types
@@ -3136,8 +3148,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
-        let function_instructions = std::mem::take(&mut self.codegen.instructions);
-        self.verify_operand_depths(&function_instructions)?;
+        let body = std::mem::take(&mut self.codegen.instructions);
+        let function_instructions = self.finish_body(body)?;
 
         // If every branch of the body was a pure parameter dispatch, record its case table so
         // calls can specialize the result type to the concrete argument (return-type dispatch).
@@ -4556,6 +4568,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         })
     }
 
+    /// A body's final form: checked, cleaned up (see [`optimise`]), and checked again, so a
+    /// rewrite that unbalances the operand stack fails the build rather than the program.
+    fn finish_body(&self, instructions: Vec<Instruction>) -> Result<Vec<Instruction>, Error> {
+        self.verify_operand_depths(&instructions)?;
+        let instructions = optimise::body(instructions, self.program);
+        self.verify_operand_depths(&instructions)?;
+        Ok(instructions)
+    }
+
     /// Debug builds of the compiler: check that every path reaches each instruction at one
     /// operand-stack depth. A mis-sized unwind (or any stack imbalance) shows up here, at a join,
     /// rather than as values silently piling up at runtime.
@@ -5205,8 +5226,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .unwrap_or_else(Type::nil);
 
         // Get the compiled module instructions
-        let module_instructions = std::mem::take(&mut self.codegen.instructions);
-        self.verify_operand_depths(&module_instructions)?;
+        let body = std::mem::take(&mut self.codegen.instructions);
+        let module_instructions = self.finish_body(body)?;
 
         // Restore original compiler state
         self.codegen.instructions = saved_instructions;
