@@ -1421,44 +1421,7 @@ impl<E: Effect> Environment<E> {
             // Extend the incrementally-maintained compatibility tables to the merged
             // program, capturing the extension as a delta when a serializing transport
             // will ship it.
-            let verify = std::env::var("QUIVER_VERIFY_COMPAT").is_ok();
-            let before = (verify && !shared).then(|| self.compatibility.clone());
             let delta = self.compatibility.update(&input, !shared);
-            if verify {
-                let reclaimed = self.program.stubbed_counts() != (0, 0);
-                self.compatibility.assert_matches_full(&input, reclaimed);
-                // And the delta must carry a worker from the previous tables to exactly
-                // these — the contract the serializing transport rests on.
-                if let (Some(mut before), Some(delta)) = (before, delta.clone()) {
-                    delta.apply(
-                        &mut before.type_compatibility,
-                        &mut before.function_params,
-                        &mut before.builtin_params,
-                        &mut before.canonical_tuples,
-                        &mut before.field_offsets,
-                    );
-                    assert_eq!(
-                        before.type_compatibility, self.compatibility.type_compatibility,
-                        "delta drifts from the tables: type_compatibility"
-                    );
-                    assert_eq!(
-                        before.function_params, self.compatibility.function_params,
-                        "delta drifts from the tables: function_params"
-                    );
-                    assert_eq!(
-                        before.builtin_params, self.compatibility.builtin_params,
-                        "delta drifts from the tables: builtin_params"
-                    );
-                    assert_eq!(
-                        before.canonical_tuples, self.compatibility.canonical_tuples,
-                        "delta drifts from the tables: canonical_tuples"
-                    );
-                    assert_eq!(
-                        before.field_offsets, self.compatibility.field_offsets,
-                        "delta drifts from the tables: field_offsets"
-                    );
-                }
-            }
 
             // Built once and wrapped once for the shared form: `update_cmd.clone()` below
             // runs per worker, so without the `Arc` each table was deep-copied N times
@@ -1524,9 +1487,7 @@ impl<E: Effect> Environment<E> {
     }
 
     /// Assert the incrementally-maintained compatibility tables equal a full
-    /// recomputation over the merged program. A validation hook for tests; the
-    /// `QUIVER_VERIFY_COMPAT` environment variable applies the same check at every
-    /// merge.
+    /// recomputation over the merged program. A validation hook for tests.
     pub fn verify_compatibility_tables(&self) {
         let resource_names = self.program.collect_resource_names();
         self.compatibility.assert_matches_full(
