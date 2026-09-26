@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast;
 use quiver_core::{
@@ -1698,16 +1698,10 @@ fn analyze_star_pattern(
     // discriminate the matching variant (and, for a named star, to enforce the name).
     let needs_type_check = all_sources.len() > 1;
 
-    // Create a binding set for each matching field source
-    let mut binding_sets = vec![];
+    // Each matching variant's fields, and whether it needs a type check to discriminate it.
+    let mut variants = vec![];
     let mut narrowed_type_ids: Vec<usize> = vec![];
     for source in &field_sources {
-        // Clone identifiers only if there are multiple variants to avoid cross-contamination
-        let mut variant_identifiers_scope =
-            IdentifierScope::new(identifiers, field_sources.len() > 1);
-        let variant_identifiers = variant_identifiers_scope.get_mut();
-
-        // Get fields from the source
         let (fields, type_check): (Vec<(Option<String>, usize)>, Option<usize>) = match source {
             FieldSource::Tuple(tuple_id) => {
                 let tuple_fields = program
@@ -1733,6 +1727,29 @@ fn analyze_star_pattern(
                 (converted, None)
             }
         };
+        variants.push((source, fields, type_check));
+    }
+
+    // Whichever variant matches, the body sees the same bindings, so only the names every
+    // matching variant has are bound — as every alternative of an alternation must bind the same.
+    let common_names: HashSet<String> = variants
+        .iter()
+        .map(|(_, fields, _)| {
+            fields
+                .iter()
+                .filter_map(|(name, _)| name.clone())
+                .collect::<HashSet<_>>()
+        })
+        .reduce(|common, names| &common & &names)
+        .unwrap_or_default();
+
+    // Create a binding set for each matching field source
+    let mut binding_sets = vec![];
+    for (source, fields, type_check) in variants {
+        // Clone identifiers only if there are multiple variants to avoid cross-contamination
+        let mut variant_identifiers_scope =
+            IdentifierScope::new(identifiers, field_sources.len() > 1);
+        let variant_identifiers = variant_identifiers_scope.get_mut();
 
         // Add type check if needed
         let mut requirements = vec![];
@@ -1745,7 +1762,7 @@ fn analyze_star_pattern(
 
         let mut bindings = Vec::new();
         for (idx, (name, field_type_id)) in fields.iter().enumerate() {
-            if let Some(field_name) = name {
+            if let Some(field_name) = name.as_ref().filter(|name| common_names.contains(*name)) {
                 let mut field_path = path.clone();
                 // As in analyze_partial_pattern: a partial source's fields are only
                 // addressable by name.

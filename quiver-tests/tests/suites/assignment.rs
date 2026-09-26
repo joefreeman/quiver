@@ -346,6 +346,38 @@ fn test_star_pattern_order_for_union() {
 }
 
 #[test]
+fn test_star_pattern_on_union_binds_common_fields() {
+    // Whichever member matches, the body sees the same bindings: the fields every member has.
+    quiver()
+        .evaluate(
+            r#"
+            f = #([b: 'int, a: 'int] | [a: 'bin, c: 'int]) { * = $; a }
+            [f [b: 1, a: 2], f [a: <01>, c: 4]]
+            "#,
+        )
+        .expect("[2, <01>]");
+
+    quiver()
+        .evaluate(
+            r#"
+            f = #([a: 'int, b: 'int] | [a: 'int, c: 'int]) { * = $; b }
+            f [a: 1, b: 2]
+            "#,
+        )
+        .expect_error_containing("Undefined variable: b");
+
+    // A named star intersects only the members carrying its name.
+    quiver()
+        .evaluate(
+            r#"
+            f = #(A[a: 'int, b: 'int] | B[b: 'int, c: 'int]) { | A* = $ => a | 0 }
+            [f A[a: 1, b: 2], f B[b: 5, c: 1]]
+            "#,
+        )
+        .expect("[1, 0]");
+}
+
+#[test]
 fn test_recursive_destructuring() {
     quiver()
         .evaluate("A[B[i: 1], C[j: 2, k: 3], D[l: 4, m: 5]] ~> =A[B[i: i], C(j), *]; [i, j, l, m]")
