@@ -5,7 +5,7 @@ use crate::common::*;
 // The stamp is row-invisible — rows keep saying exact-empty, so types are identical in
 // debug and release — and fresh-only, so a propagating failure keeps its original site.
 // Tooling reads the value directly; programs can reach it with a structural checked
-// retrieval (`:((line: 'int))origin`).
+// retrieval (`:origin<(line: 'int)>`).
 
 #[test]
 fn test_match_failure_is_stamped() {
@@ -73,7 +73,7 @@ fn test_program_reads_origin_by_shape() {
     // partial's own layout. Presence is observable today.)
     quiver()
         .debug()
-        .evaluate("f = #'int { =0 => Ok }; x = 5 ~> f ~; x:((line: 'int))origin ~> { =[] => NoOrigin | HasOrigin }")
+        .evaluate("f = #'int { =0 => Ok }; x = 5 ~> f ~; x:origin<(line: 'int)> ~> { =[] => NoOrigin | HasOrigin }")
         .expect("HasOrigin");
 }
 
@@ -81,7 +81,7 @@ fn test_program_reads_origin_by_shape() {
 fn test_checked_origin_read_is_nil_in_release() {
     // Same program, release build: same types, the retrieval just answers nil.
     quiver()
-        .evaluate("f = #'int { =0 => Ok }; x = 5 ~> f ~; x:((line: 'int))origin ~> { =[] => IsNil | NotNil }")
+        .evaluate("f = #'int { =0 => Ok }; x = 5 ~> f ~; x:origin<(line: 'int)> ~> { =[] => IsNil | NotNil }")
         .expect("IsNil");
 }
 
@@ -130,7 +130,7 @@ fn test_origin_module_name_is_an_ordinary_string() {
         .debug()
         .evaluate(
             "r = { 1 ~> =2 };
-             r:((module: '%str, line: 'int))origin ~> =(module: m);
+             r:origin<(module: '%str, line: 'int)> ~> =(module: m);
              [m, %str.length m]",
         )
         .expect("[\"test\", 4]");

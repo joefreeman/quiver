@@ -15,7 +15,7 @@ fn test_template_provenance_is_attached() {
         .evaluate(
             r#"u = [name: "Ada", on?: Ok]
                t = u ~> %html{ <div class="x" hidden={~.on?}>Hi {~.name}!</div> }
-               t:('%html.tmpl<[]>)template"#,
+               t:template<'%html.tmpl<[]>>"#,
         )
         .expect(
             r#"[statics: Cons["<div data-q=\"0\" class=\"x\"", Cons[">Hi <!--q:1-->", Cons["<!--/q:1-->!</div>", Nil]]], holes: Cons[Attr[elem: 0, name: "hidden", value: Ok], Cons[Child[Text["Ada"]], Nil]]]"#,
@@ -276,7 +276,7 @@ fn test_pointer_events_carry_element_relative_positions() {
                comp = [
                  mount: #'%http { "" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   | $event:('%html/live.event)event ~> =MouseMove(x: x, y: y)
+                   | $event:event<'%html/live.event> ~> =MouseMove(x: x, y: y)
                      %str.from_int x ~> %str.concat [~, ","] ~> %str.concat [~, %str.from_int y]
                    | $state
                  },
@@ -637,7 +637,7 @@ fn test_submit_fields_reach_update_as_event_metadata() {
                comp = [
                  mount: #'%http { "" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   | $event:('%html/live.event)event ~> =Submit(fields: f)
+                   | $event:event<'%html/live.event> ~> =Submit(fields: f)
                      %http.get [f, "v"]
                    | $state
                  },
@@ -684,7 +684,7 @@ fn test_change_metadata_carries_checked_state() {
                comp = [
                  mount: #'%http { "" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   | $event:('%html/live.event)event ~> =Change(value: v, checked?: c)
+                   | $event:event<'%html/live.event> ~> =Change(value: v, checked?: c)
                      c ~> { | =Ok => %str.concat ["on:", v] | %str.concat ["off:", v] }
                    | $state
                  },
@@ -710,7 +710,7 @@ fn test_input_and_change_share_one_shape() {
                comp = [
                  mount: #'%http { "" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   | $event:('%html/live.event)event ~> =(value: v)
+                   | $event:event<'%html/live.event> ~> =(value: v)
                      v
                    | $state
                  },
@@ -736,7 +736,7 @@ fn test_keydown_metadata_carries_key_and_modifiers() {
                comp = [
                  mount: #'%http { "" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   | $event:('%html/live.event)event ~> =KeyDown(key: k, mods: m)
+                   | $event:event<'%html/live.event> ~> =KeyDown(key: k, mods: m)
                      m ~> =(ctrl?: Ok)
                      k
                    | $state
@@ -762,7 +762,7 @@ fn test_click_metadata_carries_coordinates_and_modifiers() {
                comp = [
                  mount: #'%http { "" },
                  update: #[(state): Str['bin], (event): 'ev] {
-                   | $event:('%html/live.event)event ~> =Click(x: x, y: y, mods: m)
+                   | $event:event<'%html/live.event> ~> =Click(x: x, y: y, mods: m)
                      m ~> =(shift?: Ok)
                      %str.concat [%str.from_int x, %str.concat [",", %str.from_int y]]
                    | $state
@@ -790,7 +790,7 @@ fn test_redirect_marks_state_without_changing_it() {
     quiver()
         .evaluate(
             r#"s = [page: "x", clicks: 3] ~> %html/live.redirect [~, "/posts/7"]
-               [s, s:('%str)redirect, s ~> { =(page: "x") => Matches | Differs }]"#,
+               [s, s:redirect<'%str>, s ~> { =(page: "x") => Matches | Differs }]"#,
         )
         .expect(r#"[[page: "x", clicks: 3], "/posts/7", Matches]"#);
 }
@@ -803,7 +803,7 @@ fn test_redirect_composes_inside_generic_app_code() {
         .evaluate(
             r#"to_home = #<'s>'s { %html/live.redirect [$, "/"] }
                s = to_home [page: "x"]
-               s:('%str)redirect"#,
+               s:redirect<'%str>"#,
         )
         .expect(r#""/""#);
 }
@@ -889,7 +889,7 @@ fn test_one_event_union_folds_markers_and_payloads_together() {
                    | $event ~> {
                        | =Del[_] => "deleted"
                        | =Submit => {
-                         $event:('%html/live.event)event ~> =Submit(fields: f)
+                         $event:event<'%html/live.event> ~> =Submit(fields: f)
                          %http.get [f, "t"]
                        }
                      }

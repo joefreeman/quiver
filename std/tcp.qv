@@ -47,8 +47,8 @@ try_each = #[(addrs): '%list<'%dns.ip>, (port): 'int, (last): []] {
 
       outcome = __tcp_connect__ [ip, $port]
       outcome ~> {
-        | =(+TcpSocket)s => s
-        | =([])failure => ^ [rest, $port, failure]
+        | =(+TcpSocket & s) => s
+        | =([] & failure) => ^ [rest, $port, failure]
       }
     }
   }
@@ -58,9 +58,9 @@ try_each = #[(addrs): '%list<'%dns.ip>, (port): 'int, (last): []] {
   connect: #[(to): 'address, (port): 'int] {
     :doc "Connects to [to, port], yielding a +TcpSocket. A raw IP ('bin, 4 or 16 bytes) is connected in one step; a hostname ('%str) is resolved and each address tried until one accepts. Nil (carrying :error) on failure — for a hostname, also when resolution fails or the name has no addresses."
     $to ~> {
-      | =('bin)ip => __tcp_connect__ [ip, $port]
-      | =('%str)host => {
-        %dns.resolve host ~> %list.try_collect ~ ~> =('%list<'%dns.ip>)addrs
+      | =('bin & ip) => __tcp_connect__ [ip, $port]
+      | =('%str & host) => {
+        %dns.resolve host ~> %list.try_collect ~ ~> =('%list<'%dns.ip> & addrs)
 
         addrs ~> {
           | =Nil => [] ~> { :error IoError[kind: NotFound, message: "no addresses for {host}"] }

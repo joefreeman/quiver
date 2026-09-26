@@ -607,122 +607,179 @@ fn test_variable_pattern_matching_in_branches() {
 }
 
 #[test]
-fn test_as_pattern_binds_and_asserts_type() {
-    // `('int)x` matches the value against `'int` AND binds the whole value to `x`.
-    quiver().evaluate("42 ~> =('int)x; x").expect("42");
+fn test_conjunction_binds_and_asserts_type() {
+    // `('int & x)` matches the value against `'int` AND binds the whole value to `x`.
+    quiver().evaluate("42 ~> =('int & x); x").expect("42");
     // The binding is at the narrowed type, so `x` is usable as an int.
     quiver()
-        .evaluate("42 ~> =('int)x; [x, 1] ~> __integer_add__ ~")
+        .evaluate("42 ~> =('int & x); [x, 1] ~> __integer_add__ ~")
         .expect("43");
     // A type mismatch fails the match (yields nil), like any failed match.
-    quiver().evaluate("<0a> ~> =('int)x").expect("[]");
+    quiver().evaluate("<0a> ~> =('int & x)").expect("[]");
 }
 
 #[test]
-fn test_as_pattern_propagates_nil() {
+fn test_conjunction_propagates_nil() {
     // The key use: assert-and-bind that fails (propagates) on nil, replacing the `=x, x` re-emit.
     // A non-nil value binds and continues; a nil value fails the assertion and short-circuits.
     quiver()
         .evaluate(
-            "opt = #'int { | =0 => [] | $ }; 5 ~> opt ~ ~> =('int)x; x ~> [~, 1] ~> __integer_add__ ~",
+            "opt = #'int { | =0 => [] | $ }; 5 ~> opt ~ ~> =('int & x); x ~> [~, 1] ~> __integer_add__ ~",
         )
         .expect("6");
     quiver()
-        .evaluate("opt = #'int { | =0 => [] | $ }; 0 ~> opt ~ ~> =('int)x; x")
+        .evaluate("opt = #'int { | =0 => [] | $ }; 0 ~> opt ~ ~> =('int & x); x")
         .expect("[]");
 }
 
 #[test]
-fn test_as_pattern_narrows_union_in_field() {
+fn test_conjunction_narrows_union_in_field() {
     // Nested in a field, the as-binder narrows a union variant by field type and binds the field.
     quiver()
         .evaluate(
-            "f = #(A[a: 'int] | A[a: 'bin]) { =A[a: ('int)x] => x | NoMatch }; A[a: 5] ~> f ~",
+            "f = #(A[a: 'int] | A[a: 'bin]) { =A[a: ('int & x)] => x | NoMatch }; A[a: 5] ~> f ~",
         )
         .expect("5");
     // The other variant fails the field-type assertion.
     quiver()
         .evaluate(
-            "f = #(A[a: 'int] | A[a: 'bin]) { =A[a: ('int)x] => x | NoMatch }; A[a: <0a>] ~> f ~",
+            "f = #(A[a: 'int] | A[a: 'bin]) { =A[a: ('int & x)] => x | NoMatch }; A[a: <0a>] ~> f ~",
         )
         .expect("NoMatch");
     // The partial-pattern spelling works identically.
     quiver()
-        .evaluate("A[a: 5] ~> =A(a: ('int)x); x")
+        .evaluate("A[a: 5] ~> =A(a: ('int & x)); x")
         .expect("5");
 }
 
 #[test]
-fn test_as_pattern_captures_whole_value() {
+fn test_conjunction_captures_whole_value() {
     // At the top level the binder captures the whole value, ascribed the parenthesised type.
     quiver()
-        .evaluate("A[a: 5] ~> =(A[a: 'int])whole; whole")
+        .evaluate("A[a: 5] ~> =(A[a: 'int] & whole); whole")
         .expect("A[a: 5]");
 }
 
 #[test]
-fn test_as_pattern_with_union_type() {
+fn test_conjunction_with_union_type() {
     quiver()
-        .evaluate("<0a> ~> =('int | 'bin)x; x")
+        .evaluate("<0a> ~> =(('int | 'bin) & x); x")
         .expect("<0a>");
-    quiver().evaluate("42 ~> =('int | 'bin)x; x").expect("42");
+    quiver()
+        .evaluate("42 ~> =(('int | 'bin) & x); x")
+        .expect("42");
 }
 
 #[test]
-fn test_as_pattern_over_literal_alternation() {
+fn test_conjunction_over_literal_alternation() {
     // The ascribed head is a pattern, so it reaches alternations the type grammar cannot
     // spell — a set of integer literals has no type to state.
     quiver()
-        .evaluate("9 ~> =(32 | 9 | 10 | 13)b; b")
+        .evaluate("9 ~> =((32 | 9 | 10 | 13) & b); b")
         .expect("9");
     quiver()
-        .evaluate("7 ~> =(32 | 9 | 10 | 13)b; b")
+        .evaluate("7 ~> =((32 | 9 | 10 | 13) & b); b")
         .expect("[]");
 }
 
 #[test]
-fn test_as_pattern_over_literal_alternation_narrows() {
+fn test_conjunction_over_literal_alternation_narrows() {
     // The binder takes the alternatives' union, so an int-only operation accepts it.
     quiver()
-        .evaluate("1 ~> =(0 | 1)n; %num.add [n, 1]")
+        .evaluate("1 ~> =((0 | 1) & n); %num.add [n, 1]")
         .expect("2");
     // ... and a nil alternative widens it back, so the narrowed type is not just `'int`.
     quiver()
-        .evaluate("[] ~> =([] | 1)n; { n ~> ='int => Int | Other }")
+        .evaluate("[] ~> =(([] | 1) & n); { n ~> ='int => Int | Other }")
         .expect("Other");
 }
 
 #[test]
-fn test_as_pattern_over_binding_alternation() {
+fn test_conjunction_over_binding_alternation() {
     // Alternatives may bind, and the ascription's own binder captures the whole value
     // alongside them — one binding set per alternative, each carrying both.
-    let src = "[1, []] ~> =([x, []] | [[], x])whole; [x, whole]";
+    let src = "[1, []] ~> =(([x, []] | [[], x]) & whole); [x, whole]";
     quiver().evaluate(src).expect("[1, [1, []]]");
-    let src = "[[], 2] ~> =([x, []] | [[], x])whole; [x, whole]";
+    let src = "[[], 2] ~> =(([x, []] | [[], x]) & whole); [x, whole]";
     quiver().evaluate(src).expect("[2, [[], 2]]");
 }
 
 #[test]
-fn test_as_pattern_over_alternation_of_pins() {
+fn test_conjunction_over_alternation_of_pins() {
     // A pin inside an ascribed alternation still resolves against the enclosing scope.
-    let src = "f = #[x: 'int, y: 'int] { { 3 ~> =(^$x | ^$y)v => v | No } };\n\
+    let src = "f = #[x: 'int, y: 'int] { { 3 ~> =((^$x | ^$y) & v) => v | No } };\n\
                [f [x: 3, y: 9], f [x: 9, y: 3], f [x: 9, y: 9]]";
     quiver().evaluate(src).expect("[3, 3, No]");
 }
 
 #[test]
-fn test_as_pattern_over_alternation_repeated_binder() {
+fn test_conjunction_over_alternation_repeated_binder() {
     // A repeated binder is a runtime equality check, as it is for a plain ascription.
-    quiver().evaluate("[0, 0] ~> =[(0 | 1)n, n]; n").expect("0");
     quiver()
-        .evaluate("[0, 1] ~> =[(0 | 1)n, n]; n")
+        .evaluate("[0, 0] ~> =[((0 | 1) & n), n]; n")
+        .expect("0");
+    quiver()
+        .evaluate("[0, 1] ~> =[((0 | 1) & n), n]; n")
         .expect("[]");
 }
 
 #[test]
-fn test_as_pattern_over_alternation_inconsistent_bindings_is_error() {
+fn test_conjunction_binder_order_is_irrelevant() {
+    // A binder takes the value at the meet of the other conjuncts wherever it is written.
+    quiver()
+        .evaluate("f = #('int | 'bin) { =(x & 'int) => %num.add [x, 1] | 0 }; [f 4, f <01>]")
+        .expect("[5, 0]");
+}
+
+#[test]
+fn test_conjunction_binds_several_names() {
+    quiver()
+        .evaluate("5 ~> =(a & b & 'int); [a, b]")
+        .expect("[5, 5]");
+    // Nested conjunctions flatten into one.
+    quiver()
+        .evaluate("5 ~> =(('int & a) & b); %num.add [a, b]")
+        .expect("10");
+}
+
+#[test]
+fn test_conjunction_of_structural_patterns() {
+    // A destructuring conjunct binds alongside the whole-value binder.
+    quiver()
+        .evaluate("Point[x: 1, y: 2] ~> =(Point[x: a, y: _] & p); [a, p]")
+        .expect("[1, Point[x: 1, y: 2]]");
+    // Each conjunct must match.
+    quiver()
+        .evaluate("Point[x: 1, y: 2] ~> { =(Point[x: 1, y: _] & (y: 3)) => Hit | Miss }")
+        .expect("Miss");
+}
+
+#[test]
+fn test_conjunction_binds_tighter_than_alternation() {
+    quiver()
+        .evaluate("f = #(A['int] | B['int]) { =(A[n] & v | B[n] & v) => [n, v] }; [f A[1], f B[2]]")
+        .expect("[[1, A[1]], [2, B[2]]]");
+}
+
+#[test]
+fn test_conjunction_with_a_resource_type_member() {
+    // A type the pattern grammar cannot spell bare is still a conjunct.
+    quiver()
+        .evaluate("f = #(@'int | 'int) { | =(@'int & p) => Proc | Int }; f 3")
+        .expect("Int");
+}
+
+#[test]
+fn test_old_ascription_syntax_is_rejected() {
+    quiver()
+        .evaluate("42 ~> =('int)x; x")
+        .expect_parse_failure();
+}
+
+#[test]
+fn test_conjunction_over_alternation_inconsistent_bindings_is_error() {
     // The head is analysed as an ordinary alternation, so its balance rule still applies.
-    let src = "'ab = A['int] | B['int];\nf = #'ab { =(A[x] | B[y])v => 9 };\nA[1] ~> f ~";
+    let src = "'ab = A['int] | B['int];\nf = #'ab { =((A[x] | B[y]) & v) => 9 };\nA[1] ~> f ~";
     quiver().evaluate(src).expect_compile_error(
         quiver_compiler::compiler::Error::OrPatternBindingMismatch {
             expected: vec!["x".to_string()],
@@ -800,10 +857,10 @@ fn test_ascription_stays_name_strict() {
     // The exact-shape test is a type: ascription requires the unnamed tuple type,
     // where the bracket pattern would destructure any name.
     quiver()
-        .evaluate("{ A[1] ~> =(['int])v => v | No }")
+        .evaluate("{ A[1] ~> =(['int] & v) => v | No }")
         .expect("No");
     quiver()
-        .evaluate("{ [1] ~> =(['int])v => v | No }")
+        .evaluate("{ [1] ~> =(['int] & v) => v | No }")
         .expect("[1]");
 }
 

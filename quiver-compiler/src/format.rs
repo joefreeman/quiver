@@ -1676,23 +1676,11 @@ fn render_access(access: &Access) -> String {
             }
             AccessPath::Annotation(name, expected) => {
                 out.push(':');
-                if let Some(ast_type) = expected {
-                    // The checked form's shape is parenthesised. Unions and unnamed
-                    // partials render fully wrapped in their own parens, so don't double
-                    // up — but decide by variant, not by rendered prefix: an intersection
-                    // like `(a: 't) & (b: 't)` *starts* with `(` without being enclosed.
-                    let self_parenthesised = matches!(ast_type, Type::Union(_))
-                        || matches!(ast_type, Type::Tuple(tuple) if tuple.is_partial && tuple.name.is_none());
-                    let rendered = render_type(ast_type);
-                    if self_parenthesised {
-                        out.push_str(&rendered);
-                    } else {
-                        out.push('(');
-                        out.push_str(&rendered);
-                        out.push(')');
-                    }
-                }
                 out.push_str(name);
+                // The checked form's shape is a glued type argument (`:key<'t>`).
+                if let Some(ast_type) = expected {
+                    out.push_str(&render_type_arguments(std::slice::from_ref(ast_type)));
+                }
             }
         }
     }
@@ -1771,30 +1759,16 @@ fn render_match_flat(pattern: &Match) -> String {
                 .collect::<Vec<_>>()
                 .join(" | ")
         ),
-        // An ascribed binding always parenthesises its head: the parser requires `'(' head ')'`
-        // immediately followed by the binder. A self-parenthesised rendering — an alternation, a
-        // union or an unnamed partial — already provides that pair (`(0 | 1)v`, `('int | 'bin)v`,
-        // `(x: 'int)p`); a named partial's parens don't lead, so it still takes the explicit pair
-        // (`(Point(x))p`).
-        Match::As(head, name, _) => {
-            // The head must end up parenthesised exactly once, and the two head forms arrive
-            // differently: an alternation renders its own parens, while `render_type` never does
-            // except for the self-parenthesising types above.
-            let head = match head.as_ref() {
-                Match::Or(_) => render_match(head),
-                Match::Type(type_def) => {
-                    let self_parenthesised = matches!(type_def, Type::Union(_))
-                        || matches!(type_def, Type::Tuple(t) if t.is_partial && t.name.is_none());
-                    if self_parenthesised {
-                        render_type(type_def)
-                    } else {
-                        format!("({})", render_type(type_def))
-                    }
-                }
-                other => format!("({})", render_match(other)),
-            };
-            format!("{}{}", head, name)
-        }
+        // Conjuncts render as themselves: `&` binds tighter than `|`, and an alternation or union
+        // conjunct renders its own parens (`((0 | 1) & v)`).
+        Match::And(conjuncts) => format!(
+            "({})",
+            conjuncts
+                .iter()
+                .map(render_match)
+                .collect::<Vec<_>>()
+                .join(" & ")
+        ),
     }
 }
 
@@ -2482,8 +2456,8 @@ mod tests {
         // A consequence that follows the last continuation on the same line lays out relative to
         // that deeper indent too — a breaking tuple's fields indent under its `[`, `]` aligned.
         assert_formats(
-            "#{ x ~> { [haystack, delimiter, start_offset, end_offset] ~> find_index_from ~> =('int)index => [haystack ~> [~, start_offset, index] ~> %bin.slice ~> Str[~], [index, delim_len] ~> %num.add, another_field, one_more_field] | other } }",
-            "#{\n  x ~> {\n    | [haystack, delimiter, start_offset, end_offset]\n      ~> find_index_from\n      ~> =('int)index => [\n        haystack ~> [~, start_offset, index] ~> %bin.slice ~> Str[~],\n        [index, delim_len] ~> %num.add,\n        another_field,\n        one_more_field,\n      ]\n    | other\n  }\n}\n",
+            "#{ x ~> { [haystack, delimiter, start_offset, end_offset] ~> find_index_from ~> =('int & index) => [haystack ~> [~, start_offset, index] ~> %bin.slice ~> Str[~], [index, delim_len] ~> %num.add, another_field, one_more_field] | other } }",
+            "#{\n  x ~> {\n    | [haystack, delimiter, start_offset, end_offset]\n      ~> find_index_from\n      ~> =('int & index) => [\n        haystack ~> [~, start_offset, index] ~> %bin.slice ~> Str[~],\n        [index, delim_len] ~> %num.add,\n        another_field,\n        one_more_field,\n      ]\n    | other\n  }\n}\n",
         );
     }
 
@@ -2492,14 +2466,14 @@ mod tests {
         // The block writes itself out below the line it opens on, so it stays attached to what
         // feeds it; the rest of the chain still takes a line per term.
         assert_formats(
-            "#{ %bin.get_byte [$data, p1] ~> { =40 => OpenParenthesis | =41 => CloseParenthesis | Other } ~> =('token)t }",
-            "#{\n  %bin.get_byte [$data, p1] ~> {\n    | =40 => OpenParenthesis\n    | =41 => CloseParenthesis\n    | Other\n  }\n  ~> =('token)t\n}\n",
+            "#{ %bin.get_byte [$data, p1] ~> { =40 => OpenParenthesis | =41 => CloseParenthesis | Other } ~> =('token & t) }",
+            "#{\n  %bin.get_byte [$data, p1] ~> {\n    | =40 => OpenParenthesis\n    | =41 => CloseParenthesis\n    | Other\n  }\n  ~> =('token & t)\n}\n",
         );
         // A call's argument list is not a body: it may break, but the chain breaks with it rather
         // than gluing the call to what precedes it.
         assert_formats(
-            "#{ $acc ~> %bin.append [~, %int.divide [b0, 4] ~> b64_digit ~, 1] ~> %bin.append [~, %int.modulo [b0, 4] ~> b64_digit ~, 1] ~> =('bin)out }",
-            "#{\n  $acc\n  ~> %bin.append [~, %int.divide [b0, 4] ~> b64_digit ~, 1]\n  ~> %bin.append [~, %int.modulo [b0, 4] ~> b64_digit ~, 1]\n  ~> =('bin)out\n}\n",
+            "#{ $acc ~> %bin.append [~, %int.divide [b0, 4] ~> b64_digit ~, 1] ~> %bin.append [~, %int.modulo [b0, 4] ~> b64_digit ~, 1] ~> =('bin & out) }",
+            "#{\n  $acc\n  ~> %bin.append [~, %int.divide [b0, 4] ~> b64_digit ~, 1]\n  ~> %bin.append [~, %int.modulo [b0, 4] ~> b64_digit ~, 1]\n  ~> =('bin & out)\n}\n",
         );
     }
 
@@ -2934,23 +2908,23 @@ mod tests {
             "=*",
             "=_",
             "=^y",
-            "=('int)n",
-            "=('int | 'bin)v",
-            "=(x: 'int)p",
-            "=(Point(x: 'int))p",
+            "=('int & n)",
+            "=(('int | 'bin) & v)",
+            "=((x: 'int) & p)",
+            "=(Point(x: 'int) & p)",
             // A resource type renders bare, so the binder supplies the only pair.
-            "=(+File)fd",
-            "('bin)ip = f x; ip",
+            "=(+File & fd)",
+            "('bin & ip) = f x; ip",
             "=([a] | [b])",
             // Negation glues to what it negates, and a lone negation heads a binder.
             "=\\[]",
             "=A[b: \\'int, c: \\^y]",
             "=\\(0 | 1)",
-            "=(\\[])n",
-            "(\\[])n = f x; n",
+            "=(\\[] & n)",
+            "(\\[] & n) = f x; n",
             // An alternation head renders its own pair, and takes a binder like a type head.
-            "=(32 | 9 | 10 | 13)b",
-            "=([a, _] | [_, a])whole",
+            "=((32 | 9 | 10 | 13) & b)",
+            "=(([a, _] | [_, a]) & whole)",
             "='int",
             "=Circle[radius: r]",
             "=\"hello\"",

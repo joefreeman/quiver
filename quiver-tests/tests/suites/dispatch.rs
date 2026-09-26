@@ -170,7 +170,7 @@ fn test_dispatch_to_tail_call_branch_takes_the_function_result() {
 
 #[test]
 fn test_ascribed_fast_arm_guards_only_its_own_types() {
-    // An arm ascribing a field (`('int)a`) narrows its dispatch guard to that type even when the
+    // An arm ascribing a field (`('int & a)`) narrows its dispatch guard to that type even when the
     // field's declared type has a recursive member, so it claims no other argument's result.
     quiver()
         .evaluate(
@@ -178,7 +178,7 @@ fn test_ascribed_fast_arm_guards_only_its_own_types() {
             'ts = Nil | Cons['int, ^]
             'v = 'int | R['int] | L['ts]
             f = #['v, 'v] {
-              | =[('int)a, ('int)b] => __integer_add__ [a, b]
+              | =[('int & a), ('int & b)] => __integer_add__ [a, b]
               | =[L[t], y] => Lst
               | =[x, L[t]] => Lst
               | =[R[a], y] => R[a]

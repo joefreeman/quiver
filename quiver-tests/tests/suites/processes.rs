@@ -291,7 +291,7 @@ fn test_receive_function_cannot_spawn() {
             p = @#[] { ![#'int { @#[] { 42 } []; Ok }] } [];
             %proc.send [p, 10];
             r = !p;
-            r:((message: Str['bin]))crash ~> =(message: m);
+            r:crash<(message: Str['bin])> ~> =(message: m);
             m
             "#,
         )
@@ -307,7 +307,7 @@ fn test_receive_function_cannot_send() {
             p2 = @#[] { ![#'int { %proc.send [p1, 42]; Ok }] } [];
             %proc.send [p2, 10];
             r = !p2;
-            r:((message: Str['bin]))crash ~> =(message: m);
+            r:crash<(message: Str['bin])> ~> =(message: m);
             m
             "#,
         )
@@ -322,7 +322,7 @@ fn test_receive_function_cannot_select() {
             p = @#[] { ![#'int { !#'int; Ok }] } [];
             %proc.send [p, 10];
             r = !p;
-            r:((message: Str['bin]))crash ~> =(message: m);
+            r:crash<(message: Str['bin])> ~> =(message: m);
             m
             "#,
         )
@@ -340,7 +340,7 @@ fn test_receive_function_cannot_await() {
             p = @#[] { ![#'int { !q; Ok }] } [];
             %proc.send [p, 10];
             r = !p;
-            r:(Error(pid: (@)))crash ~> { =Error(pid: ^p) => Matched | Missed }
+            r:crash<Error(pid: (@))> ~> { =Error(pid: ^p) => Matched | Missed }
             "#,
         )
         .expect("Matched");
@@ -355,7 +355,7 @@ fn test_receive_function_cannot_perform_effect() {
             p = @#[] { ![#'int { ["/dev/null" ~> .0, 0, 0] ~> __file_open__ ~; Ok }] } [];
             %proc.send [p, 10];
             r = !p;
-            r:((message: Str['bin]))crash ~> =(message: m);
+            r:crash<(message: Str['bin])> ~> =(message: m);
             m
             "#,
         )
@@ -379,7 +379,7 @@ fn test_parent_termination_tears_down_children() {
             !a ~> =[b1, b2];
             r1 = !b1;
             r2 = !b2;
-            [r1:(Killed)crash, r2:(Killed)crash]
+            [r1:crash<Killed>, r2:crash<Killed>]
             "#,
         )
         .expect("[Killed, Killed]");
@@ -393,7 +393,7 @@ fn test_detached_child_survives_parent() {
             a = @#[] { p = @#[] { !'int } []; %proc.detach p; [p] } [];
             !a ~> =[b];
 %proc.send [b, 42];
-            !b ~> =('int)v;
+            !b ~> =('int & v);
             v
             "#,
         )
@@ -427,7 +427,7 @@ fn test_kill_terminates_a_running_process() {
             p = @#[] { !'int } [];
             %proc.kill p;
             r = !p;
-            r:('%proc.crash)crash
+            r:crash<'%proc.crash>
             "#,
         )
         .expect("Killed");
@@ -439,7 +439,7 @@ fn test_kill_of_completed_process_is_noop() {
         .evaluate(
             r#"
             p = @#[] { 42 } [];
-            !p ~> =('int)v;
+            !p ~> =('int & v);
             %proc.kill p;
             v
             "#,
@@ -457,7 +457,7 @@ fn test_link_fires_on_abnormal_termination() {
             c = @#[] { %proc.link v; "die" ~> __panic__ ~ } [];
             rc = !c;
             rv = !v;
-            rv:(Killed)crash
+            rv:crash<Killed>
             "#,
         )
         .expect("Killed");
@@ -471,9 +471,9 @@ fn test_link_is_silent_on_normal_completion() {
             r#"
             v = @#[] { !'int } [];
             c = @#[] { %proc.link v; 1 } [];
-            !c ~> =('int)one;
+            !c ~> =('int & one);
             %proc.send [v, 42];
-            !v ~> =('int)out;
+            !v ~> =('int & out);
             out
             "#,
         )
@@ -491,7 +491,7 @@ fn test_link_to_crashed_process_kills_immediately() {
             { ![50] | Ok };
             c = @#[] { %proc.link dead; !'int } [];
             r = !c;
-            r:(Killed)crash
+            r:crash<Killed>
             "#,
         )
         .expect("Killed");
@@ -507,7 +507,7 @@ fn test_panic_is_catchable_at_await() {
             r#"
             p = @#[] { "boom" ~> __panic__ ~ } [];
             r = !p;
-            r:(Panic(message: Str['bin]))crash ~> =(message: m);
+            r:crash<Panic(message: Str['bin])> ~> =(message: m);
             m
             "#,
         )
@@ -523,7 +523,7 @@ fn test_timeout_stamp_carries_the_ms() {
             r#"
             p = @#[] { !'int } [];
             r = ![p, 30];
-            r:('int)timeout
+            r:timeout<'int>
             "#,
         )
         .expect("30");
@@ -539,7 +539,7 @@ fn test_late_await_of_crashed_process_yields_same_crash() {
             p = @#[] { "gone" ~> __panic__ ~ } [];
             { ![20] | Ok };
             r = !p;
-            r:(Panic(pid: (@), message: Str['bin]))crash ~> =(pid: ^p, message: m);
+            r:crash<Panic(pid: (@), message: Str['bin])> ~> =(pid: ^p, message: m);
             m
             "#,
         )
@@ -1311,7 +1311,7 @@ fn test_constant_binary_crosses_as_a_spawn_init() {
         .evaluate(
             r#"
             r = { 1 ~> =2 };
-            r:((module: '%str, line: 'int))origin ~> =(module: m);
+            r:origin<(module: '%str, line: 'int)> ~> =(module: m);
             p = m ~> @'%str { %str.length $ } ~;
             !p
             "#,
@@ -1327,7 +1327,7 @@ fn test_constant_binary_crosses_in_a_message() {
             r#"
             p = @#[] { !'%str ~> { =Str[b] => %bin.length b } } [];
             r = { 1 ~> =2 };
-            r:((module: '%str, line: 'int))origin ~> =(module: m);
+            r:origin<(module: '%str, line: 'int)> ~> =(module: m);
             %proc.send [p, m];
             !p
             "#,

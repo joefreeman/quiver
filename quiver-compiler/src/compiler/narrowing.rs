@@ -993,10 +993,9 @@ pub fn pattern_constrains_variable(
     };
     match pattern {
         ast::Match::Identifier(..) | ast::Match::Placeholder => false,
-        ast::Match::As(head, ..) => pattern_constrains_variable(head, value_type, program),
-        ast::Match::Or(alternatives) => alternatives
+        ast::Match::Or(parts) | ast::Match::And(parts) => parts
             .iter()
-            .any(|alternative| pattern_constrains_variable(alternative, value_type, program)),
+            .any(|part| pattern_constrains_variable(part, value_type, program)),
         ast::Match::Tuple(tuple) => {
             has_variable_member(program)
                 || tuple.fields.iter().enumerate().any(|(idx, field)| {

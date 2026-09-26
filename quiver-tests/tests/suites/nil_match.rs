@@ -129,7 +129,7 @@ fn test_failure_inside_a_half_built_expression_unwinds_it() {
     quiver()
         .evaluate(
             "f = #('int | 'bin) {
-               | [a: 0, b: $ ~> =('int)n, c: n] => Int[n]
+               | [a: 0, b: $ ~> =('int & n), c: n] => Int[n]
                | x = $; Other[x]
              }
              [f 5, f <01>]",

@@ -34,7 +34,7 @@ Because the buffer is an ordinary binary, it can be built by hand — which is h
 broadcasts, tiling one lane rather than materialising the repetition:
 
 ```quiver
-%vec.of [I32, 1, %list{ 7 }] ~> =('%vec.vec)unit
+%vec.of [I32, 1, %list{ 7 }] ~> =('%vec.vec & unit)
 [unit.data, 3] ~> __binary_repeat__ ~ ~> __vector_sum__ [~, 4]   //= 21
 ```
 
@@ -215,7 +215,7 @@ so never nil for a representable magnitude. Halves round away from zero.
 ```
 
 ```quiver
-%vec.of_round [I32, 1, %list{ -3/2, 3/2 }] ~> =('%vec.vec)r
+%vec.of_round [I32, 1, %list{ -3/2, 3/2 }] ~> =('%vec.vec & r)
 [r, 0] ~> %vec.get ~   //= -2
 [r, 1] ~> %vec.get ~   //= 2
 ```
@@ -225,7 +225,7 @@ of the denominators. It is the constructor to reach for when the values are what
 the layout is not your concern.
 
 ```quiver
-%vec.of_values [I32, %list{ 1/2, 1/3 }] ~> =('%vec.vec)v
+%vec.of_values [I32, %list{ 1/2, 1/3 }] ~> =('%vec.vec & v)
 v ~> %vec.scale ~   //= 1/6 // 1/lcm(2, 3)
 v ~> %vec.sum ~     //= 5/6
 ```
@@ -235,7 +235,7 @@ irrational value has no denominator at all, so no scale holds it: that is nil to
 `:error` from `%num.denom`.
 
 ```quiver
-%vec.of_values [I32, %list{ %num.pi, 1 }] ~> :('%num.error)error   //= OutOfDomain
+%vec.of_values [I32, %list{ %num.pi, 1 }] ~> :error<'%num.error>   //= OutOfDomain
 ```
 
 ## Comparison and filtering

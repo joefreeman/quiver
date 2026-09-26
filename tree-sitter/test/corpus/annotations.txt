@@ -109,7 +109,7 @@ spaced colon is still a field label
 checked annotation retrieval
 ==================
 
-r:('perr)error
+r:error<'perr>
 
 ---
 
@@ -119,15 +119,16 @@ r:('perr)error
       (access
         source: (identifier)
         annotation: (checked_annotation
-          (type_identifier
-            name: (type_name))
-          key: (identifier))))))
+          key: (annotation_name)
+          (type_arguments
+            (type_identifier
+              name: (type_name))))))))
 
 ==================
 checked annotation retrieval with partial shape
 ==================
 
-x:((line: 'int))origin
+x:origin<(line: 'int)>
 
 ---
 
@@ -137,8 +138,9 @@ x:((line: 'int))origin
       (access
         source: (identifier)
         annotation: (checked_annotation
-          (partial_type
-            name: (identifier)
-            (type_identifier
-              name: (type_name)))
-          key: (identifier))))))
+          key: (annotation_name)
+          (type_arguments
+            (partial_type
+              name: (identifier)
+              (type_identifier
+                name: (type_name)))))))))

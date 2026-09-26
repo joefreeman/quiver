@@ -35,7 +35,7 @@
 // that wants it reads it back with a checked retrieval:
 //
 //   update = #[(state): 'state, (event): 'ev] {
-//     $event:('%html/live.event)event ~> =Submit(fields: f)
+//     $event:event<'%html/live.event> ~> =Submit(fields: f)
 //     ...
 //   }
 //
@@ -107,7 +107,7 @@ binding = #[(attr): '%html.pattr, (event): '%str] {
     | opts_member? $event ~> =Str[m] => Str[m]
     | %parse.fail [pos, "a supported event name (click, submit, input, change, keydown)"]
   }
-  ~> =('%str)member
+  ~> =('%str & member)
 
   {
     | value ~> =AHole[sp] => Expr[
@@ -115,7 +115,7 @@ binding = #[(attr): '%html.pattr, (event): '%str] {
       ]
     | %parse.fail [pos, "'\{ … }' (a binding's payload is a hole)"]
   }
-  ~> =('%html.pattr_val)payload
+  ~> =('%html.pattr_val & payload)
 
   name = %str.concat ["data-q-", $event]
   bound = [name: name, pos: pos, mods: [], value: payload]
@@ -203,7 +203,7 @@ keys_text = #[(items): '%list<'%str>, (acc): '%str] {
   }
 }
 
-ms_text = #('int | []) { =('int)n => %str.from_int n | "0" }
+ms_text = #('int | []) { =('int & n) => %str.from_int n | "0" }
 
 opts_text = #[(debounce): ('int | []), (throttle): ('int | []), (keys): ('keys | [])] {
   keys = key_list $keys ~> keys_text [~, ""]
@@ -309,8 +309,8 @@ enc_attr = #'%html.attr_val<_> {
 
 // A node's frame; self-passed to recurse into template slots.
 frame_of = #[(self): ^, (node): '%html<_>] -> 'frame {
-  | $node:('bnd)boundary ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: st]
-  | $node:('%html.tmpl<_>)template ~> =(statics: s, holes: h) => {
+  | $node:boundary<'bnd> ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: st]
+  | $node:template<'%html.tmpl<_>> ~> =(statics: s, holes: h) => {
     slots = %list.map [
       h,
       #{
@@ -326,7 +326,7 @@ frame_of = #[(self): ^, (node): '%html<_>] -> 'frame {
     // frames (chat items being their own templates diff granularly), each carrying
     // its optional `:key`.
     Many[
-      %list.map [items, #{ k = $:('%str)key; [key: k, row: $$self [$$self, $]] }],
+      %list.map [items, #{ k = $:key<'%str>; [key: k, row: $$self [$$self, $]] }],
     ]
   }
   | Opaque[%html.render $node]
@@ -893,7 +893,7 @@ sync_redirect = #<'s>[(state): 's, (synced): ('%str | []), (app): @'app_msg] {
   // access would send), so bind the fields locally.
   synced = $synced
   app = $app
-  m = $state:('%str)redirect
+  m = $state:redirect<'%str>
   {
     | m ~> =^synced => synced
     | m ~> =Str[p] => { %proc.send [app, Frame[url_sync Str[p]]]; Str[p] }
@@ -973,14 +973,14 @@ key_assigned? = #[(items): 'assigns, (k): '%str] { %list.any? [$items, #{ =(key:
 // A kid by key (reconcile) or by vid (crash reports).
 kid_of = #[(items): 'kids, (k): '%str] -> 'kid_hit {
   {
-    | %list.find [$items, #{ =(key: ^$$k) }] ~> =('kid)kd => KFound[kd]
+    | %list.find [$items, #{ =(key: ^$$k) }] ~> =('kid & kd) => KFound[kd]
     | KMissing
   }
 }
 
 kid_by_vid = #[(items): 'kids, (v): '%str] -> 'kid_hit {
   {
-    | %list.find [$items, #{ =(vid: ^$$v) }] ~> =('kid)kd => KFound[kd]
+    | %list.find [$items, #{ =(vid: ^$$v) }] ~> =('kid & kd) => KFound[kd]
     | KMissing
   }
 }
@@ -1254,7 +1254,7 @@ view_run = #<'i, 's, 'e>[
   mode = $boot ~> { =Reply[_] => Idle | Live }
   // The sync tracker starts at the mount state's own mark, if any: the page was served
   // for the URL that produced this state, so only a mark that changes needs syncing.
-  vlife [mode, state, rf, $comp, $vid, $app, kids, ar.1, state:('%str)redirect]
+  vlife [mode, state, rf, $comp, $vid, $app, kids, ar.1, state:redirect<'%str>]
 }
 
 // Define a component from its record: answers the **placeable component** — a
@@ -1268,7 +1268,7 @@ view_run = #<'i, 's, 'e>[
 // re-declares `<'i>`: a nested signature reaches the enclosing type parameters by
 // re-declaration — suffix inheritance makes it the same variable.)
 component = #<'e, 'i, 's>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
-  :doc "Defines a component from its `[mount, update, view, decode]` record — `decode` reads the `on:*` payload the client echoes back, %data notation in the `Ev` envelope, so the field is the instantiated codec itself, `decode: %data.decode<Ev['ev]>` (add a `nav: #[(state): 's, (request): '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. Pin the event type — `component<'ev> [...]` — to compile-check the view's `on:*` payloads against it (unpinned, a stray payload widens the inferred union and is only dropped at decode). What the browser knows and the payload cannot carry — a click's coordinates, a submit's fields, an input's value — rides the event as the `:event` annotation, read in `update` with a checked retrieval (`e:(Submit(fields: '%http.pairs))event`). The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
+  :doc "Defines a component from its `[mount, update, view, decode]` record — `decode` reads the `on:*` payload the client echoes back, %data notation in the `Ev` envelope, so the field is the instantiated codec itself, `decode: %data.decode<Ev['ev]>` (add a `nav: #[(state): 's, (request): '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. Pin the event type — `component<'ev> [...]` — to compile-check the view's `on:*` payloads against it (unpinned, a stray payload widens the inferred union and is only dropped at decode). What the browser knows and the payload cannot carry — a click's coordinates, a submit's fields, an input's value — rides the event as the `:event` annotation, read in `update` with a checked retrieval (`e:event<Submit(fields: '%http.pairs)>`). The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
   comp = with_nav $
   #<'i>'place<'i> {
     i = $init
@@ -1561,7 +1561,7 @@ classify_frame = #'%str -> 'fclass {
 splice = #[(page): '%str, (vid): '%str, (html): '%str] {
   open = %str.concat ["<!--v:", %str.concat [$vid, "-->"]]
   {
-    | %str.index_of [$page, open] ~> =('int)i => {
+    | %str.index_of [$page, open] ~> =('int & i) => {
       cut = %num.add [i, %str.length open]
       pre = %str.slice [$page, 0, cut]
       post = %str.slice [$page, cut, %str.length $page]
@@ -1578,11 +1578,11 @@ unfilled_from = #[(page): '%str, (from): 'int] {
   plen = %str.length $page
   rest = %str.slice [$page, $from, plen]
   {
-    | %str.index_of [rest, "<!--v:"] ~> =('int)i => {
+    | %str.index_of [rest, "<!--v:"] ~> =('int & i) => {
       idstart = %num.add [$from, %num.add [i, 6]]
       tail1 = %str.slice [$page, idstart, plen]
       {
-        | %str.index_of [tail1, "-->"] ~> =('int)j => {
+        | %str.index_of [tail1, "-->"] ~> =('int & j) => {
           id = %str.slice [$page, idstart, %num.add [idstart, j]]
           closepos = %num.add [idstart, %num.add [j, 3]]
           needle = %str.concat ["<!--/v:", %str.concat [id, "-->"]]
@@ -1718,7 +1718,7 @@ app_run = #[
   // (A root that didn't come from `view` carries no :boundary — the retrieval
   // fails and the app ends, so the GET times out. Fail fast.)
   node = $root [init: $req, key: "root"]
-  node:('bnd)boundary ~> =(start: st)
+  node:boundary<'bnd> ~> =(start: st)
   $boot ~> {
     | =Dead[handler] => {
       v = st ["0", me, Reply[me]]

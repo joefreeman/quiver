@@ -56,7 +56,7 @@ conn_loop = #[(sock): +TcpSocket, (handler): 'handler, (buf): 'bin] {
     | =Incomplete => {
       // A read failure ends the connection: the nil short-circuits out of the pump, the
       // connection process finishes, and teardown closes the socket it still owns.
-      __tcp_socket_read__ [$sock, 8192] ~> =('bin)chunk
+      __tcp_socket_read__ [$sock, 8192] ~> =('bin & chunk)
       {
         | %bin.length chunk ~> =0 => __tcp_socket_close__ $sock
         | ^ [$sock, $handler, %bin.concat [$buf, chunk]]
@@ -91,7 +91,7 @@ conn_loop = #[(sock): +TcpSocket, (handler): 'handler, (buf): 'bin] {
         }
         | {
           resp = {
-            | r ~> =('%http.response)ok => ok
+            | r ~> =('%http.response & ok) => ok
             | plain [500, "Internal Server Error"]
           }
           resp2 = {
@@ -134,14 +134,14 @@ conn = #[(sock): +TcpSocket, (handler): 'handler, (tls): ('tls | [])] {
 // A failed accept ends the loop rather than spinning on a broken listener; the nil carries
 // its `:error` out to `serve`'s caller.
 accept_loop = #[(listener): +TcpListener, (handler): 'handler, (tls): ('tls | [])] {
-  __tcp_listener_accept__ $listener ~> =(+TcpSocket)sock
+  __tcp_listener_accept__ $listener ~> =(+TcpSocket & sock)
   [sock, $handler, $tls] ~> @conn ~
   ^ [$listener, $handler, $tls]
 }
 
 serve = #[port: 'int, handler: 'handler, tls: ('tls | []) = []] {
   :doc "Serves HTTP on the port, one process per connection, each request answered by the handler (a nil result becomes a 500). With `tls:` ([cert, key] as %tls.accept takes them) each connection is upgraded first, serving HTTPS. Blocks forever; nil (with :error) if the listen or an accept failed."
-  $port ~> __tcp_listen__ [~, 128] ~> =(+TcpListener)listener
+  $port ~> __tcp_listen__ [~, 128] ~> =(+TcpListener & listener)
 
   accept_loop [listener, $handler, $tls]
 }

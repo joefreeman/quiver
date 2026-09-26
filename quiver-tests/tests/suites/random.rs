@@ -40,7 +40,7 @@ fn test_below_stays_in_range() {
             "chk = #'int {
                | =0 => Ok
                | {
-                 10 ~> %random.below ~ ~> =('int)v
+                 10 ~> %random.below ~ ~> =('int & v)
                  [v, 10] ~> __integer_compare__ ~ ~> =-1
                  [$, 1] ~> __integer_subtract__ ~ ~> ^ ~
                }

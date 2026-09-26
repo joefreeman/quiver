@@ -953,10 +953,6 @@ fn walk_access_spans(access: &mut ast::Access, f: &mut impl FnMut(&mut ast::Span
 fn walk_match_spans(pattern: &mut ast::Match, f: &mut impl FnMut(&mut ast::Spanned)) {
     match pattern {
         ast::Match::Identifier(_, span) => f(span),
-        ast::Match::As(head, _, span) => {
-            walk_match_spans(head, f);
-            f(span);
-        }
         ast::Match::Not(inner) => walk_match_spans(inner, f),
         ast::Match::Pin(target) => {
             for span in &mut target.accessor_spans {
@@ -983,9 +979,9 @@ fn walk_match_spans(pattern: &mut ast::Match, f: &mut impl FnMut(&mut ast::Spann
                 }
             }
         }
-        ast::Match::Or(alternatives) => {
-            for alternative in alternatives {
-                walk_match_spans(alternative, f);
+        ast::Match::Or(parts) | ast::Match::And(parts) => {
+            for part in parts {
+                walk_match_spans(part, f);
             }
         }
     }

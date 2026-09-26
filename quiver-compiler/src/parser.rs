@@ -1258,9 +1258,9 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
             // Star (optionally named) and placeholder. Before `match_tuple` so `Name*` isn't
             // first consumed as a bare named tuple, leaving the `*` dangling.
             star_pattern,
-            // As-pattern `(P)x` as a field value (`A(a: ('int)x)`) — narrow-and-capture a field.
-            // Before `type_identifier` so `('int)x` isn't read as a bare type leaving `x` dangling.
-            as_pattern,
+            // A parenthesised type or compound pattern as a field value (`A(a: ('int & x))`) —
+            // narrow-and-capture a field.
+            type_or_compound,
             // Named/structural tuple pattern: `Dir`, `Circle[r]`, `[a, b]`. Before
             // `type_identifier` so a bare named tuple in a field is a *value* pattern (matching the
             // field's runtime value, like `=Dir`), not a type assertion — the latter compiles to a
@@ -1963,17 +1963,18 @@ fn accessor(input: Span) -> IResult<Span, (AccessPath, Spanned)> {
 }
 
 /// An annotation-retrieval accessor, glued to what precedes it: `:key`, or the checked
-/// form `:('t)key` — a parenthesised expected shape between the `:` and the key, exactly
-/// the `=('t)v` ascription syntax transplanted to retrieval. Everything is glued; a field
-/// label (`x: v`) is distinguished by the space after its `:`.
+/// form `:key<'t>` — the expected shape as a glued type argument, like a type-consuming
+/// builtin's (`%data.decode<'t>`). Everything is glued; a field label (`x: v`) is
+/// distinguished by the space after its `:`.
 fn annotation_accessor(input: Span) -> IResult<Span, (AccessPath, Spanned)> {
     let start = input;
     let (after_colon, _) = char(':')(input)?;
-    // Like `as_pattern`, the shape must be parenthesised — `peek('(')` keeps a bare type
-    // name from gluing onto the key (`:'intkey`) and admits `('t)`-style and `(x: 't)`
-    // partial gates only.
-    let (rest, expected) = opt(preceded(peek(char('(')), inline_type_expression))(after_colon)?;
-    let (rest, name) = identifier(rest)?;
+    let (rest, name) = identifier(after_colon)?;
+    let (rest, expected) = opt(delimited(
+        pair(char('<'), ws0),
+        type_definition,
+        pair(ws0, char('>')),
+    ))(rest)?;
     Ok((
         rest,
         (
@@ -2814,48 +2815,60 @@ fn inline_type_expression(input: Span) -> IResult<Span, Type> {
     ))(input)
 }
 
-/// An alternation pattern: `(p | q | …)`, two or more `|`-separated patterns in parentheses.
-/// Tried after partial patterns and type expressions, so `(x: T)` stays a partial and
-/// `('int | 'bin)` stays a type union; this captures groups with a genuinely structural
-/// alternative (e.g. `([[], _] | [_, []])`).
-fn or_pattern(input: Span) -> IResult<Span, Vec<Match>> {
-    delimited(
+/// A parenthesised compound pattern: an alternation `(p | q | …)`, a conjunction `(p & q & …)`,
+/// or both, with `&` binding tighter than `|` as it does in types (`(A & x | B & x)`). At least
+/// two parts are required — a lone `(p)` is not a pattern group, leaving `(x)` to the partial
+/// pattern. Tried after partial patterns and type expressions, so `(x: T)` stays a partial and
+/// `('int | 'bin)` a type union; this captures groups with a structural part the type grammar
+/// cannot spell (`([[], _] | [_, []])`, `('int & n)`). A conjunct that is itself a conjunction
+/// is flattened into its parent.
+fn compound_pattern(input: Span) -> IResult<Span, Match> {
+    fn conjunction(input: Span) -> IResult<Span, Match> {
+        map(
+            // A conjunct is a pattern, else any type the intersection grammar admits as a member
+            // (`+File`, `@'int`), which a pattern cannot spell unparenthesised.
+            separated_list1(
+                tuple((wsc, char('&'), wsc)),
+                alt((match_pattern, map(base_type, Match::Type))),
+            ),
+            |conjuncts| {
+                let mut flat = Vec::with_capacity(conjuncts.len());
+                for conjunct in conjuncts {
+                    match conjunct {
+                        Match::And(inner) => flat.extend(inner),
+                        other => flat.push(other),
+                    }
+                }
+                if flat.len() == 1 {
+                    flat.pop().unwrap()
+                } else {
+                    Match::And(flat)
+                }
+            },
+        )(input)
+    }
+    let (rest, alternatives) = delimited(
         pair(char('('), wsc),
-        verify(
-            separated_list1(tuple((wsc, char('|'), wsc)), match_pattern),
-            |alts: &Vec<Match>| alts.len() >= 2,
-        ),
+        separated_list1(tuple((wsc, char('|'), wsc)), conjunction),
         pair(wsc, char(')')),
-    )(input)
+    )(input)?;
+    let mut alternatives = alternatives;
+    match alternatives.len() {
+        1 if matches!(alternatives[0], Match::And(_)) => Ok((rest, alternatives.pop().unwrap())),
+        1 => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        ))),
+        _ => Ok((rest, Match::Or(alternatives))),
+    }
 }
 
-/// A type expression, or — where the contents are not a type — an alternation of patterns. Both
-/// spell "one of these", and the type form wins wherever it parses, so `('int | 'bin)` is a single
-/// union test and `(0 | 1)` an alternation (the type grammar has no literal members). This is the
-/// sole place that order is decided: `match_pattern` and `as_pattern` both defer to it, so a `( … )`
-/// head reads the same way whether or not a binder follows it.
-fn type_or_alternation(input: Span) -> IResult<Span, Match> {
-    alt((
-        map(inline_type_expression, Match::Type),
-        map(or_pattern, Match::Or),
-        // A lone negation is a head too, so `(\[])x` binds a value required to be non-nil.
-        delimited(pair(char('('), wsc), negated_pattern, pair(wsc, char(')'))),
-    ))(input)
-}
-
-/// Parse an ascribed binding: a *parenthesised* pattern head immediately followed by a binding
-/// identifier — `('int)x`, `('int | 'bin)x`, `(0 | 1)x`. Matches the head, then binds the whole
-/// value, at the type the head narrowed it to, to the trailing identifier. The identifier must be
-/// *adjacent* — no whitespace after `)` — so `('int) x` is not an as-pattern (the `x` is left for
-/// the next term). The leading `(` is required, so a bare type (`'int`, `A['int]`) is never
-/// silently turned into a binder.
-fn as_pattern(input: Span) -> IResult<Span, Match> {
-    // Require the parenthesised form. `peek('(')` keeps a bare type like `A['int]` from being read
-    // as `('A['int]')` + binder; and lets a non-type `(x)` fall through to the partial-pattern rule.
-    peek(char('('))(input)?;
-    let (input, head) = type_or_alternation(input)?;
-    let (input, (span, name)) = spanned(identifier)(input)?;
-    Ok((input, Match::As(Box::new(head), name, Spanned(Some(span)))))
+/// A type expression, or — where the contents are not a type — a compound pattern. The type
+/// form wins wherever it parses, so `('int | 'bin)` is a single union test, `('a & 'b)` a single
+/// intersection test, and `(0 | 1)` or `('int & n)` a compound pattern (the type grammar has no
+/// literals or binders).
+fn type_or_compound(input: Span) -> IResult<Span, Match> {
+    alt((map(inline_type_expression, Match::Type), compound_pattern))(input)
 }
 
 /// A negated pattern: `\` glued to the pattern it negates (`\[]`, `\'int`, `\^x`,
@@ -2886,17 +2899,14 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
         // Star (optionally named): `*` or `Name*`. Before match_tuple so `Name*` isn't
         // first consumed as a bare named tuple, leaving the `*` dangling.
         star_pattern,
-        // As-pattern `(P)x` — before the bare paren-forms below, which would otherwise consume
-        // `(P)` and leave the trailing binder dangling.
-        as_pattern,
         // Try match tuple (handles both [..] and Name[..])
         map(match_tuple, Match::Tuple),
         // Try partial patterns before inline types (partial patterns use parentheses too)
         map(partial_pattern_inner, Match::Partial),
-        // Type reference (`'int`, `'list<'t>`, `('int | 'bin)`), else an alternation of patterns
-        // (`([[], _] | [_, []])`). Types need no & since they are never bound. Must come after
-        // partial patterns to avoid ambiguity with (...).
-        type_or_alternation,
+        // Type reference (`'int`, `'list<'t>`, `('int | 'bin)`), else a compound pattern
+        // (`([[], _] | [_, []])`, `('int & n)`). Must come after partial patterns to avoid
+        // ambiguity with (...).
+        type_or_compound,
         // Numeric literal patterns: decimal (`=1.5`) and fraction (`=1/3`), before bare
         // literals so the leading digits aren't consumed as a plain integer.
         match_decimal,

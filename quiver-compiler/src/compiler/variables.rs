@@ -157,7 +157,7 @@ impl<'a> FreeVariableCollector<'a> {
                 }
             }
             ast::Term::State(access, _) => {
-                // `?('t)p` names its target without calling it — the same capture as any name.
+                // `?p` names its target without calling it — the same capture as any name.
                 self.visit_access_capture(access);
             }
             // Dialects are expanded before capture collection (`compile_function`), so an
@@ -265,16 +265,11 @@ impl<'a> FreeVariableCollector<'a> {
                     }
                 }
             }
-            ast::Match::Or(alternatives) => {
-                // Visit each alternative's nested patterns and references
-                for alternative in alternatives {
-                    self.visit_match(alternative);
+            ast::Match::Or(parts) | ast::Match::And(parts) => {
+                // Visit each part's nested patterns and references (pins: `=(^a | ^b)`).
+                for part in parts {
+                    self.visit_match(part);
                 }
-            }
-            ast::Match::As(head, _, _) => {
-                // The binder itself names no variable, but its head is an ordinary pattern and may
-                // hold pins (`=(^a | ^b)v`).
-                self.visit_match(head);
             }
             // A negation can't bind, but may pin (`=\^x`).
             ast::Match::Not(inner) => self.visit_match(inner),

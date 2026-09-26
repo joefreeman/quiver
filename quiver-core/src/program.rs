@@ -808,7 +808,7 @@ impl Program {
                 let panic_tuple = self.vocabulary_tuple(&decl.panic)?;
                 let killed_tuple = self.vocabulary_tuple(&decl.killed)?;
                 // Give the crash union a type-table presence: checked retrievals
-                // (`x:('t)crash`) enumerate compatible concrete types from it.
+                // (`x:crash<'t>`) enumerate compatible concrete types from it.
                 let member_types: Vec<usize> = [error_tuple, panic_tuple, killed_tuple]
                     .into_iter()
                     .map(|tuple_id| self.register_type(Type::Tuple(tuple_id)))
@@ -836,7 +836,7 @@ impl Program {
                     .iter()
                     .map(|kind| self.vocabulary_tuple(kind))
                     .collect::<Result<Vec<_>, _>>()?;
-                // Type-table presence, so a checked retrieval (`x:('%io.error)error`) can
+                // Type-table presence, so a checked retrieval (`x:error<'%io.error>`) can
                 // enumerate the payload — and so a match on a single kind resolves.
                 self.register_type(Type::Tuple(io_error_tuple));
                 let kind_types: Vec<usize> = kind_tuples
@@ -998,7 +998,7 @@ impl Program {
                 ],
             );
             // Give the Site tuple a type-table presence: checked retrievals
-            // (`x:((line: 'int))origin`) enumerate compatible concrete types from the
+            // (`x:origin<(line: 'int)>`) enumerate compatible concrete types from the
             // types table, and imports walk it types-first.
             self.register_type(Type::Tuple(site_tuple));
             self.debug = Some(crate::bytecode::SiteTable {

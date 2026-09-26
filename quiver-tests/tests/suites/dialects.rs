@@ -552,7 +552,7 @@ fn test_context_record_chain_callback() {
         r#"'cb = #['bin, 'int] -> ('int | [])
 d = #(content: Str['bin], chain: 'cb) {
   $.content ~> =Str[data]
-  [data, 0] ~> $.chain ~ ~> =('int)end
+  [data, 0] ~> $.chain ~ ~> =('int & end)
   Unquote[offset: 0, length: end]
 }
 { :dialect d; Ok }"#

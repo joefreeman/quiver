@@ -216,8 +216,8 @@ That nil short-circuits like any other, so a caller that reads a file and hands 
 straight on never has to test it:
 
 ```quiver ignore
-%pem.certificates cert_text ~> =('bin)cert
-%pem.key key_text ~> =('bin)key
+%pem.certificates cert_text ~> =('bin & cert)
+%pem.key key_text ~> =('bin & key)
 %tls.accept [socket: s, cert: cert, key: key]
 ```
 
@@ -225,6 +225,6 @@ The client side is the same shape: `certificates` over a CA bundle gives the `ro
 `%tls.attach` verifies a server against.
 
 ```quiver ignore
-%pem.certificates ca_text ~> =('bin)roots
+%pem.certificates ca_text ~> =('bin & roots)
 %tls.attach [socket: s, hostname: "example.com", roots: roots]
 ```

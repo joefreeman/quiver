@@ -77,7 +77,7 @@ fn tombstone_result_on_another_worker_keeps_code_alive() {
         .evaluate("f = #'int { [$, 7] ~> __integer_add__ ~ }; p = @#[] { f } []; Ok")
         .then_evaluate("f = 5")
         .force_code_collection()
-        .then_evaluate("!p ~> =(#'int -> 'int)h; h 3")
+        .then_evaluate("!p ~> =((#'int -> 'int) & h); h 3")
         .expect("10");
 }
 

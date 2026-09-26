@@ -421,7 +421,7 @@ top type
 resource type
 ==================
 
-open = #[(fd): +File] { $ ~> =(+TcpSocket)s }
+open = #[(fd): +File] { $ ~> =(+TcpSocket & s) }
 
 ---
 
@@ -440,6 +440,6 @@ open = #[(fd): +File] { $ ~> =(+TcpSocket)s }
                 (access
                   (parameter))
                 (bind_match
-                  (pattern_ascription
+                  (pattern_and
                     (resource_type)
                     (identifier)))))))))))

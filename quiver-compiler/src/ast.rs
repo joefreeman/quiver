@@ -512,9 +512,9 @@ pub enum AccessPath {
     Field(String),
     Index(usize),
     /// Annotation retrieval (`x:key`, glued): yields the annotation value or nil. An
-    /// optional expected shape (`x:('t)key`, the checked form) makes the retrieval
+    /// optional expected shape (`x:key<'t>`, the checked form) makes the retrieval
     /// total: legal on any carrier, guarded by a runtime structural test — an entry
-    /// outside the shape answers nil, exactly as a `=('t)v` ascription fails to nil.
+    /// outside the shape answers nil, exactly as a failed `=('t & v)` match does.
     Annotation(String, Option<Type>),
 }
 
@@ -573,7 +573,7 @@ pub enum Match {
     /// requires the value to be named, mirroring a named partial pattern.
     Star(Option<String>),
     Placeholder,
-    /// A pin against an existing value: `^name`, `^name.field`, `&$`, `^$x.0` — matches only
+    /// A pin against an existing value: `^name`, `^name.field`, `^$`, `^$x.0` — matches only
     /// if the value equals the referenced value. The target is an access path rooted at a
     /// variable or the enclosing function's parameter (with the parameter's usual glued first
     /// accessor, as in `$x`); annotation accessors are not part of a pin target.
@@ -583,16 +583,15 @@ pub enum Match {
     /// alternative must bind the same set of variables (so the body sees them regardless of which
     /// matched).
     Or(Vec<Match>),
-    /// An ascribed binding `(P)x`: match the parenthesised pattern, then bind the whole value —
-    /// at the type `P` narrowed it to — to `x`. `P` is whatever a parenthesised pattern head can
-    /// be: a type (`('int)x`, `('int | 'bin)x`) or an alternation the type grammar cannot spell
-    /// (`(0 | 1)x`). Composes anywhere a pattern can appear, including field values
-    /// (`A[a: ('int)x]`), so it can narrow-and-capture a union variant in one step. The `Spanned`
-    /// covers the binding identifier.
-    As(Box<Match>, String, Spanned),
+    /// A conjunction of patterns (`(p & q & …)`): matches when every conjunct does, and binds
+    /// what each binds. A binder conjunct captures the whole value at the type the other
+    /// conjuncts narrowed it to, so `('int & x)` binds `x: 'int` — the as-pattern is simply a
+    /// conjunction with a binder. Binds tighter than an alternation (`(A & x | B & x)`), and
+    /// nested conjunctions are flattened by the parser.
+    And(Vec<Match>),
     /// A negated pattern `\P`: matches exactly when `P` does not. `P` may not bind (nothing
     /// matched, so there is nothing to bind), but may pin, test types, and nest anywhere a pattern
-    /// can (`=A[b: \'int]`). `(\[])x` binds `x` while requiring it to be non-nil.
+    /// can (`=A[b: \'int]`). `(\[] & x)` binds `x` while requiring it to be non-nil.
     Not(Box<Match>),
 }
 

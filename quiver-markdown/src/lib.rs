@@ -536,7 +536,7 @@ mod tests {
         let block = Block {
             mode: Mode::Session,
             line: 1,
-            source: "'point = [x: 'int]\n[x: 1] ~> =('point)p".to_string(),
+            source: "'point = [x: 'int]\n[x: 1] ~> =('point & p)".to_string(),
         };
         let steps = block.steps().unwrap();
         assert_eq!(steps.len(), 2);

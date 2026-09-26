@@ -69,7 +69,7 @@ split_authority = #[(data): 'bin, (start): 'int, (end): 'int] {
   ci = {
     // A bracketed host: the port colon, if any, is the one after the closing bracket.
     | [$data, $start] ~> %bin.get_byte ~ ~> =91
-      %bin.index [$data, 93, $start] ~> =('int)rb
+      %bin.index [$data, 93, $start] ~> =('int & rb)
       __integer_compare__ [__integer_add__ [rb, 1], $end] ~> =-1 => __integer_add__ [rb, 1]
     | [$data, $start] ~> %bin.get_byte ~ ~> =91 => $end
     | scan_to [$data, $start, $end, <3a>]
@@ -81,7 +81,7 @@ split_authority = #[(data): 'bin, (start): 'int, (end): 'int] {
       %bin.slice [$data, __integer_add__ [ci, 1], $end]
       ~> Str[~]
       ~> %str.parse_int ~
-      ~> =('int)p
+      ~> =('int & p)
 
       __integer_compare__ [p, 0] ~> =(0 | 1)
       [host, p]
@@ -94,7 +94,7 @@ parse = #'%str {
   len = %bin.length u
 
   // `scheme://`
-  %bin.index [u, 58, 0] ~> =('int)ci
+  %bin.index [u, 58, 0] ~> =('int & ci)
   __integer_compare__ [ci, 0] ~> =1
   __integer_compare__ [__integer_add__ [ci, 2], len] ~> =-1
   %bin.get_byte [u, __integer_add__ [ci, 1]] ~> =47
@@ -150,7 +150,7 @@ directory = #'%str {
   =Str[p]
   {
     | last_index [p, 47, __integer_subtract__ [%bin.length p, 1]]
-      ~> =('int)i => %bin.slice [p, 0, __integer_add__ [i, 1]] ~> Str[~]
+      ~> =('int & i) => %bin.slice [p, 0, __integer_add__ [i, 1]] ~> Str[~]
     | "/"
   }
 }

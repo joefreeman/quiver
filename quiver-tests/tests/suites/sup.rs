@@ -60,7 +60,7 @@ fn test_restart_intensity_limit_escalates() {
             p2 = !#(@'int);%proc.send [p2, 0]
             p3 = !#(@'int);%proc.send [p3, 0]
             r = !sup
-            r:(Panic(message: Str['bin]))crash ~> =(message: msg)
+            r:crash<Panic(message: Str['bin])> ~> =(message: msg)
             msg
             "#,
         )
@@ -87,7 +87,7 @@ fn test_temporary_child_is_not_restarted() {
             sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             p1 = !#(@'int)
 %proc.send [p1, 0]
-            { | ![#(@'int), 200] ~> =(@'int)p2 => "restarted" | "no restart" }
+            { | ![#(@'int), 200] ~> =(@'int & p2) => "restarted" | "no restart" }
             "#,
         )
         .expect("\"no restart\"");
@@ -140,7 +140,7 @@ fn test_transient_child_not_restarted_after_normal_completion() {
             sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             p1 = !#(@'int)
 %proc.send [p1, 1]
-            { | ![#(@'int), 200] ~> =(@'int)p2 => "restarted" | "no restart" }
+            { | ![#(@'int), 200] ~> =(@'int & p2) => "restarted" | "no restart" }
             "#,
         )
         .expect("\"no restart\"");
@@ -171,7 +171,7 @@ fn test_killing_the_supervisor_tears_down_its_children() {
             p1 = !#(@'int ![])
             %proc.kill sup
             r = !p1
-            r:(Killed)crash
+            r:crash<Killed>
             "#,
         )
         .expect("Killed");

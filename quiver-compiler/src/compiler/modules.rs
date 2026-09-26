@@ -573,13 +573,13 @@ impl Collector {
                     }
                 }
             }
-            ast::Match::Or(alternatives) => {
-                for alternative in alternatives {
-                    self.pattern(alternative);
+            ast::Match::Or(parts) | ast::Match::And(parts) => {
+                for part in parts {
+                    self.pattern(part);
                 }
             }
             ast::Match::Type(type_def) => self.type_def(type_def),
-            ast::Match::As(head, ..) | ast::Match::Not(head) => self.pattern(head),
+            ast::Match::Not(inner) => self.pattern(inner),
         }
     }
 

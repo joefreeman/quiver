@@ -232,7 +232,7 @@ fn test_name_inheriting_spread_over_union_source() {
                'r = Response[status: 'int, headers: 'hdrs]
                check = #'r { $status }
                f = #('int | []) {
-                 resp = $ ~> { =('int)s => Response[status: s, headers: Nil] | Response[status: 500, headers: Cons["a", Nil]] }
+                 resp = $ ~> { =('int & s) => Response[status: s, headers: Nil] | Response[status: 500, headers: Cons["a", Nil]] }
                  resp ~> ~[..., status: 201] ~> check ~
                }
                f 200"#,
@@ -243,7 +243,7 @@ fn test_name_inheriting_spread_over_union_source() {
         .evaluate(
             r#"check = #Response(status: 'int) { $status }
                f = #('int | []) {
-                 v = $ ~> { =('int)s => Response[status: s] | Other[status: 500] }
+                 v = $ ~> { =('int & s) => Response[status: s] | Other[status: 500] }
                  v ~> ~[..., status: 201] ~> check ~
                }
                f 200"#,

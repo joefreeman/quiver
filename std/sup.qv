@@ -56,7 +56,7 @@ watch = #[(id): '%str, (child): @!_, (sup): @'down] {
   @[] {
     r = ![child]
     o = {
-      | r:('%proc.crash)crash ~> =('%proc.crash)e => Crashed[e]
+      | r:crash<'%proc.crash> ~> =('%proc.crash & e) => Crashed[e]
       | Done
     }
     %proc.send [sup, Down[id: id, pid: child, outcome: o]]
@@ -108,7 +108,7 @@ loop = #'state {
     | =Down[id: i, pid: dp, outcome: o] => {
       // The row must hold the SAME incarnation the watcher awaited — a late report
       // for a reused id (drop, then add again) pin-fails and is dropped.
-      | %dict.get [$table, i] ~> =('row)r; r ~> =(pid: ^dp) => {
+      | %dict.get [$table, i] ~> =('row & r); r ~> =(pid: ^dp) => {
         | restart? [r, o] => {
           now = %time.monotonic []
           allow? [stamps: r.restarts, now: now, max: $max, window: $window] ~> {
@@ -141,7 +141,7 @@ loop = #'state {
     }
     | =Drop[i] => {
       // Remove the row BEFORE the kill, so the watcher's report finds nothing.
-      | %dict.get [$table, i] ~> =('row)r => {
+      | %dict.get [$table, i] ~> =('row & r) => {
         t2 = %dict.remove [$table, i]; r ~> =(pid: p); %proc.kill p; ^ $[..., table: t2]
       }
       | ^ $

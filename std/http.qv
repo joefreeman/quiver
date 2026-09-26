@@ -95,12 +95,12 @@ pct_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (plus?): 'int, (acc): 'bin]
           [$data, __integer_add__ [$pos, 1]]
           ~> %bin.get_byte ~
           ~> hex_val ~
-          ~> =('int)h1
+          ~> =('int & h1)
 
           [$data, __integer_add__ [$pos, 2]]
           ~> %bin.get_byte ~
           ~> hex_val ~
-          ~> =('int)h2 => {
+          ~> =('int & h2) => {
             decoded = __integer_add__ [__integer_multiply__ [h1, 16], h2]
 
             ^ [$data, __integer_add__ [$pos, 3], $len, $plus?, %bin.append [$acc, decoded, 1]]
@@ -164,7 +164,7 @@ part_pair = #'bin {
   =part
   ei = %bin.index [part, 61, 0]
   {
-    | ei ~> =('int)e => [
+    | ei ~> =('int & e) => [
         pct_decode [%bin.slice [part, 0, e], 1] ~> Str[~],
         pct_decode [%bin.slice [part, __integer_add__ [e, 1], %bin.length part], 1]
         ~> Str[~],
@@ -257,7 +257,7 @@ trim_end = #[(data): 'bin, (pos): 'int, (end): 'int] {
 // A `Name: value` header line as a pair (value trimmed of optional whitespace), or nil.
 parse_header_line = #'bin {
   =line
-  %bin.index [line, 58, 0] ~> =('int)c
+  %bin.index [line, 58, 0] ~> =('int & c)
   c ~> =\0
 
   vs = trim_start [line, __integer_add__ [c, 1], %bin.length line]
@@ -298,10 +298,10 @@ method_of = #'%str {
 // `METHOD SP target SP version`, or nil.
 parse_request_line = #'bin {
   =line
-  %bin.index [line, 32, 0] ~> =('int)a
+  %bin.index [line, 32, 0] ~> =('int & a)
   a ~> =\0
 
-  %bin.index [line, 32, __integer_add__ [a, 1]] ~> =('int)b
+  %bin.index [line, 32, __integer_add__ [a, 1]] ~> =('int & b)
 
   target = %bin.slice [line, __integer_add__ [a, 1], b]
   %bin.length target ~> =\0
@@ -318,7 +318,7 @@ split_target = #'%str {
   =Str[t]
   qi = %bin.index [t, 63, 0]
   {
-    | qi ~> =('int)q => [
+    | qi ~> =('int & q) => [
         [t, 0, q] ~> %bin.slice ~ ~> path_segments ~,
         qp_loop [
           %bin.slice [t, __integer_add__ [q, 1], %bin.length t],
@@ -337,7 +337,7 @@ content_length = #'pairs {
   =hs
   {
     | header [hs, "content-length"] ~> =Str[v] => {
-      %str.parse_int Str[v] ~> =('int)n; __integer_compare__ [n, 0] ~> =(0 | 1); n
+      %str.parse_int Str[v] ~> =('int & n); __integer_compare__ [n, 0] ~> =(0 | 1); n
     }
     | 0
   }
@@ -348,7 +348,7 @@ parse_request_with = #[(data): 'bin, (max_head): 'int, (max_body): 'int] {
   len = %bin.length $data
   he = head_end [$data, 0, len]
   {
-    | he ~> =('int)h => {
+    | he ~> =('int & h) => {
       | __integer_compare__ [h, $max_head] ~> =1 => Bad[
           status: 431,
           reason: "request head too large",
@@ -371,7 +371,7 @@ parse_request_with = #[(data): 'bin, (max_head): 'int, (max_body): 'int] {
                       status: 501,
                       reason: "transfer encodings are not supported",
                     ]
-                  | content_length hs ~> =('int)cl => {
+                  | content_length hs ~> =('int & cl) => {
                     | __integer_compare__ [cl, $max_body] ~> =1 => Bad[
                         status: 413,
                         reason: "request body too large",
@@ -446,7 +446,7 @@ hex_value = #'int {
 parse_hex = #[(data): 'bin, (pos): 'int, (end): 'int, (acc): 'int] {
   {
     | __integer_compare__ [$pos, $end] ~> =(0 | 1) => $acc
-    | %bin.get_byte [$data, $pos] ~> hex_value ~ ~> =('int)v => ^ [
+    | %bin.get_byte [$data, $pos] ~> hex_value ~ ~> =('int & v) => ^ [
         $data,
         __integer_add__ [$pos, 1],
         $end,
@@ -475,7 +475,7 @@ chunk_step = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
     | {
       // The size line ends at a chunk extension's `;` if there is one.
       size_end = {
-        | %bin.index [$data, 59, $pos] ~> =('int)s
+        | %bin.index [$data, 59, $pos] ~> =('int & s)
           __integer_compare__ [s, le] ~> =-1 => s
         | le
       }
@@ -487,7 +487,7 @@ chunk_step = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
           dstart = __integer_add__ [le, 2]
           {
             | n ~> =0 => {
-              | trailer_end [$data, dstart, $len] ~> =('int)e => [$acc, e]
+              | trailer_end [$data, dstart, $len] ~> =('int & e) => [$acc, e]
               | Incomplete
             }
             | {
@@ -517,15 +517,15 @@ chunk_step = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 parse_status_line = #'bin {
   =line
   len = %bin.length line
-  %bin.index [line, 32, 0] ~> =('int)a
+  %bin.index [line, 32, 0] ~> =('int & a)
   __integer_compare__ [a, 0] ~> =1
   b = %bin.index [line, 32, __integer_add__ [a, 1]]
-  code_end = { b ~> =('int)i => i | len }
+  code_end = { b ~> =('int & i) => i | len }
 
   %bin.slice [line, __integer_add__ [a, 1], code_end]
   ~> Str[~]
   ~> %str.parse_int ~
-  ~> =('int)status
+  ~> =('int & status)
 
   __integer_compare__ [status, 100] ~> =(0 | 1)
   __integer_compare__ [status, 599] ~> =(-1 | 0)
@@ -543,7 +543,7 @@ parse_response_with = #[(data): 'bin, (eof): (Ok | []), (max_head): 'int, (max_b
   :doc "Parses one response from a byte buffer with explicit head/body caps. `eof` says the connection has closed, which is what terminates a response framed by neither Content-Length nor chunked encoding."
   len = %bin.length $data
   head_end [$data, 0, len] ~> {
-    | =('int)h => {
+    | =('int & h) => {
       | __integer_compare__ [h, $max_head] ~> =1 => Bad[reason: "response head too large"]
       | {
         sle = line_end [$data, 0, h]
@@ -551,7 +551,7 @@ parse_response_with = #[(data): 'bin, (eof): (Ok | []), (max_head): 'int, (max_b
           | [$data, 0, sle]
             ~> %bin.slice ~
             ~> parse_status_line ~
-            ~> =('int)status => {
+            ~> =('int & status) => {
               hstart = {
                 | __integer_compare__ [sle, h] ~> =-1 => __integer_add__ [sle, 2]
                 | h
@@ -580,7 +580,7 @@ parse_response_with = #[(data): 'bin, (eof): (Ok | []), (max_head): 'int, (max_b
                         reason: "unsupported transfer encoding",
                       ]
                     | header [hs, "content-length"] ~> =Str[_] => {
-                      | content_length hs ~> =('int)cl => {
+                      | content_length hs ~> =('int & cl) => {
                         | __integer_compare__ [cl, $max_body] ~> =1 => Bad[
                             reason: "response body too large",
                           ]
@@ -756,7 +756,7 @@ cookie_seg = #[(data): 'bin, (s0): 'int, (e0): 'int, (acc): 'pairs] {
   s = trim_start [$data, $s0, $e0]
   e = trim_end [$data, s, $e0]
   {
-    | %bin.index [$data, 61, s] ~> =('int)eq
+    | %bin.index [$data, 61, s] ~> =('int & eq)
       __integer_compare__ [eq, e] ~> =-1
       __integer_compare__ [eq, s] ~> =1 => Cons[
         [Str[%bin.slice [$data, s, eq]], Str[%bin.slice [$data, __integer_add__ [eq, 1], e]]],

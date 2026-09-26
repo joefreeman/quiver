@@ -370,7 +370,7 @@ d_expr = #'%meta.cb {
   #'%parse {
     =st
     cb [st.data, st.pos] ~> {
-      | =('int)end => [
+      | =('int & end) => [
           Unquote[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
           st[..., pos: end],
         ]

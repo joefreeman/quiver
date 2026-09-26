@@ -29,7 +29,7 @@
 
   connect: #[(host): '%str, (port): 'int, roots: 'bin = <>] {
     :doc "Resolves, connects and upgrades in one step: a TLS connection to host:port, trying each resolved address until one accepts. Nil (with :error) if any stage fails."
-    %tcp.connect [$host, $port] ~> =(+TcpSocket)socket
+    %tcp.connect [$host, $port] ~> =(+TcpSocket & socket)
     __tls_attach__ [socket: socket, hostname: $host.0, roots: $roots]
   },
 ]

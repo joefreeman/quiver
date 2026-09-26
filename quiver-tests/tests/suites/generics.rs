@@ -286,7 +286,7 @@ fn test_generic_unification_of_resource_and_reference_types() {
         .with_io()
         .evaluate(
             r#"pick = #<'t>['t, 't] { $0 }
-               ["/tmp/quiver-generic-res-test" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(+File)f
+               ["/tmp/quiver-generic-res-test" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(+File & f)
                pick [f, f]"#,
         )
         .expect_type("+File | []");
@@ -420,7 +420,7 @@ fn test_type_parameters_visible_in_body_positions() {
         .evaluate(
             r#"'box<'t> = Full['t] | Empty
                first_full = #<'t>['box<'t>, 'box<'t>] {
-                 | $.0 ~> =('box<'t>)b; b ~> =Full[_] => b
+                 | $.0 ~> =('box<'t> & b); b ~> =Full[_] => b
                  | $.1
                }
                first_full [Empty, Full[7]] ~> =Full[x]; x"#,
@@ -431,7 +431,7 @@ fn test_type_parameters_visible_in_body_positions() {
         .evaluate(
             r#"'meta<'t> = [it: 't]
                tag = #<'t>[Box['t], 't] { =[v, m]; v ~> { :meta [it: m] } }
-               peek = #<'t>Box['t] { $:('meta<'t>)meta ~> =(it: x); x }
+               peek = #<'t>Box['t] { $:meta<'meta<'t>> ~> =(it: x); x }
                tag [Box[1], 2] ~> peek ~"#,
         )
         .expect("2");
@@ -447,7 +447,7 @@ fn test_unpinned_result_parameter_closes_to_never() {
             r#"'node<'e> = Leaf[Str['bin]] | Evt['e]
                norm = #<'e>('node<'e> | Str['bin]) {
                  | =Str[b] => Leaf[Str[b]]
-                 | =('node<'e>)n => n
+                 | =('node<'e> & n) => n
                }
                sink = #(Leaf[Str['bin]] | Evt[(Inc | Dec)]) { Ok }
                norm "x" ~> sink ~"#,
@@ -630,18 +630,20 @@ fn test_declared_generic_result_holds_its_parameters_rigid() {
 
 #[test]
 fn test_type_test_on_a_type_variable_is_checked_at_runtime() {
-    // A `'t` value may be anything, so `('int)y` must test it, and the match can fail.
+    // A `'t` value may be anything, so `('int & y)` must test it, and the match can fail.
     quiver()
         .evaluate(
-            "g = #<'t>['t, 't] { [x, ('int)y] = $; __integer_add__ [y, 1] }
+            "g = #<'t>['t, 't] { [x, ('int & y)] = $; __integer_add__ [y, 1] }
              [g [<01>, <02>], g [1, 2]]",
         )
         .expect("[[], 3]");
     quiver()
-        .evaluate("f = #<'t>['t, 't] { $ ~> =[x, ('int)y] }; f")
+        .evaluate("f = #<'t>['t, 't] { $ ~> =[x, ('int & y)] }; f")
         .expect_type("#['t, 't] -> (['t, 't] | [])");
     quiver()
-        .evaluate("f = #<'t>['t, 't] { $ ~> =[x, ('int)y] ~> [~, y] }; [f [1, 2], f [<01>, <02>]]")
+        .evaluate(
+            "f = #<'t>['t, 't] { $ ~> =[x, ('int & y)] ~> [~, y] }; [f [1, 2], f [<01>, <02>]]",
+        )
         .expect("[[[1, 2], 2], []]");
     // Binding alone still can't fail.
     quiver()
@@ -656,13 +658,13 @@ fn test_type_test_on_a_type_variable_leaves_the_block_fallible() {
     // and a caller testing for it must still see it.
     quiver()
         .evaluate(
-            "f = #<'t>'t { $ ~> =('int)y }
+            "f = #<'t>'t { $ ~> =('int & y) }
              f <01> ~> { =[] => IsNil | NotNil }",
         )
         .expect("IsNil");
     quiver()
         .evaluate(
-            "f = #<'t>'%list<'t> { | =Cons[('int)h, _] => Int | =Nil => Empty }
+            "f = #<'t>'%list<'t> { | =Cons[('int & h), _] => Int | =Nil => Empty }
              [f %list{1}, f Nil, f %list{<01>} ~> { =[] => IsNil | NotNil }]",
         )
         .expect("[Int, Empty, IsNil]");

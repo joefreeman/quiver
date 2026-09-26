@@ -397,7 +397,7 @@ nil:
 
 ```quiver
 %num.ln 18446744073709551617          //= Log[0, Cons[[274177, 1], Cons[[67280421310721, 1], Nil]]] // 2⁶⁴ + 1
-%num.ln 340282366920938463463374607431768211457 ~> :('%num.error)error   //= Unrepresentable // 2¹²⁸ + 1
+%num.ln 340282366920938463463374607431768211457 ~> :error<'%num.error>   //= Unrepresentable // 2¹²⁸ + 1
 ```
 
 The logarithms of primes are linearly independent over the algebraic numbers (Baker's
@@ -527,7 +527,7 @@ integer part could have more bits than the budget:
 ```quiver
 %num.exp -1000000000000 ~> %num.floor ~                                //= 0
 %num.exp -1000000000000 ~> %num.neg ~ ~> %num.floor ~                  //= -1
-%num.exp 1000000000000 ~> %num.to_int ~ ~> :('%num.error)error         //= Unrepresentable
+%num.exp 1000000000000 ~> %num.to_int ~ ~> :error<'%num.error>         //= Unrepresentable
 ```
 
 ## Trigonometry
@@ -652,16 +652,16 @@ A nil answered for a non-nil input carries its reason as an `:error` annotation,
 
 ```quiver
 (pi) = %num
-%num.sqrt -1 ~> :('%num.error)error                        //= OutOfDomain
-%num.div [pi, 2] ~> %num.tan ~ ~> :('%num.error)error      //= OutOfDomain
-%num.sin 1 ~> :('%num.error)error                          //= Unrepresentable
-%num.add [pi, %num.e] ~> :('%num.error)error               //= Unrepresentable
-%num.mul [2, %num.e] ~> %num.sqrt ~ ~> :('%num.error)error  //= Unrepresentable
+%num.sqrt -1 ~> :error<'%num.error>                        //= OutOfDomain
+%num.div [pi, 2] ~> %num.tan ~ ~> :error<'%num.error>      //= OutOfDomain
+%num.sin 1 ~> :error<'%num.error>                          //= Unrepresentable
+%num.add [pi, %num.e] ~> :error<'%num.error>               //= Unrepresentable
+%num.mul [2, %num.e] ~> %num.sqrt ~ ~> :error<'%num.error>  //= Unrepresentable
 ```
 
 A nil operand is answered as itself, so the first failure's reason survives the rest of a
 calculation:
 
 ```quiver
-%num.div [1, 0] ~> %num.add [~, 1] ~> %num.sqrt ~ ~> :('%num.error)error   //= DivisionByZero
+%num.div [1, 0] ~> %num.add [~, 1] ~> %num.sqrt ~ ~> :error<'%num.error>   //= DivisionByZero
 ```

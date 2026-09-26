@@ -1295,7 +1295,7 @@ fn registry_rendezvous_across_sessions() {
     // before B's await answers.
     assert_eq!(
         b.evaluate_value(
-            "%registry.lookup<@'int !'int> Shared ~> =(@'int !'int)q; %proc.send [q, 21]; !q"
+            "%registry.lookup<@'int !'int> Shared ~> =((@'int !'int) & q); %proc.send [q, 21]; !q"
         ),
         "42"
     );

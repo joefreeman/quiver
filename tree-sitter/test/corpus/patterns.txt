@@ -175,10 +175,10 @@ x ~> ='
         (self_default_type)))))
 
 ==================
-type-ascribed binding
+conjunction binding
 ==================
 
-f ~> =('int)n
+f ~> =('int & n)
 
 ---
 
@@ -188,16 +188,16 @@ f ~> =('int)n
       (access
         source: (identifier))
       (bind_match
-        (pattern_ascription
+        (pattern_and
           (type_identifier
             name: (type_name))
-          binding: (identifier))))))
+          (identifier))))))
 
 ==================
-type-ascribed binding in tuple pattern
+conjunction binding in tuple pattern
 ==================
 
-p ~> =Rational[_, ('int)d]
+p ~> =Rational[_, ('int & d)]
 
 ---
 
@@ -210,16 +210,16 @@ p ~> =Rational[_, ('int)d]
         (pattern_tuple
           name: (tuple_name)
           (placeholder)
-          (pattern_ascription
+          (pattern_and
             (type_identifier
               name: (type_name))
-            binding: (identifier)))))))
+            (identifier)))))))
 
 ==================
-type-ascribed binding with union type
+conjunction binding with union type
 ==================
 
-x ~> =('int | 'bin)v
+x ~> =(('int | 'bin) & v)
 
 ---
 
@@ -229,13 +229,13 @@ x ~> =('int | 'bin)v
       (access
         source: (identifier))
       (bind_match
-        (pattern_ascription
+        (pattern_and
           (union_type
             (type_identifier
               name: (type_name))
             (type_identifier
               name: (type_name)))
-          binding: (identifier))))))
+          (identifier))))))
 
 ==================
 spaced paren type is not an ascription
@@ -257,34 +257,34 @@ y ~> =('int) ~> x
         source: (identifier)))))
 
 ==================
-statement-level ascribed binding
+statement-level conjunction binding
 ==================
 
-('bin)ip = f x
-('int | 'bin)v = g y
+('bin & ip) = f x
+(('int | 'bin) & v) = g y
 
 ---
 
 (source_file
   (sequence
     (chain
-      binding: (pattern_ascription
+      binding: (pattern_and
         (type_identifier
           name: (type_name))
-        binding: (identifier))
+        (identifier))
       (application
         function: (access
           source: (identifier))
         argument: (access
           source: (identifier))))
     (chain
-      binding: (pattern_ascription
-        (union_type
+      binding: (pattern_and
+        (pattern_or
           (type_identifier
             name: (type_name))
           (type_identifier
             name: (type_name)))
-        binding: (identifier))
+        (identifier))
       (application
         function: (access
           source: (identifier))
@@ -314,7 +314,7 @@ negated patterns
 x ~> =\[]
 x ~> =A[b: \'int, c: \^y]
 x ~> =\(A | B)
-(\[])n = x
+(\[] & n) = x
 
 ---
 
@@ -351,9 +351,52 @@ x ~> =\(A | B)
             (tuple_type
               (tuple_name))))))
     (chain
-      (pattern_ascription
+      (pattern_and
         (pattern_negation
           (pattern_tuple))
         (identifier))
       (access
         (identifier)))))
+
+==================
+conjunction inside alternation
+==================
+
+x ~> =(A[n] & v | B[n] & v)
+x ~> =(Point[x: a, y: _] & p & (y: 'int))
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (access
+        (identifier))
+      (bind_match
+        (pattern_or
+          (pattern_and
+            (pattern_tuple
+              (tuple_name)
+              (identifier))
+            (identifier))
+          (pattern_and
+            (pattern_tuple
+              (tuple_name)
+              (identifier))
+            (identifier)))))
+    (chain
+      (access
+        (identifier))
+      (bind_match
+        (pattern_and
+          (pattern_tuple
+            (tuple_name)
+            (identifier)
+            (identifier)
+            (identifier)
+            (placeholder))
+          (identifier)
+          (pattern_partial
+            (identifier)
+            (type_identifier
+              (type_name))))))))

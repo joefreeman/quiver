@@ -32,13 +32,13 @@ get = #[(req): '%http, (key): 'bin] {
   :doc "The request's verified session pairs, or nil (no session cookie, malformed, or bad signature)."
   %http.cookies $req ~> %http.get [~, "session"] ~> =Str[raw]
 
-  %bin.index [raw, 46, 0] ~> =('int)dot
+  %bin.index [raw, 46, 0] ~> =('int & dot)
 
-  %bin.slice [raw, 0, dot] ~> %bin.from_hex Str[~] ~> =('bin)payload
+  %bin.slice [raw, 0, dot] ~> %bin.from_hex Str[~] ~> =('bin & payload)
 
   %bin.slice [raw, __integer_add__ [dot, 1], %bin.length raw]
   ~> %bin.from_hex Str[~]
-  ~> =('bin)mac
+  ~> =('bin & mac)
 
   const_eq? [%hash.hmac_sha256 [$key, payload], mac]
   %http.form_decode payload

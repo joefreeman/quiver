@@ -514,53 +514,16 @@ fn analyze_match_pattern(
             scopes,
             value_provenance,
         ),
-        ast::Match::As(head, name, _) => {
-            // Ascribed binding `(P)x`: match the head, then bind `name` to the whole value at the
-            // type the head narrowed it to — so `('int)x` binds `x: 'int` and `(0 | 1)x` binds `x`
-            // at the two literals' union. The head is analysed like any other pattern, so an
-            // alternation contributes one binding set per alternative and the binder joins each.
-            let (mut sets, narrowed_type_id) = analyze_match_pattern(
-                env,
-                program,
-                head,
-                value_type_id,
-                path.clone(),
-                identifiers,
-                scopes,
-                value_provenance,
-            )?;
-            match identifiers.get_mut(name) {
-                // A repeated binder (`=[('int)x, x]`) becomes a runtime equality check against the
-                // first occurrence, exactly like a repeated plain identifier.
-                Some(info) => {
-                    info.is_repeated = true;
-                    let requirement = Requirement {
-                        path: info.first_path.clone(),
-                        check: RuntimeCheck::Path(path.clone()),
-                    };
-                    for set in &mut sets {
-                        set.requirements.push(requirement.clone());
-                    }
-                }
-                None => {
-                    identifiers.insert(
-                        name.clone(),
-                        Identifier {
-                            first_path: path.clone(),
-                            is_repeated: false,
-                        },
-                    );
-                    for set in &mut sets {
-                        set.bindings.push(Binding {
-                            name: name.clone(),
-                            path: path.clone(),
-                            var_type_id: narrowed_type_id,
-                        });
-                    }
-                }
-            }
-            Ok((sets, narrowed_type_id))
-        }
+        ast::Match::And(conjuncts) => analyze_and_pattern(
+            env,
+            program,
+            conjuncts,
+            value_type_id,
+            path,
+            identifiers,
+            scopes,
+            value_provenance,
+        ),
         ast::Match::Not(inner) => analyze_negated_pattern(
             env,
             program,
@@ -706,7 +669,7 @@ fn type_check_requirements(
         // Elide the runtime check only when the scrutinee *provably* fits: identical
         // ids always do, and otherwise `is_compatible` can vouch only for cycle-free
         // operands — it traverses a `Cycle` optimistically, so trusting it on a
-        // recursive scrutinee elided load-bearing checks (an `=(I['int])s` ascription
+        // recursive scrutinee elided load-bearing checks (an `=(I['int] & s)` ascription
         // on a `(^ | Lb['int])`-typed binding matched an `Lb`). The emitted `IsType`'s
         // runtime set is computed with the full cycle-aware machinery, so keeping the
         // check is exact, merely occasionally redundant. A type variable vouches for nothing
@@ -886,6 +849,58 @@ fn analyze_or_pattern(
 
     let narrowed_type_id = union_type_ids(program, narrowed_ids);
     Ok((pooled_sets, narrowed_type_id))
+}
+
+/// A conjunction `(p & q & …)`: every conjunct must match. The tests run in written order, each
+/// conjunct analysed against the type the ones before it narrowed the value to; binder conjuncts
+/// are deferred to the end, so a binder captures the value at the meet of all the others wherever
+/// it is written (`(x & 'int)` binds `x: 'int`, as `('int & x)` does). Each conjunct's binding
+/// sets are alternatives, so the conjunction's sets are their cross product.
+#[allow(clippy::too_many_arguments)]
+fn analyze_and_pattern(
+    env: &mut super::typing::TypeEnv,
+    program: &mut Program,
+    conjuncts: &[ast::Match],
+    value_type_id: usize,
+    path: AccessPath,
+    identifiers: &mut HashMap<String, Identifier>,
+    scopes: &[super::scopes::Scope],
+    value_provenance: &super::provenance::Provenance,
+) -> Result<(Vec<BindingSet>, usize), Error> {
+    let (binders, tests): (Vec<_>, Vec<_>) = conjuncts
+        .iter()
+        .partition(|conjunct| matches!(conjunct, ast::Match::Identifier(..)));
+    let mut sets = vec![BindingSet {
+        requirements: vec![],
+        bindings: vec![],
+    }];
+    let mut narrowed_type_id = value_type_id;
+    for conjunct in tests.into_iter().chain(binders) {
+        let (conjunct_sets, conjunct_narrowed) = analyze_match_pattern(
+            env,
+            program,
+            conjunct,
+            narrowed_type_id,
+            path.clone(),
+            identifiers,
+            scopes,
+            value_provenance,
+        )?;
+        if conjunct_sets.is_empty() {
+            return Ok((vec![], program.never()));
+        }
+        sets = sets
+            .iter()
+            .flat_map(|set| {
+                conjunct_sets.iter().map(move |conjunct_set| BindingSet {
+                    requirements: [&set.requirements[..], &conjunct_set.requirements[..]].concat(),
+                    bindings: [&set.bindings[..], &conjunct_set.bindings[..]].concat(),
+                })
+            })
+            .collect();
+        narrowed_type_id = conjunct_narrowed;
+    }
+    Ok((sets, narrowed_type_id))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1070,7 +1085,7 @@ fn analyze_match_tuple_pattern(
             // must recognize the branch as covering the original member — a closed
             // field would read as a *different* recursive type and break exhaustiveness
             // (and a direct `Cycle(1)` would materialize an infinite type). A narrowing that
-            // leaves no cycle behind (`('int)a` against a union with a recursive member) is
+            // leaves no cycle behind (`('int & a)` against a union with a recursive member) is
             // exact on its own, and is kept.
             if !super::narrowing::has_cycles(raw_field_type_id, program)
                 || !super::narrowing::has_cycles(field_narrowed_type_id, program)

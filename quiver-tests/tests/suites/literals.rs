@@ -111,7 +111,7 @@ fn a_folded_literal_is_not_observably_shared() {
     // Annotating one must not be visible through the other — annotation is copy-on-write,
     // and this is the test that says so out loud.
     quiver()
-        .evaluate("a = [1, 2] ~> { :note 7 }; b = [1, 2]; [a ~> :('int)note, b ~> :('int)note]")
+        .evaluate("a = [1, 2] ~> { :note 7 }; b = [1, 2]; [a ~> :note<'int>, b ~> :note<'int>]")
         .expect("[7, []]");
 }
 

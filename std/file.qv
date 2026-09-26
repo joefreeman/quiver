@@ -40,7 +40,7 @@ do_read = #[(f): ', (offset): 'int, (length): 'int] {
 
 // Read the file in chunks from `offset`, accumulating until a read returns no bytes (EOF).
 read_all = #[(f): ', (offset): 'int, (acc): 'bin] {
-  do_read [$f, $offset, 65536] ~> =('bin)chunk
+  do_read [$f, $offset, 65536] ~> =('bin & chunk)
   %bin.length chunk ~> {
     | =0 => $acc
     | =n => %bin.concat [$acc, chunk] ~> ^ [$f, %num.add [$offset, n], ~]
@@ -60,7 +60,7 @@ lines_step = #[', 'int, 'bin, 'int] {
     | =[] => {
       // No newline in the remaining buffer: keep the unconsumed tail and read more.
       leftover = %bin.slice [buf, pos, len]
-      do_read [f, offset, 65536] ~> =('bin)chunk
+      do_read [f, offset, 65536] ~> =('bin & chunk)
       %bin.length chunk ~> {
         | =0 => {
           // EOF: emit the final unterminated line if there is one, otherwise stop.
@@ -90,7 +90,7 @@ lines_step = #[', 'int, 'bin, 'int] {
     name = %path.to_string $path ~> .0
     // 420 = 0o644, the permission mode used when the file is created (O_CREAT).
     // A failed open answers nil carrying its `:error`, so the caller's sequence stops here.
-    __file_open__ [name, flags, 420] ~> =(+File)fd
+    __file_open__ [name, flags, 420] ~> =(+File & fd)
     File[fd ~> @serve ~]
   },
 

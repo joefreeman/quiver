@@ -56,7 +56,7 @@ between = #[(min): 'int, (max): 'int] {
 
   __integer_add__ [__integer_subtract__ [$max, $min], 1]
   ~> below ~
-  ~> =('int)r
+  ~> =('int & r)
 
   __integer_add__ [$min, r]
 }

@@ -19,7 +19,7 @@ find_index = #[(haystack): 'bin, (needle): 'bin, (offset): 'int, (end): 'int] {
   {
     | %bin.length needle ~> =0 => $offset
     | %bin.index [$haystack, %bin.get_byte [needle, 0], $offset]
-      ~> =('int)pos
+      ~> =('int & pos)
       %num.le? [pos, $end] => {
         | %bin.length needle
           ~> %num.add [pos, ~]
@@ -155,7 +155,7 @@ from_chars = #'%iter<'int> {
 // Decimal digits from byte pos, accumulating onto acc: [n: value, end: pos]. Zero or more.
 int_digits = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'int] {
   | %num.lt? [$pos, $len]
-    %bin.get_byte [$data, $pos] ~> =('int)b
+    %bin.get_byte [$data, $pos] ~> =('int & b)
     %num.ge? [b, 48]
     %num.le? [b, 57] => %num.add [%num.mul [$acc, 10], %num.sub [b, 48]] ~> ^ [
       $data,
@@ -273,7 +273,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
         =start
         {
           | start ~> %num.gt? [~, haystack_len] => []
-          | find_index [haystack, delim, start, end] ~> =('int)index => [
+          | find_index [haystack, delim, start, end] ~> =('int & index) => [
               haystack ~> %bin.slice [~, start, index] ~> Str[~],
               %num.add [index, delim_len],
             ]
@@ -315,7 +315,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
         haystack_len
         ~> %num.sub [~, needle_len]
         ~> find_index [haystack, needle, 0, ~]
-        ~> =('int)byte_pos
+        ~> =('int & byte_pos)
 
         byte_pos_to_char_idx [haystack, 0, byte_pos, 0]
       }

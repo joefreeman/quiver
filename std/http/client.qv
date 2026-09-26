@@ -1,6 +1,6 @@
 // The HTTP client, over the host's mediated exchange.
 //
-//   %http/client.get "https://example.com/thing" ~> =('%http.response)r
+//   %http/client.get "https://example.com/thing" ~> =('%http.response & r)
 //
 // `__http_request__` performs one whole HTTP exchange, mediated by the host: a browser
 // backs it with its `fetch` (which follows redirects itself and decides which response
@@ -67,12 +67,12 @@ exchange = #[(url): '%url, (method): '%http.method, (headers): '%http.pairs, (bo
   // is load-bearing: without it a malformed block would put a nil *into* the response's
   // headers rather than failing the exchange.
   %http.headers_of headers ~> {
-    | =('%http.pairs)pairs => pairs
+    | =('%http.pairs & pairs) => pairs
     | [] ~> { :error IoError[kind: Other, message: "malformed response headers"] }
   }
-  ~> =('%http.pairs)hs
+  ~> =('%http.pairs & hs)
 
-  drain [body, <>] ~> =('bin)content
+  drain [body, <>] ~> =('bin & content)
   Response[status: status, headers: hs, body: content]
 }
 
@@ -104,13 +104,13 @@ follow_loop = #[
   (left): 'int,
 ] {
   attempt [$url, $method, $headers, $body, $timeout]
-  ~> =('%http.response)resp
+  ~> =('%http.response & resp)
 
   {
     | __integer_compare__ [$left, 0] ~> =1
-      redirect_of [resp.status, $method] ~> =('follow)kind
-      %http.header [resp.headers, "location"] ~> =('%str)location
-      %url.resolve [$url, location] ~> =('%url)next => {
+      redirect_of [resp.status, $method] ~> =('follow & kind)
+      %http.header [resp.headers, "location"] ~> =('%str & location)
+      %url.resolve [$url, location] ~> =('%url & next) => {
         // A method-changing redirect drops the body with the method: a GET with a payload is
         // meaningless, and forwarding it would resend a POST's data to a new target.
         method = { kind ~> =ToGet => GET | $method }
@@ -131,21 +131,21 @@ follow_loop = #[
     redirects: 'int = 5,
   ] {
     :doc "Performs a request, following redirects. Nil on failure, carrying :error (exchange), :timeout (deadline) or :crash (the exchange died)."
-    %url.parse $url ~> =('%url)u; follow_loop [u, $method, $headers, $body, $timeout, $redirects]
+    %url.parse $url ~> =('%url & u); follow_loop [u, $method, $headers, $body, $timeout, $redirects]
   },
 
   get: #'%str {
     :doc "A GET for the URL, with default headers and timeout."
-    %url.parse $ ~> =('%url)u; follow_loop [u, GET, Nil, <>, 30000, 5]
+    %url.parse $ ~> =('%url & u); follow_loop [u, GET, Nil, <>, 30000, 5]
   },
 
   head: #'%str {
     :doc "A HEAD for the URL, with default headers and timeout."
-    %url.parse $ ~> =('%url)u; follow_loop [u, HEAD, Nil, <>, 30000, 5]
+    %url.parse $ ~> =('%url & u); follow_loop [u, HEAD, Nil, <>, 30000, 5]
   },
 
   post: #[(url): '%str, (body): 'bin, headers: '%http.pairs = Nil] {
     :doc "A POST of the body to the URL, with the default timeout."
-    %url.parse $url ~> =('%url)u; follow_loop [u, POST, $headers, $body, 30000, 5]
+    %url.parse $url ~> =('%url & u); follow_loop [u, POST, $headers, $body, 30000, 5]
   },
 ]

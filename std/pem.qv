@@ -39,15 +39,15 @@ line_step = #['state, '%str] {
   state ~> {
     | =Bad => Bad
     | =State[blocks: bs, cur: Nil] => {
-      | begin_label line ~> =('%str)label => State[blocks: bs, cur: Cur[label: label, body: <>]]
+      | begin_label line ~> =('%str & label) => State[blocks: bs, cur: Cur[label: label, body: <>]]
       // Anything outside a block — headers, comments, blank lines — is ignored, matching
       // how PEM readers have always treated surrounding text.
       | State[blocks: bs, cur: Nil]
     }
     | =State[blocks: bs, cur: Cur[label: label, body: body]] => {
-      | end_label line ~> =('%str)end => {
+      | end_label line ~> =('%str & end) => {
         | end ~> =^label
-          Str[body] ~> %bin.from_base64 ~ ~> =('bin)der => State[
+          Str[body] ~> %bin.from_base64 ~ ~> =('bin & der) => State[
             blocks: Cons[[label: label, der: der], bs],
             cur: Nil,
           ]
@@ -73,7 +73,7 @@ parse = #'%str {
 
   certificates: #'%str {
     :doc "The text's CERTIFICATE blocks as concatenated DER — a fullchain.pem in the form %tls.accept's cert (or %tls.attach's roots) takes. Nil when the text is malformed or holds no certificate."
-    parse $ ~> =('%list<'block>)bs
+    parse $ ~> =('%list<'block> & bs)
     certs = %list.filter [bs, #{ $label ~> ="CERTIFICATE"; $ }]
     certs ~> =Cons[_, _]
     %list.fold [certs, <>, #{ %bin.concat [$0, $1.der] }]
@@ -81,8 +81,8 @@ parse = #'%str {
 
   key: #'%str {
     :doc "The text's first PRIVATE KEY block as PKCS#8 DER — a privkey.pem in the form %tls.accept's key takes. Nil when malformed or absent; a legacy 'EC PRIVATE KEY'/'RSA PRIVATE KEY' block is deliberately not answered — convert it with `openssl pkcs8 -topk8 -nocrypt`."
-    parse $ ~> =('%list<'block>)bs
-    %list.find [bs, #{ $label ~> ="PRIVATE KEY"; $ }] ~> =('block)b
+    parse $ ~> =('%list<'block> & bs)
+    %list.find [bs, #{ $label ~> ="PRIVATE KEY"; $ }] ~> =('block & b)
     b.der
   },
 ]

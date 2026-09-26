@@ -86,12 +86,7 @@
 
 ; ---------------------------------------------------------------- annotations
 
-(annotation_name) @attribute    ; :doc, :error — declaration, attach, and retrieval
-
-; The checked retrieval form `x:('t)key`: the key is the attribute; the `:(` opener
-; pairs with the closing `)`, which the general bracket rule below already captures.
-(checked_annotation ":(" @punctuation.bracket)
-(checked_annotation key: (identifier) @attribute)
+(annotation_name) @attribute    ; :doc, :error — declaration, attach, and retrieval (incl. `x:key<'t>`)
 
 ; ----------------------------------------------------------------- parameters
 

@@ -52,7 +52,7 @@ fn test_top_value_supports_no_operations() {
 fn test_top_value_narrows_by_type_test() {
     quiver()
         .evaluate(
-            "f = #_ { | =('int)n => %num.add [n, 1] | =('bin)b => b | Other }
+            "f = #_ { | =('int & n) => %num.add [n, 1] | =('bin & b) => b | Other }
              [f 5, f <01>, f Blue]",
         )
         .expect("[6, <01>, Other]");
@@ -75,7 +75,7 @@ fn test_top_value_destructures() {
         .expect("[1, <01>, Nope]");
     quiver()
         .evaluate(
-            "f = #_ { | =[a, [('int)b, 1]] => %num.add [a ~> { =('int)n => n | 0 }, b] | Nope }
+            "f = #_ { | =[a, [('int & b), 1]] => %num.add [a ~> { =('int & n) => n | 0 }, b] | Nope }
              [f [1, [2, 1]], f [1, [2, 3]], f [1, [<01>, 1]], f [1, 2]]",
         )
         .expect("[3, Nope, Nope, Nope]");
@@ -169,7 +169,7 @@ fn test_top_await_grant() {
 fn test_top_receive() {
     quiver()
         .evaluate(
-            "p = @#[] { !#_ ~> { | =('int)n => n | 0 } } []
+            "p = @#[] { !#_ ~> { | =('int & n) => n | 0 } } []
              %proc.send [p, <01>]
              !p",
         )
@@ -200,12 +200,12 @@ fn test_parenthesised_underscore_reads_as_a_type() {
     quiver()
         .evaluate(
             "'l = A | B | Cons[^]
-             f = #'l { | =(A | Cons[_])v => v ~> { =Cons[B] => Hit | Miss } | No }
+             f = #'l { | =((A | Cons[_]) & v) => v ~> { =Cons[B] => Hit | Miss } | No }
              [f Cons[B], f Cons[A], f B]",
         )
         .expect("[Hit, Miss, No]");
     quiver()
-        .evaluate("f = #_ { | =(_)v => v }; f 5")
+        .evaluate("f = #_ { | =(_ & v) => v }; f 5")
         .expect("5");
 }
 

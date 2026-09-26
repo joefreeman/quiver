@@ -254,7 +254,7 @@
             "named": true
           },
           {
-            "type": "pattern_ascription",
+            "type": "pattern_and",
             "named": true
           },
           {
@@ -366,7 +366,7 @@
           "named": true
         },
         {
-          "type": "pattern_ascription",
+          "type": "pattern_and",
           "named": true
         },
         {
@@ -515,7 +515,7 @@
             "named": true
           },
           {
-            "type": "pattern_ascription",
+            "type": "pattern_and",
             "named": true
           },
           {
@@ -637,76 +637,18 @@
         "required": true,
         "types": [
           {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      },
-      "name": {
-        "multiple": true,
-        "required": false,
-        "types": [
-          {
-            "type": "identifier",
+            "type": "annotation_name",
             "named": true
           }
         ]
       }
     },
     "children": {
-      "multiple": true,
-      "required": false,
+      "multiple": false,
+      "required": true,
       "types": [
         {
-          "type": "cycle_type",
-          "named": true
-        },
-        {
-          "type": "function_type",
-          "named": true
-        },
-        {
-          "type": "intersection_type",
-          "named": true
-        },
-        {
-          "type": "module_type",
-          "named": true
-        },
-        {
-          "type": "partial_type",
-          "named": true
-        },
-        {
-          "type": "process_type",
-          "named": true
-        },
-        {
-          "type": "resource_type",
-          "named": true
-        },
-        {
-          "type": "self_default_type",
-          "named": true
-        },
-        {
-          "type": "top_type",
-          "named": true
-        },
-        {
-          "type": "tuple_type",
-          "named": true
-        },
-        {
-          "type": "type_identifier",
-          "named": true
-        },
-        {
-          "type": "type_spread",
-          "named": true
-        },
-        {
-          "type": "union_type",
+          "type": "type_arguments",
           "named": true
         }
       ]
@@ -1479,30 +1421,31 @@
     }
   },
   {
-    "type": "pattern_ascription",
+    "type": "pattern_and",
     "named": true,
-    "fields": {
-      "binding": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      }
-    },
+    "fields": {},
     "children": {
-      "multiple": false,
-      "required": true,
+      "multiple": true,
+      "required": false,
       "types": [
+        {
+          "type": "binary",
+          "named": true
+        },
         {
           "type": "cycle_type",
           "named": true
         },
         {
           "type": "function_type",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "integer",
           "named": true
         },
         {
@@ -1514,7 +1457,15 @@
           "named": true
         },
         {
+          "type": "multiline_string",
+          "named": true
+        },
+        {
           "type": "partial_type",
+          "named": true
+        },
+        {
+          "type": "pattern_and",
           "named": true
         },
         {
@@ -1523,6 +1474,22 @@
         },
         {
           "type": "pattern_or",
+          "named": true
+        },
+        {
+          "type": "pattern_partial",
+          "named": true
+        },
+        {
+          "type": "pattern_pin",
+          "named": true
+        },
+        {
+          "type": "pattern_tuple",
+          "named": true
+        },
+        {
+          "type": "placeholder",
           "named": true
         },
         {
@@ -1535,6 +1502,14 @@
         },
         {
           "type": "self_default_type",
+          "named": true
+        },
+        {
+          "type": "star",
+          "named": true
+        },
+        {
+          "type": "string",
           "named": true
         },
         {
@@ -1601,7 +1576,7 @@
           "named": true
         },
         {
-          "type": "pattern_ascription",
+          "type": "pattern_and",
           "named": true
         },
         {
@@ -1712,7 +1687,7 @@
           "named": true
         },
         {
-          "type": "pattern_ascription",
+          "type": "pattern_and",
           "named": true
         },
         {
@@ -1838,7 +1813,7 @@
           "named": true
         },
         {
-          "type": "pattern_ascription",
+          "type": "pattern_and",
           "named": true
         },
         {
@@ -1998,7 +1973,7 @@
           "named": true
         },
         {
-          "type": "pattern_ascription",
+          "type": "pattern_and",
           "named": true
         },
         {
@@ -3332,10 +3307,6 @@
   },
   {
     "type": ":",
-    "named": false
-  },
-  {
-    "type": ":(",
     "named": false
   },
   {

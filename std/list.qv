@@ -37,7 +37,7 @@ d_elem = #'%meta.cb {
   #'%parse {
     =st
     cb [st.data, st.pos] ~> {
-      | =('int)end => [
+      | =('int & end) => [
           Unquote[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
           st[..., pos: end],
         ]
@@ -110,7 +110,7 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
   try_collect: #<'t>'%iter<'t> {
     :doc "Collects an iterator that may fail into a list, or nil (carrying :error) if the source broke part-way."
     %iter.try_fold [$, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }]
-    ~> =('<'t>)xs
+    ~> =('<'t> & xs)
 
     reverse [xs, Nil]
   },

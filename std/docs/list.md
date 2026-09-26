@@ -87,7 +87,7 @@ passed straight back to a list operation. Ascribing the list type is the idiom: 
 nil away, and a genuinely empty list ends the sequence at that step instead.
 
 ```quiver
-%list.tail %list{ 1, 2, 3 } ~> =('%list<'int>)rest
+%list.tail %list{ 1, 2, 3 } ~> =('%list<'int> & rest)
 %list.head rest               //= 2
 %list.count rest              //= 2
 ```

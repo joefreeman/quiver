@@ -64,8 +64,8 @@
 reduce = #'rational {
   // The caller must supply a non-zero denominator; the result is always canonical form,
   // whose denominator is positive.
-  :pre #{ $ ~> =Rational[_, ('int)d]; __integer_compare__ [d, 0] ~> =\0 }
-  :post #{ $ ~> =(out: Rational[_, ('int)d]); __integer_compare__ [d, 0] ~> =1 }
+  :pre #{ $ ~> =Rational[_, ('int & d)]; __integer_compare__ [d, 0] ~> =\0 }
+  :post #{ $ ~> =(out: Rational[_, ('int & d)]); __integer_compare__ [d, 0] ~> =1 }
   =Rational[n, d]
   {
     | __integer_compare__ [d, 0] ~> =-1 => ^ Rational[
@@ -193,20 +193,20 @@ ssign = #[(a): 'rational, (b): 'rational, (n): 'int] {
 surd_add = #[(x): 'alg, (y): 'alg] {
   explode $x ~> =[a: a1, b: b1, n: n1]
   explode $y ~> =[a: a2, b: b2, n: n2]
-  radical [b1, n1, b2, n2] ~> =('int)n
+  radical [b1, n1, b2, n2] ~> =('int & n)
   build [radd [a1, a2], radd [b1, b2], n]
 }
 surd_sub = #[(x): 'alg, (y): 'alg] {
   explode $x ~> =[a: a1, b: b1, n: n1]
   explode $y ~> =[a: a2, b: b2, n: n2]
-  radical [b1, n1, b2, n2] ~> =('int)n
+  radical [b1, n1, b2, n2] ~> =('int & n)
   build [rsub [a1, a2], rsub [b1, b2], n]
 }
 // (a₁ + b₁√n)(a₂ + b₂√n) = (a₁a₂ + b₁b₂·n) + (a₁b₂ + a₂b₁)√n.
 surd_mul = #[(x): 'alg, (y): 'alg] {
   explode $x ~> =[a: a1, b: b1, n: n1]
   explode $y ~> =[a: a2, b: b2, n: n2]
-  radical [b1, n1, b2, n2] ~> =('int)n
+  radical [b1, n1, b2, n2] ~> =('int & n)
   build [
     radd [rmul [a1, a2], rmul [rmul [b1, b2], Rational[n, 1]]],
     radd [rmul [a1, b2], rmul [a2, b1]],
@@ -217,7 +217,7 @@ surd_mul = #[(x): 'alg, (y): 'alg] {
 surd_div = #[(x): 'alg, (y): 'alg] {
   explode $x ~> =[a: a1, b: b1, n: n1]
   explode $y ~> =[a: a2, b: b2, n: n2]
-  radical [b1, n1, b2, n2] ~> =('int)n
+  radical [b1, n1, b2, n2] ~> =('int & n)
 
   dd = rsub [rmul [a2, a2], rmul [rmul [b2, b2], Rational[n, 1]]]
 
@@ -571,8 +571,8 @@ gen_join = #['gen, 'terms, 'gen, 'terms] {
 }
 tx_pair = #['opt, 'opt] {
   | =[Tx[g1, xs], Tx[g2, ys]] => gen_join [g1, xs, g2, ys]
-  | =[Tx[g, xs], ('coeff)c] => [g, xs, const_terms c]
-  | =[('coeff)c, Tx[g, ys]] => [g, const_terms c, ys]
+  | =[Tx[g, xs], ('coeff & c)] => [g, xs, const_terms c]
+  | =[('coeff & c), Tx[g, ys]] => [g, const_terms c, ys]
 }
 
 tx_add = #['opt, 'opt] { tx_pair $ ~> =[g, xs, ys]; tx_build [g, terms_add [xs, ys]] }
@@ -606,8 +606,8 @@ gen_iv = #['gen, 'int] {
 log_build = #['coeff, 'terms] { =[a, Nil] => a | =[a, ts] => Log[a, ts] }
 log_pair = #['opt, 'opt] {
   | =[Log[a1, xs], Log[a2, ys]] => [a1, xs, a2, ys]
-  | =[Log[a, xs], ('coeff)c] => [a, xs, c, Nil]
-  | =[('coeff)c, Log[a, ys]] => [c, Nil, a, ys]
+  | =[Log[a, xs], ('coeff & c)] => [a, xs, c, Nil]
+  | =[('coeff & c), Log[a, ys]] => [c, Nil, a, ys]
 }
 // `(a + Σ c·ln p)·r`, for any coefficient `r`.
 log_scale = #[(a): 'coeff, (ts): 'terms, (r): 'coeff] {
@@ -628,12 +628,12 @@ log_sub = #['opt, 'opt] {
 }
 // Linear forms multiply only by coefficients.
 log_mul = #['opt, 'opt] {
-  | =[Log[a, ts], ('coeff)r] => log_scale [a, ts, r]
-  | =[('coeff)r, Log[a, ts]] => log_scale [a, ts, r]
+  | =[Log[a, ts], ('coeff & r)] => log_scale [a, ts, r]
+  | =[('coeff & r), Log[a, ts]] => log_scale [a, ts, r]
 }
 // Divided by a non-zero coefficient, or by a proportional form (`ln 8 / ln 2` is `3`).
 log_div = #['opt, 'opt] {
-  | =[Log[a, ts], ('coeff)r]; to_rational r ~> rsign ~ ~> =\0 => log_scale [
+  | =[Log[a, ts], ('coeff & r)]; to_rational r ~> rsign ~ ~> =\0 => log_scale [
       a,
       ts,
       rquot [Rational[1, 1], to_rational r],
@@ -758,7 +758,7 @@ rest_mag = #['terms, ['int, 'int, 'int], 'int, ('int | []), 'int] -> [('int | []
         l2,
         skip,
         {
-          | hi ~> =('int)m; __integer_compare__ [m, h] ~> =1 => m
+          | hi ~> =('int & m); __integer_compare__ [m, h] ~> =1 => m
           | h
         },
         __integer_add__ [n, 1],
@@ -784,7 +784,7 @@ tx_dominant = #'tx -> (['int, 'int, 'int] | []) {
   rest_mag [ts, l2, k, [], 0] ~> =[rest, n]
   {
     | rest ~> =[] => Ok
-    | rest ~> =('int)rhi => outweighs [lo, rhi, n]
+    | rest ~> =('int & rhi) => outweighs [lo, rhi, n]
   }
   [to_rational c ~> rsign ~, __integer_subtract__ [lo, 1], __integer_add__ [hi, 1]]
 }
@@ -829,7 +829,7 @@ tx_size = #'tx -> (['int, 'int, 'int] | []) {
     hi = __integer_add__ [mhi, thi]
     {
       | low ~> =Nil => [s, lo, hi]
-      | rest_mag [low, l2, top, [], 0] ~> =[('int)rhi, n]
+      | rest_mag [low, l2, top, [], 0] ~> =[('int & rhi), n]
         outweighs [lo, rhi, n] => [s, __integer_subtract__ [lo, 1], __integer_add__ [hi, 1]]
     }
   }
@@ -844,15 +844,15 @@ tx_sign = #'tx -> 'int {
 // Sign of a difference: exact for the algebraic kinds, and by refinement otherwise — which
 // terminates, because a canonical `Tx` or `Log` is never zero.
 diff_sign = #('coeff | 'slow) {
-  | =('coeff)c => to_rational c ~> rsign ~
+  | =('coeff & c) => to_rational c ~> rsign ~
   | =Surd[a, b, n] => ssign [to_rational a, to_rational b, n]
-  | =('tx)t => tx_sign t
+  | =('tx & t) => tx_sign t
   | =d => refine [d, 0, 64, 0]
 }
 
 // The magnitude of a non-zero number; nil for a bulky `Tx` it can't be read off.
 mag = #('coeff | 'slow) -> (['int, 'int] | []) {
-  | =('tx)t; bulky t => { tx_size t ~> =[_, lo, hi]; [lo, hi] }
+  | =('tx & t); bulky t => { tx_size t ~> =[_, lo, hi]; [lo, hi] }
   | { bounds_size [$, 64] ~> =[_, lo, hi]; [lo, hi] }
 }
 
@@ -894,26 +894,26 @@ floor_slow = #[(x): ', (k): 'int] -> 'int {
 slow_add = #['opt, 'opt] {
   | =([Tx[_, _], _] | [_, Tx[_, _]]); tx_add $
   | =([Log[_, _], _] | [_, Log[_, _]]); log_add $
-  | =[('alg)x, ('alg)y]; surd_add [x, y]
+  | =[('alg & x), ('alg & y)]; surd_add [x, y]
   | [] ~> { :error Unrepresentable }
 }
 slow_sub = #['opt, 'opt] {
   | =([Tx[_, _], _] | [_, Tx[_, _]]); tx_sub $
   | =([Log[_, _], _] | [_, Log[_, _]]); log_sub $
-  | =[('alg)x, ('alg)y]; surd_sub [x, y]
+  | =[('alg & x), ('alg & y)]; surd_sub [x, y]
   | [] ~> { :error Unrepresentable }
 }
 slow_mul = #['opt, 'opt] {
   | =([Tx[_, _], _] | [_, Tx[_, _]]); tx_mul $
   | =([Log[_, _], _] | [_, Log[_, _]]); log_mul $
-  | =[('alg)x, ('alg)y]; surd_mul [x, y]
+  | =[('alg & x), ('alg & y)]; surd_mul [x, y]
   | [] ~> { :error Unrepresentable }
 }
 slow_div = #['opt, 'opt] {
-  | =[_, ('coeff)y]; to_rational y ~> rsign ~ ~> =0 => [] ~> { :error DivisionByZero }
+  | =[_, ('coeff & y)]; to_rational y ~> rsign ~ ~> =0 => [] ~> { :error DivisionByZero }
   | =([Tx[_, _], _] | [_, Tx[_, _]]); tx_div $
   | =([Log[_, _], _] | [_, Log[_, _]]); log_div $
-  | =[('alg)x, ('alg)y]; surd_div [x, y]
+  | =[('alg & x), ('alg & y)]; surd_div [x, y]
   | [] ~> { :error Unrepresentable }
 }
 
@@ -921,11 +921,11 @@ slow_div = #['opt, 'opt] {
 // different fields and can't be equal — unless both are transcendental, where that is
 // unproven and the budget applies. A bulky operand is ordered by magnitude instead.
 slow_compare = #['opt, 'opt] {
-  | slow_sub $ ~> =('coeff | 'slow)d => diff_sign d
-  | =[('coeff | 'slow)x, ('coeff | 'slow)y]
+  | slow_sub $ ~> =(('coeff | 'slow) & d) => diff_sign d
+  | =[(('coeff | 'slow) & x), (('coeff | 'slow) & y)]
     { bulky x | bulky y } => mag_compare [x, y]
-  | =[('tx | 'lg)x, ('tx | 'lg)y] => refine [x, y, 64, 1]
-  | =[('coeff | 'slow)x, ('coeff | 'slow)y] => refine [x, y, 64, 0]
+  | =[(('tx | 'lg) & x), (('tx | 'lg) & y)] => refine [x, y, 64, 1]
+  | =[(('coeff | 'slow) & x), (('coeff | 'slow) & y)] => refine [x, y, 64, 0]
 }
 
 // Compare two numbers, returning -1/0/1 (nil for a nil operand). Integers and rationals keep
@@ -935,9 +935,9 @@ compare = #['opt, 'opt] {
   // Integer and rational operands first: the hot cases, answered before any other kind is
   // tested. The arms below repeat them, narrowed by the structural arms before them, for the
   // type checker.
-  | =[('int)a, ('int)b] => __integer_compare__ [a, b]
-  | =[Rational[a, b], ('coeff)y] => rcompare [Rational[a, b], to_rational y]
-  | =[('coeff)x, Rational[c, d]] => rcompare [to_rational x, Rational[c, d]]
+  | =[('int & a), ('int & b)] => __integer_compare__ [a, b]
+  | =[Rational[a, b], ('coeff & y)] => rcompare [Rational[a, b], to_rational y]
+  | =[('coeff & x), Rational[c, d]] => rcompare [to_rational x, Rational[c, d]]
   | =[[], _] => $0
   | =[_, []] => $1
   | =[Surd[a, b, n], y] => slow_compare [Surd[a, b, n], y]
@@ -959,12 +959,12 @@ compare = #['opt, 'opt] {
 to_int = #'opt {
   :doc "Truncates a number toward zero to an integer; nil for a nil operand, and for a power of e or π beyond the precision budget that is not below 1."
   // A bulky power is only truncated when it is provably below 1.
-  | =('tx)x; bulky x => {
+  | =('tx & x); bulky x => {
     | tx_size x ~> =[_, _, hi]
       __integer_compare__ [hi, 0] ~> =(-1 | 0) => 0
     | [] ~> { :error Unrepresentable }
   }
-  | =('tx | 'lg)x => {
+  | =(('tx | 'lg) & x) => {
     f = floor_slow [x, 64]
     {
       | __integer_compare__ [f, 0] ~> =-1 => __integer_add__ [f, 1]
@@ -1034,9 +1034,9 @@ clamp = #[(value): 'opt, (min): 'opt, (max): 'opt] {
       | =v => { compare [$in.min, v] ~> =\1; compare [v, $in.max] ~> =\1; Ok }
     }
   }
-  | $value ~> =([])n => n
-  | $min ~> =([])n => n
-  | $max ~> =([])n => n
+  | $value ~> =([] & n) => n
+  | $min ~> =([] & n) => n
+  | $max ~> =([] & n) => n
   | compare [$value, $min] ~> =-1 => $min
   | compare [$value, $max] ~> =1 => $max
   | $value
@@ -1048,7 +1048,7 @@ clamp = #[(value): 'opt, (min): 'opt, (max): 'opt] {
 floor = #'opt {
   :doc "The largest integer not greater than the number; nil for a nil operand, or one too large to truncate."
   to_int $ ~> {
-    | =('int)t => {
+    | =('int & t) => {
       | compare [$, t] ~> =-1 => __integer_subtract__ [t, 1]
       | t
     }
@@ -1058,7 +1058,7 @@ floor = #'opt {
 ceil = #'opt {
   :doc "The smallest integer not less than the number; nil for a nil operand, or one too large to truncate."
   to_int $ ~> {
-    | =('int)t => {
+    | =('int & t) => {
       | compare [$, t] ~> =1 => __integer_add__ [t, 1]
       | t
     }
@@ -1072,7 +1072,7 @@ ceil = #'opt {
 round = #'opt {
   :doc "Rounds to the nearest integer, halves away from zero; nil for a nil operand, or one too large to truncate."
   floor $ ~> {
-    | =('int)f => {
+    | =('int & f) => {
       mid = f ~> __integer_multiply__ [~, 2] ~> __integer_add__ [~, 1] ~> Rational[~, 2]
       {
         | compare [$, mid] ~> =1 => __integer_add__ [f, 1]
@@ -1128,7 +1128,7 @@ d_pow_op = %parse.right [%parse.ws, %parse.byte [94, "'^'"]]
 // accumulated onto `n`.
 d_digits = #[(data): 'bin, (pos): 'int, (len): 'int, (n): 'int, (k): 'int] -> ['int, 'int, 'int] {
   | __integer_compare__ [$pos, $len] ~> =-1
-    %bin.get_byte [$data, $pos] ~> =('int)b
+    %bin.get_byte [$data, $pos] ~> =('int & b)
     __integer_compare__ [b, 48] ~> =(0 | 1)
     __integer_compare__ [b, 57] ~> =(-1 | 0) => ^ [
       $data,
@@ -1194,7 +1194,7 @@ d_term = #'%meta.cb {
   #'%parse {
     =st
     cb [st.data, st.pos] ~> {
-      | =('int)end => [
+      | =('int & end) => [
           Unquote[offset: st.pos, length: __integer_subtract__ [end, st.pos]],
           st[..., pos: end],
         ]
@@ -1282,13 +1282,13 @@ csqrt = #'coeff {
 // answer nil.
 sqrt = #'opt {
   :doc "The exact square root; nil on a negative number or one whose root isn't representable."
-  | =([])n => n
-  | =('coeff)c => csqrt c
+  | =([] & n) => n
+  | =('coeff & c) => csqrt c
   | sign $ ~> =-1 => [] ~> { :error OutOfDomain }
   | =Tx[Pi, Cons[[k, c], Nil]]
     __integer_modulo__ [k, 2] ~> =0
-    csqrt c ~> =('coeff)r => tx_build [Pi, Cons[[__integer_divide__ [k, 2], r], Nil]]
-  | =Tx[E[d], Cons[[k, c], Nil]]; csqrt c ~> =('coeff)r => tx_build [
+    csqrt c ~> =('coeff & r) => tx_build [Pi, Cons[[__integer_divide__ [k, 2], r], Nil]]
+  | =Tx[E[d], Cons[[k, c], Nil]]; csqrt c ~> =('coeff & r) => tx_build [
       E[__integer_multiply__ [d, 2]],
       Cons[[k, r], Nil],
     ]
@@ -1303,9 +1303,9 @@ add = #['opt, 'opt] {
   // Integer and rational operands first: the hot cases, answered before any other kind is
   // tested. The arms below repeat them, narrowed by the structural arms before them, for the
   // type checker.
-  | =[('int)a, ('int)b] => __integer_add__ [a, b]
-  | =[Rational[a, b], ('coeff)y] => radd [Rational[a, b], to_rational y]
-  | =[('coeff)x, Rational[c, d]] => radd [to_rational x, Rational[c, d]]
+  | =[('int & a), ('int & b)] => __integer_add__ [a, b]
+  | =[Rational[a, b], ('coeff & y)] => radd [Rational[a, b], to_rational y]
+  | =[('coeff & x), Rational[c, d]] => radd [to_rational x, Rational[c, d]]
   | =[[], _] => $0
   | =[_, []] => $1
   | =[Surd[a, b, n], y] => slow_add [Surd[a, b, n], y]
@@ -1324,9 +1324,9 @@ sub = #['opt, 'opt] {
   // Integer and rational operands first: the hot cases, answered before any other kind is
   // tested. The arms below repeat them, narrowed by the structural arms before them, for the
   // type checker.
-  | =[('int)a, ('int)b] => __integer_subtract__ [a, b]
-  | =[Rational[a, b], ('coeff)y] => rsub [Rational[a, b], to_rational y]
-  | =[('coeff)x, Rational[c, d]] => rsub [to_rational x, Rational[c, d]]
+  | =[('int & a), ('int & b)] => __integer_subtract__ [a, b]
+  | =[Rational[a, b], ('coeff & y)] => rsub [Rational[a, b], to_rational y]
+  | =[('coeff & x), Rational[c, d]] => rsub [to_rational x, Rational[c, d]]
   | =[[], _] => $0
   | =[_, []] => $1
   | =[Surd[a, b, n], y] => slow_sub [Surd[a, b, n], y]
@@ -1345,9 +1345,9 @@ mul = #['opt, 'opt] {
   // Integer and rational operands first: the hot cases, answered before any other kind is
   // tested. The arms below repeat them, narrowed by the structural arms before them, for the
   // type checker.
-  | =[('int)a, ('int)b] => __integer_multiply__ [a, b]
-  | =[Rational[a, b], ('coeff)y] => rmul [Rational[a, b], to_rational y]
-  | =[('coeff)x, Rational[c, d]] => rmul [to_rational x, Rational[c, d]]
+  | =[('int & a), ('int & b)] => __integer_multiply__ [a, b]
+  | =[Rational[a, b], ('coeff & y)] => rmul [Rational[a, b], to_rational y]
+  | =[('coeff & x), Rational[c, d]] => rmul [to_rational x, Rational[c, d]]
   | =[[], _] => $0
   | =[_, []] => $1
   | =[Surd[a, b, n], y] => slow_mul [Surd[a, b, n], y]
@@ -1376,7 +1376,7 @@ rdiv = #['coeff, 'coeff] {
 div = #['opt, 'opt] {
   :doc "Divides exactly; nil on a zero divisor, nil operand, or mixed radicals."
   // Coefficient operands first, the hot case; the final arm repeats it for the type checker.
-  | =[('coeff)x, ('coeff)y] => rdiv [x, y]
+  | =[('coeff & x), ('coeff & y)] => rdiv [x, y]
   | =[[], _] => $0
   | =[_, []] => $1
   | =[Surd[a, b, n], y] => slow_div [Surd[a, b, n], y]
@@ -1417,7 +1417,7 @@ abs = #'opt {
       | Surd[a, b, n]
     }
   }
-  | =(Tx[_, _] | Log[_, _])v => { compare [v, 0] ~> =-1 => neg v | v }
+  | =((Tx[_, _] | Log[_, _]) & v) => { compare [v, 0] ~> =-1 => neg v | v }
   | =Rational[m, d] => Rational[__integer_abs__ m, d]
   | ='int => __integer_abs__ $
 }
@@ -1448,8 +1448,8 @@ exp_logs = #['terms, 'rational, 'int] -> (['rational, 'int] | []) {
 
 exp = #'opt {
   :doc "e raised to a number: exact for a rational power, and for a logarithmic form whose log coefficients are integers or halves — halves only with no rational term, since e·√2 mixes fields; nil otherwise."
-  | =([])n => n
-  | =('coeff)r => exp_rational r
+  | =([] & n) => n
+  | =('coeff & r) => exp_rational r
   | =Log[a, ts]; exp_logs [ts, Rational[1, 1], 1] ~> =[f, m] => {
     | m ~> =1 => mul [lower f, exp_rational a]
     // `m` is already a product of distinct primes, so `f·√m` is canonical as it stands.
@@ -1474,7 +1474,7 @@ strip = #['int, 'int, 'int] -> ['int, 'int] {
 factor = #['int, 'terms] -> ('terms | []) {
   | =[1, acc] => acc
   | =[n, acc] => {
-    __integer_factor__ n ~> =('int)p
+    __integer_factor__ n ~> =('int & p)
     strip [n, p, 0] ~> =[e, rest]
     ^ [rest, terms_add [acc, Cons[[p, e], Nil]]]
   }
@@ -1485,7 +1485,7 @@ ln_coeff = #'coeff {
   to_rational $ ~> =Rational[p, q]
   __integer_compare__ [p, 0] ~> =1
   {
-    | [factor [p, Nil], factor [q, Nil]] ~> =[('terms)fp, ('terms)fq] => log_build [
+    | [factor [p, Nil], factor [q, Nil]] ~> =[('terms & fp), ('terms & fq)] => log_build [
         0,
         terms_add [fp, terms_neg fq],
       ]
@@ -1495,9 +1495,9 @@ ln_coeff = #'coeff {
 
 ln = #'opt {
   :doc "The natural logarithm: exact for a positive rational, a positive rational times a power of e, and a surd b√n with b > 0; nil otherwise, and where a numerator or denominator has a prime factor too large to find."
-  | =([])n => n
+  | =([] & n) => n
   | sign $ ~> =(-1 | 0) => [] ~> { :error OutOfDomain }
-  | =('coeff)c => ln_coeff c
+  | =('coeff & c) => ln_coeff c
   | =Tx[E[d], Cons[[k, c], Nil]] => add [ln_coeff c, Rational[k, d] ~> reduce ~ ~> lower ~]
   | =Surd[0, b, n] => add [ln_coeff b, mul [Rational[1, 2], ln_coeff n]]
   | [] ~> { :error Unrepresentable }
@@ -1508,7 +1508,7 @@ ln = #'opt {
 // cⁿ for a coefficient and an integer `n ≥ 0`. A rational's terms stay coprime, and its
 // denominator positive, under a power.
 cpow_nat = #['coeff, 'int] {
-  | =[('int)a, n] => ipow [a, n, 1]
+  | =[('int & a), n] => ipow [a, n, 1]
   | =[Rational[a, b], n] => Rational[ipow [a, n, 1], ipow [b, n, 1]]
 }
 
@@ -1538,12 +1538,12 @@ cqpow = #[(c): 'coeff, (p): 'int, (q): 'int] { mul [Rational[$p, $q], ln_coeff $
 // x^(p/q), `q ≥ 2`, for a positive number: a coefficient, or a monomial in a generator whose
 // coefficient's power is rational and, for π, whose exponent stays an integer.
 qpow = #[', 'int, 'int] {
-  | =[('coeff)c, p, q] => cqpow [c, p, q]
+  | =[('coeff & c), p, q] => cqpow [c, p, q]
   | =[Tx[Pi, Cons[[k, c], Nil]], p, q]
     kp = __integer_multiply__ [k, p]
     __integer_modulo__ [kp, q] ~> =0
-    cqpow [c, p, q] ~> =('coeff)r => tx_build [Pi, Cons[[__integer_divide__ [kp, q], r], Nil]]
-  | =[Tx[E[d], Cons[[k, c], Nil]], p, q]; cqpow [c, p, q] ~> =('coeff)r => tx_build [
+    cqpow [c, p, q] ~> =('coeff & r) => tx_build [Pi, Cons[[__integer_divide__ [kp, q], r], Nil]]
+  | =[Tx[E[d], Cons[[k, c], Nil]], p, q]; cqpow [c, p, q] ~> =('coeff & r) => tx_build [
       E[__integer_multiply__ [d, q]],
       Cons[[__integer_multiply__ [k, p], r], Nil],
     ]
@@ -1553,10 +1553,10 @@ qpow = #[', 'int, 'int] {
 pow = #['opt, 'opt] {
   :doc "Raises a number to a power: exact for an integer power of any number whose products stay representable; for a rational power of a rational, or of a monomial in π or e, where the result is rational or a single surd (a negative base needs an odd denominator); and for any power of e that `exp` takes. Nil otherwise, and for zero to a negative power."
   // Coefficients to integer powers first, the hot case.
-  | =[('coeff)x, ('int)n] => cpow [x, n]
+  | =[('coeff & x), ('int & n)] => cpow [x, n]
   | =[[], _] => $0
   | =[_, []] => $1
-  | =[x, ('int)n] => {
+  | =[x, ('int & n)] => {
     | __integer_compare__ [n, 0] ~> =-1 => npow [x, __integer_multiply__ [n, -1], 1] ~> div [1, ~]
     | npow [x, n, 1]
   }
@@ -1585,7 +1585,7 @@ pow = #['opt, 'opt] {
 
 // r for a rational multiple rπ of π (zero included); nil for anything else.
 pi_ratio = #'opt {
-  | =('coeff)c; to_rational c ~> rsign ~ ~> =0 => Rational[0, 1]
+  | =('coeff & c); to_rational c ~> rsign ~ ~> =0 => Rational[0, 1]
   | =Tx[Pi, Cons[[1, c], Nil]] => to_rational c
 }
 
@@ -1660,10 +1660,10 @@ sin_r = #'rational {
     | rcompare [h, Rational[1, 2]] ~> =1 => rsub [Rational[1, 1], h]
     | h
   }
-  ~> =('rational)t
+  ~> =('rational & t)
 
   {
-    | sin_table t ~> =('alg)v => { s ~> =1 => v | neg v }
+    | sin_table t ~> =('alg & v) => { s ~> =1 => v | neg v }
     | [] ~> { :error Unrepresentable }
   }
 }
@@ -1680,71 +1680,71 @@ tan_r = #'rational {
 
   {
     | t ~> =Rational[1, 2] => [] ~> { :error OutOfDomain }
-    | tan_table t ~> =('alg)v => { s ~> =1 => v | neg v }
+    | tan_table t ~> =('alg & v) => { s ~> =1 => v | neg v }
     | [] ~> { :error Unrepresentable }
   }
 }
 
 // A value in the form the inverse tables key on.
 lowered = #' {
-  | =('coeff)c => to_rational c ~> lower ~
+  | =('coeff & c) => to_rational c ~> lower ~
   | =v => v
 }
 
 // r with table(r) = |v|, carrying v's sign.
 inverse = #[(v): ', (table): #' -> ('rational | [])] {
-  | compare [$v, 0] ~> =-1 => { neg $v ~> lowered ~ ~> $table ~ ~> =('rational)r; rneg r }
+  | compare [$v, 0] ~> =-1 => { neg $v ~> lowered ~ ~> $table ~ ~> =('rational & r); rneg r }
   | lowered $v ~> $table ~
 }
 
 sin = #'opt {
   :doc "The sine, exact at rational multiples of π where the value is rational or a single surd; nil otherwise."
-  | =([])n => n
-  | pi_ratio $ ~> =('rational)r => sin_r r
+  | =([] & n) => n
+  | pi_ratio $ ~> =('rational & r) => sin_r r
   | [] ~> { :error Unrepresentable }
 }
 
 cos = #'opt {
   :doc "The cosine, exact at rational multiples of π where the value is rational or a single surd; nil otherwise."
-  | =([])n => n
-  | pi_ratio $ ~> =('rational)r => rsub [Rational[1, 2], r] ~> sin_r ~
+  | =([] & n) => n
+  | pi_ratio $ ~> =('rational & r) => rsub [Rational[1, 2], r] ~> sin_r ~
   | [] ~> { :error Unrepresentable }
 }
 
 tan = #'opt {
   :doc "The tangent, exact at rational multiples of π where the value is rational or a single surd; nil otherwise, and at the poles."
-  | =([])n => n
-  | pi_ratio $ ~> =('rational)r => tan_r r
+  | =([] & n) => n
+  | pi_ratio $ ~> =('rational & r) => tan_r r
   | [] ~> { :error Unrepresentable }
 }
 
 asin = #'opt {
   :doc "The arcsine, in [−π/2, π/2]: exact where the sine table has the value; nil otherwise."
-  | =([])n => n
+  | =([] & n) => n
   | abs $ ~> compare [~, 1] ~> =1 => [] ~> { :error OutOfDomain }
-  | inverse [$, asin_table] ~> =('rational)r => pi_times r
+  | inverse [$, asin_table] ~> =('rational & r) => pi_times r
   | [] ~> { :error Unrepresentable }
 }
 
 acos = #'opt {
   :doc "The arccosine, in [0, π]: exact where the sine table has the value; nil otherwise."
-  | =([])n => n
+  | =([] & n) => n
   | abs $ ~> compare [~, 1] ~> =1 => [] ~> { :error OutOfDomain }
-  | inverse [$, asin_table] ~> =('rational)r => rsub [Rational[1, 2], r] ~> pi_times ~
+  | inverse [$, asin_table] ~> =('rational & r) => rsub [Rational[1, 2], r] ~> pi_times ~
   | [] ~> { :error Unrepresentable }
 }
 
 atan = #'opt {
   :doc "The arctangent, in (−π/2, π/2): exact where the tangent table has the value; nil otherwise."
-  | =([])n => n
-  | inverse [$, atan_table] ~> =('rational)r => pi_times r
+  | =([] & n) => n
+  | inverse [$, atan_table] ~> =('rational & r) => pi_times r
   | [] ~> { :error Unrepresentable }
 }
 
 atan2 = #[(y): 'opt, (x): 'opt] {
   :doc "The angle of the point (x, y), in (−π, π]: exact where the tangent table has |y/x|; nil otherwise, and at the origin."
-  $y ~> =('coeff | 'slow)y
-  $x ~> =('coeff | 'slow)x
+  $y ~> =(('coeff | 'slow) & y)
+  $x ~> =(('coeff | 'slow) & x)
   sy = compare [y, 0]
   sx = compare [x, 0]
 
@@ -1754,15 +1754,15 @@ atan2 = #[(y): 'opt, (x): 'opt] {
       | sy ~> =-1 => Rational[-1, 2]
       | [] ~> { :error OutOfDomain }
     }
-    | div [y, x] ~> abs ~ ~> =('coeff | 'slow)q
-      inverse [q, atan_table] ~> =('rational)t => {
+    | div [y, x] ~> abs ~ ~> =(('coeff | 'slow) & q)
+      inverse [q, atan_table] ~> =('rational & t) => {
       | sx ~> =1 => { sy ~> =-1 => rneg t | t }
       | sy ~> =-1 => rsub [t, Rational[1, 1]]
       | rsub [Rational[1, 1], t]
     }
     | [] ~> { :error Unrepresentable }
   }
-  ~> =('rational)r
+  ~> =('rational & r)
 
   pi_times r
 }
@@ -1818,26 +1818,26 @@ approx_step = #[(x): ', (eps): 'rational, (k): 'int] {
 
 approx = #[(value): 'opt, within: 'opt] {
   :doc "The simplest rational within the given positive distance of a number, rational or not (an integer when one is close enough); nil for a nil operand or a non-positive distance."
-  $within ~> =('coeff)eps
+  $within ~> =('coeff & eps)
   e = to_rational eps
   rsign e ~> { =1 => Ok | [] ~> { :error OutOfDomain } }
   $value ~> {
-    | =('coeff)c => { r = to_rational c; simplest [rsub [r, e], radd [r, e]] }
-    | =('slow)x => approx_step [x, e, 64]
+    | =('coeff & c) => { r = to_rational c; simplest [rsub [r, e], radd [r, e]] }
+    | =('slow & x) => approx_step [x, e, 64]
   }
 }
 
 [
   numer: #'opt {
     :doc "The numerator of a rational, or the integer itself; nil for an irrational or nil operand."
-    | =([])n => n
+    | =([] & n) => n
     | =Rational[n, _] => n
     | ='int => $
     | [] ~> { :error OutOfDomain }
   },
   denom: #'opt {
     :doc "The denominator of a rational, or 1 for an integer; nil for an irrational or nil operand."
-    | =([])n => n
+    | =([] & n) => n
     | =Rational[_, d] => d
     | ='int => 1
     | [] ~> { :error OutOfDomain }

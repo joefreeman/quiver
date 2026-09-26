@@ -72,7 +72,7 @@ fn test_assertion_bindings_rejected() {
         },
     );
     // Rejected in release builds too — the check would never run there.
-    quiver().evaluate("5 //= ('int)n").expect_compile_error(
+    quiver().evaluate("5 //= ('int & n)").expect_compile_error(
         quiver_compiler::compiler::Error::AssertionBindings {
             bindings: vec!["n".to_string()],
         },

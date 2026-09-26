@@ -1641,7 +1641,7 @@ fn test_type_alias_over_function_type_parameter() {
             r#"
             h = #<'t>'t {
               'pair = ['t, 't]
-              [$, $] ~> =('pair)p
+              [$, $] ~> =('pair & p)
               p
             }
             h 1
@@ -1741,7 +1741,7 @@ fn test_nested_type_alias_is_module_private() {
         r#"
         make = #'int {
           'private = Secret['int]
-          Secret[$] ~> =('private)s
+          Secret[$] ~> =('private & s)
           s
         }
         [make: make]
@@ -1763,7 +1763,7 @@ fn test_nested_type_alias_may_name_a_module_type() {
             r#"
             main = #[] {
               'ints = '%list<'int>
-              %list.new [] ~> %list.prepend [~, 4] ~> =('ints)xs
+              %list.new [] ~> %list.prepend [~, 4] ~> =('ints & xs)
               xs
             }
             main []

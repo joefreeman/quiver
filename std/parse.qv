@@ -62,7 +62,7 @@ further = #[(a): ('perr | []), (b): ('perr | [])] {
   | $a ~> =Expected(offset: ao)
     $b ~> =Expected(offset: bo)
     __integer_compare__ [ao, bo] ~> =(0 | 1) => $a
-  | $b ~> =('perr)x => x
+  | $b ~> =('perr & x) => x
   | $a
 }
 
@@ -97,7 +97,7 @@ satisfy = #[(pred): 'pred<'int>, (what): Str['bin]] {
   pred = $pred
   what = $what
   #' {
-    | peek $ ~> =('int)b; pred b ~> =('int)v => [v, advance [$, 1]]
+    | peek $ ~> =('int & b); pred b ~> =('int & v) => [v, advance [$, 1]]
     | fail_in [$, what]
   }
 }
@@ -131,7 +131,7 @@ digit_val = #'int {
 }
 
 int_digits = #[(st): ', (acc): 'int] {
-  | peek $st ~> =('int)b; digit_val b ~> =('int)d => ^ [
+  | peek $st ~> =('int & b); digit_val b ~> =('int & d) => ^ [
       advance [$st, 1],
       __integer_add__ [__integer_multiply__ [$acc, 10], d],
     ]
@@ -144,7 +144,7 @@ int = #' {
   =st0
   st = { peek st0 ~> =45; advance [st0, 1] | st0 }
   {
-    | peek st ~> =('int)b; digit_val b => {
+    | peek st ~> =('int & b); digit_val b => {
       int_digits [st, 0] ~> =[n: n, st: st2]
       {
         | peek st0 ~> =45 => [__integer_subtract__ [0, n], st2]
@@ -180,7 +180,7 @@ opt_byte_end = #[(data): 'bin, (pos): 'int, (len): 'int, (b): 'int] {
 // `?` then `!` suffixes — the host language's identifier grammar), as a Str.
 ident = #' {
   :doc "An identifier (lowercase start; letters, digits, underscores; optional `?` then `!` suffixes), as a Str."
-  | peek $ ~> =('int)b
+  | peek $ ~> =('int & b)
     __integer_compare__ [b, 97] ~> =(0 | 1)
     __integer_compare__ [b, 122] ~> =(-1 | 0) => {
       end =
@@ -215,7 +215,7 @@ qstr_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
               | =116 => 9
               | =114 => 13
             }
-            ~> =('int)r => ^ [$data, __integer_add__ [p1, 1], $len, %bin.append [$acc, r, 1]]
+            ~> =('int & r) => ^ [$data, __integer_add__ [p1, 1], $len, %bin.append [$acc, r, 1]]
           | [] ~> { :error Expected[offset: p1, message: "an escape character"] }
         }
       }
@@ -291,10 +291,10 @@ alt2 = #<'t>[(p): 'p<'t>, (q): 'p<'t>] {
       | {
         r2 = $$q $
         {
-          | r2 ~> =[v, st] => [v, st[..., err: further [r:('perr)error, st.err]]]
-          | e = further [r:('perr)error, r2:('perr)error]
+          | r2 ~> =[v, st] => [v, st[..., err: further [r:error<'perr>, st.err]]]
+          | e = further [r:error<'perr>, r2:error<'perr>]
             {
-              | e ~> =('perr)x => [] ~> { :error x }
+              | e ~> =('perr & x) => [] ~> { :error x }
               | fail_in [$, "no alternative matched"]
             }
         }
@@ -322,7 +322,7 @@ many_run = #<'t>[(p): 'p<'t>, (st): ', (acc): 'items<'t>] {
       | __integer_compare__ [st2.pos, $st.pos] ~> =1 => ^ [$p, st2, Cons[v, $acc]]
       | [rev [$acc, Nil], st2]
     }
-    | [rev [$acc, Nil], $st[..., err: further [r:('perr)error, $st.err]]]
+    | [rev [$acc, Nil], $st[..., err: further [r:error<'perr>, $st.err]]]
   }
 }
 
@@ -346,10 +346,10 @@ sep_run = #<'t>[(p): 'p<'t>, (sep): 'p<_>, (st): ', (acc): 'items<'t>] {
         }
         // Backtracking over the separator: stash the element's failure — it's the
         // furthest this path got.
-        | [rev [$acc, Nil], $st[..., err: further [r2:('perr)error, $st.err]]]
+        | [rev [$acc, Nil], $st[..., err: further [r2:error<'perr>, $st.err]]]
       }
     }
-    | [rev [$acc, Nil], $st[..., err: further [r:('perr)error, $st.err]]]
+    | [rev [$acc, Nil], $st[..., err: further [r:error<'perr>, $st.err]]]
   }
 }
 
@@ -362,7 +362,7 @@ sep_by = #<'t>[(p): 'p<'t>, (sep): 'p<_>] {
     r = $$p $
     {
       | r ~> =[v, st1] => sep_run [$$p, $$sep, st1, Cons[v, Nil]]
-      | [Nil, $[..., err: further [r:('perr)error, $err]]]
+      | [Nil, $[..., err: further [r:error<'perr>, $err]]]
     }
   }
 }
@@ -375,7 +375,7 @@ opt = #<'t>'p<'t> {
     r = p $
     {
       | r ~> =[v, st] => [Some[v], st]
-      | [None, $[..., err: further [r:('perr)error, $err]]]
+      | [None, $[..., err: further [r:error<'perr>, $err]]]
     }
   }
 }
@@ -415,7 +415,7 @@ chain_run = #<'t>[(p): 'p<'t>, (op): 'p<#['t, 't] -> 't>, (st): ', (lhs): 't] {
         | [$lhs, $st]
       }
     }
-    | [$lhs, $st[..., err: further [r:('perr)error, $st.err]]]
+    | [$lhs, $st[..., err: further [r:error<'perr>, $st.err]]]
   }
 }
 

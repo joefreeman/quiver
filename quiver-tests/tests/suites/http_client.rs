@@ -20,7 +20,7 @@ fn test_client_reaches_a_server_and_parses_its_answer() {
     quiver()
         .with_mock_io(serves("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nhi"))
         .evaluate(
-            r#"%http/client.get "http://example.com/a?x=1" ~> =('%http.response)r
+            r#"%http/client.get "http://example.com/a?x=1" ~> =('%http.response & r)
                [r.status, Str[r.body]]"#,
         )
         .expect(r#"[200, "hi"]"#);
@@ -41,9 +41,9 @@ fn test_tcp_response_is_assembled_across_arbitrary_read_boundaries() {
             b"ld\r\n0\r\n\r\n".to_vec(),
         ]))
         .evaluate(
-            r#"%url.parse "http://e.com/" ~> =('%url)u
-               %http.request [method: GET, target: %url.target u] ~> =('%http)req
-               %http/tcp.request [url: u, request: req] ~> =('%http.response)r
+            r#"%url.parse "http://e.com/" ~> =('%url & u)
+               %http.request [method: GET, target: %url.target u] ~> =('%http & req)
+               %http/tcp.request [url: u, request: req] ~> =('%http.response & r)
                Str[r.body]"#,
         )
         .expect(r#""hello world""#);
@@ -55,7 +55,7 @@ fn test_post_carries_its_body_and_method() {
         .with_mock_io(serves("HTTP/1.1 201 Created\r\ncontent-length: 0\r\n\r\n"))
         .evaluate(
             r#"%http/client.post [url: "http://e.com/submit", body: "payload" ~> .0]
-               ~> =('%http.response)r
+               ~> =('%http.response & r)
                r.status"#,
         )
         .expect("201");
@@ -72,7 +72,7 @@ fn test_redirect_budget_answers_the_redirect_rather_than_failing() {
         ))
         .evaluate(
             r#"%http/client.request [url: "http://example.com/a", redirects: 2]
-               ~> =('%http.response)r
+               ~> =('%http.response & r)
                [r.status, %http.header [r.headers, "location"]]"#,
         )
         .expect(r#"[302, "http://other.org/z"]"#);
@@ -82,7 +82,7 @@ fn test_redirect_budget_answers_the_redirect_rather_than_failing() {
 fn test_a_refused_connection_is_a_value_the_caller_can_read() {
     quiver()
         .with_mock_io(MockIo::Refuses)
-        .evaluate(r#"%http/client.get "http://e.com/" ~> :('%io)error ~> =IoError(kind: k); k"#)
+        .evaluate(r#"%http/client.get "http://e.com/" ~> :error<'%io> ~> =IoError(kind: k); k"#)
         .expect("ConnectionRefused");
 }
 
@@ -96,9 +96,9 @@ fn test_tcp_connect_falls_through_to_an_address_that_accepts() {
     quiver()
         .with_mock_io(serves("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nhi"))
         .evaluate(
-            r#"%url.parse "http://dual.test/" ~> =('%url)u
-               %http.request [method: GET, target: "/"] ~> =('%http)req
-               %http/tcp.request [url: u, request: req] ~> =('%http.response)r
+            r#"%url.parse "http://dual.test/" ~> =('%url & u)
+               %http.request [method: GET, target: "/"] ~> =('%http & req)
+               %http/tcp.request [url: u, request: req] ~> =('%http.response & r)
                r.status"#,
         )
         .expect("200");
@@ -111,7 +111,7 @@ fn test_a_silent_peer_times_out_rather_than_hanging() {
     // await is the only thing that can be raced against a clock.
     quiver()
         .with_mock_io(MockIo::Stalls)
-        .evaluate(r#"%http/client.request [url: "http://e.com/", timeout: 50] ~> :('int)timeout"#)
+        .evaluate(r#"%http/client.request [url: "http://e.com/", timeout: 50] ~> :timeout<'int>"#)
         .expect("50");
 }
 
@@ -122,7 +122,7 @@ fn test_an_aborting_operation_is_caught_at_the_request_process() {
     quiver()
         .with_mock_io(MockIo::Aborts)
         .evaluate(
-            r#"%http/client.get "http://e.com/" ~> :((message: Str['bin]))crash ~> =(message: m)
+            r#"%http/client.get "http://e.com/" ~> :crash<(message: Str['bin])> ~> =(message: m)
                %str.contains? [m, "the read aborted"]"#,
         )
         .expect("Ok");
@@ -137,7 +137,7 @@ fn test_a_truncated_response_is_reported_not_silently_short() {
         .with_mock_io(serves(
             "HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nshort",
         ))
-        .evaluate(r#"%http/client.get "http://e.com/" ~> :('%io)error ~> =IoError(message: m); m"#)
+        .evaluate(r#"%http/client.get "http://e.com/" ~> :error<'%io> ~> =IoError(message: m); m"#)
         .expect(r#""connection closed mid-body""#);
 }
 
@@ -149,10 +149,10 @@ fn test_tcp_truncation_is_reported_not_silently_short() {
             "HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nshort",
         ))
         .evaluate(
-            r#"%url.parse "http://e.com/" ~> =('%url)u
-               %http.request [method: GET, target: "/"] ~> =('%http)req
+            r#"%url.parse "http://e.com/" ~> =('%url & u)
+               %http.request [method: GET, target: "/"] ~> =('%http & req)
                %http/tcp.request [url: u, request: req]
-               ~> :('%io)error ~> =IoError(message: m); m"#,
+               ~> :error<'%io> ~> =IoError(message: m); m"#,
         )
         .expect(r#""connection closed mid-response""#);
 }
@@ -190,10 +190,10 @@ fn test_an_untrusted_anchor_set_is_refused() {
         .with_real_time()
         .evaluate(
             r#""example.com" ~> %dns.resolve ~ ~> %iter.nth [~, 0]
-               ~> { | =IPv4[b] => b | =IPv6[b] => b } ~> =('bin)ip
-               %tcp.connect [ip, 443] ~> =(+TcpSocket)s
+               ~> { | =IPv4[b] => b | =IPv6[b] => b } ~> =('bin & ip)
+               %tcp.connect [ip, 443] ~> =(+TcpSocket & s)
                %tls.attach [socket: s, hostname: "example.com", roots: <deadbeef>]
-               ~> :('%io)error ~> =IoError(message: m); m"#,
+               ~> :error<'%io> ~> =IoError(message: m); m"#,
         )
         .expect(r#""tls: no usable trust anchors in the supplied roots""#);
 }
@@ -221,13 +221,13 @@ fn test_client_over_a_real_socket_against_a_real_server() {
             @[] { [port: 4291, handler: handler] ~> %http/server.serve ~ } []
             { ![100] | Ok }
 
-            %http/client.get "http://127.0.0.1:4291/echo/hello" ~> =('%http.response)a
+            %http/client.get "http://127.0.0.1:4291/echo/hello" ~> =('%http.response & a)
             %http/client.post [url: "http://127.0.0.1:4291/upper", body: "sent" ~> .0]
-            ~> =('%http.response)b
+            ~> =('%http.response & b)
 
-            %http/client.get "http://127.0.0.1:4291/nope" ~> =('%http.response)c
+            %http/client.get "http://127.0.0.1:4291/nope" ~> =('%http.response & c)
             // A 303 from the server is followed automatically, ending at the echo route.
-            %http/client.get "http://127.0.0.1:4291/moved" ~> =('%http.response)d
+            %http/client.get "http://127.0.0.1:4291/moved" ~> =('%http.response & d)
 
             [[a.status, Str[a.body]], [b.status, Str[b.body]], c.status, [d.status, Str[d.body]]]
             "#,
@@ -241,7 +241,7 @@ fn test_a_real_refused_connection() {
         .with_io()
         .with_real_time()
         .evaluate(
-            r#"%http/client.get "http://127.0.0.1:9/x" ~> :('%io)error ~> =IoError(kind: k); k"#,
+            r#"%http/client.get "http://127.0.0.1:9/x" ~> :error<'%io> ~> =IoError(kind: k); k"#,
         )
         .expect("ConnectionRefused");
 }
@@ -283,7 +283,7 @@ fn test_pure_std_is_shared_by_both_hosts_unchanged() {
     // `%http` and `%url` are the point of the whole arrangement: one vocabulary, compiled
     // identically for a host with sockets and a host with only fetch.
     for source in [
-        r#""http://e.com/a?x=1" ~> %url.parse ~ ~> =('%url)u; %url.target u"#,
+        r#""http://e.com/a?x=1" ~> %url.parse ~ ~> =('%url & u); %url.target u"#,
         r#"%http.request [method: GET, target: "/"] ~> %http.serialize_request ~ ~> Str[~]"#,
     ] {
         let native = quiver().evaluate(source).value_string();

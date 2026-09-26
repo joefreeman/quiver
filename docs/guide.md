@@ -49,7 +49,7 @@ Quiver uses a keyword-less syntax. The table below gives an overview of the symb
 | `#` | function literal | `#'int { $ }` |
 | `$` | the function's parameter | `#'int { $ }` |
 | `$$` | the *enclosing* function's parameter | `#'int { #'int { $$ } }` |
-| `&` | type intersection | `'t & 'u` |
+| `&` | type intersection; pattern conjunction | `'t & 'u` / `=('int & n)` |
 | `\` | negate a pattern | `5 ~> =\[]` |
 | `=` | bind, or match | `x = 5` / `5 ~> =x` |
 | `\|` | separates branches; union members; pattern alternatives | `{ =A => 1 \| 2 }` |
@@ -495,18 +495,6 @@ same? = #[x: 'int, y: 'int] { $y ~> =^$x }
 same? [x: 3, y: 3]            //= 3
 ```
 
-`(T)x` asserts a type *and* binds the value at that narrowed type. The identifier must be
-adjacent to the `)`. The parenthesised part is a pattern head, so it also takes an
-[alternation](#alternation).
-
-```quiver
-42 ~> =('int)n; n             //= 42
-{ [] ~> =('int)n }            //= [] // nil is not an int, so this fails
-```
-
-This is the idiom for "bind, but fail on the wrong type", which combines with
-short-circuiting to propagate.
-
 ### Alternation
 
 A parenthesised, `|`-separated list matches if any alternative does. Every alternative
@@ -517,12 +505,29 @@ must bind the same variables (if any).
 42 ~> =('int | 'bin)              //= 42
 ```
 
-Either reading takes a binder, exactly as `(T)x` does, and it binds at the alternatives'
-union:
+### Conjunction
+
+A parenthesised, `&`-separated list matches if every part does — the pattern reading of a
+type [intersection](#intersections), as alternation is of a union. Its parts may bind
+different variables, and a bare name among them binds the whole value at the type the other
+parts narrowed it to, wherever it is written:
 
 ```quiver
-9 ~> =(32 | 9 | 10 | 13)b; b          //= 9
-[[], 2] ~> =([x, []] | [[], x])p; p   //= [[], 2]
+42 ~> =('int & n); n            //= 42
+{ [] ~> =('int & n) }           //= [] // nil is not an int, so this fails
+Point[x: 1, y: 2] ~> =(Point[x: a, y: _] & p); [a, p]   //= [1, Point[x: 1, y: 2]]
+```
+
+This is the idiom for "bind, but fail on the wrong type", which combines with
+short-circuiting to propagate.
+
+`&` binds tighter than `|`, as it does in types, so an alternation used as a part is
+parenthesised, and each alternative of a union may carry its own binder:
+
+```quiver
+9 ~> =((32 | 9 | 10 | 13) & b); b          //= 9
+[[], 2] ~> =(([x, []] | [[], x]) & p); p   //= [[], 2]
+B[2] ~> =(A[n] & v | B[n] & v); [n, v]     //= [2, B[2]]
 ```
 
 ### Negation
@@ -539,11 +544,11 @@ A[b: <01>] ~> =A[b: \'int]         //= A[b: <01>]
 ```
 
 When a negation matches, its pattern didn't, so there is nothing to bind inside one. A
-binder outside it is fine, and a negated type narrows to what is left: `(\[])x` binds `x`
+binder outside it is fine, and a negated type narrows to what is left: `(\[] & x)` binds `x`
 and fails if the value is nil, without having to name the value's type.
 
 ```quiver
-succ = #('int | []) { (\[])n = $; %num.add [n, 1] }
+succ = #('int | []) { (\[] & n) = $; %num.add [n, 1] }
 succ 4                        //= 5
 succ []                       //= []
 5 ~> =\x                      //! cannot bind
@@ -559,7 +564,7 @@ fields — runs only when it matched, and may rely on its bindings.
 ```quiver
 42 ~> =42 ~> %num.add [~, 1]     //= 43
 { 42 ~> =41 ~> %num.add [~, 1] } //= []
-f = #('int | 'bin) { [$ ~> =('int)n, %num.add [n, 1]] }
+f = #('int | 'bin) { [$ ~> =('int & n), %num.add [n, 1]] }
 f 5                              //= [5, 6]
 f <01>                           //= []
 ```
@@ -690,7 +695,7 @@ type parameters. Aliases are positional: a definition must precede its uses.
 ```quiver
 h = #<'t>'t {
   'pair = ['t, 't]
-  [$, $] ~> =('pair)p
+  [$, $] ~> =('pair & p)
   p
 }
 h 3                           //= [3, 3]
@@ -740,8 +745,8 @@ pattern tests for its own shape:
 
 ```quiver
 describe = #_ {
-  | =('int)n => %num.add [n, 1]
-  | =Point[x: ('int)x, y: _] => x
+  | =('int & n) => %num.add [n, 1]
+  | =Point[x: ('int & x), y: _] => x
   | 0
 }
 describe 5                        //= 6
@@ -872,7 +877,7 @@ the tuple, with the constrained fields narrowed. Disjoint members intersect to n
 In matching, each member is checked separately:
 
 ```quiver
-[x: 1, y: 2] ~> =((x: 'int) & (y: 'int))v; v.x   //= 1
+[x: 1, y: 2] ~> =((x: 'int) & (y: 'int) & v); v.x   //= 1
 ```
 
 ### Data notation
@@ -1041,8 +1046,8 @@ the error, so an ordinary branch recovers from it.
 crashed = @#[] { __panic__ "boom" } []
 r = !crashed
 r ~> {
-  | =('int)v => v                                          // completed
-  | r:(Panic(message: '%str))crash ~> =(message: m) => m   // crashed
+  | =('int & v) => v                                       // completed
+  | r:crash<Panic(message: '%str)> ~> =(message: m) => m   // crashed
   | "no result"                                            // legitimately nil
 }   //= "boom"
 ```
@@ -1135,7 +1140,7 @@ p = @#[] { !'int ~> %num.mul [~, 2] } []
 %registry.register [Doubler, p]              //= Ok
 %registry.register [Doubler, p]              //= [] // the name is taken
 %registry.lookup<@'bin> Doubler              //= [] // wrong message type
-%registry.lookup<@'int> Doubler ~> =(@'int)q
+%registry.lookup<@'int> Doubler ~> =(@'int & q)
 %proc.send [q, 21]
 !p                                           //= 42
 %registry.lookup<@'int> Doubler              //= [] // freed when the process ended
@@ -1231,7 +1236,7 @@ nil.
 ```quiver ignore
 sock = %tcp.connect [ip, port]                          // a failure ends the sequence
 { %tcp.connect [ip, port]; Connected | Unreachable }    // ... or a branch catches it
-result ~> :('%io)error ~> =IoError(kind: ConnectionRefused) => retry
+result ~> :error<'%io> ~> =IoError(kind: ConnectionRefused) => retry
 ```
 
 Failures that are not the world's doing stay runtime errors, because no caller could act
@@ -1300,12 +1305,12 @@ short-circuits with the *same* nil, an `:error` payload survives out through cal
 a recovering branch discards it along with the nil it replaces.
 
 Bare retrieval compiles only where the annotation is statically visible. Inferred paths
-keep that knowledge, and explicitly declared types — function parameters, `(T)x`
-ascription — shed it. The **checked form** `x:('t)key` states the expected shape and is
+keep that knowledge, and explicitly declared types — function parameters, a type tested in
+a match (`('t & x)`) — shed it. The **checked form** `x:key<'t>` states the expected shape and is
 total on any carrier, answering nil when the key is absent or outside the shape.
 
 ```quiver
-[x: 1] ~> :('int)nope         //= []
+[x: 1] ~> :nope<'int>         //= []
 ```
 
 ### Contracts
@@ -1430,7 +1435,7 @@ the short-circuiting nil and is shown wherever it surfaces:
 Stamping is fresh-only, so a propagating failure keeps its original site, and positional,
 so nil used as data is never stamped. Stamps are invisible to the type system, as types
 are identical across build modes, so they are read with a checked retrieval
-(`x:((line: 'int))origin`) that answers nil in a release build.
+(`x:origin<(line: 'int)>`) that answers nil in a release build.
 
 ## Dialects
 

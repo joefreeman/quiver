@@ -1018,7 +1018,7 @@ impl Instruction {
     }
 
     /// Pop a carrier; push its annotation under this key, or nil. Total: a value that
-    /// cannot carry annotations answers nil too. The checked form (`x:('t)key`) compiles
+    /// cannot carry annotations answers nil too. The checked form (`x:key<'t>`) compiles
     /// to this followed by a test against the expected shape.
     pub fn get_annotation(key: usize) -> Instruction {
         Instruction::with_id(Opcode::GetAnnotation, key)

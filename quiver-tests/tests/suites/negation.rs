@@ -62,7 +62,7 @@ fn test_negation_narrows_to_complement() {
     quiver()
         .evaluate(
             "g = #'bin { $ }
-             f = #[b: ('int | 'bin)] { | $ ~> =[b: (\\'int)v] => g v | None }
+             f = #[b: ('int | 'bin)] { | $ ~> =[b: (\\'int & v)] => g v | None }
              [f [b: 1], f [b: <01>]]",
         )
         .expect("[None, <01>]");
@@ -104,12 +104,12 @@ fn test_inexact_negation_does_not_narrow_later_branches() {
 
 #[test]
 fn test_strict_binder() {
-    // `(\[])x` binds `x` and fails the step when the value is nil.
+    // `(\[] & x)` binds `x` and fails the step when the value is nil.
     quiver()
-        .evaluate("f = #('int | []) { (\\[])n = $; %num.add [n, 1] }; [f 1, f []]")
+        .evaluate("f = #('int | []) { (\\[] & n) = $; %num.add [n, 1] }; [f 1, f []]")
         .expect("[2, []]");
     quiver()
-        .evaluate("f = #('int | []) { $ ~> =(\\[])n; n }; f")
+        .evaluate("f = #('int | []) { $ ~> =(\\[] & n); n }; f")
         .expect_type("#('int | []) -> ('int | [])");
 }
 
@@ -206,7 +206,7 @@ fn test_nested_negation() {
         .expect("[No, Ok, Ok]");
     // Nor can a binder appear inside the inner negation, however deep.
     quiver()
-        .evaluate("f = #(A[b: ('int | 'bin)] | B) { | =\\A[b: (\\'int)x] => x | No }; f B")
+        .evaluate("f = #(A[b: ('int | 'bin)] | B) { | =\\A[b: (\\'int & x)] => x | No }; f B")
         .expect_compile_error(Error::NegatedPatternBindings {
             bindings: vec!["x".to_string()],
         });

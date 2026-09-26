@@ -49,7 +49,7 @@ expected:
 
 ```quiver
 r = %parse.run ["12x", %parse.int]
-r:('%parse.perr)error   //= Expected[offset: 2, message: "end of input"]
+r:error<'%parse.perr>   //= Expected[offset: 2, message: "end of input"]
 ```
 
 `'%parse.perr` is `Expected[offset: 'int, message: Str['bin]]`, the offset counted in bytes
@@ -329,7 +329,7 @@ expr = #['%parse.p<('%num | [])>, '%parse] {
 They are what a hand-written parser reports with, and what every combinator above is built on.
 
 ```quiver
-%parse.fail [3, "a digit"] ~> :('%parse.perr)error   //= Expected[offset: 3, message: "a digit"]
+%parse.fail [3, "a digit"] ~> :error<'%parse.perr>   //= Expected[offset: 3, message: "a digit"]
 ```
 
 Nothing about a parser is privileged: it is a function of the state, and the state is an
@@ -342,7 +342,7 @@ any = #'%parse {
 }
 %parse.run ["A", any]   //= 65
 r = %parse.run ["", any]
-r:('%parse.perr)error   //= Expected[offset: 0, message: "any byte"]
+r:error<'%parse.perr>   //= Expected[offset: 0, message: "any byte"]
 ```
 
 `label` replaces a parser's failure message with one of your own, reported at the position
@@ -351,7 +351,7 @@ byte-level expectation that happened to fail first.
 
 ```quiver
 r = %parse.run ["x", %parse.label [%parse.int, "a count"]]
-r:('%parse.perr)error   //= Expected[offset: 0, message: "a count"]
+r:error<'%parse.perr>   //= Expected[offset: 0, message: "a count"]
 ```
 
 ### The furthest failure
@@ -368,7 +368,7 @@ number that failed immediately at 0.
 
 ```quiver
 r = %parse.run ["\"ab", %parse.alt2 [%parse.int, %parse.quoted]]
-r:('%parse.perr)error   //= Expected[offset: 3, message: "'\"' (unterminated string)"]
+r:error<'%parse.perr>   //= Expected[offset: 3, message: "'\"' (unterminated string)"]
 ```
 
 The same holds through backtracking. `sep_by` on `"1,2,x"` backtracks over the trailing comma
@@ -378,7 +378,7 @@ error surfaced is the element's, at 4:
 ```quiver
 comma = %parse.byte [44, "','"]
 r = %parse.run ["1,2,x", %parse.sep_by [%parse.int, comma]]
-r:('%parse.perr)error   //= Expected[offset: 4, message: "a number"]
+r:error<'%parse.perr>   //= Expected[offset: 4, message: "a number"]
 ```
 
 And through `opt`, whose whole job is to discard a failure:
@@ -386,7 +386,7 @@ And through `opt`, whose whole job is to discard a failure:
 ```quiver
 ab_cd = %parse.then [%parse.literal ["ab", "'ab'"], %parse.literal ["cd", "'cd'"]]
 r = %parse.run ["abx", %parse.opt ab_cd]
-r:('%parse.perr)error   //= Expected[offset: 2, message: "'cd'"]
+r:error<'%parse.perr>   //= Expected[offset: 2, message: "'cd'"]
 ```
 
 `opt` succeeded with `None` at offset 0 and `run` failed there, so without the stash the

@@ -26,10 +26,10 @@ fn test_a_locally_issued_certificate_is_trusted_via_roots() {
     tls(
         &server,
         r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
         %tcp.write [s, "ping" ~> .0]
-        %tcp.read [s, 4] ~> =('bin)reply
+        %tcp.read [s, 4] ~> =('bin & reply)
         %tcp.close s
         Str[reply]
         "#,
@@ -43,10 +43,10 @@ fn test_a_close_notify_reads_as_a_clean_end_of_stream() {
     tls(
         &server,
         r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
         %tcp.write [s, "ping" ~> .0]
-        %tcp.read [s, 4] ~> =('bin)reply
+        %tcp.read [s, 4] ~> =('bin & reply)
         after = %tcp.read [s, 4]
         [Str[reply], after]
         "#,
@@ -63,11 +63,11 @@ fn test_a_bare_tcp_close_is_an_error_not_an_end() {
     tls(
         &server,
         r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
         %tcp.write [s, "ping" ~> .0]
-        %tcp.read [s, 4] ~> =('bin)reply
-        %tcp.read [s, 4] ~> :('%io)error ~> =IoError(message: m)
+        %tcp.read [s, 4] ~> =('bin & reply)
+        %tcp.read [s, 4] ~> :error<'%io> ~> =IoError(message: m)
         %str.contains? [m, "close_notify"]
         "#,
     )
@@ -83,11 +83,11 @@ fn test_a_bare_tcp_close_fails_a_select() {
     tls(
         &server,
         r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
         %tcp.write [s, "ping" ~> .0]
         ![s] ~> =Data[sock: _, data: _]
-        ![s] ~> :('%io)error ~> =IoError(message: m)
+        ![s] ~> :error<'%io> ~> =IoError(message: m)
         %str.contains? [m, "close_notify"]
         "#,
     )
@@ -102,7 +102,7 @@ fn test_a_record_split_across_socket_reads_is_reassembled() {
     tls(
         &server,
         r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
         %tcp.read [s, 16] ~> Str[~]
         "#,
@@ -119,15 +119,15 @@ fn test_records_spanning_read_boundaries_arrive_complete() {
         &server,
         r#"
         read_all = #[(sock): +TcpSocket, (buf): 'bin] {
-          %tcp.read [$sock, 65536] ~> =('bin)chunk
+          %tcp.read [$sock, 65536] ~> =('bin & chunk)
           {
             | %bin.length chunk ~> =0 => $buf
             | ^ [$sock, %bin.concat [$buf, chunk]]
           }
         }
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
-        read_all [s, <>] ~> =('bin)all
+        read_all [s, <>] ~> =('bin & all)
         %bin.length all
         "#,
     )
@@ -143,9 +143,9 @@ fn test_a_mismatched_hostname_is_refused() {
     tls(
         &server,
         r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "wrong.test", roots: __ROOTS__]
-        ~> :('%io)error ~> =IoError(message: m)
+        ~> :error<'%io> ~> =IoError(message: m)
         %str.contains? [m, "not valid for name"]
         "#,
     )
@@ -160,9 +160,9 @@ fn test_an_unknown_issuer_is_refused() {
     tls(
         &server,
         r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __DECOY__]
-        ~> :('%io)error ~> =IoError(message: m)
+        ~> :error<'%io> ~> =IoError(message: m)
         %str.contains? [m, "UnknownIssuer"]
         "#,
     )
@@ -179,11 +179,11 @@ fn test_a_failed_handshake_closes_the_socket() {
         &server,
         r#"
         p = @[] {
-          %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+          %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
           { %tls.attach [socket: s, hostname: "localhost", roots: __DECOY__] => [] | Ok }
           %tcp.read [s, 1]
         } []
-        !p ~> :((message: Str['bin]))crash ~> =(message: m)
+        !p ~> :crash<(message: Str['bin])> ~> =(message: m)
         %str.contains? [m, "not found"]
         "#,
     )
@@ -198,7 +198,7 @@ fn test_a_select_yields_decrypted_data_then_closed() {
     tls(
         &server,
         r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
         %tcp.write [s, "ping" ~> .0]
         ![s] ~> =Data[sock: _, data: d]
@@ -217,10 +217,10 @@ fn test_buffered_plaintext_answers_a_select() {
     tls(
         &server,
         r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
         %tcp.write [s, "ping" ~> .0]
-        %tcp.read [s, 2] ~> =('bin)first
+        %tcp.read [s, 2] ~> =('bin & first)
         ![s] ~> =Data[sock: _, data: rest]
         Str[%bin.concat [first, rest]]
         "#,
@@ -235,9 +235,9 @@ fn test_a_timeout_races_an_upgraded_socket() {
     tls(
         &server,
         r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
-        ![s, 100] ~> :('int)timeout
+        ![s, 100] ~> :timeout<'int>
         "#,
     )
     .expect("100");
@@ -256,24 +256,24 @@ fn test_tls_accept_serves_an_in_language_client() {
         .evaluate(&pki.splice(
             r#"
             server = @[] {
-              %tcp.listen [4381, 8] ~> =(+TcpListener)l
-              %tcp.accept l ~> =(+TcpSocket)c
+              %tcp.listen [4381, 8] ~> =(+TcpListener & l)
+              %tcp.accept l ~> =(+TcpSocket & c)
               %tls.accept [socket: c, cert: __CERT__, key: __KEY__]
-              %tcp.read [c, 4] ~> =('bin)msg
+              %tcp.read [c, 4] ~> =('bin & msg)
               %tcp.write [c, msg]
               %tcp.close c
               Done
             } []
             // The server races the connect: retry (bounded) until its listener is up.
             connect = #'int {
-              | %tcp.connect [<7f000001>, 4381] ~> =(+TcpSocket)c => c
+              | %tcp.connect [<7f000001>, 4381] ~> =(+TcpSocket & c) => c
               | =0 => []
               | { ![50] | Ok }; n = %num.sub [$, 1]; ^ n
             }
-            connect 20 ~> =(+TcpSocket)s
+            connect 20 ~> =(+TcpSocket & s)
             %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
             %tcp.write [s, "ping" ~> .0]
-            %tcp.read [s, 4] ~> =('bin)reply
+            %tcp.read [s, 4] ~> =('bin & reply)
             %tcp.close s
             !server ~> =Done
             Str[reply]
@@ -296,7 +296,7 @@ fn test_https_serves_via_http_server() {
         .evaluate(&pki.splice(
             r#"
             read_all = #[(sock): +TcpSocket, (buf): 'bin] {
-              %tcp.read [$sock, 8192] ~> =('bin)chunk
+              %tcp.read [$sock, 8192] ~> =('bin & chunk)
               {
                 | %bin.length chunk ~> =0 => $buf
                 | ^ [$sock, %bin.concat [$buf, chunk]]
@@ -310,13 +310,13 @@ fn test_https_serves_via_http_server() {
             // The server races the connect: retry (bounded) until it accepts and shakes
             // hands — a refused or half-up connection answers nil, and we go again.
             connect = #'int {
-              | %tls.connect [host: "localhost", port: 4382, roots: __ROOTS__] ~> =(+TcpSocket)c => c
+              | %tls.connect [host: "localhost", port: 4382, roots: __ROOTS__] ~> =(+TcpSocket & c) => c
               | =0 => []
               | { ![50] | Ok }; n = %num.sub [$, 1]; ^ n
             }
-            connect 20 ~> =(+TcpSocket)s
+            connect 20 ~> =(+TcpSocket & s)
             %tcp.write [s, "GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n" ~> .0]
-            read_all [s, <>] ~> =('bin)resp
+            read_all [s, <>] ~> =('bin & resp)
             [
               %str.contains? [Str[resp], "200"],
               %str.contains? [Str[resp], "secure hello"],
@@ -339,8 +339,8 @@ fn test_pem_roots_reach_a_tls_server() {
         .with_timeout(Duration::from_secs(10))
         .evaluate(&server.program(
             r#"
-            %pem.certificates "__CA_PEM__" ~> =('bin)roots
-            %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+            %pem.certificates "__CA_PEM__" ~> =('bin & roots)
+            %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
             %tls.attach [socket: s, hostname: "localhost", roots: roots]
             %tcp.write [s, "ping" ~> .0]
             %tcp.read [s, 4] ~> Str[~]

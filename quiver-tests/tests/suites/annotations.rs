@@ -116,7 +116,7 @@ fn test_branch_fallback_discards_payload() {
     // recovering branch yields a fresh value, so the payload is gone and :e reads nil.
     quiver()
         .evaluate(
-            "[] ~> { :e Boom } ~> { =[] => Recovered | ~ } ~> :(Boom)e ~> { =[] => Gone | Kept }",
+            "[] ~> { :e Boom } ~> { =[] => Recovered | ~ } ~> :e<Boom> ~> { =[] => Gone | Kept }",
         )
         .expect("Gone");
 }
@@ -330,7 +330,7 @@ fn test_error_payload_propagates_through_a_failed_match() {
     ";
     quiver()
         .evaluate(&format!(
-            "{source} g = #[] {{ [4, 0] ~> div ~ ~> =('int)x; 5 }}; g [] ~> :error"
+            "{source} g = #[] {{ [4, 0] ~> div ~ ~> =('int & x); 5 }}; g [] ~> :error"
         ))
         .expect("DivisionByZero");
     // The two-step spelling answers the same, for a different reason: the first step is the
@@ -389,7 +389,7 @@ fn test_generic_carrier_attaches_and_reads_back_checked() {
         .evaluate(
             r#"stamp = #<'t>['t, 'int] { $0 ~> { :seen $1 } }
                e = stamp [Inc, 41]
-               [e, e:('int)seen]"#,
+               [e, e:seen<'int>]"#,
         )
         .expect("[Inc, 41]");
 }
@@ -466,7 +466,7 @@ fn test_laundering_is_rejected() {
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
             "Cannot retrieve :error — a value of type [] may carry erased annotations \
              (annotations aren't statically visible through declared parameter/receive \
-             types; state the expected shape with a checked retrieval, `:('t)error`)"
+             types; state the expected shape with a checked retrieval, `:error<'t>`)"
                 .to_string(),
         ));
 }
@@ -480,7 +480,7 @@ fn test_parameter_erases_annotations() {
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
             "Cannot retrieve :error — a value of type [] may carry erased annotations \
              (annotations aren't statically visible through declared parameter/receive \
-             types; state the expected shape with a checked retrieval, `:('t)error`)"
+             types; state the expected shape with a checked retrieval, `:error<'t>`)"
                 .to_string(),
         ));
 }
@@ -576,24 +576,24 @@ fn test_module_member_builtin_doc() {
         .expect("42");
 }
 
-// Checked retrieval `x:('t)key`: one retrieval operation with an optional expected
+// Checked retrieval `x:key<'t>`: one retrieval operation with an optional expected
 // shape. Bare form: shape inferred from the rows (the five visibility rules). Checked
 // form: shape explicit — total on any carrier, typed `'t | []`, gated by the same
-// runtime structural test as `=('t)v` ascription; an entry outside the shape answers
+// runtime structural test as `=('t & v)` ascription; an entry outside the shape answers
 // nil. The gate is elided when the rows already entail the shape.
 
 #[test]
 fn test_checked_retrieval_definite_entry() {
     // Rows entail the shape: the gate is elided and the type stays definite (non-nil).
     quiver()
-        .evaluate("f = [1] ~> { :count 42 }; f:('int)count")
+        .evaluate("f = [1] ~> { :count 42 }; f:count<'int>")
         .expect("42");
 }
 
 #[test]
 fn test_checked_retrieval_wrong_shape_is_nil() {
     quiver()
-        .evaluate("f = [1] ~> { :count \"hi\" }; f:('int)count ~> { =[] => IsNil | NotNil }")
+        .evaluate("f = [1] ~> { :count \"hi\" }; f:count<'int> ~> { =[] => IsNil | NotNil }")
         .expect("IsNil");
 }
 
@@ -602,7 +602,7 @@ fn test_checked_retrieval_absent_key_is_nil() {
     // No typo firewall on the checked form: the explicit shape is the programmer's
     // declaration that this is beyond static tracking.
     quiver()
-        .evaluate("a = A[b: 1]; a:('int)foo ~> { =[] => IsNil | NotNil }")
+        .evaluate("a = A[b: 1]; a:foo<'int> ~> { =[] => IsNil | NotNil }")
         .expect("IsNil");
 }
 
@@ -611,7 +611,7 @@ fn test_checked_retrieval_through_erased_parameter() {
     // The generic-reader case rule 4 forbids for the bare form: the value crossed a
     // declared parameter (rows erased), yet the entry is recovered by shape.
     quiver()
-        .evaluate("report = #[] { $:('int)err }; [] ~> { :err 9 } ~> report ~")
+        .evaluate("report = #[] { $:err<'int> }; [] ~> { :err 9 } ~> report ~")
         .expect("9");
 }
 
@@ -624,7 +624,7 @@ fn test_checked_retrieval_gates_laundered_entry() {
             "launder = #[] { $ };
              a = [] ~> { :error \"overflow\" } ~> launder ~;
              b = A[c: 1] ~> { =A(c) => a | [] ~> { :error 404 } };
-             b:('int)error ~> { =[] => Gated | Escaped }",
+             b:error<'int> ~> { =[] => Gated | Escaped }",
         )
         .expect("Gated");
 }
@@ -634,7 +634,7 @@ fn test_checked_retrieval_narrows_by_partial_shape() {
     // The shape doubles as a filter: a partial gate narrows the entry, so field access
     // on the result typechecks.
     quiver()
-        .evaluate("f = [1] ~> { :error Overflow[line: 9] }; f:(Overflow(line: 'int))error ~> .line")
+        .evaluate("f = [1] ~> { :error Overflow[line: 9] }; f:error<Overflow(line: 'int)> ~> .line")
         .expect("9");
 }
 
@@ -642,10 +642,10 @@ fn test_checked_retrieval_narrows_by_partial_shape() {
 fn test_checked_retrieval_on_module_member() {
     // Compile-time module values decide the gate statically, both ways.
     quiver()
-        .evaluate("%list.head:(Str['bin])doc")
+        .evaluate("%list.head:doc<Str['bin]>")
         .expect("\"The first element of a list, or nil when it is empty.\"");
     quiver()
-        .evaluate("%list.head:('int)doc ~> { =[] => IsNil | NotNil }")
+        .evaluate("%list.head:doc<'int> ~> { =[] => IsNil | NotNil }")
         .expect("IsNil");
 }
 

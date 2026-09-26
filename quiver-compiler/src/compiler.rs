@@ -425,7 +425,7 @@ impl std::fmt::Display for Error {
             Error::NegatedPatternBindings { bindings } => {
                 write!(
                     f,
-                    "A negated pattern cannot bind variables (found {bindings:?}); bind outside it, as in `(\\[])x`"
+                    "A negated pattern cannot bind variables (found {bindings:?}); bind outside it, as in `(\\[] & x)`"
                 )
             }
             Error::NegatedWildcard => write!(f, "`\\_` never matches"),
@@ -963,11 +963,9 @@ fn collect_binding_spans(pattern: &ast::Match, out: &mut Vec<(String, SourceSpan
                 collect_binding_spans(alternative, out);
             }
         }
-        ast::Match::As(head, name, span) => {
-            // The ascribed binder `(P)x` binds `x`, and its head may bind too (`=(^a | [b])v`).
-            collect_binding_spans(head, out);
-            if let Some(span) = span.get() {
-                out.push((name.clone(), span));
+        ast::Match::And(conjuncts) => {
+            for conjunct in conjuncts {
+                collect_binding_spans(conjunct, out);
             }
         }
         _ => {}
@@ -991,12 +989,12 @@ fn collect_pin_targets<'m>(pattern: &'m ast::Match, out: &mut Vec<&'m ast::PinTa
                 }
             }
         }
-        ast::Match::Or(alternatives) => {
-            for alternative in alternatives {
-                collect_pin_targets(alternative, out);
+        ast::Match::Or(parts) | ast::Match::And(parts) => {
+            for part in parts {
+                collect_pin_targets(part, out);
             }
         }
-        ast::Match::As(head, _, _) | ast::Match::Not(head) => collect_pin_targets(head, out),
+        ast::Match::Not(inner) => collect_pin_targets(inner, out),
         _ => {}
     }
 }
@@ -2278,7 +2276,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     /// Resolve the type after an accessor path, for type-only inspection (look-ahead
     /// peeks, receive-type collection). Builds the type environment a checked
-    /// annotation accessor (`:('t)key`) needs to resolve its expected shape.
+    /// annotation accessor (`:key<'t>`) needs to resolve its expected shape.
     fn peek_accessor_type(
         &mut self,
         base: usize,
@@ -3416,17 +3414,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             return Ok(self.program.never());
         }
 
-        // A binder of the whole scrutinee (`=x`, `=(P)x`) is the scrutinee, so it keeps its
+        // A binder of the whole scrutinee (`=x`, `=(P & x)`) is the scrutinee, so it keeps its
         // provenance and later reads see its narrowings. A binding taken from inside it is
         // not, however few bindings the pattern makes: `=A[Cons[x, _]]` binds only `x`.
-        let whole_value = matches!(pattern, ast::Match::Identifier(..) | ast::Match::As(..));
+        let whole_value = |name: &str| match &pattern {
+            ast::Match::Identifier(binder, _) => binder == name,
+            ast::Match::And(conjuncts) => conjuncts.iter().any(
+                |conjunct| matches!(conjunct, ast::Match::Identifier(binder, _) if binder == name),
+            ),
+            _ => false,
+        };
 
         // Register locals for all bindings (indices needed for Load)
         for (variable_name, variable_type) in &bindings {
             let local_index = self.local_count;
             self.local_count += 1;
 
-            let var_provenance = if whole_value {
+            let var_provenance = if whole_value(variable_name) {
                 value_provenance.clone()
             } else {
                 Provenance::Unknown
@@ -3537,7 +3541,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // value's type — `[x, y]` against `[A, B] | [A, C]` tests which member it has, but
             // matches either. Coverage is the complement's verdict, which is exact only for pure
             // type tests on non-recursive positions (what `prevents` rules out), and on a value
-            // without type variables — narrowing keeps a variable whole, so `=[x, ('int)y]` would
+            // without type variables — narrowing keeps a variable whole, so `=[x, ('int & y)]` would
             // seem to cover `['t, 't]`. Otherwise only a requirement-free set counts.
             let irrefutable = pattern::is_irrefutable(&binding_sets)
                 || (!prevents
@@ -8078,7 +8082,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         for accessor in accessors {
             // Annotation retrieval: works on tuples and callables, yields value-or-nil.
-            // The bare form types by the visibility rules; the checked form `:('t)key`
+            // The bare form types by the visibility rules; the checked form `:key<'t>`
             // is total, gated by a runtime shape test where the rows can't vouch.
             if let ast::AccessPath::Annotation(name, expected) = &accessor {
                 let (key_id, result_type, check) = match expected {
@@ -8111,7 +8115,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 };
                 self.codegen
                     .add_instruction(Instruction::get_annotation(key_id));
-                // The checked form (`x:('t)key`) gates the retrieved entry on its expected
+                // The checked form (`x:key<'t>`) gates the retrieved entry on its expected
                 // shape, answering nil when it does not fit. That is a test the retrieval
                 // itself need not know about: keep the entry when it matches, else discard
                 // it for nil.

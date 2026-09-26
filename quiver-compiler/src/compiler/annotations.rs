@@ -145,7 +145,7 @@ pub fn retrieval_type(
     Ok((key_id, result_type))
 }
 
-/// The static type of a checked retrieval `x:('t)key` — total on any carrier, no
+/// The static type of a checked retrieval `x:key<'t>` — total on any carrier, no
 /// visibility requirement. Each union member contributes:
 /// - its entry's type, when visible and within the asked shape (the gate can't reject it);
 /// - the asked shape itself, when the member is open or its entry only partially overlaps
@@ -312,7 +312,7 @@ fn erased_error(program: &Program, member: usize, name: &str) -> Error {
     Error::TypeUnresolved(format!(
         "Cannot retrieve :{name} — a value of type {} may carry erased annotations \
          (annotations aren't statically visible through declared parameter/receive \
-         types; state the expected shape with a checked retrieval, `:('t){name}`)",
+         types; state the expected shape with a checked retrieval, `:{name}<'t>`)",
         quiver_core::format::format_type_by_id(program, member)
     ))
 }

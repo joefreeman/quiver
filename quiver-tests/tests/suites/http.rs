@@ -31,10 +31,10 @@ fn test_served_connection_end_to_end() {
             };
             @[] { [port: 4181, handler: handler] ~> %http/server.serve ~ } [];
             { ![50] | Ok };
-            [<7f000001>, 4181] ~> __tcp_connect__ ~ ~> =(+TcpSocket)sock;
+            [<7f000001>, 4181] ~> __tcp_connect__ ~ ~> =(+TcpSocket & sock);
             [sock, "GET /n/one HTTP/1.1\r\n\r\nGET /n/two HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __tcp_socket_write__ ~;
-            [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin)r1;
-            [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin)r2;
+            [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin & r1);
+            [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin & r2);
             sock ~> __tcp_socket_close__ ~;
             [Str[[r1, r2] ~> %bin.concat ~]]
             "#,
@@ -61,10 +61,10 @@ fn test_crashed_handler_answers_500_and_connection_survives() {
             };
             @[] { [port: 4182, handler: handler] ~> %http/server.serve ~ } [];
             { ![50] | Ok };
-            [<7f000001>, 4182] ~> __tcp_connect__ ~ ~> =(+TcpSocket)sock;
+            [<7f000001>, 4182] ~> __tcp_connect__ ~ ~> =(+TcpSocket & sock);
             [sock, "GET /boom HTTP/1.1\r\n\r\nGET /ok HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __tcp_socket_write__ ~;
-            [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin)r1;
-            [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin)r2;
+            [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin & r1);
+            [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin & r2);
             sock ~> __tcp_socket_close__ ~;
             [Str[[r1, r2] ~> %bin.concat ~]]
             "#,
@@ -106,7 +106,7 @@ fn test_session_round_trip() {
             resp = Response[status: 200, headers: Nil, body: <>];
             r2 = [resp, key, Cons[["count", "7"], Cons[["name", "Ada L"], Nil]]] ~> %http/session.put ~;
             [r2.headers, "set-cookie"] ~> %http.header ~ ~> =Str[scb];
-            [scb, 59, 0] ~> %bin.index ~ ~> =('int)semi;
+            [scb, 59, 0] ~> %bin.index ~ ~> =('int & semi);
             cookie = [scb, 0, semi] ~> %bin.slice ~ ~> Str[~];
             "GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[rq, _];
             [rq, key] ~> %http/session.get ~
@@ -124,7 +124,7 @@ fn test_session_rejects_tampering() {
             key = <000102030405060708090a0b0c0d0e0f>;
             "GET / HTTP/1.1\r\nCookie: session=ff.00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[rq, _];
             r = [rq, key] ~> %http/session.get ~;
-            { | r ~> =('%http.pairs)p => Forged | Rejected }
+            { | r ~> =('%http.pairs & p) => Forged | Rejected }
             "#,
         )
         .expect("Rejected");
@@ -136,11 +136,11 @@ fn test_session_rejects_tampering() {
             resp = Response[status: 200, headers: Nil, body: <>];
             r2 = [resp, key, Cons[["a", "1"], Nil]] ~> %http/session.put ~;
             [r2.headers, "set-cookie"] ~> %http.header ~ ~> =Str[scb];
-            [scb, 59, 0] ~> %bin.index ~ ~> =('int)semi;
+            [scb, 59, 0] ~> %bin.index ~ ~> =('int & semi);
             cookie = [scb, 0, semi] ~> %bin.slice ~ ~> Str[~];
             "GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[rq, _];
             r = [rq, other] ~> %http/session.get ~;
-            { | r ~> =('%http.pairs)p => WrongKeyAccepted | Rejected }
+            { | r ~> =('%http.pairs & p) => WrongKeyAccepted | Rejected }
             "#,
         )
         .expect("Rejected");

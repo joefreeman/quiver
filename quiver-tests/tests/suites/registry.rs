@@ -9,7 +9,7 @@ fn register_lookup_send_await() {
     quiver()
         .evaluate("p = @#[] { !'int ~> %num.mul [~, 2] } []; %registry.register [Doubler, p]")
         .expect("Ok")
-        .then_evaluate("%registry.lookup<@'int> Doubler ~> =(@'int)q; %proc.send [q, 21]; !p")
+        .then_evaluate("%registry.lookup<@'int> Doubler ~> =(@'int & q); %proc.send [q, 21]; !p")
         .expect("42");
 }
 
@@ -68,7 +68,7 @@ fn lookup_state_grant_supports_sampling() {
     quiver()
         .evaluate("w = 7 ~> @#'int { !'bin; $ } ~; %registry.register [Stateful, w]")
         .expect("Ok")
-        .then_evaluate("%registry.lookup<(@?'int)> Stateful ~> =((@?'int))v; ?v")
+        .then_evaluate("%registry.lookup<(@?'int)> Stateful ~> =((@?'int) & v); ?v")
         .expect("7");
 }
 
@@ -79,7 +79,7 @@ fn name_frees_at_normal_completion() {
     quiver()
         .evaluate(
             "p = @#[] { !'int ~> %num.mul [~, 2] } []; %registry.register [Fleet, p]; \
-             %registry.lookup<@'int> Fleet ~> =(@'int)q; %proc.send [q, 21]; !p",
+             %registry.lookup<@'int> Fleet ~> =(@'int & q); %proc.send [q, 21]; !p",
         )
         .expect("42")
         .then_evaluate("%registry.lookup<@'int> Fleet")
@@ -105,7 +105,7 @@ fn cascade_teardown_frees_the_name() {
         .evaluate(
             "parent = @#(@Ready) { c = @#[] { !'int } []; %registry.register [Child, c]; \
              %proc.send [$, Ready]; !'bin } @; \
-             !Ready; %registry.lookup<@'int !'int> Child ~> =(@'int !'int)c; \
+             !Ready; %registry.lookup<@'int !'int> Child ~> =((@'int !'int) & c); \
              %proc.kill parent; !c ~> =[]; %registry.lookup<@'int> Child",
         )
         .expect("[]");
@@ -160,7 +160,7 @@ fn registered_service_survives_its_spawner_and_collection() {
         .expect("Ok")
         .force_collection()
         .then_evaluate(
-            "%registry.lookup<@'int !'int> Svc ~> =(@'int !'int)q; %proc.send [q, 14]; !q",
+            "%registry.lookup<@'int !'int> Svc ~> =((@'int !'int) & q); %proc.send [q, 14]; !q",
         )
         .expect("42");
 }

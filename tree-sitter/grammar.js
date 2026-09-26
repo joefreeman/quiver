@@ -56,18 +56,6 @@ function immBracketed($, open, rule, close) {
   return seq(token.immediate(open), optional($._nl), optional(commaSep1($, rule)), optional($._nl), close);
 }
 
-/// The body of a checked annotation retrieval after its `:(` opener: the expected shape —
-/// a type (`('t)`) or a partial-field gate (`(line: 'int)`) — then the key glued to the `)`.
-function checkedAnnotationBody($) {
-  return seq(
-    optional($._nl),
-    optional(choice($._type, commaSep1($, $._partial_type_field))),
-    optional($._nl),
-    ')',
-    field('key', alias($._identifier_immediate, $.identifier)),
-  );
-}
-
 module.exports = grammar({
   name: 'quiver',
 
@@ -132,13 +120,16 @@ module.exports = grammar({
     // patterns) or as a parenthesised type union; both are accepted for editor purposes.
     [$.pattern_tuple, $.tuple_type],
     [$._pattern, $._type_atom],
+    // `(+File …` / `(@'int …` may open a conjunction with a type part (`(+File & fd)`) or a
+    // parenthesised type; the `&` followed by a non-type decides, via GLR.
+    [$._conjunct, $._type_atom],
+    // A conjunction directly inside `( … )` is either the whole group or the first
+    // alternative of an alternation (`(A & x | B & x)`); a `|` decides.
+    [$.pattern_and, $._alternative],
     // `_` is a pattern's placeholder and the top type alike; inside `( … )` either reading
     // is possible, and they match the same values.
     [$.placeholder, $.top_type],
     [$.pattern_partial, $.partial_type],
-    // `(\\P` opens either an alternation (`(\\P | Q)`) or a lone negation heading an
-    // ascription (`(\\P)x`); the `|` or `)` decides, via GLR.
-    [$._pattern, $._paren_negation],
     // `(a, b)` may be a punned tuple (value position) or a partial pattern (before a `=`,
     // or after one as `=(a, b)`); the surrounding position decides, via GLR.
     [$.pun, $._partial_field],
@@ -280,15 +271,13 @@ module.exports = grammar({
     ),
 
     // The forms valid as the target of a chain binding (`x = ...`, `[a, b] = ...`,
-    // `(add, mul) = ...`, `('bin)ip = ...`, `* = ...`). A bare type or literal is never a
-    // binding target, which keeps bindings distinct from type aliases. (Ascribed targets
-    // once mis-resolved `$N` accesses via GLR — that was the missing dotless-`$`-sugar
-    // rule, fixed alongside it.)
+    // `(add, mul) = ...`, `('bin & ip) = ...`, `* = ...`). A bare type or literal is never a
+    // binding target, which keeps bindings distinct from type aliases.
     _binding_target: $ => choice(
       $.identifier,
       $.pattern_tuple,
       $.pattern_partial,
-      $.pattern_ascription,
+      $.pattern_and,
       $.pattern_negation,
       $.star,
       $.placeholder,
@@ -380,13 +369,14 @@ module.exports = grammar({
     ),
     _annotation_name_immediate: _ => token.immediate(seq(':', /[a-z][a-z0-9_]*[?!]?/)),
 
-    // The checked retrieval form `x:('t)key` — a parenthesised expected shape between the
-    // `:` and the key, the `=('t)v` ascription syntax transplanted to retrieval
-    // (`annotation_accessor` in quiver-compiler/src/parser.rs). Everything is glued: `:(`
-    // is a single token (a field label's `:` is followed by a space), and the key sits
-    // immediately after the `)`.
-    checked_annotation: $ => seq(':(', checkedAnnotationBody($)),
-    _checked_annotation_immediate: $ => seq(token.immediate(':('), checkedAnnotationBody($)),
+    // The checked retrieval form `x:key<'t>` — the expected shape as a glued type argument
+    // (`annotation_accessor` in quiver-compiler/src/parser.rs). A retrieval's type argument
+    // belongs to the key rather than to the access, so the precedence prefers it.
+    checked_annotation: $ => prec(1, seq(field('key', $.annotation_name), $.type_arguments)),
+    _checked_annotation_immediate: $ => prec(1, seq(
+      field('key', alias($._annotation_name_immediate, $.annotation_name)),
+      $.type_arguments,
+    )),
     index: _ => /\d+/,
 
     // `%num`, `%mathx/vec`. The `/` path separator is immediate so a later `mod / x`
@@ -622,7 +612,7 @@ module.exports = grammar({
     _pattern: $ => choice(
       $.pattern_negation,
       $.pattern_pin,
-      $.pattern_ascription,
+      $.pattern_and,
       $.multiline_string,
       $.string,
       $.pattern_tuple,
@@ -649,22 +639,9 @@ module.exports = grammar({
       repeat(seq('.', field('field', choice($.identifier, $.index)))),
     )),
 
-    // An ascribed binding: a *parenthesised* pattern head immediately followed by a binding
-    // identifier — `('int)x`, `('int | 'bin)v`, `(0 | 1)n`. Matches the head and binds the whole
-    // (narrowed) value. The head is a type where the contents are one, else an alternation, as
-    // it is without the binder. The identifier must be glued (token.immediate), matching the real
-    // parser: `('int) x` is a type pattern with `x` left for the next term.
-    // The type reading wins where both are live, as it does without the binder, so the positive
-    // dynamic precedence mirrors the `prec.dynamic(-1, …)` that tips `=(A[x] | B[x])` the other way.
-    pattern_ascription: $ => seq(
-      choice(prec.dynamic(1, $._paren_type), $.pattern_or, $._paren_negation),
-      field('binding', alias($._identifier_immediate, $.identifier)),
-    ),
     // A negated pattern: `\\P` matches exactly when `P` doesn't (`\\[]`, `\\'int`, `\\^x`). The
     // real parser requires the `\\` glued to its pattern; this grammar is looser.
     pattern_negation: $ => seq('\\', $._pattern),
-    // A lone negation in parentheses heads an ascription: `(\\[])x`.
-    _paren_negation: $ => seq('(', optional($._nl), $.pattern_negation, optional($._nl), ')'),
     _identifier_immediate: _ => token.immediate(/[a-z][a-zA-Z0-9_]*\??!?/),
     // `*` binds every named field; `Name*` additionally requires the tuple's name. The `*`
     // is glued to the name, as a tuple pattern's name is glued to its bracket.
@@ -676,10 +653,23 @@ module.exports = grammar({
     // `:`/`,`) and a non-field leading pattern select this.
     pattern_or: $ => seq(
       '(', optional($._nl),
-      $._pattern,
-      repeat1(seq(optional($._nl), '|', optional($._nl), $._pattern)),
+      $._alternative,
+      repeat1(seq(optional($._nl), '|', optional($._nl), $._alternative)),
       optional($._nl), ')',
     ),
+    _alternative: $ => choice($._conjunct, alias($._conjunction, $.pattern_and)),
+
+    // A conjunction of patterns: `(p & q & …)`, matching when every part does. A bare name
+    // among the parts binds the whole value (`('int & n)`). `&` binds tighter than `|`, so
+    // inside an alternation the conjunction needs no parentheses of its own
+    // (`(A[n] & v | B[n] & v)`). A part may also be a type the pattern grammar cannot spell
+    // bare (`(+File & fd)`).
+    pattern_and: $ => seq('(', optional($._nl), $._conjunction, optional($._nl), ')'),
+    _conjunction: $ => seq(
+      $._conjunct,
+      repeat1(seq('&', optional($._nl), $._conjunct)),
+    ),
+    _conjunct: $ => choice($._pattern, $.resource_type, $.process_type),
 
     pattern_tuple: $ => choice(
       seq(field('name', $.tuple_name), immBracketed($, '[', $._pattern_field, ']')),

@@ -5,7 +5,7 @@
 // relinquish.
 //
 // The `'crash` type names the payload a never-lethal await answers for a crashed
-// source, read with a checked retrieval: `r = !p; r:('%proc.crash)crash`.
+// source, read with a checked retrieval: `r = !p; r:crash<'%proc.crash>`.
 
 'crash = Error[pid: @, message: '%str] | Panic[pid: @, message: '%str] | Killed
 

@@ -128,7 +128,7 @@ peek_at = #'%parse { %num.lt? [$pos, $len]; %bin.get_byte [$data, $pos] }
 build_number = #[(sign): 'int, (int_b): 'bin, (frac_b): 'bin, (exp): 'int] {
   // The digits were scanned as a non-empty run of digits, so they always parse.
   mag = %bin.concat [$int_b, $frac_b] ~> %str.parse_int Str[~] ~> {
-    | =('int)n => n
+    | =('int & n) => n
     | __panic__ "scanned number digits did not parse"
   }
 
@@ -144,7 +144,7 @@ build_number = #[(sign): 'int, (int_b): 'bin, (frac_b): 'bin, (exp): 'int] {
 
       // `den` is a positive power of ten, so the division is always a rational.
       %num.div [m, den] ~> {
-        | =('%num.coeff)r => lower_num r
+        | =('%num.coeff & r) => lower_num r
         | __panic__ "dividing by a power of ten failed"
       }
     }
@@ -193,7 +193,7 @@ number = #'%parse {
         | %bin.length ebb ~> =0 => %parse.fail_in [st3, "digits in the exponent"]
         | {
           emag = ebb ~> %str.parse_int Str[~] ~> {
-            | =('int)n => n
+            | =('int & n) => n
             | __panic__ "scanned exponent digits did not parse"
           }
           [exponent: __integer_multiply__ [esign, emag], st: st4a]
@@ -366,7 +366,7 @@ str_step = #[(self): ^, (v): '] -> '%str {
     | =Null => "null"
     | =True => "true"
     | =False => "false"
-    | =('int)n => %str.from_int n
+    | =('int & n) => %str.from_int n
     | =Rational[n, d] => format_rational [n, d]
     | =Str[bytes] => escape_str Str[bytes]
     | =Array[items] => {
@@ -415,14 +415,14 @@ obj_get = #[(pairs): 'pairs, (key): '%str, (found): 'opt] {
   }
 }
 
-// One key applied to one value: an object key or an array index. The `=(')v` narrow
+// One key applied to one value: an object key or an array index. The `=(' & v)` narrow
 // comes first: destructuring `'opt` directly would re-root the payload's recursion at
 // the nil-bearing union, poisoning the element types.
 get1 = #[(value): 'opt, (key): ('%str | 'int)] -> 'opt {
-  $value ~> =(')v
+  $value ~> =(' & v)
   $key ~> {
-    | =('%str)k => v ~> =Object[pairs]; obj_get [pairs, k, []]
-    | =('int)i => v ~> =Array[items]; %list.nth [items, i]
+    | =('%str & k) => v ~> =Object[pairs]; obj_get [pairs, k, []]
+    | =('int & i) => v ~> =Array[items]; %list.nth [items, i]
   }
 }
 
@@ -435,8 +435,8 @@ get_path = #[(value): 'opt, (path): '%list<('%str | 'int)>] -> 'opt {
 get = #[(value): 'opt, (key): 'key] -> 'opt {
   :doc "The value at a key — an object key, a 0-based array index, or a path list of either. Nil when absent or the kind mismatches."
   $key ~> {
-    | =('%str | 'int)k => get1 [$value, k]
-    | =('%list<('%str | 'int)>)path => get_path [$value, path]
+    | =(('%str | 'int) & k) => get1 [$value, k]
+    | =('%list<('%str | 'int)> & path) => get_path [$value, path]
   }
 }
 
@@ -469,10 +469,10 @@ arr_set = #[(rest): '%list<'>, (index): 'int, (new): ', (acc): '%list<'>] -> ('%
 
 // One key set on one value.
 set1 = #[(value): 'opt, (key): ('%str | 'int), (new): '] -> 'opt {
-  $value ~> =(')v
+  $value ~> =(' & v)
   $key ~> {
-    | =('%str)k => { v ~> =Object[pairs]; obj_set [pairs, k, $new, Nil, []] ~> Object[~] }
-    | =('int)i => { v ~> =Array[items]; Array[arr_set [items, i, $new, Nil] ~> ='%list<'>] }
+    | =('%str & k) => { v ~> =Object[pairs]; obj_set [pairs, k, $new, Nil, []] ~> Object[~] }
+    | =('int & i) => { v ~> =Array[items]; Array[arr_set [items, i, $new, Nil] ~> ='%list<'>] }
   }
 }
 
@@ -488,10 +488,10 @@ set_step = #[(self): ^, (value): 'opt, (path): '%list<('%str | 'int)>, (new): ']
 
 set = #[(value): 'opt, (key): 'key, (new): 'opt] -> 'opt {
   :doc "The value with `new` at a key or path: replaced in place when present, appended when an object key is absent. Nil when a container along the path is missing, the kind mismatches, or an index is out of range."
-  $new ~> =(')j
+  $new ~> =(' & j)
   $key ~> {
-    | =('%str | 'int)k => set1 [$value, k, j]
-    | =('%list<('%str | 'int)>)path => set_step [set_step, $value, path, j]
+    | =(('%str | 'int) & k) => set1 [$value, k, j]
+    | =('%list<('%str | 'int)> & path) => set_step [set_step, $value, path, j]
   }
 }
 
@@ -523,10 +523,10 @@ arr_delete = #[(rest): '%list<'>, (index): 'int, (acc): '%list<'>] -> '%list<'> 
 // One key deleted from one value. Deletion is idempotent: an absent key or index answers
 // the value unchanged; only a kind mismatch is nil.
 delete1 = #[(value): 'opt, (key): ('%str | 'int)] -> 'opt {
-  $value ~> =(')v
+  $value ~> =(' & v)
   $key ~> {
-    | =('%str)k => v ~> =Object[pairs]; obj_delete [pairs, k, Nil] ~> Object[~]
-    | =('int)i => v ~> =Array[items]; arr_delete [items, i, Nil] ~> Array[~]
+    | =('%str & k) => v ~> =Object[pairs]; obj_delete [pairs, k, Nil] ~> Object[~]
+    | =('int & i) => v ~> =Array[items]; arr_delete [items, i, Nil] ~> Array[~]
   }
 }
 
@@ -537,7 +537,7 @@ delete_step = #[(self): ^, (value): 'opt, (path): '%list<('%str | 'int)>] -> 'op
     | =Nil => []
     | =Cons[k, Nil] => delete1 [$value, k]
     | =Cons[k, rest] => get1 [$value, k] ~> {
-      | =(')child => set1 [$value, k, $self [$self, child, rest] ~> =']
+      | =(' & child) => set1 [$value, k, $self [$self, child, rest] ~> =']
       | $value
     }
   }
@@ -546,8 +546,8 @@ delete_step = #[(self): ^, (value): 'opt, (path): '%list<('%str | 'int)>] -> 'op
 delete = #[(value): 'opt, (key): 'key] -> 'opt {
   :doc "The value without what a key or path names; unchanged when already absent (the empty path deletes the whole value: nil). Nil when the kind mismatches."
   $key ~> {
-    | =('%str | 'int)k => delete1 [$value, k]
-    | =('%list<('%str | 'int)>)path => delete_step [delete_step, $value, path]
+    | =(('%str | 'int) & k) => delete1 [$value, k]
+    | =('%list<('%str | 'int)> & path) => delete_step [delete_step, $value, path]
   }
 }
 
@@ -555,7 +555,7 @@ merge = #[(value): 'opt, (with): 'opt] -> 'opt {
   :doc "A shallow merge of two objects: the first's pairs in their order with the second's values winning per key, then the second's remaining pairs in its order. Nil unless both are objects."
   $value ~> =' ~> =Object[a]
   $with ~> =' ~> =Object[b]
-  merged = %list.map [a, #{ obj_get [b, $0, []] ~> { =(')bv => [$0, bv] | [$0, $1] } }]
+  merged = %list.map [a, #{ obj_get [b, $0, []] ~> { =(' & bv) => [$0, bv] | [$0, $1] } }]
   extra = %list.filter [b, #{ obj_get [a, $0, []] ~> =[]; $ }]
   %list.chain [merged, extra] ~> Object[~]
 }
@@ -567,8 +567,8 @@ to_dict = #'opt {
 
 object = #('%dict<'%str, '> | 'pairs) -> ' {
   :doc "An Object from a %dict or a [key, value] pair list. A dict's entries arrive in its own (hash) order."
-  | =('pairs)pairs => Object[pairs]
-  | =('%dict<'%str, '>)d => Object[%dict.entries d]
+  | =('pairs & pairs) => Object[pairs]
+  | =('%dict<'%str, '> & d) => Object[%dict.entries d]
 }
 
 array = #'%list<'> -> ' {

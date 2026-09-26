@@ -7,7 +7,7 @@
 //
 //     sock = %tcp.connect [ip, port]        // nil short-circuits the sequence
 //     ...
-//     result ~> :('%io)error ~> =IoError(kind: ConnectionRefused) => retry
+//     result ~> :error<'%io> ~> =IoError(kind: ConnectionRefused) => retry
 //
 // The kind is a tag to branch on. The message is the host's description: useful in a log,
 // but it varies by platform, so don't make logic depend on it.

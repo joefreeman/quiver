@@ -1030,7 +1030,7 @@ fn test_complement_keeps_nil_for_later_branches() {
     quiver()
         .evaluate(
             r#"
-            f = #('int | Ok | []) { | =('int)i => Yep | =Ok => Okay | =[] => Nada };
+            f = #('int | Ok | []) { | =('int & i) => Yep | =Ok => Okay | =[] => Nada };
             x = []; x ~> f ~
             "#,
         )
@@ -1205,7 +1205,7 @@ fn test_nil_bearing_wrapped_union_dispatch_without_empty_member() {
 
 #[test]
 fn test_ascription_through_recursive_union_is_checked() {
-    // The checked ascription `=(T)s` on a binding typed by an inner recursive union
+    // The checked ascription `=(T & s)` on a binding typed by an inner recursive union
     // (`^2 | Lb['int]`) must keep its runtime test: `is_compatible` traverses a `Cycle`
     // optimistically, and eliding on its verdict matched an `Lb` value against
     // `I['int]` (and bound `s`, typed `I['int]`, to it — the recorded over-match).
@@ -1213,7 +1213,7 @@ fn test_ascription_through_recursive_union_is_checked() {
         .evaluate(
             r#"
             'e = I['int] | T[(Nil | Cons[(^2 | Lb['int]), ^])]
-            f = #'e { $ ~> =T[fs]; fs ~> =Cons[h, _]; h ~> { =(I['int])s => Matched[s] | Failed } }
+            f = #'e { $ ~> =T[fs]; fs ~> =Cons[h, _]; h ~> { =(I['int] & s) => Matched[s] | Failed } }
             [f T[Cons[Lb[5], Nil]], f T[Cons[I[9], Nil]]]
             "#,
         )
@@ -1223,7 +1223,7 @@ fn test_ascription_through_recursive_union_is_checked() {
         .evaluate(
             r#"
             'e = I['int] | T[(Nil | Cons[(^2 | Lb['int]), ^])]
-            g = #'e { $ ~> =T[fs]; fs ~> =Cons[h, _]; h ~> =(I['int])s; Reached[s] }
+            g = #'e { $ ~> =T[fs]; fs ~> =Cons[h, _]; h ~> =(I['int] & s); Reached[s] }
             [g T[Cons[Lb[5], Nil]], g T[Cons[I[9], Nil]]]
             "#,
         )
@@ -1269,7 +1269,7 @@ fn test_checked_annotation_gate_on_recursive_entry() {
         .evaluate(
             r#"
             x = P[v: 1] ~> { :k Cons[1, Nil] }
-            x:(Str['bin])k ~> { =Str[_] => WronglyStr | CorrectNil }
+            x:k<Str['bin]> ~> { =Str[_] => WronglyStr | CorrectNil }
             "#,
         )
         .expect("CorrectNil");
@@ -1281,7 +1281,7 @@ fn test_match_in_apply_argument_fails_its_step() {
     // call with a nil-filled binding — so a binding made there holds afterwards.
     quiver()
         .evaluate(
-            "f = #('int | 'bin) { g = #'int { $ }; x = g =('int)s; Got[x, s] }
+            "f = #('int | 'bin) { g = #'int { $ }; x = g =('int & s); Got[x, s] }
              [f 5, f <01>]",
         )
         .expect("[Got[5, 5], []]");
@@ -1472,7 +1472,7 @@ fn test_alternation_over_recursive_members_keeps_every_tail_variant() {
     quiver()
         .evaluate(
             "'l = A | B | Cons[^]
-             f = #'l { | =(A | Cons[_])v => v ~> { =Cons[B] => Hit | Miss } | No }
+             f = #'l { | =((A | Cons[_]) & v) => v ~> { =Cons[B] => Hit | Miss } | No }
              [f Cons[B], f Cons[A], f B]",
         )
         .expect("[Hit, Miss, No]");

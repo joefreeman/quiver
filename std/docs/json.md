@@ -145,7 +145,7 @@ just a number here:
 
 ```quiver
 doc = "1000000000000000000000000000000"
-doc ~> %json.parse ~ ~> =('%json)v; v ~> %json.stringify ~   //= ^doc
+doc ~> %json.parse ~ ~> =('%json & v); v ~> %json.stringify ~   //= ^doc
 ```
 
 ## Rendering
@@ -164,31 +164,31 @@ fractional places is written exactly; anything else is rounded, half away from z
 places. So JSON-originated data round-trips exactly and only computed fractions round.
 
 ```quiver
-[314, 100] ~> %num.div ~ ~> =('%json)v; v ~> %json.stringify ~   //= "3.14"
-[1, 3] ~> %num.div ~ ~> =('%json)v; v ~> %json.stringify ~       //= "0.333333333333"
-[2, 3] ~> %num.div ~ ~> =('%json)v; v ~> %json.stringify ~       //= "0.666666666667"
-[-2, 7] ~> %num.div ~ ~> =('%json)v; v ~> %json.stringify ~      //= "-0.285714285714"
+[314, 100] ~> %num.div ~ ~> =('%json & v); v ~> %json.stringify ~   //= "3.14"
+[1, 3] ~> %num.div ~ ~> =('%json & v); v ~> %json.stringify ~       //= "0.333333333333"
+[2, 3] ~> %num.div ~ ~> =('%json & v); v ~> %json.stringify ~       //= "0.666666666667"
+[-2, 7] ~> %num.div ~ ~> =('%json & v); v ~> %json.stringify ~      //= "-0.285714285714"
 ```
 
 A magnitude below 12 fractional digits of significance rounds to `0` — and never to `-0`:
 
 ```quiver
-[1, 10000000000000] ~> %num.div ~ ~> =('%json)v; v ~> %json.stringify ~   //= "0"
+[1, 10000000000000] ~> %num.div ~ ~> =('%json & v); v ~> %json.stringify ~   //= "0"
 ```
 
 ## Round trips
 
-`parse` is nilable, so its result is narrowed with `=('%json)v` before `stringify` takes it.
+`parse` is nilable, so its result is narrowed with `=('%json & v)` before `stringify` takes it.
 Since `stringify` emits canonical form, re-stringifying a parse of already-canonical text
 reproduces it byte for byte:
 
 ```quiver
-"[1, [2, 3], [], -4]" ~> %json.parse ~ ~> =('%json)v
+"[1, [2, 3], [], -4]" ~> %json.parse ~ ~> =('%json & v)
 v ~> %json.stringify ~   //= "[1,[2,3],[],-4]"
 ```
 
 ```quiver
-"\{\"k\": [true, null]}" ~> %json.parse ~ ~> =('%json)v
+"\{\"k\": [true, null]}" ~> %json.parse ~ ~> =('%json & v)
 v ~> %json.stringify ~   //= "{\"k\":[true,null]}"
 ```
 
@@ -196,7 +196,7 @@ Decimals originating from JSON survive too — including values `f64` cannot rep
 exponent forms that normalize to plain decimals:
 
 ```quiver
-round = #'%str { %json.parse $ ~> =('%json)v; %json.stringify v }
+round = #'%str { %json.parse $ ~> =('%json & v); %json.stringify v }
 round "3.14"     //= "3.14"
 round "-0.5"     //= "-0.5"
 round "2.675"    //= "2.675"
@@ -210,7 +210,7 @@ and strings needing quote, backslash and newline escaping — checked with a sin
 
 ```quiver
 doc = "\{\"user\":\{\"name\":\"Ada \\\"L\\\"\",\"age\":36,\"active\":true,\"roles\":[\"admin\",\"dev\"],\"manager\":null},\"scores\":[10,-5,0],\"empty_obj\":\{},\"empty_arr\":[],\"path\":\"a\\\\b\\nc\"}"
-doc ~> %json.parse ~ ~> =('%json)v; v ~> %json.stringify ~   //= ^doc
+doc ~> %json.parse ~ ~> =('%json & v); v ~> %json.stringify ~   //= ^doc
 ```
 
 ## Reading
@@ -263,31 +263,31 @@ mainstream parsers keep:
 document's order; an absent one is appended.
 
 ```quiver
-%json{ { "a": 1, "b": 2 } } ~> %json.set [~, "a", 9] ~> =('%json)v
+%json{ { "a": 1, "b": 2 } } ~> %json.set [~, "a", 9] ~> =('%json & v)
 v ~> %json.stringify ~   //= "{\"a\":9,\"b\":2}"
 ```
 
 ```quiver
-%json{ { "a": 1 } } ~> %json.set [~, "c", 3] ~> =('%json)v
+%json{ { "a": 1 } } ~> %json.set [~, "c", 3] ~> =('%json & v)
 v ~> %json.stringify ~   //= "{\"a\":1,\"c\":3}"
 ```
 
 Duplicates collapse: the first occurrence is rewritten, the rest dropped.
 
 ```quiver
-"\{\"a\": 1, \"b\": 2, \"a\": 3}" ~> %json.parse ~ ~> %json.set [~, "a", 9] ~> =('%json)v
+"\{\"a\": 1, \"b\": 2, \"a\": 3}" ~> %json.parse ~ ~> %json.set [~, "a", 9] ~> =('%json & v)
 v ~> %json.stringify ~   //= "{\"a\":9,\"b\":2}"
 ```
 
 An index sets an array element, and a path rebuilds every level around the leaf:
 
 ```quiver
-%json{ [1, 2, 3] } ~> %json.set [~, 1, 9] ~> =('%json)v
+%json{ [1, 2, 3] } ~> %json.set [~, 1, 9] ~> =('%json & v)
 v ~> %json.stringify ~   //= "[1,9,3]"
 ```
 
 ```quiver
-%json{ { "tags": [1, 2] } } ~> %json.set [~, %list{ "tags", 0 }, 9] ~> =('%json)v
+%json{ { "tags": [1, 2] } } ~> %json.set [~, %list{ "tags", 0 }, 9] ~> =('%json & v)
 v ~> %json.stringify ~   //= "{\"tags\":[9,2]}"
 ```
 
@@ -312,12 +312,12 @@ than being embedded as `null`.
 `update` is `get` then `set`: `f` is applied to what the key names.
 
 ```quiver
-%json{ { "n": 2 } } ~> %json.update [~, "n", #{ =('int)i; %num.mul [i, 10] }] ~> %json.get [~, "n"]   //= 20
+%json{ { "n": 2 } } ~> %json.update [~, "n", #{ =('int & i); %num.mul [i, 10] }] ~> %json.get [~, "n"]   //= 20
 ```
 
 ```quiver
 %json{ { "a": { "n": [5, 7] } } }
-~> %json.update [~, %list{ "a", "n", 1 }, #{ =('int)i; %num.mul [i, 10] }] ~> =('%json)v
+~> %json.update [~, %list{ "a", "n", 1 }, #{ =('int & i); %num.mul [i, 10] }] ~> =('%json & v)
 v ~> %json.stringify ~   //= "{\"a\":{\"n\":[5,70]}}"
 ```
 
@@ -335,22 +335,22 @@ An absent target is nil, and so is `f` answering nil:
 key deletion removes *every* occurrence of it.
 
 ```quiver
-%json{ { "a": 1, "b": 2 } } ~> %json.delete [~, "a"] ~> =('%json)v
+%json{ { "a": 1, "b": 2 } } ~> %json.delete [~, "a"] ~> =('%json & v)
 v ~> %json.stringify ~   //= "{\"b\":2}"
 ```
 
 ```quiver
-%json{ [1, 2, 3] } ~> %json.delete [~, 1] ~> =('%json)v
+%json{ [1, 2, 3] } ~> %json.delete [~, 1] ~> =('%json & v)
 v ~> %json.stringify ~   //= "[1,3]"
 ```
 
 ```quiver
-%json{ { "a": [1, 2] } } ~> %json.delete [~, %list{ "a", 0 }] ~> =('%json)v
+%json{ { "a": [1, 2] } } ~> %json.delete [~, %list{ "a", 0 }] ~> =('%json & v)
 v ~> %json.stringify ~   //= "{\"a\":[2]}"
 ```
 
 ```quiver
-"\{\"a\": 1, \"b\": 2, \"a\": 3}" ~> %json.parse ~ ~> %json.delete [~, "a"] ~> =('%json)v
+"\{\"a\": 1, \"b\": 2, \"a\": 3}" ~> %json.parse ~ ~> %json.delete [~, "a"] ~> =('%json & v)
 v ~> %json.stringify ~   //= "{\"b\":2}"
 ```
 
@@ -381,7 +381,7 @@ The empty path names the whole value, so deleting it leaves nothing:
 values winning, then the second's remaining pairs in its order.
 
 ```quiver
-[%json{ { "a": 1, "b": 2 } }, %json{ { "b": 20, "c": 30 } }] ~> %json.merge ~ ~> =('%json)v
+[%json{ { "a": 1, "b": 2 } }, %json{ { "b": 20, "c": 30 } }] ~> %json.merge ~ ~> =('%json & v)
 v ~> %json.stringify ~   //= "{\"a\":1,\"b\":20,\"c\":30}"
 ```
 
@@ -397,12 +397,12 @@ Anything but two objects is nil:
 later ones winning, as `get` does) in exchange for hashed lookup.
 
 ```quiver
-%json{ { "a": 1 } } ~> %json.to_dict ~ ~> =('%dict<'%str, '%json>)d
+%json{ { "a": 1 } } ~> %json.to_dict ~ ~> =('%dict<'%str, '%json> & d)
 %dict.get [d, "a"]   //= 1
 ```
 
 ```quiver
-"\{\"a\": 1, \"a\": 2}" ~> %json.parse ~ ~> %json.to_dict ~ ~> =('%dict<'%str, '%json>)d
+"\{\"a\": 1, \"a\": 2}" ~> %json.parse ~ ~> %json.to_dict ~ ~> =('%dict<'%str, '%json> & d)
 %dict.get [d, "a"]   //= 2
 ```
 
@@ -423,7 +423,7 @@ A dict's entries arrive in its own hash order, so `Object → %dict → Object` 
 entries but not their order:
 
 ```quiver
-%json{ { "m": { "x": 7 } } } ~> %json.to_dict ~ ~> =('%dict<'%str, '%json>)d
+%json{ { "m": { "x": 7 } } } ~> %json.to_dict ~ ~> =('%dict<'%str, '%json> & d)
 %json.object d ~> %json.get [~, %list{ "m", "x" }]   //= 7
 ```
 
@@ -539,7 +539,7 @@ Exact rationals pass through as `'%num.coeff`; how they are written is `stringif
 not `encode`'s:
 
 ```quiver
-%num.div [1, 2] ~> =('%num.coeff)h
+%num.div [1, 2] ~> =('%num.coeff & h)
 h ~> %json.encode<'%num.coeff> ~ ~> %json.stringify ~   //= "0.5"
 ```
 

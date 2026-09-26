@@ -174,7 +174,7 @@ recv = #' {
     | =Incomplete => {
       // A read failure ends the connection: the nil short-circuits out of `recv`, the
       // connection process finishes, and teardown closes the socket it still owns.
-      __tcp_socket_read__ [$sock, 8192] ~> =('bin)chunk
+      __tcp_socket_read__ [$sock, 8192] ~> =('bin & chunk)
       {
         | %bin.length chunk ~> =0 => {
           // The peer vanished without a Close: abnormal closure (1006 is never on

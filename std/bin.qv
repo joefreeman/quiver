@@ -36,11 +36,11 @@ to_hex = #'bin {
 
 from_hex_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
   | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
-  | __binary_get__ [$data, $pos, 0, 8] ~> hex_val ~ ~> =('int)hi
+  | __binary_get__ [$data, $pos, 0, 8] ~> hex_val ~ ~> =('int & hi)
 
     __binary_get__ [$data, __integer_add__ [$pos, 1], 0, 8]
     ~> hex_val ~
-    ~> =('int)lo => ^ [
+    ~> =('int & lo) => ^ [
       $data,
       __integer_add__ [$pos, 2],
       $len,
@@ -168,8 +168,8 @@ from_base64_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
     c2 = __binary_get__ [$data, __integer_add__ [$pos, 2], 0, 8]
     c3 = __binary_get__ [$data, __integer_add__ [$pos, 3], 0, 8]
     last? = __integer_compare__ [__integer_add__ [$pos, 4], $len] ~> { =(0 | 1) => Ok | [] }
-    b64_val c0 ~> =('int)v0
-    b64_val c1 ~> =('int)v1
+    b64_val c0 ~> =('int & v0)
+    b64_val c1 ~> =('int & v1)
     {
       // "xx==" — one output byte; only legal in the final quantum.
       | [c2, c3] ~> =[61, 61] => {
@@ -183,7 +183,7 @@ from_base64_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
       // "xxx=" — two output bytes; only legal in the final quantum.
       | c3 ~> =61 => {
         last?
-        b64_val c2 ~> =('int)v2
+        b64_val c2 ~> =('int & v2)
 
         __binary_append__ [
           $acc,
@@ -200,8 +200,8 @@ from_base64_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
         ]
       }
       | {
-        b64_val c2 ~> =('int)v2
-        b64_val c3 ~> =('int)v3
+        b64_val c2 ~> =('int & v2)
+        b64_val c3 ~> =('int & v3)
 
         acc2 =
           __binary_append__ [

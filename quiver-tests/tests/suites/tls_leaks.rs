@@ -19,7 +19,7 @@ fn test_repeated_tls_sessions_hold_no_descriptors() {
             count_fds = #[] { %fs.list "/proc/self/fd" ~> %iter.count ~ }
 
             cycle = #[] {
-              %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+              %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
               %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
               %tcp.write [s, "ping" ~> .0]
               %tcp.read [s, 4]
@@ -30,7 +30,7 @@ fn test_repeated_tls_sessions_hold_no_descriptors() {
             // nothing else could ever close it. The refused attach answers nil, which the
             // block converts to Ok; an attach that unexpectedly *succeeds* fails the test.
             failed_cycle = #[] {
-              %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket)s
+              %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
               { %tls.attach [socket: s, hostname: "localhost", roots: __DECOY__] => [] | Ok }
             }
 
