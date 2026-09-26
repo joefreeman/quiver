@@ -1020,10 +1020,31 @@ pub fn builtin_panic<E: Effect>(
     Err(Error::Panic(message))
 }
 
+/// Record that the debug-build assertion written at the given site (its `module:line:column`,
+/// as bytes) passed, answering nil. This is how a test runner learns which assertions actually
+/// ran, rather than which were written. Counted as pure: it changes nothing the program can
+/// observe, so it is as welcome in a receive filter or at compile time as the check it follows.
+pub fn builtin_assertion_passed<E: Effect>(
+    arg: &Value,
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    let Value::Binary(binary) = arg else {
+        return Err(Error::TypeMismatch {
+            expected: "binary".to_string(),
+            found: arg.type_name().to_string(),
+        });
+    };
+    let site =
+        String::from_utf8_lossy(&ctx.executor.get_binary_data(binary)?.to_vec()).into_owned();
+    ctx.executor.record_assertion_passed(site);
+    Ok(Completion::Value(Value::nil()))
+}
+
 pub fn register_control_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     let str = TypeSpec::Tuple(Some("Str"), vec![(None, TypeSpec::Binary)]);
     // `__panic__` never returns: its result is the empty union (`never`).
     register_builtin!(registry, "panic", builtin_panic, str => TypeSpec::Union(vec![]));
+    register_builtin!(registry, "assertion_passed", builtin_assertion_passed, TypeSpec::Binary => TypeSpec::Tuple(None, vec![]));
 }
 
 /// The Quiver data notation codec (`%data`): `data_encode` walks any data value into

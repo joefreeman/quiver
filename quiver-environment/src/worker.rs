@@ -308,6 +308,13 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             Command::GetWorkerInfo { request_id } => {
                 self.get_worker_info(request_id)?;
             }
+            Command::TakeAssertionsPassed { request_id } => {
+                let sites = self.executor.take_assertions_passed();
+                self.sender.send(Event::AssertionsPassedResponse {
+                    request_id,
+                    result: Ok(sites),
+                })?;
+            }
             Command::GetProcessTypes { request_id } => {
                 self.get_process_types(request_id)?;
             }

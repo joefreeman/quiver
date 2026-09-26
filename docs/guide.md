@@ -1471,9 +1471,10 @@ double 5
 double 5 ~> %num.add [~, 3] //= 13
 ```
 
-A check inside a function body runs when the function is *called*, not where it is written,
-so one in a function nothing calls never runs at all. `quiv test` counts those apart, as
-**deferred**, rather than reporting them as assertions it saw hold.
+A check runs only where control reaches it: one inside a function body runs when the
+function is *called*, not where it is written, and one in an untaken branch or after a failed
+step never runs at all. `quiv test` counts the assertions it saw hold, and reports the rest of
+those written as **not run**, rather than as passed.
 
 ### Expected failures
 

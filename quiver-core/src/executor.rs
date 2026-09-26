@@ -196,6 +196,9 @@ pub struct Executor<E: Effect> {
     /// module bodies), which must be deterministic: `Purity::HostRead` builtins are
     /// rejected. Set only by the sync driver; runtime workers leave it false.
     pub(crate) compile_time: bool,
+    /// The debug-build assertions that have passed here, by the site they are written at, since
+    /// they were last taken — so an assertion counts once however often it runs.
+    assertions_passed: HashSet<String>,
     tuples: Vec<usize>, // Tuple arities
     /// The full type and tuple tables (what the program serializes), so type-consuming
     /// builtins (`__data_decode__<'t>`) can read their type argument's structure at
@@ -790,6 +793,7 @@ impl<E: Effect> Executor<E> {
             builtin_labels: vec![],
             builtin_result_types: vec![],
             compile_time: false,
+            assertions_passed: HashSet::new(),
             tuples: vec![0, 0], // NIL and OK have 0 fields
             // Full infos for the same two pre-seeded tuples (updates skip them), keeping
             // `tuple_infos` index-aligned with the arity table.
@@ -1283,6 +1287,16 @@ impl<E: Effect> Executor<E> {
     /// there is no slot table to occupy, and no free list or reclamation queue to report. A
     /// buffer shared between processes — or between workers — is counted once here, by
     /// identity.
+    /// Record that the assertion written at `site` passed.
+    pub fn record_assertion_passed(&mut self, site: String) {
+        self.assertions_passed.insert(site);
+    }
+
+    /// The sites of the assertions that have passed since the last take, clearing them.
+    pub fn take_assertions_passed(&mut self) -> HashSet<String> {
+        std::mem::take(&mut self.assertions_passed)
+    }
+
     pub fn worker_info(&self) -> crate::process::WorkerInfo {
         let mut live = HashMap::new();
         for process in self.processes.values() {

@@ -46,7 +46,7 @@ pub struct Step {
     pub column: usize,
     /// The `//= P` assertions the step carries. A step may carry several, since a leading `//=`
     /// continues the step above rather than opening a new one.
-    pub assertions: Assertions,
+    pub assertions: usize,
     /// A `//! text` failure expectation: the step must fail, and the rendered error must contain
     /// `text`. An empty fragment accepts any failure.
     pub expect_failure: Option<String>,
@@ -142,170 +142,78 @@ impl Block {
     }
 }
 
-/// A tally of `//= P` assertions, split by whether evaluating the source they were counted from
-/// checks them.
-///
-/// The split is what keeps a report truthful. An assertion is a check the *runtime* performs,
-/// and it performs it only if control reaches it — so a document that merely writes one has
-/// established nothing. A function body is where the two come apart: defining a function
-/// evaluates nothing inside it, and whether anything ever calls it is not something a reader of
-/// the source can decide.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Assertions {
-    /// Checked by evaluating the source: those on its own chains, and inside the blocks those
-    /// chains evaluate.
-    pub checked: usize,
-    /// Written inside a function body, so checked only when something calls that function —
-    /// a later step, a combinator the function is handed to, or nothing at all.
-    pub deferred: usize,
-}
-
-impl Assertions {
-    pub fn total(&self) -> usize {
-        self.checked + self.deferred
-    }
-
-    /// This tally as it counts where the source is only *defined* rather than evaluated: nothing
-    /// in a function body is checked by writing the function down.
-    fn into_deferred(self) -> Self {
-        Assertions {
-            checked: 0,
-            deferred: self.total(),
-        }
-    }
-}
-
-impl std::ops::Add for Assertions {
-    type Output = Assertions;
-
-    fn add(self, other: Assertions) -> Assertions {
-        Assertions {
-            checked: self.checked + other.checked,
-            deferred: self.deferred + other.deferred,
-        }
-    }
-}
-
-impl std::ops::AddAssign for Assertions {
-    fn add_assign(&mut self, other: Assertions) {
-        *self = *self + other;
-    }
-}
-
-impl std::iter::Sum for Assertions {
-    fn sum<I: Iterator<Item = Assertions>>(iter: I) -> Assertions {
-        iter.fold(Assertions::default(), std::ops::Add::add)
-    }
-}
-
-/// Every `//= P` assertion the source makes, at any depth, split by whether evaluating the source
-/// checks it.
+/// How many `//= P` assertions the source writes, at any depth — function bodies included, since
+/// what a report compares this with is how many actually ran.
 ///
 /// The traversal matches exhaustively rather than falling through on a wildcard: an AST node
 /// that grows a nested sequence must then be considered here, instead of silently dropping the
 /// assertions inside it from a total that reads as complete.
-pub fn count_assertions(source: &str) -> Result<Assertions, ParseError> {
+pub fn count_assertions(source: &str) -> Result<usize, ParseError> {
     Ok(sequence_assertions(&quiver_compiler::parse(source)?))
 }
 
-/// The assertions a ```` ```quiver program ```` block checks. Its steps are evaluated as usual,
-/// and then the value of its last step — the entry-point function — is *called*, so that
-/// function's body is evaluated too.
-pub fn count_program_assertions(source: &str) -> Result<Assertions, ParseError> {
-    let sequence = quiver_compiler::parse(source)?;
-    let mut tally = sequence_assertions(&sequence);
-    if let Some(AstStep::Chain(chain)) = sequence.steps.last()
-        && let Some(Term::Function(function)) = chain.terms.last()
-        && let Some(body) = function.body.as_ref()
-    {
-        // Writing the function down deferred its whole body; entering it checks the body's own
-        // assertions, leaving those nested one function deeper deferred in turn.
-        let entered = block_assertions(body);
-        tally.checked += entered.checked;
-        tally.deferred -= entered.checked;
-    }
-    Ok(tally)
-}
-
-fn sequence_assertions(sequence: &Sequence) -> Assertions {
+fn sequence_assertions(sequence: &Sequence) -> usize {
     sequence.steps.iter().map(step_assertions).sum()
 }
 
-fn step_assertions(step: &AstStep) -> Assertions {
+fn step_assertions(step: &AstStep) -> usize {
     match step {
         AstStep::Chain(chain) => chain_assertions(chain),
         // An alias produces no value to assert on; the parser rejects one that carries an
         // assertion.
-        AstStep::TypeAlias { .. } => Assertions::default(),
+        AstStep::TypeAlias { .. } => 0,
     }
 }
 
-fn chain_assertions(chain: &Chain) -> Assertions {
-    Assertions {
-        checked: chain.assertions.len(),
-        deferred: 0,
-    } + chain.terms.iter().map(term_assertions).sum()
+fn chain_assertions(chain: &Chain) -> usize {
+    chain.assertions.len() + chain.terms.iter().map(term_assertions).sum::<usize>()
 }
 
-fn block_assertions(block: &AstBlock) -> Assertions {
+fn block_assertions(block: &AstBlock) -> usize {
     block
         .annotations
         .iter()
         .map(|annotation| chain_assertions(&annotation.value))
         .chain(block.branches.iter().map(|branch| {
             sequence_assertions(&branch.condition)
-                + branch
-                    .consequence
-                    .as_ref()
-                    .map_or(Assertions::default(), sequence_assertions)
+                + branch.consequence.as_ref().map_or(0, sequence_assertions)
         }))
         .sum()
 }
 
-fn term_assertions(term: &Term) -> Assertions {
+fn term_assertions(term: &Term) -> usize {
     match term {
         Term::Tuple(tuple) => tuple
             .fields
             .iter()
             .map(|field| match &field.value {
                 FieldValue::Chain(chain) => chain_assertions(chain),
-                FieldValue::Spread(_) => Assertions::default(),
+                FieldValue::Spread(_) => 0,
             })
             .sum(),
         Term::String(_, segments) => segments
             .iter()
             .map(|segment| match segment {
                 StrSegment::Hole(block) => block_assertions(block),
-                StrSegment::Text(_) => Assertions::default(),
+                StrSegment::Text(_) => 0,
             })
             .sum(),
         Term::Block(block) => block_assertions(block),
-        // A function literal is a value, not a call: nothing in its body runs here.
-        Term::Function(function) => function
-            .body
-            .as_ref()
-            .map_or(Assertions::default(), block_assertions)
-            .into_deferred(),
-        // A spawn evaluates its init here and passes it, but enters its target in the new
-        // process. The target is a function literal or a name either way, so the deferral above
-        // already covers what runs over there.
+        Term::Function(function) => function.body.as_ref().map_or(0, block_assertions),
         Term::Spawn(inner, argument, _) => {
-            term_assertions(inner)
-                + argument
-                    .as_ref()
-                    .map_or(Assertions::default(), |a| term_assertions(a))
+            term_assertions(inner) + argument.as_ref().map_or(0, |a| term_assertions(a))
         }
         Term::Apply(_, argument) => term_assertions(argument),
         Term::Select(sources, _) => sources.iter().flatten().map(chain_assertions).sum(),
         // A dialect's content is the dialect's grammar, not Quiver, and its expansion is
         // produced at compile time — there is no source text here to carry an assertion.
-        Term::Dialect(_) => Assertions::default(),
+        Term::Dialect(_) => 0,
         Term::Literal(_)
         | Term::Match(_)
         | Term::Access(_)
         | Term::Self_
         | Term::State(..)
-        | Term::Process(_) => Assertions::default(),
+        | Term::Process(_) => 0,
     }
 }
 
@@ -507,7 +415,7 @@ mod tests {
         };
         let steps = block.steps().unwrap();
         assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].assertions.checked, 2);
+        assert_eq!(steps[0].assertions, 2);
         assert_eq!(steps[1].source, "6");
     }
 
@@ -541,39 +449,13 @@ mod tests {
         let steps = block.steps().unwrap();
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].source, "'point = [x: 'int]");
-        assert_eq!(steps[0].assertions, Assertions::default());
+        assert_eq!(steps[0].assertions, 0);
     }
 
     #[test]
-    fn an_assertion_in_a_function_body_is_deferred() {
-        let tally = count_assertions("f = #'int {\n  $ //= 999\n}\nOk").unwrap();
-        assert_eq!(
-            tally,
-            Assertions {
-                checked: 0,
-                deferred: 1
-            }
-        );
-    }
-
-    #[test]
-    fn a_program_block_enters_its_entry_point() {
-        // The last step's function is called by the runner, so its own assertion is checked;
-        // one a function deeper is not.
+    fn assertions_in_function_bodies_are_counted() {
+        // Whether they run is for the runtime to say; the count is of what is written.
         let source = "#[] {\n  1 //= 1\n  g = #'int {\n    $ //= 2\n  }\n  g 2\n}";
-        assert_eq!(
-            count_assertions(source).unwrap(),
-            Assertions {
-                checked: 0,
-                deferred: 2
-            }
-        );
-        assert_eq!(
-            count_program_assertions(source).unwrap(),
-            Assertions {
-                checked: 1,
-                deferred: 1
-            }
-        );
+        assert_eq!(count_assertions(source).unwrap(), 2);
     }
 }

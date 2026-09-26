@@ -9,7 +9,7 @@ use quiver_core::process::{
 use quiver_core::value::ResourceId;
 use quiver_core::wire::WireValue;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// What a standing subscription observes. Unlike the one-shot `Get*` requests, a worker keeps a
 /// subscription registered and re-pushes a [`SubscriptionPayload`] whenever the observed state
@@ -104,6 +104,9 @@ pub enum Command<E: Effect> {
 
     /// Request worker info (memory/heap snapshot)
     GetWorkerInfo { request_id: u64 },
+
+    /// Take the sites of the debug-build assertions that have passed since the last take
+    TakeAssertionsPassed { request_id: u64 },
 
     /// Request all process types (for REPL process references)
     GetProcessTypes { request_id: u64 },
@@ -308,6 +311,12 @@ pub enum Event<E: Effect> {
     WorkerInfoResponse {
         request_id: u64,
         result: Result<quiver_core::process::WorkerInfo, crate::environment::EnvironmentError>,
+    },
+
+    /// Response to TakeAssertionsPassed
+    AssertionsPassedResponse {
+        request_id: u64,
+        result: Result<HashSet<String>, crate::environment::EnvironmentError>,
     },
 
     /// Response to GetProcessTypes (returns function indices, Environment reconstructs types)

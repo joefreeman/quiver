@@ -30,6 +30,7 @@ enum Aggregation {
     Statuses(WorkerRequestMap<ProcessStatus>),
     ProcessTypes(WorkerRequestMap<usize>), // Maps request_id -> Option<HashMap<ProcessId, function_index>>
     WorkerInfo(HashMap<u64, Option<quiver_core::process::WorkerInfo>>), // Maps request_id -> Option<WorkerInfo>
+    AssertionsPassed(HashMap<u64, Option<HashSet<String>>>),
 }
 
 /// Phase of an in-flight reclamation round. The
@@ -411,6 +412,8 @@ pub enum RequestResult {
     Result(Result<WireValue, quiver_core::error::Error>),
     Statuses(HashMap<ProcessId, ProcessStatus>),
     WorkerInfo(Vec<quiver_core::process::WorkerInfo>),
+    /// Every worker's passed assertion sites, merged.
+    AssertionsPassed(HashSet<String>),
     ProcessTypes(HashMap<ProcessId, (Type, usize)>),
     ProcessInfo(Option<ProcessInfo>),
     Locals(Vec<WireValue>),
@@ -1093,6 +1096,29 @@ impl<E: Effect> Environment<E> {
         Ok(aggregation_id)
     }
 
+    /// Take the sites of the debug-build assertions that have passed on any worker since the last
+    /// take, clearing them. Returns a single aggregation ID that collects every worker's.
+    pub fn request_assertions_passed(&mut self) -> Result<u64, EnvironmentError> {
+        let aggregation_id = self.allocate_request_id();
+        let request_ids: Vec<u64> = (0..self.workers.len())
+            .map(|_| self.allocate_request_id())
+            .collect();
+        for &request_id in &request_ids {
+            self.pending_requests.insert(request_id, None);
+        }
+        self.aggregations.insert(
+            aggregation_id,
+            Aggregation::AssertionsPassed(request_ids.iter().map(|&id| (id, None)).collect()),
+        );
+        self.pending_requests.insert(aggregation_id, None);
+        for (worker, &request_id) in self.workers.iter_mut().zip(&request_ids) {
+            worker
+                .send(Command::TakeAssertionsPassed { request_id })
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+        }
+        Ok(aggregation_id)
+    }
+
     /// Request all process types (for REPL process references)
     /// Returns a single aggregation ID that will collect results from all workers
     pub fn request_process_types(&mut self) -> Result<u64, EnvironmentError> {
@@ -1541,6 +1567,9 @@ impl<E: Effect> Environment<E> {
             }
             Event::WorkerInfoResponse { request_id, result } => {
                 self.handle_worker_info_response(request_id, result)
+            }
+            Event::AssertionsPassedResponse { request_id, result } => {
+                self.handle_assertions_passed_response(request_id, result)
             }
             Event::ProcessTypesResponse { request_id, result } => {
                 self.handle_process_types_response(request_id, result)
@@ -2404,6 +2433,44 @@ impl<E: Effect> Environment<E> {
                 .insert(request_id, Some(RequestResult::Statuses(statuses)));
         }
 
+        Ok(())
+    }
+
+    fn handle_assertions_passed_response(
+        &mut self,
+        request_id: u64,
+        result: Result<HashSet<String>, EnvironmentError>,
+    ) -> Result<(), EnvironmentError> {
+        let sites = result?;
+        let aggregation_id = self
+            .aggregations
+            .iter()
+            .find_map(|(id, aggregation)| match aggregation {
+                Aggregation::AssertionsPassed(requests) if requests.contains_key(&request_id) => {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect("an assertions-passed response belongs to an aggregation");
+        let Some(Aggregation::AssertionsPassed(requests)) =
+            self.aggregations.get_mut(&aggregation_id)
+        else {
+            unreachable!("found above");
+        };
+        requests.insert(request_id, Some(sites));
+        self.pending_requests.remove(&request_id);
+        if requests.values().all(Option::is_some) {
+            let Some(Aggregation::AssertionsPassed(requests)) =
+                self.aggregations.remove(&aggregation_id)
+            else {
+                unreachable!("found above");
+            };
+            let merged = requests.into_values().flatten().flatten().collect();
+            self.pending_requests.insert(
+                aggregation_id,
+                Some(RequestResult::AssertionsPassed(merged)),
+            );
+        }
         Ok(())
     }
 

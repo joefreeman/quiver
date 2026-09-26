@@ -14,7 +14,7 @@ use quiver_cli::spawn_worker;
 use quiver_compiler::PackageResolver;
 use quiver_environment::{Environment, Repl, ReplError, RequestResult, WorkerHandle};
 use quiver_io::NativeEffect;
-use quiver_markdown::{Assertions, Block, Chapter, Document, Mode};
+use quiver_markdown::{Block, Chapter, Document, Mode};
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
@@ -53,14 +53,13 @@ struct Failure {
 
 struct ChapterReport {
     title: String,
+    /// The assertions that ran and held, as the runtime recorded them, plus the `//!` steps that
+    /// failed as promised. An assertion on a path that never ran — an untaken branch, a step
+    /// after a failed one, a function nothing called — is not among them, so the gap between
+    /// this and `total` is what the chapter wrote but never checked.
     passed: usize,
+    /// The assertions and `//!` expectations the chapter writes.
     total: usize,
-    /// Assertions written inside a function body, which is not evaluated by the step that
-    /// defines it. They are checked if and when something calls that function — a later step, a
-    /// combinator it is handed to, or nothing at all — and the runner cannot see which, so they
-    /// are reported apart rather than counted as passed. One that does run and fails is not
-    /// lost: it aborts its caller's step, which is reported as that step's failure.
-    deferred: usize,
     runnable_blocks: usize,
     skipped_blocks: usize,
     failures: Vec<Failure>,
@@ -189,7 +188,11 @@ impl Runner {
                 let _ = std::io::stdout().flush();
             }
 
-            let report = self.run_chapter(chapter, path);
+            // Whatever an earlier chapter left running may still record passes: those are not
+            // this chapter's.
+            self.take_passed(path);
+            let mut report = self.run_chapter(chapter, path);
+            report.passed += self.take_passed(path);
 
             if interactive {
                 print!("\r\x1b[2K");
@@ -226,7 +229,6 @@ impl Runner {
             title: title_of(chapter),
             passed: 0,
             total: 0,
-            deferred: 0,
             runnable_blocks: chapter.runnable().count(),
             skipped_blocks: chapter.skipped(),
             failures: Vec::new(),
@@ -310,13 +312,9 @@ impl Runner {
                     continue;
                 }
 
-                report.total += step.assertions.checked;
-                report.deferred += step.assertions.deferred;
+                report.total += step.assertions;
                 match self.evaluate(&mut session, &source) {
-                    Ok(()) => {
-                        report.passed += step.assertions.checked;
-                        history.push(source);
-                    }
+                    Ok(()) => history.push(source),
                     // A parse or compile error leaves the session intact — the REPL commits
                     // state only on a successful compile — so the chapter carries on and the
                     // rest of it is still checked.
@@ -349,9 +347,7 @@ impl Runner {
     /// evaluate in a session. Its assertions sit inside that function and check themselves.
     fn run_program(&mut self, block: &Block, path: &Path, report: &mut ChapterReport) {
         let source = format!("{}{}", "\n".repeat(block.line - 1), block.source);
-        let assertions = program_assertions(block);
-        report.total += assertions.checked;
-        report.deferred += assertions.deferred;
+        report.total += quiver_markdown::count_assertions(&block.source).unwrap_or_default();
 
         let result = (|| -> Result<(), String> {
             let builtins = quiver_cli::build_builtin_registry();
@@ -408,7 +404,7 @@ impl Runner {
         })();
 
         match result {
-            Ok(()) => report.passed += assertions.checked,
+            Ok(()) => {}
             // A program block is run whole, so there is no step to name: a failed check is
             // blamed on the line the compiler stamped into it, which is the assertion itself.
             Err(message) => report.failures.push(match assertion_site(&message) {
@@ -488,6 +484,26 @@ impl Runner {
             self.evaluate(&mut session, step).ok()?;
         }
         Some(session)
+    }
+
+    /// How many of this document's assertions have passed since the last take, clearing the
+    /// record. Sites are `document:line:column`, and steps are compiled at their position in the
+    /// document, so each assertion counts once however often it ran.
+    fn take_passed(&mut self, path: &Path) -> usize {
+        let request = self
+            .environment
+            .lock()
+            .unwrap()
+            .request_assertions_passed()
+            .expect("the workers take requests");
+        let RequestResult::AssertionsPassed(sites) = self.wait(request) else {
+            unreachable!("an assertions-passed request answers with its sites");
+        };
+        let prefix = format!("{}:", source_name(path));
+        sites
+            .iter()
+            .filter(|site| site.starts_with(&prefix))
+            .count()
     }
 
     fn session(&mut self, path: &Path) -> Result<Session, ReplError> {
@@ -676,10 +692,6 @@ fn title_of(chapter: &Chapter) -> String {
         .unwrap_or_else(|| "(preamble)".to_string())
 }
 
-fn program_assertions(block: &Block) -> Assertions {
-    quiver_markdown::count_program_assertions(&block.source).unwrap_or_default()
-}
-
 /// The assertions a chapter carries at or below `line` — what abandoning it costs.
 fn remaining_assertions(chapter: &Chapter, line: usize) -> usize {
     chapter
@@ -687,7 +699,7 @@ fn remaining_assertions(chapter: &Chapter, line: usize) -> usize {
         .filter_map(|block| block.steps().ok())
         .flatten()
         .filter(|step| step.line > line)
-        .map(|step| step.assertions.checked)
+        .map(|step| step.assertions)
         .sum()
 }
 
@@ -706,8 +718,8 @@ fn summarise(report: &ChapterReport) -> String {
     };
 
     let mut notes = Vec::new();
-    if report.deferred > 0 {
-        notes.push(format!("{} deferred", report.deferred));
+    if let Some(not_run) = not_run(report) {
+        notes.push(format!("{not_run} not run"));
     }
     if report.skipped_blocks > 0 {
         notes.push(format!("{} skipped", report.skipped_blocks));
@@ -772,16 +784,22 @@ fn print_failure(document: &str, chapter: &str, failure: &Failure) {
     }
 }
 
+/// How many of a passing chapter's assertions never ran. A failing chapter's gap is its failures
+/// and whatever they abandoned, which its report already accounts for.
+fn not_run(report: &ChapterReport) -> Option<usize> {
+    let gap = report.total - report.passed;
+    (report.ok() && gap > 0).then_some(gap)
+}
+
 fn total_line(reports: &[ChapterReport]) -> String {
     let passed: usize = reports.iter().map(|r| r.passed).sum();
     let total: usize = reports.iter().map(|r| r.total).sum();
-    let deferred: usize = reports.iter().map(|r| r.deferred).sum();
+    let not_run: usize = reports.iter().filter_map(not_run).sum();
     let skipped: usize = reports.iter().map(|r| r.skipped_blocks).sum();
     let chapters = reports.len();
 
-    // Coloured by the verdict rather than by the counts: a check that ran only because
-    // something called the function holding it is not in `total`, so a failing document can
-    // still have every counted assertion pass.
+    // Coloured by the verdict rather than by the counts: an assertion that never ran has not
+    // failed, so a passing document can have fewer passes than assertions.
     let head = format!("{passed}/{total} assertions in {chapters} chapters");
     let head = if reports.iter().all(ChapterReport::ok) {
         head.green().bold()
@@ -790,8 +808,8 @@ fn total_line(reports: &[ChapterReport]) -> String {
     };
 
     let mut notes = Vec::new();
-    if deferred > 0 {
-        notes.push(format!("{deferred} deferred to a call"));
+    if not_run > 0 {
+        notes.push(format!("{not_run} not run"));
     }
     if skipped > 0 {
         notes.push(format!(

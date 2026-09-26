@@ -4292,13 +4292,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             &binding_sets,
             fail_jump,
         )?;
-        let ok_jump = self.codegen.emit_jump_placeholder();
-        self.codegen.patch_jump_to_here(fail_jump);
-        let location = assertion
+        let site = assertion
             .span
             .get()
-            .map(|span| format!(" at {}:{}:{}", self.current_module, span.line, span.column))
-            .unwrap_or_default();
+            .map(|span| format!("{}:{}:{}", self.current_module, span.line, span.column));
+        // Passing is recorded by site, so a test runner can count the assertions that ran rather
+        // than those written. The value stays on top: the call's own nil is dropped.
+        if let Some(site) = &site {
+            let index = self
+                .program
+                .register_constant(Constant::Binary(site.as_bytes().to_vec()));
+            self.codegen.add_instruction(Instruction::constant(index));
+            self.compile_builtin("assertion_passed", &[], true)?;
+            self.codegen.add_instruction(Instruction::call());
+            self.codegen.add_instruction(Instruction::pop());
+        }
+        let ok_jump = self.codegen.emit_jump_placeholder();
+        self.codegen.patch_jump_to_here(fail_jump);
+        let location = site.map(|site| format!(" at {site}")).unwrap_or_default();
         self.emit_panic(&format!(
             "Assertion '{}' failed{location}",
             crate::format::render_match(&assertion.pattern)

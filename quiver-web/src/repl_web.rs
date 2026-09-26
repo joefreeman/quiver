@@ -819,6 +819,12 @@ impl Environment {
                     "Unexpected result type: ProcessTypes",
                 ));
             }
+            RequestResult::AssertionsPassed(_) => {
+                // Only the native test runner takes assertion passes.
+                callback.invoke::<()>(crate::types::Result::err(
+                    "Unexpected result type: AssertionsPassed",
+                ));
+            }
         }
     }
 }
