@@ -348,17 +348,27 @@ pub fn generate_pattern_code(
             }
         }
 
-        // If we get here, all checks passed - extract bindings
-        // Sort by name to ensure consistent ordering across binding sets (important for unions
-        // where different variants may have bindings in different field orders)
-        let (ripple, mut sorted_bindings): (Vec<_>, Vec<_>) = binding_set
+        // If we get here, all checks passed - store each binding in the slot its name was
+        // allocated, so every binding set agrees whatever order it binds in. Storing in slot
+        // order makes each store an append to the frame's locals rather than a fill.
+        let (ripple, bindings): (Vec<_>, Vec<_>) = binding_set
             .bindings
             .iter()
             .partition(|binding| binding.name == ast::RIPPLE);
-        sorted_bindings.sort_by(|a, b| a.name.cmp(&b.name));
-        for binding in sorted_bindings {
+        let mut slotted = bindings
+            .into_iter()
+            .map(|binding| {
+                super::scopes::lookup_variable(scopes, &binding.name, &[])
+                    .map(|(_, slot)| (slot, binding))
+                    .ok_or_else(|| Error::InternalError {
+                        message: format!("binding '{}' has no local slot", binding.name),
+                    })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        slotted.sort_by_key(|(slot, _)| *slot);
+        for (slot, binding) in slotted {
             generate_value_access(codegen, &binding.path);
-            codegen.add_instruction(Instruction::store());
+            codegen.add_instruction(Instruction::store(slot));
         }
         // The value at the ripple replaces the scrutinee as what the match yields.
         if let [ripple] = ripple.as_slice() {

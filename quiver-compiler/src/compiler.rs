@@ -1136,7 +1136,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let param_local = compiler.local_count;
             compiler.local_count += 1;
 
-            compiler.codegen.add_instruction(Instruction::store());
+            compiler
+                .codegen
+                .add_instruction(Instruction::store(param_local));
 
             Some(scopes::Parameter {
                 ty: parameter_type_id,
@@ -3570,14 +3572,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // itself; otherwise the failure path is here.
         if on_no_match.is_none() {
             self.codegen.patch_jump_to_here(fail_jump_addr);
-
-            // The success path stored a local for each binding (sequential `Store`), so the
-            // failure path allocates the same locals — filled with nil, since nothing matched —
-            // keeping local indices aligned with compile-time numbering wherever it lands.
-            for _ in 0..bindings.len() {
-                self.codegen.add_instruction(Instruction::tuple(NIL));
-                self.codegen.add_instruction(Instruction::store());
-            }
             let carried_nil = self.emit_match_failure(value_type);
             // Nil in `result_type` is not by itself fallibility: a bare binder (`=x`) on a
             // nil-typed value *matches* the nil and binds it. A pattern is irrefutable when
@@ -3669,7 +3663,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.local_count += 1;
 
         // Store parameter from stack
-        self.codegen.add_instruction(Instruction::store());
+        self.codegen
+            .add_instruction(Instruction::store(param_local));
 
         // Push new scope with parameter
         self.scopes.push(Scope::new(
@@ -3720,9 +3715,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
             if i > 0 {
                 self.codegen.add_instruction(Instruction::pop());
-                // Don't emit Clear here - branch variables are only allocated if the branch matches
-                // So if we jump to this branch, the previous branch's variables were never allocated
-                // Reset local count to after parameter (locals from previous branch are "forgotten")
+                // This branch's bindings reuse the slots after the parameter: whatever a failed
+                // earlier branch left there is overwritten, or truncated at the block's end.
                 self.local_count = param_local + 1;
                 // Clear scope bindings and narrowings from previous branch
                 let scope = self.scopes.last_mut().ok_or_else(|| Error::InternalError {
@@ -3775,7 +3769,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // Where the failures go: the next branch (or, for the last branch, whatever follows
             // the block — the `on_no_match` handler, or the block's nil result). A plain last
             // branch's failures join the block's result directly, as its nil.
-            let needs_cleanup = self.local_count > param_local + 1;
             if is_last_branch && branch.consequence.is_none() {
                 end_jumps.extend(condition.failures.iter().map(|failure| failure.jump));
             } else {
@@ -3783,7 +3776,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     condition
                         .failures
                         .iter()
-                        .map(|failure| (failure.jump, i + 1, needs_cleanup)),
+                        .map(|failure| (failure.jump, i + 1)),
                 );
             }
 
@@ -3924,30 +3917,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.codegen
             .add_instruction(Instruction::reset(locals_before));
 
-        // Emit cleanup blocks for branches that need to reset locals before jumping.
-        // A cleanup is only needed when the target is a next branch or an on_no_match
-        // handler; a fall-through to the param clear is truncated by its own Reset.
-        let has_cleanup_blocks = next_branch_jumps
-            .iter()
-            .any(|(_, next_idx, needs_cleanup)| {
-                *needs_cleanup && (*next_idx < branch_starts.len() || on_no_match.is_some())
-            });
-
-        // If there are cleanup blocks, emit a jump to skip them on the success path
-        let skip_cleanup_jump = if has_cleanup_blocks {
-            Some(self.codegen.emit_jump_placeholder())
-        } else {
-            None
-        };
-
-        // Process each branch jump
-        for (jump_addr, next_branch_idx, needs_cleanup) in next_branch_jumps {
-            // Target: the next branch, the on_no_match handler, or — with no handler —
-            // the param-clear Reset. Routing the fall-through-to-nil through the Reset
-            // truncates the block's locals exactly like the success paths do; it used to
-            // land *after* the Reset, leaving the parameter's slot live and every later
-            // local index skewed against compile-time numbering (so a subsequent Store
-            // landed one slot high, and later Loads read stale values).
+        // Each failure moves on to the next branch, the on_no_match handler, or — with no
+        // handler — the param-clear Reset, which truncates the block's locals exactly like the
+        // success paths do. The next branch needs no clean-up first: it binds into the same
+        // slots, overwriting whatever the failed branch left in them.
+        for (jump_addr, next_branch_idx) in next_branch_jumps {
             let target_addr = if next_branch_idx < branch_starts.len() {
                 branch_starts[next_branch_idx]
             } else if let Some(addr) = on_no_match {
@@ -3955,26 +3929,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             } else {
                 param_clear_addr
             };
-
-            // The param clear's `Reset(locals_before)` subsumes a branch cleanup's
-            // `Reset(param_local + 1)`, so fall-through jumps go direct.
-            if needs_cleanup && target_addr != param_clear_addr {
-                // Emit cleanup block: Reset locals to branch start, then jump to target
-                let cleanup_addr = self.codegen.instructions.len();
-                self.codegen
-                    .add_instruction(Instruction::reset(param_local + 1));
-                self.codegen.emit_jump_to_addr(target_addr);
-
-                // Patch original jump to point to cleanup block
-                self.codegen.patch_jump_to_addr(jump_addr, cleanup_addr);
-            } else {
-                self.codegen.patch_jump_to_addr(jump_addr, target_addr);
-            }
-        }
-
-        // Patch the skip-cleanup jump to the convergence (past the cleanup blocks)
-        if let Some(skip_jump) = skip_cleanup_jump {
-            self.codegen.patch_jump_to_here(skip_jump);
+            self.codegen.patch_jump_to_addr(jump_addr, target_addr);
         }
 
         // Patch end_jumps to go to param clear
@@ -5176,7 +5131,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let scope_parameter = if has_chains {
             let param_local = self.local_count;
             self.local_count += 1;
-            self.codegen.add_instruction(Instruction::store());
+            self.codegen
+                .add_instruction(Instruction::store(param_local));
             let nil_type_id = self.program.register_type(Type::nil());
             Some(scopes::Parameter {
                 ty: nil_type_id,

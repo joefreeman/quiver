@@ -731,7 +731,6 @@ impl Opcode {
         match self {
             Opcode::Jump | Opcode::JumpIf | Opcode::JumpUnless => OperandKind::Offset,
             Opcode::Pop
-            | Opcode::Store
             | Opcode::Nil
             | Opcode::Ok
             | Opcode::Call
@@ -885,7 +884,8 @@ impl Instruction {
     }
 
     /// Drop every local from `slot` upward, leaving the frame's earlier bindings — how a
-    /// block's scope ends.
+    /// block's scope ends, releasing what it bound. A frame holding fewer locals is left
+    /// as it is: a path that failed before binding everything has less to drop.
     pub fn reset(slot: usize) -> Instruction {
         Instruction::with_id(Opcode::Reset, slot)
     }
@@ -895,9 +895,11 @@ impl Instruction {
         Instruction::with_id(Opcode::Load, slot)
     }
 
-    /// Move the top of the stack into the frame's next local slot.
-    pub fn store() -> Instruction {
-        Instruction::bare(Opcode::Store)
+    /// Pop the top of the stack into the frame-relative local at this slot, growing the
+    /// frame's locals (with nil) when the slot is past their end. Slots are assigned at
+    /// compile time, so what a path has stored before doesn't decide where a binding goes.
+    pub fn store(slot: usize) -> Instruction {
+        Instruction::with_id(Opcode::Store, slot)
     }
 
     /// Pop this tuple type's arity worth of fields (the topmost is its last field) and

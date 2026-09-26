@@ -104,7 +104,7 @@ pub fn analyze(program: &Program, function_index: usize) -> Option<Forwarder> {
         match instruction.opcode() {
             // The opening parameter store; any later store is a binding, so ineligible.
             Opcode::Store => {
-                if !locals.is_empty() || stack.pop()? != Sym::Param {
+                if !locals.is_empty() || operand != 0 || stack.pop()? != Sym::Param {
                     return None;
                 }
                 locals.push(Sym::Param);

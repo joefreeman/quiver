@@ -1745,7 +1745,7 @@ impl<E: Effect> Executor<E> {
             Opcode::Rotate => self.handle_rotate(proc, operand),
             Opcode::Drop => self.handle_drop(proc, operand),
             Opcode::Load => self.handle_load(proc, operand),
-            Opcode::Store => self.handle_store(proc),
+            Opcode::Store => self.handle_store(proc, operand),
             Opcode::Tuple => self.handle_tuple(proc, operand),
             Opcode::Nil => self.handle_push(proc, Value::nil()),
             Opcode::Ok => self.handle_push(proc, Value::ok()),
@@ -2000,16 +2000,36 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_store(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
-        // Move the top of the stack into locals: release (leaving the stack) then retain
-        // (entering locals) nets to zero, keeping the binding's reference.
+    fn handle_store(
+        &mut self,
+        proc: &mut Process,
+        slot: usize,
+    ) -> Result<Option<Action<E>>, Error> {
         let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
-        self.push_local(proc, value);
-
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
+        let frame = proc.frames.last_mut().ok_or(Error::FrameUnderflow)?;
+        let index = frame.locals_base + slot;
+        frame.counter += 1;
+        // Bindings are stored in slot order, so this is almost always an append.
+        if index == proc.locals.len() {
+            proc.locals.push(value);
+        } else {
+            Self::store_out_of_order(proc, index, value);
         }
         Ok(None)
+    }
+
+    /// A store to a slot a path has already filled (a later branch rebinding a failed one's
+    /// slot), or to one past slots it never filled. Kept out of line so the append case
+    /// stays small in the dispatch loop.
+    #[cold]
+    #[inline(never)]
+    fn store_out_of_order(proc: &mut Process, index: usize, value: Value) {
+        if index < proc.locals.len() {
+            proc.locals[index] = value;
+        } else {
+            proc.locals.resize(index, Value::nil());
+            proc.locals.push(value);
+        }
     }
 
     fn handle_tuple(
@@ -2624,17 +2644,12 @@ impl<E: Effect> Executor<E> {
     fn handle_reset(
         &mut self,
         proc: &mut Process,
-        index: usize,
+        slot: usize,
     ) -> Result<Option<Action<E>>, Error> {
-        let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
-        let target = frame.locals_base + index;
-        if target > proc.locals.len() {
-            return Err(Error::StackUnderflow);
-        }
+        let frame = proc.frames.last_mut().ok_or(Error::FrameUnderflow)?;
+        let target = frame.locals_base + slot;
+        frame.counter += 1;
         self.truncate_locals(proc, target);
-        if let Some(frame) = proc.frames.last_mut() {
-            frame.counter += 1;
-        }
         Ok(None)
     }
 

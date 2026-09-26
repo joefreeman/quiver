@@ -258,7 +258,7 @@ fn rewrite_run(run: &[Instruction]) -> Option<Rewrite> {
         [Opcode::Drop, ..] if operand(run[0]) == 0 => rewrite(1, None),
         // Storing a copy and dropping the original stores the original.
         [Opcode::Pick, Opcode::Store, Opcode::Pop] if operand(run[0]) == 0 => {
-            rewrite(3, Some(Instruction::store()))
+            rewrite(3, Some(run[1]))
         }
         // Bringing the second value to the top and popping it drops it from under the top.
         [Opcode::Rotate, Opcode::Pop, ..] if operand(run[0]) == 2 => {
