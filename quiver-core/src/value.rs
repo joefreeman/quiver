@@ -651,6 +651,29 @@ impl PartialEq for Value {
 }
 
 impl Value {
+    /// Every resource handle in this value: in elements, captures and annotations alike, since
+    /// each can carry one. Iterative, as a value may be a long list, and each shared payload is
+    /// walked once, so a value built with heavy sharing costs no more than its distinct nodes.
+    pub fn resources(&self) -> Vec<ResourceId> {
+        let mut found = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut pending = vec![self];
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Resource(id, _) => found.push(*id),
+                Value::Tuple(_, payload)
+                | Value::Function(_, payload)
+                | Value::Builtin(_, Some(payload))
+                    if visited.insert(Rc::as_ptr(payload)) =>
+                {
+                    pending.extend(payload.all_values());
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
     /// The same value with every table reference rewritten through `remaps` — for
     /// transplanting a compile-time value (a cached module value) between programs.
     /// Heap binary references are execution-local, not table references, and pass

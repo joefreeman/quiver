@@ -315,6 +315,153 @@ fn test_resource_cleanup_on_owner_completion() {
 }
 
 #[test]
+fn test_resource_cleanup_on_unawaited_completion() {
+    let temp_path =
+        std::env::temp_dir().join(format!("quiver_test_unawaited_{}.txt", std::process::id()));
+    let path_str = temp_path.to_str().unwrap();
+    std::fs::write(&temp_path, "Hello").expect("Failed to create test file");
+
+    // A process that completes normally closes what it owns even though nobody awaits it.
+    quiver()
+        .isolated()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            'reader = Read[+File];
+            r = @[] {{
+                !#'reader ~> {{ =Read[f] => [f, 0, 5] ~> __file_read__ ~ ~> Str[~] }}
+            }} [];
+            ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & file);
+            %proc.send [r, Read[file]];
+            %proc.sleep 100;
+            Done
+        "#,
+            path_str
+        ))
+        .expect("Done")
+        .expect_open_resources(0);
+
+    let _ = std::fs::remove_file(&temp_path);
+}
+
+#[test]
+fn test_result_resource_moves_to_its_awaiter() {
+    let temp_path =
+        std::env::temp_dir().join(format!("quiver_test_resultmove_{}.txt", std::process::id()));
+    let path_str = temp_path.to_str().unwrap();
+    std::fs::write(&temp_path, "Hello").expect("Failed to create test file");
+
+    // A result is a message to its awaiter: the handle it holds survives the process that
+    // opened it, and belongs to the first awaiter. A second awaiter gets the handle without
+    // ownership, as after a send, so its read is refused.
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            p = @[] {{ ["{}" ~> .0, 0, 0] ~> __file_open__ ~ }} [];
+            !p ~> =(+File & f);
+            a = [f, 0, 5] ~> __file_read__ ~ ~> Str[~];
+            q = @[] {{ !p ~> =(+File & g); [g, 0, 5] ~> __file_read__ ~ }} [];
+            b = !q ~> {{ | :crash<'%proc.crash> ~> =Error() => Refused | Read }};
+            [a, b]
+        "#,
+            path_str
+        ))
+        .expect("[\"Hello\", Refused]");
+
+    let _ = std::fs::remove_file(&temp_path);
+}
+
+#[test]
+fn test_race_answers_a_usable_resource() {
+    let temp_path =
+        std::env::temp_dir().join(format!("quiver_test_raceres_{}.txt", std::process::id()));
+    let path_str = temp_path.to_str().unwrap();
+    std::fs::write(&temp_path, "Hello").expect("Failed to create test file");
+
+    // The winner's handle is passed up through the race's processes to the caller, and the
+    // loser's is closed when the race tears it down.
+    quiver()
+        .isolated()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            path = "{}" ~> .0;
+            h = %proc.race [%list{{
+                #[] {{ %proc.sleep 10000; [path, 0, 0] ~> __file_open__ ~ }},
+                #[] {{ [path, 0, 0] ~> __file_open__ ~ }},
+            }}];
+            h ~> =(+File & f);
+            [f, 0, 5] ~> __file_read__ ~ ~> Str[~]
+        "#,
+            path_str
+        ))
+        .expect("\"Hello\"")
+        .expect_open_resources(1);
+
+    let _ = std::fs::remove_file(&temp_path);
+}
+
+#[test]
+fn test_unawaited_result_resource_closes_with_the_owner() {
+    let temp_path = std::env::temp_dir().join(format!(
+        "quiver_test_resultowner_{}.txt",
+        std::process::id()
+    ));
+    let path_str = temp_path.to_str().unwrap();
+    std::fs::write(&temp_path, "Hello").expect("Failed to create test file");
+
+    // The child's result holds the handle for an awaiter that never comes; the child's
+    // owner ending tears it down, and the handle is closed with it.
+    quiver()
+        .isolated()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            owner = @[] {{
+                c = @[] {{ ["{}" ~> .0, 0, 0] ~> __file_open__ ~ }} [];
+                %proc.sleep 50;
+                Ok
+            }} [];
+            !owner
+        "#,
+            path_str
+        ))
+        .expect("Ok")
+        .expect_open_resources(0);
+
+    let _ = std::fs::remove_file(&temp_path);
+}
+
+#[test]
+fn test_unawaited_result_resource_closes_on_reclamation() {
+    let temp_path =
+        std::env::temp_dir().join(format!("quiver_test_resultgc_{}.txt", std::process::id()));
+    let path_str = temp_path.to_str().unwrap();
+    std::fs::write(&temp_path, "Hello").expect("Failed to create test file");
+
+    // With no pid left to await it by, the tombstone is reclaimed and the handle its result
+    // held is closed.
+    quiver()
+        .isolated()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            {{ @[] {{ ["{}" ~> .0, 0, 0] ~> __file_open__ ~ }} []; Ok }};
+            %proc.sleep 50;
+            Done
+        "#,
+            path_str
+        ))
+        .expect("Done")
+        .expect_open_resources(1)
+        .force_collection()
+        .expect_open_resources(0);
+
+    let _ = std::fs::remove_file(&temp_path);
+}
+
+#[test]
 fn test_std_file_write_then_read() {
     let temp_path =
         std::env::temp_dir().join(format!("quiver_std_file_wr_{}.txt", std::process::id()));

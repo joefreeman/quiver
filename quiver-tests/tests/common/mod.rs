@@ -922,6 +922,17 @@ impl TestResult {
         self
     }
 
+    /// Assert exactly `n` resources are open (owned by some process).
+    pub fn expect_open_resources(self, n: usize) -> Self {
+        let actual = self.session.environment().open_resource_count();
+        assert_eq!(
+            actual, n,
+            "expected {n} open resources, got {actual} for source: {}",
+            self.source
+        );
+        self
+    }
+
     /// Assert exactly `n` tombstones have been reclaimed in total across all rounds so far.
     pub fn expect_reclaimed(self, n: usize) -> Self {
         let actual = self.session.environment().reclaimed_total();

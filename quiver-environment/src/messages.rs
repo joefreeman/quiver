@@ -395,6 +395,13 @@ pub enum Event<E: Effect> {
         alive: bool,
     },
 
+    /// A process terminated, however it ended. `kept` lists the resources its result
+    /// holds; everything else it still owns is closed.
+    ProcessEnded {
+        pid: ProcessId,
+        kept: Vec<ResourceId>,
+    },
+
     /// A registered process terminated (its `Watcher::Registered` flushed): free
     /// every name bound to it.
     RegistryExpired { pid: ProcessId },

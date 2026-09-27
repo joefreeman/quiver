@@ -162,6 +162,11 @@ pub struct Executor<E: Effect> {
     /// above drains these via `take_watcher_events` — delivery routes through the
     /// environment, which the executor knows nothing about.
     pending_watcher_events: Vec<(Watcher, ProcessId)>,
+    /// Every non-persistent process that terminated, however it ended, with the resources
+    /// its result holds. Drained by the runtime above via `take_terminations`: the
+    /// environment closes whatever else the process still owns, and keeps those for the
+    /// result's first awaiter.
+    terminations: Vec<(ProcessId, Vec<ResourceId>)>,
     /// Reactive subscribers to wake this round: a set of subscriber pids recorded when a
     /// process they watch changed state. A set, so several state
     /// changes to one subscriber's dependencies between drains coalesce into one wakeup.
@@ -393,11 +398,15 @@ impl<E: Effect> Executor<E> {
             process.mailbox = Default::default();
             process.select_state = None;
             process.resource_events = Default::default();
-            Some(())
+            Some(match &process.result {
+                Some(Ok(value)) => value.resources(),
+                _ => Vec::new(),
+            })
         });
-        if taken.is_none() {
+        let Some(kept) = taken else {
             return;
-        }
+        };
+        self.terminations.push((pid, kept));
         self.truncate_locals_pid(pid, 0);
     }
 
@@ -572,6 +581,12 @@ impl<E: Effect> Executor<E> {
     /// watcher's pid may live on another worker.
     pub fn take_watcher_events(&mut self) -> Vec<(Watcher, ProcessId)> {
         std::mem::take(&mut self.pending_watcher_events)
+    }
+
+    /// Drain the terminations recorded since the last call: each terminated process with the
+    /// resources its result holds (none for a crash or kill).
+    pub fn take_terminations(&mut self) -> Vec<(ProcessId, Vec<ResourceId>)> {
+        std::mem::take(&mut self.terminations)
     }
 
     /// The `Changed` wakeup value delivered to a reactive subscriber — an empty named
@@ -789,6 +804,7 @@ impl<E: Effect> Executor<E> {
             runnable: 0,
             timeouts: BinaryHeap::new(),
             pending_watcher_events: Vec::new(),
+            terminations: Vec::new(),
             pending_state_wakeups: HashSet::new(),
             pending_unsubscribes: Vec::new(),
             constants: Arc::new(vec![]),

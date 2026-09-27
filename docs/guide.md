@@ -1346,8 +1346,11 @@ is written `+Name`: `+File`, `+Dir`, `+TcpSocket`, `+TcpListener`, `+DnsResolver
 Every resource is owned by exactly one process, and only its owner may operate on it.
 Ownership **moves** when the handle is sent in a message or captured by a spawn, and after
 the move the original owner can no longer use it. When a process ends, the resources it
-still owns are closed. Sharing therefore means keeping the handle in one process and
-sending that process requests, which is what `%file` does.
+still owns are closed, except those in its result. A result is a message to whoever awaits
+it, so those move to the first awaiter, and are closed if nobody ever can: when the
+process's owner ends, or once no pid is left to await it by. Sharing therefore means
+keeping the handle in one process and sending that process requests, which is what
+`%file` does.
 
 ### Failure as a value
 

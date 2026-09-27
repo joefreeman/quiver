@@ -90,6 +90,35 @@ const DEFAULT_CODE_COLLECTION_THRESHOLD: usize = 4096;
 /// — including through a tombstone's surviving `result`/`state`, since a late `!p`/`?p`
 /// exposes those — to a fixpoint. A tombstone not reached is unobservable and collectible;
 /// this naturally sweeps cycles of mutually-referencing dead processes that refcounting can't.
+/// Every resource handle in a wire value. Walks the wire form: the environment owns no heap, so
+/// an executor's `Value` is not its to inspect.
+///
+/// **Iterative**, and that is not decoration. This runs on the environment thread, which is
+/// `main` with the default 8 MiB stack — not a worker, so `WORKER_STACK_SIZE` does not cover
+/// it. A recursive version aborted the whole process on a message carrying a 200k-element
+/// list, which is ordinary code: build a list, send it to a process. An abort is uncatchable,
+/// so this has to be bounded rather than merely deep.
+fn wire_resources(value: &WireValue) -> Vec<ResourceId> {
+    let mut found = Vec::new();
+    // Lazily allocated: a message with no nesting never pushes, so never allocates.
+    let mut pending: Vec<&WireValue> = Vec::new();
+    let mut next = Some(value);
+    while let Some(value) = next.take().or_else(|| pending.pop()) {
+        match value {
+            WireValue::Resource(resource_id, _) => found.push(*resource_id),
+            // `all_values`, not `elements`: an annotation carries a value like any other
+            // field, so a handle attached as one crosses with the message and must move with
+            // it. A builtin's elements are always empty — its payload exists only to carry
+            // annotations — so that arm is about annotations alone.
+            WireValue::Tuple(_, payload)
+            | WireValue::Function(_, payload)
+            | WireValue::Builtin(_, Some(payload)) => pending.extend(payload.all_values()),
+            _ => {} // Other value types don't contain resources
+        }
+    }
+    found
+}
+
 fn compute_sweep(adjacency: &[ProcessAdjacency], host_roots: &[ProcessId]) -> Vec<ProcessId> {
     let mut edges: HashMap<ProcessId, &[ProcessId]> = HashMap::new();
     let mut tombstones: HashSet<ProcessId> = HashSet::new();
@@ -1613,6 +1642,12 @@ impl<E: Effect> Environment<E> {
                 caller,
                 alive,
             } => self.handle_registry_watched(target, function_index, key, caller, alive),
+            Event::ProcessEnded { pid, kept } => {
+                // Whatever the process still owns is closed, except the resources its result
+                // holds, which wait for the result's first awaiter.
+                self.close_owned_resources(pid, &kept);
+                Ok(())
+            }
             Event::RegistryExpired { pid } => {
                 // The registered process terminated: free every name bound to it. A
                 // stray expiry (the entry was unregistered, or lost a registration
@@ -1689,6 +1724,11 @@ impl<E: Effect> Environment<E> {
         self.reclaimed_total
     }
 
+    /// How many resources are open (owned by some process) right now.
+    pub fn open_resource_count(&self) -> usize {
+        self.resource_ownership.len()
+    }
+
     /// Number of processes the environment still tracks: live processes plus tombstones not
     /// yet reclaimed. Shrinks as a reclamation round prunes the router. A test/metric hook.
     pub fn process_count(&self) -> usize {
@@ -1760,8 +1800,11 @@ impl<E: Effect> Environment<E> {
         let registry_pids: Vec<ProcessId> = self.registry.values().map(|(pid, _)| *pid).collect();
         let sweep = compute_sweep(&state.adjacency, &registry_pids);
 
+        // A reclaimed process can never be awaited again, so resources its result held for
+        // an awaiter are closed with it.
         for pid in &sweep {
             self.process_router.remove(pid);
+            self.cleanup_process_resources(*pid);
         }
         self.reclaimed_total += sweep.len();
 
@@ -2163,11 +2206,10 @@ impl<E: Effect> Environment<E> {
         awaiter: ProcessId,
         results: ProcessResultsMap,
     ) -> Result<(), EnvironmentError> {
-        // Clean up resources for any completed processes
+        // A delivered result moves the resources it holds to the awaiter.
         for (process_id, result) in &results {
-            if result.is_some() {
-                // Process has completed (success or failure) - clean up its resources
-                self.cleanup_process_resources(*process_id);
+            if let Some(Ok(value)) = result {
+                self.claim_result_resources(value, *process_id, awaiter);
             }
         }
         // Get the worker ID that sent this response by looking up any process ID in results
@@ -2292,31 +2334,26 @@ impl<E: Effect> Environment<E> {
         Ok(())
     }
 
-    /// Transfer ownership of every resource in a transferred value to its new owner. Walks the
-    /// wire form: the environment owns no heap, so an executor's `Value` is not its to inspect.
-    ///
-    /// **Iterative**, and that is not decoration. This runs on the environment thread, which is
-    /// `main` with the default 8 MiB stack — not a worker, so `WORKER_STACK_SIZE` does not
-    /// cover it. A recursive version aborted the whole process on a message carrying a
-    /// 200k-element list, which is ordinary code: build a list, send it to a process. An abort
-    /// is uncatchable, so this has to be bounded rather than merely deep.
+    /// Transfer ownership of every resource in a transferred value to its new owner.
     fn transfer_wire_resource_ownership(&mut self, value: &WireValue, new_owner: ProcessId) {
-        // Lazily allocated: a message with no nesting never pushes, so never allocates.
-        let mut pending: Vec<&WireValue> = Vec::new();
-        let mut next = Some(value);
-        while let Some(value) = next.take().or_else(|| pending.pop()) {
-            match value {
-                WireValue::Resource(resource_id, _) => {
-                    self.resource_ownership.insert(*resource_id, new_owner);
-                }
-                // `all_values`, not `elements`: an annotation carries a value like any other
-                // field, so a handle attached as one crosses with the message and must move
-                // with it. A builtin's elements are always empty — its payload exists only to
-                // carry annotations — so that arm is about annotations alone.
-                WireValue::Tuple(_, payload)
-                | WireValue::Function(_, payload)
-                | WireValue::Builtin(_, Some(payload)) => pending.extend(payload.all_values()),
-                _ => {} // Other value types don't contain resources
+        for resource_id in wire_resources(value) {
+            self.resource_ownership.insert(resource_id, new_owner);
+        }
+    }
+
+    /// Hand a terminated process's result resources to an awaiter the result was delivered
+    /// to. A result is a message to whoever awaits it, so the first delivery moves each handle
+    /// the terminated process still owns; a later awaiter gets the handles without ownership,
+    /// as a process does after sending one away.
+    fn claim_result_resources(
+        &mut self,
+        result: &WireValue,
+        terminated: ProcessId,
+        awaiter: ProcessId,
+    ) {
+        for resource_id in wire_resources(result) {
+            if self.resource_ownership.get(&resource_id) == Some(&terminated) {
+                self.resource_ownership.insert(resource_id, awaiter);
             }
         }
     }
@@ -2998,12 +3035,16 @@ impl<E: Effect> Environment<E> {
     /// Clean up all resources owned by a process
     /// This is called when a process completes (either successfully or with an error)
     fn cleanup_process_resources(&mut self, process_id: ProcessId) {
+        self.close_owned_resources(process_id, &[]);
+    }
+
+    /// Close every resource `process_id` owns, except those in `kept`.
+    fn close_owned_resources(&mut self, process_id: ProcessId, kept: &[ResourceId]) {
         if let Some(backend) = &mut self.effect_backend {
-            // Find all resources owned by this process
             let resources: Vec<_> = self
                 .resource_ownership
                 .iter()
-                .filter(|(_, owner)| **owner == process_id)
+                .filter(|(rid, owner)| **owner == process_id && !kept.contains(rid))
                 .map(|(rid, _)| *rid)
                 .collect();
 

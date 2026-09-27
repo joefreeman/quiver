@@ -479,19 +479,18 @@ fn test_sleep_leaves_the_mailbox_untouched() {
 
 #[test]
 fn test_send_after_delivers_unless_cancelled() {
-    // The later message arrives; the earlier one's timer is killed before it fires.
+    // The earlier timer is killed, so the later message is the first to arrive. Were the
+    // cancel to fail, 2 would arrive first — no window to race.
     quiver()
         .evaluate(
             r#"
-            %proc.send_after [@, 1, after: 20];
-            t = %proc.send_after [@, 2, after: 10];
+            %proc.send_after [@, 1, after: 300];
+            t = %proc.send_after [@, 2, after: 200];
             %proc.kill [t];
-            a = !'int;
-            b = { ![#'int, 50] };
-            [a, b]
+            !'int
             "#,
         )
-        .expect("[1, []]");
+        .expect("1");
 }
 
 #[test]
@@ -501,9 +500,9 @@ fn test_send_after_is_cancelled_with_its_sender() {
         .evaluate(
             r#"
             me = @;
-            s = @[] { %proc.send_after [me, 1, after: 20]; Ok } [];
+            s = @[] { %proc.send_after [me, 1, after: 200]; Ok } [];
             !s;
-            { ![#'int, 60] }
+            { ![#'int, 300] }
             "#,
         )
         .expect("[]");
@@ -576,8 +575,8 @@ fn test_race_kills_the_losers() {
         .evaluate(
             r#"
             me = @;
-            w = %proc.race [%list{ #[] { 1 }, #[] { %proc.sleep 20; %proc.send [me, 9]; 2 } }];
-            [w, { ![#'int, 60] }]
+            w = %proc.race [%list{ #[] { 1 }, #[] { %proc.sleep 200; %proc.send [me, 9]; 2 } }];
+            [w, { ![#'int, 300] }]
             "#,
         )
         .expect("[1, []]");

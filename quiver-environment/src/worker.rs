@@ -943,6 +943,11 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         // process terminated. Routing goes through the environment even for a local
         // watcher: it keeps delivery uniform, and the environment's completion-report
         // handling (resource cleanup) depends on seeing the event.
+        // Terminations go first, so the environment settles what a process leaves behind
+        // before any awaiter's delivery of its result can claim the rest.
+        for (pid, kept) in self.executor.take_terminations() {
+            self.sender.send(Event::ProcessEnded { pid, kept })?;
+        }
         for (watcher, target) in self.executor.take_watcher_events() {
             match watcher {
                 Watcher::Awaiter { pid } => {
