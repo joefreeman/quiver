@@ -196,10 +196,6 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
         Ok(())
     }
 
-    /// Deliver `message` to `target` (`%proc.send`): fire-and-forget — the message
-    /// routes through the environment while the caller carries on, and a send to a
-    /// terminated process is a no-op. Refused in restricted contexts: a filter or a
-    /// tracked render may be re-evaluated, and a send is not idempotent.
     /// The calling process as a value (`@`): its pid, carrying its root function's index as
     /// every pid value does.
     pub fn self_process(&self) -> Result<Value, Error> {
@@ -258,15 +254,6 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
             function_index: function,
             captures,
             argument,
-        });
-        Ok(())
-    }
-
-    pub fn send(&mut self, target: ProcessId, message: Value) -> Result<(), Error> {
-        self.allow(Operation::Send)?;
-        self.queue(Action::Deliver {
-            target,
-            value: message,
         });
         Ok(())
     }
@@ -1088,37 +1075,6 @@ pub fn register_json_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     );
 }
 
-/// Send a message to a process (`%proc.send [p, message]`): asynchronous and
-/// fire-and-forget — the caller does not wait for delivery, and a send to a process
-/// that has already terminated is discarded. The message type is checked statically
-/// against the target's send grant, so the runtime shape check here only guards the
-/// argument's spine.
-pub fn builtin_process_send<E: Effect>(
-    arg: &Value,
-    ctx: &mut BuiltinContext<E>,
-) -> Result<Completion<E>, Error> {
-    let Value::Tuple(_, payload) = arg else {
-        return Err(Error::TypeMismatch {
-            expected: "[process, message]".to_string(),
-            found: arg.type_name().to_string(),
-        });
-    };
-    let [target, message] = &payload[..] else {
-        return Err(Error::ArityMismatch {
-            expected: 2,
-            found: payload.len(),
-        });
-    };
-    let Value::Process(target, _) = target else {
-        return Err(Error::TypeMismatch {
-            expected: "process".to_string(),
-            found: target.type_name().to_string(),
-        });
-    };
-    ctx.send(*target, message.clone())?;
-    Ok(Completion::Value(Value::ok()))
-}
-
 /// Detach an owned child from the calling process (the parent-only `%proc.detach`):
 /// the child survives the caller's termination. Errors when the argument is not an
 /// owned child of the caller — ownership is the parent's to relinquish, like operating
@@ -1298,20 +1254,6 @@ pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
         ],
     );
     register_builtin!(registry, "process_spawn", builtin_process_spawn, Purity::Process, spawn_param => pid.clone());
-    // `send`'s polymorphic type `#[@'m, 'm] -> Ok`: the target's send grant fixes `'m`,
-    // and the message is then checked against it by the ordinary generic-call path —
-    // which is the whole of the send type rule, with no special case in `Apply`.
-    let send_param = TypeSpec::Tuple(
-        None,
-        vec![
-            (
-                None,
-                TypeSpec::Process(Some(Box::new(TypeSpec::Var("m"))), None),
-            ),
-            (None, TypeSpec::Var("m")),
-        ],
-    );
-    register_builtin!(registry, "process_send", builtin_process_send, Purity::Process, send_param => ok.clone());
     register_builtin!(registry, "process_detach", builtin_process_detach, Purity::Process, pid.clone() => ok.clone());
     let kill_param = TypeSpec::Tuple(None, vec![(None, pid.clone()), (None, TypeSpec::Top)]);
     register_builtin!(registry, "process_kill", builtin_process_kill, Purity::Process, kill_param => ok.clone());

@@ -146,7 +146,6 @@ impl<'a> FreeVariableCollector<'a> {
                 self.visit_access_capture(access);
                 self.visit_term(argument);
             }
-            ast::Term::Self_ => {}
             ast::Term::Process(_) => {}
             ast::Term::Select(sources, _) => {
                 // Visit all source chains (if explicit sources provided)

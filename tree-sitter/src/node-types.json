@@ -186,6 +186,10 @@
             "named": true
           },
           {
+            "type": "self",
+            "named": true
+          },
+          {
             "type": "spawn",
             "named": true
           },

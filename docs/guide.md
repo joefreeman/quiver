@@ -1096,8 +1096,9 @@ parameter and `~` to the flowing value.
 
 ### Sending, receiving, awaiting
 
-Send with `%proc.send`. Receive with `!`, whose parameter type names the message type.
-Await a process's result with `!` on the pid.
+Send by applying the pid to the message, `p x`, as a function is applied to its argument.
+Receive with `!`, whose parameter type names the message type. Await a process's result
+with `!` on the pid.
 
 ```quiver
 p = @#[] { 42 } []
@@ -1107,13 +1108,13 @@ p = @#[] { 42 } []
 ```quiver
 adder = #[] { !#['int, 'int] ~> %num.add ~ }
 q = @adder []
-%proc.send [q, [3, 4]]; !q      //= 7
+q [3, 4]; !q                  //= 7
 ```
 
 A receive shapes the process's message type, and sending is checked against it: the
 message must fit the target's send grant, and a pid that might be one of several
 processes accepts only what every one of them takes. Sending is asynchronous, answering
-`Ok` without waiting, and sending to self is just `%proc.send [@, x]`.
+`Ok` without waiting, and sending to self is just `@ x`.
 
 Awaiting is never lethal, so its result is fallible: `'r | []` for a process returning
 `'r`. A crashed process answers nil carrying a `:crash` annotation rather than propagating
@@ -1229,7 +1230,7 @@ p = @#[] { !'int ~> %num.mul [~, 2] } []
 %registry.register [Doubler, p]              //= [] // the name is taken
 %registry.lookup<@'bin> Doubler              //= [] // wrong message type
 %registry.lookup<@'int> Doubler ~> =(@'int & q)
-%proc.send [q, 21]
+q 21
 !p                                           //= 42
 %registry.lookup<@'int> Doubler              //= [] // freed when the process ended
 ```
@@ -1309,13 +1310,13 @@ already received.
 
 ```quiver
 filter = @#[] { !'int { =42 => Ok | [] } } []      // waits specifically for 42
-%proc.send [filter, 1]; %proc.send [filter, 42]
+filter 1; filter 42
 !filter                       //= 42 // the 1 is still in the mailbox
 ```
 
 ```quiver
 handler = @#[] { !'int ~> { =42 => Ok | [] } } []  // takes any int, then tests it
-%proc.send [handler, 1]
+handler 1
 !handler                      //= []
 ```
 
@@ -1623,7 +1624,7 @@ __integer_add__ [3, 4]                       //= 7
 | `%json` | JSON parsing, rendering, querying and editing, typed `decode<'t>`/`encode<'t>`, plus `%json{ … }` |
 | `%parse` | parser combinators over binary input |
 | `%meta` | the expression IR a dialect returns |
-| `%proc` | process management: `send`, `detach`, `kill`, `link`, `track`, and timers: `sleep`, `send_after`, `expire`, `race` |
+| `%proc` | process management: `detach`, `kill`, `link`, `track`, and timers: `sleep`, `send_after`, `expire`, `race` |
 | `%registry` | the per-environment name registry: `register`, `unregister`, `lookup` |
 | `%sup` | supervision: restart strategies over `%proc` |
 | `%io` | the failure vocabulary every I/O operation shares |

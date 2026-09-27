@@ -278,16 +278,16 @@ pub enum Error {
     /// unchanged.
     AssertionRipple,
 
-    /// A value flows into a union whose members include functions or processes, and the
+    /// A value is applied to a union whose members include functions or processes, and the
     /// union is not sendable (a union of only process types is — the message is checked
-    /// against every member's send type). Rejected rather than silently compiled as a
-    /// replace, which would discard the flowing value.
+    /// against every member's send grant).
     UnionApplication {
         union: String,
         all_functions: bool,
     },
 
-    ProcessApplication {
+    /// A value is applied to (sent to) a process whose type grants no send.
+    SendNotGranted {
         process: String,
     },
 
@@ -327,8 +327,6 @@ fn term_uses_flow(term: &ast::Term) -> bool {
         | ast::Term::Function(_)
         | ast::Term::State(..)
         | ast::Term::Process(_) => false,
-        // `.` names the current process, like any other name.
-        ast::Term::Self_ => false,
         // Consumed directly: as a scrutinee, as a block or expansion's input, or as the
         // process awaited by a bare `!`.
         ast::Term::Match(_)
@@ -690,22 +688,20 @@ impl std::fmt::Display for Error {
                         f,
                         "Cannot call {union}: a union of function types cannot be \
                          applied (the members are separate functions). Narrow the union \
-                         first, or reference the value with '&'"
+                         first"
                     )
                 } else {
                     write!(
                         f,
-                        "Cannot pipe a value into {union}: the union mixes function \
-                         members with other values, so the pipe would be a call for \
-                         some members and a replace for others. Narrow the union \
-                         first, or reference the value with '&'"
+                        "Cannot apply a value to {union}: only some of its members are \
+                         functions or processes. Narrow the union first"
                     )
                 }
             }
-            Error::ProcessApplication { process } => write!(
+            Error::SendNotGranted { process } => write!(
                 f,
-                "Cannot apply a value to {process}: a process is not callable. \
-                 Send to it with '%proc.send [p, message]'"
+                "Cannot send to {process}: its type grants no send. A process type \
+                 grants sending with a glued message type, as in @'msg"
             ),
             Error::InternalError { message } => write!(f, "Internal compiler error: {message}"),
         }
@@ -6089,7 +6085,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             ast::Term::Literal(_)
             | ast::Term::Match(_)
             | ast::Term::Access(_)
-            | ast::Term::Self_
             | ast::Term::Process(_)
             | ast::Term::State(..) => {}
         }
@@ -6983,6 +6978,33 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.compile_tail_call(identifier.as_deref(), &access.accessors, argument)?;
                 Ok((ty, Provenance::Unknown))
             }
+            Some(ast::AccessSource::Self_) => {
+                // `@` names the current process; applying it sends to self (`@ x`).
+                if !applied {
+                    self.drop_flowing_value(value_type);
+                }
+                self.codegen.add_instruction(Instruction::tuple(NIL));
+                self.emit_builtin_call("process_self");
+                // The send grant is the current function's receive type. There is no await
+                // grant, since a process can't know its own result, and no state grant either:
+                // the enclosing *function's* states union is not the spawned process's (the
+                // pid may outlive this frame in a helper), so granting it would be unsound.
+                let self_type = self.program.register_type(Type::Process {
+                    send: Some(self.current_receive_type_id),
+                    receive: None,
+                    state: None,
+                });
+                // A pid has no fields, so accessors (`@.x`) fail here as a non-tuple.
+                let (accessed_type, _) =
+                    self.compile_accessor(self_type, access.accessors, "@", Provenance::Unknown)?;
+                let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
+                if let (true, Some(val_type)) = (applied, value_type) {
+                    let ty = self.apply_value_to_type(accessed_type, val_type, None, None)?;
+                    Ok((ty, Provenance::Unknown))
+                } else {
+                    Ok((accessed_type, Provenance::Unknown))
+                }
+            }
             Some(ast::AccessSource::TailCallRipple) => {
                 // `^~` - tail-call the flowing value (a nilary function) with nil.
                 let ty = self.compile_ripple_tail_call(None, value_type)?;
@@ -7582,23 +7604,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.record_typed(span.get(), ty, SymbolKind::Expression, None);
                 Ok((ty, Provenance::Unknown))
             }
-            ast::Term::Self_ => {
-                // `@` names the current process; sending to it is `%proc.send [@, x]`.
-                self.drop_flowing_value(value_type);
-                self.codegen.add_instruction(Instruction::tuple(NIL));
-                self.emit_builtin_call("process_self");
-                // Return a process type with the current function's receive type.
-                // Return type is None since a process can't know its own return type;
-                // state is None too — the enclosing *function's* states union is not the
-                // spawned process's (the pid may outlive this frame in a helper), so
-                // granting it here would be unsound.
-                let self_type = self.program.register_type(Type::Process {
-                    send: Some(self.current_receive_type_id),
-                    receive: None,
-                    state: None,
-                });
-                Ok((self_type, Provenance::Unknown))
-            }
             ast::Term::Process(process_id) => {
                 // Look up process info from the map (REPL-only feature)
                 let (process_type, function_index) = self
@@ -8178,15 +8183,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             Ok(result_type)
         } else if let Type::Process { .. } = target_type {
-            // A pid is not callable: sending is `%proc.send [p, message]`, so that
-            // applying a value means one thing everywhere.
-            Err(Error::ProcessApplication {
-                process: quiver_core::format::format_type_by_id(&*self.program, target_type_id),
-            })
+            // Applying a pid sends the value to it: asynchronous, answering `Ok`.
+            self.check_sendable(target_type_id, target_type_id, value_type)?;
+            self.codegen.add_instruction(Instruction::call());
+            Ok(self.program.register_type(Type::ok()))
         } else if let Type::Union(members) = target_type {
-            // A function-bearing union is not applicable either: the call would be a
-            // call for some members and a replace for others, and a silent replace
-            // discards the flowing value.
+            let members = members.clone();
+            let all_processes = !members.is_empty()
+                && members.iter().all(|&member| {
+                    matches!(self.program.lookup_base(member), Some(Type::Process { .. }))
+                });
+            if all_processes {
+                // A union of pids is a send too: whichever member the value turns out to
+                // be at runtime must accept the message.
+                for &member in &members {
+                    self.check_sendable(member, target_type_id, value_type)?;
+                }
+                self.codegen.add_instruction(Instruction::call());
+                return Ok(self.program.register_type(Type::ok()));
+            }
+            // Any other function- or process-bearing union is not applicable: its members
+            // would take the value in different ways, or not at all.
             let all_functions = !members.is_empty()
                 && members.iter().all(|&member| {
                     matches!(
@@ -8286,6 +8303,41 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// own `'int` parameter no longer accepts every `'acc`), so the instantiated parameter is
     /// checked as a whole. A parameter still mentioning an unbound variable has nothing the
     /// argument pinned there, so only what unification checked applies.
+    /// Check that `message_type` may be sent to `process_type` (a process type, or one
+    /// member of the union `shown` names): the process must grant a send, and the message
+    /// must fit it.
+    fn check_sendable(
+        &mut self,
+        process_type: usize,
+        shown: usize,
+        message_type: usize,
+    ) -> Result<(), Error> {
+        let Some(Type::Process { send, .. }) = self.program.lookup_base(process_type) else {
+            unreachable!("check_sendable is only called on process types");
+        };
+        let Some(send) = *send else {
+            return Err(Error::SendNotGranted {
+                process: quiver_core::format::format_type_by_id(&*self.program, shown),
+            });
+        };
+        if self.is_never(send) {
+            return Err(Error::TypeMismatch {
+                expected: "a process that receives messages".to_string(),
+                found: quiver_core::format::format_type_by_id(&*self.program, shown),
+            });
+        }
+        if quiver_core::types::is_compatible(message_type, send, &*self.program) {
+            return Ok(());
+        }
+        Err(Error::TypeMismatch {
+            expected: format!(
+                "message compatible with {}",
+                quiver_core::format::format_type_by_id(&*self.program, send)
+            ),
+            found: quiver_core::format::format_type_by_id(&*self.program, message_type),
+        })
+    }
+
     fn check_argument_fits(
         &mut self,
         arg_type: usize,

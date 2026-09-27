@@ -80,13 +80,13 @@ fn test_socket_select_races_mailbox() {
             } []
             ![l] ~> =Accepted[listener: _, sock: conn]
             me = @
-            %proc.send [me, Hello]
+            me Hello
             first = ![conn, #Hello] ~> {
               | =Hello => MailboxFirst
               | =Data[sock: _, data: _] => SocketFirst
               | Neither
             }
-            %proc.send [c, 1]
+            c 1
             second = ![conn, 2000] ~> {
               | =Data[sock: _, data: d] => Str[d]
               | Other
@@ -140,10 +140,10 @@ fn test_plain_read_consumes_stashed_event() {
             ![l] ~> =Accepted[listener: _, sock: conn]
             // Arm the socket (no bytes exist yet), and let a queued message win.
             me = @
-            %proc.send [me, Hi]
+            me Hi
             ![conn, #Hi] ~> =Hi
             // Release the write; the armed read completes into the stash.
-            %proc.send [c, 1]
+            c 1
             { ![150] | Ok }
             // The pull-read consumes the stashed event, in order.
             %tcp.read [conn, 8192] ~> Str[~]

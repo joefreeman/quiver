@@ -295,6 +295,7 @@ fn hint(kind: &ErrorKind) -> String {
         ErrorKind::InvalidFunctionBody => "function body is incomplete or invalid".to_string(),
 
         ErrorKind::SpawnBlock => "'@{ ... }' does not state a parameter type".to_string(),
+        ErrorKind::SpawnUnglued => "glue the function to the '@' to spawn it".to_string(),
 
         ErrorKind::StepComma => "',' is not a step separator".to_string(),
         ErrorKind::MissingChainArrow => "expected '~>' or ';' here".to_string(),

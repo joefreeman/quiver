@@ -140,8 +140,8 @@ fn test_pid_message_is_filtered_by_type_not_just_accepted() {
             r#"
             g = #'int { !#'int };
             h = @#[] { ![#'int] ~> =n; ![#(@'int ?'int)] ~> =q; [n, ?q] } [];
-            %proc.send [h, 7 ~> @g ~];
-            %proc.send [h, 5];
+            @g 7 ~> h ~;
+            h 5;
             !h
             "#,
         )
@@ -158,7 +158,7 @@ fn test_message_received_pid_is_sampleable_with_clause() {
             r#"
             g = #'int { !#'int };
             h = @#[] { ![#(@'int ?'int)] ~> =q; ?q } [];
-            %proc.send [h, 7 ~> @g ~];
+            @g 7 ~> h ~;
             !h
             "#,
         )
@@ -175,7 +175,7 @@ fn test_callable_receive_clause_grants_sending_to_spawn() {
             r#"
             g = #'int { !#'int }
             'w = #'int -> 'int !'int
-            run_it = #'w { p = 7 ~> @$ ~; %proc.send [p, 1]; !p }
+            run_it = #'w { p = 7 ~> @$ ~; p 1; !p }
             g ~> run_it ~
             "#,
         )

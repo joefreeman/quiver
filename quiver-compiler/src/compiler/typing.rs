@@ -2058,8 +2058,8 @@ pub fn unify(
 /// Ordinary unification widens: two occurrences of `'t` meeting different types make
 /// `'t` their union, which is how an element type is inferred from several places. An
 /// upper-bound occurrence cannot widen, because widening would manufacture a capability
-/// the value does not have — `%proc.send`'s `[@'m, 'm]` binds `'m` to what the target
-/// accepts, so a message that is not already covered is a mismatch, not a reason to
+/// the value does not have — `%proc.send_after`'s `[(to): @'m, (message): 'm]` binds `'m`
+/// to what the target accepts, so a message that is not already covered is a mismatch, not a reason to
 /// grow `'m`.
 /// Unification state threaded through one `unify`: the variables bound as upper bounds (see
 /// `unify_bounded`), the pattern-side binders (unions and callables) entered, innermost last, which a

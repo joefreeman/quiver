@@ -93,7 +93,7 @@ p1 ~> ![~, 1000]
 send and self
 ==================
 
-%proc.send [pid, 42]; @ ~> =self_pid
+pid 42; @ 42; @f 42; @ ~> =self_pid
 
 ---
 
@@ -102,15 +102,18 @@ send and self
     (chain
       (application
         function: (access
-          source: (import
-            (identifier))
-          field: (identifier))
-        argument: (tuple
-          (chain
-            (access
-              source: (identifier)))
-          (chain
-            (integer)))))
+          source: (identifier))
+        argument: (integer)))
+    (chain
+      (application
+        function: (self)
+        argument: (integer)))
+    (chain
+      (application
+        function: (spawn
+          (access
+            source: (identifier)))
+        argument: (integer)))
     (chain
       (self)
       (bind_match

@@ -33,7 +33,7 @@ send_after = #<'m>[(to): @'m, (message): 'm, (after): 'int] -> (@!Ok) {
   to = $to
   message = $message
   after = $after
-  @[] { sleep after; __process_send__ [to, message] } []
+  @[] { sleep after; to message } []
 }
 
 // A watchdog races the process's completion against the deadline, so it ends as soon as
@@ -71,7 +71,7 @@ race = #<'r>[(racers): '%list<#[] -> 'r>, timeout: ('int | []) = []] {
     c = count ~> @collect ~
     %list.map [
       racers,
-      #{ f = $; @[] { p = f ~> @~ []; r = !p; __process_send__ [c, Done[r]] } [] },
+      #{ f = $; @[] { p = f ~> @~ []; r = !p; c Done[r] } [] },
     ]
     !c
   } []
@@ -83,9 +83,6 @@ race = #<'r>[(racers): '%list<#[] -> 'r>, timeout: ('int | []) = []] {
 }
 
 [
-  send: __process_send__ ~> {
-    :doc "Sends a message to a process. Asynchronous and fire-and-forget: the caller does not wait for delivery, and a send to a process that has already terminated is discarded. The message is checked against the target's send grant, so a pid a boundary handed out at a narrower type accepts only what that type spells."
-  },
   detach: __process_detach__ ~> {
     :doc "Detaches an owned child from the calling process, so it survives the caller's termination. Parent-only: errors unless the argument is a process the caller currently owns."
   },

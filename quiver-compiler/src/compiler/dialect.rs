@@ -887,7 +887,7 @@ fn walk_chain_spans(chain: &mut ast::Chain, f: &mut impl FnMut(&mut ast::Spanned
 
 fn walk_term_spans(term: &mut ast::Term, f: &mut impl FnMut(&mut ast::Spanned)) {
     match term {
-        ast::Term::Literal(_) | ast::Term::Self_ | ast::Term::Process(_) => {}
+        ast::Term::Literal(_) | ast::Term::Process(_) => {}
         ast::Term::String(_, segments) => {
             for segment in segments {
                 match segment {

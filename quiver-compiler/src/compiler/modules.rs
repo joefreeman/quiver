@@ -492,7 +492,7 @@ impl Collector {
         match term {
             // Pin roots are variables and parameters, so a pattern holds no value
             // imports — but its type ascriptions may reference module types.
-            ast::Term::Literal(_) | ast::Term::Process(_) | ast::Term::Self_ => {}
+            ast::Term::Literal(_) | ast::Term::Process(_) => {}
             ast::Term::Match(pattern) => self.pattern(pattern),
             ast::Term::Tuple(tuple) => {
                 for field in &tuple.fields {

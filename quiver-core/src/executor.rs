@@ -2422,8 +2422,28 @@ impl<E: Effect> Executor<E> {
                     }
                 }
             }
+            Value::Process(target, _) => {
+                // Applying a pid sends the parameter to it: fire-and-forget, answering
+                // `Ok` while the message routes through the environment (a send to a
+                // terminated process is discarded). Refused in restricted contexts: a
+                // filter or a tracked render may be re-evaluated, and a send is not
+                // idempotent.
+                if let Some(context) = proc.restricted_context() {
+                    return Err(Error::OperationNotAllowed {
+                        operation: Operation::Send,
+                        context,
+                    });
+                }
+                self.pop_value(proc); // process
+                let message = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+                self.push_value(proc, Value::ok());
+                Ok(Some(Action::Deliver {
+                    target,
+                    value: message,
+                }))
+            }
             _ => Err(Error::TypeMismatch {
-                expected: "function".to_string(),
+                expected: "function or process".to_string(),
                 found: function_value.type_name().to_string(),
             }),
         }

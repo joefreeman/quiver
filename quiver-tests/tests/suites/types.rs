@@ -1813,7 +1813,7 @@ fn test_process_type_clause_stops_at_a_newline() {
     // A clause sigil needs horizontal whitespace, so the `!'int` on its own line is a
     // receive step, not an await clause reaching across the step boundary.
     quiver()
-        .evaluate("f = #[] {\n  'p = @'int\n  !'int\n}\nq = @f []\n%proc.send [q, 7]\n!q")
+        .evaluate("f = #[] {\n  'p = @'int\n  !'int\n}\nq = @f []\nq 7\n!q")
         .expect("7");
 }
 

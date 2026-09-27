@@ -417,13 +417,13 @@ fn module_send_rejected_statically() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["sender".to_string()],
-        "me = @; %proc.send [me, 42]; !'int; [x: 1]".to_string(),
+        "me = @; me 42; !'int; [x: 1]".to_string(),
     );
 
     quiver()
         .with_modules(modules)
         .evaluate("%sender.x")
-        .expect_error_containing("does not fit never");
+        .expect_error_containing("a process that receives messages");
 }
 
 #[test]

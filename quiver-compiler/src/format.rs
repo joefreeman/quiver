@@ -690,7 +690,6 @@ fn render_term_atom(term: &Term) -> String {
         Term::Literal(literal) => render_literal(literal),
         Term::Match(pattern) => format!("={}", render_match(pattern)),
         Term::Access(access) => render_access(access),
-        Term::Self_ => "@".to_string(),
         Term::Process(index) => format!("@{}", index),
         Term::State(access, _) => format!("?{}", render_access(access)),
         // Dialect content is opaque raw text and is preserved verbatim (including newlines):
@@ -1666,6 +1665,7 @@ fn render_access(access: &Access) -> String {
             out.push_str(name);
         }
         Some(AccessSource::TailCallRipple) => out.push_str("^~"),
+        Some(AccessSource::Self_) => out.push('@'),
     }
     // A single field/index directly after `$` is sugar for `$.x`/`$.0`, so the first accessor on a
     // parameter is written without its dot (`$0`, `$foo`); the rest keep their dots.
@@ -2908,7 +2908,7 @@ mod tests {
             // --- spawn (the block is part of the spawn, so it stays a single term) ---
             "@f []",
             "@",
-            "%proc.send [@, 5]",
+            "@ 5",
             "@'int { $ }",
             "@('int | 'bin) { $ }",
             "x ~> @counter ~",
@@ -2954,7 +2954,7 @@ mod tests {
             "point.x ~> .name",
             "$ ~> $.x ~> $.0",
             "[] ~> =[]",
-            "42 ~> %proc.send [@, ~]",
+            "42 ~> @ ~",
             // --- match forms ---
             "=Point[x, y]",
             "=(x: 'int)",

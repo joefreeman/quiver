@@ -59,7 +59,7 @@ watch = #[(id): '%str, (child): @!_, (sup): @'down] {
       | r:crash<'%proc.crash> => Crashed[~]
       | Done
     }
-    %proc.send [sup, Down[id: id, pid: child, outcome: o]]
+    sup Down[id: id, pid: child, outcome: o]
   } []
   Ok
 }
@@ -131,11 +131,11 @@ loop = #'state {
       | ^ $
     }
     | =Add[s, reply] => {
-      | %dict.has? [$table, s.id] => { %proc.send [reply, Duplicate]; ^ $ }
+      | %dict.has? [$table, s.id] => { reply Duplicate; ^ $ }
       | {
         row = start_row [s, @]
         row ~> =(pid: p)
-        %proc.send [reply, Started[p]]
+        reply Started[p]
         ^ $[..., table: %dict.put [$table, s.id, row]]
       }
     }
@@ -160,12 +160,12 @@ start = #[children: 'specs, max_restarts: 'int = 3, window: 'int = 5000] {
 
 add = #[(sup): @'msg, (spec): 'spec] {
   :doc "Adds a child to a running supervisor and awaits the verdict: Started[pid] (widened to an inert `(@)`), or Duplicate for an id the table already holds. The child is spawned in the supervisor's process — owned by it, supervised like any startup spec."
-  %proc.send [$sup, Add[$spec, @]]; !'started
+  $sup Add[$spec, @]; !'started
 }
 
 drop = #[(sup): @'msg, (id): '%str] {
   :doc "Drops a supervised child: kills it (tearing down its owned subtree) and forgets its row — its watcher's report is disregarded, and the id may be supervised again. Asynchronous: the supervisor applies it in mailbox order."
-  %proc.send [$sup, Drop[$id]]; Ok
+  $sup Drop[$id]; Ok
 }
 
 (start, add, drop, watch)

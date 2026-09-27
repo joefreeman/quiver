@@ -13,17 +13,18 @@ fn test_spawn_simple_function() {
 #[test]
 fn test_send_to_process() {
     quiver()
-        .evaluate("p = @#[] { !#'int } []; %proc.send [p, 42]")
+        .evaluate("p = @#[] { !#'int } []; p 42")
         .expect("Ok");
 }
 
 #[test]
 fn test_process_without_receive_rejects_send() {
     quiver()
-        .evaluate("p = @#[] { [] } []; %proc.send [p, 42]")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "in `1`: 'int does not fit never".to_string(),
-        ));
+        .evaluate("p = @#[] { [] } []; p 42")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "a process that receives messages".to_string(),
+            found: "@never ![] ?[]".to_string(),
+        });
 }
 
 #[test]
@@ -32,12 +33,13 @@ fn test_process_type_checking_send() {
         .evaluate(
             r#"
             p = @#[] { !#'int } [];
-            %proc.send [p, <00>]
+            p <00>
         "#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "in `1`: 'bin does not fit 'int".to_string(),
-        ));
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "message compatible with 'int".to_string(),
+            found: "'bin".to_string(),
+        });
 }
 
 #[test]
@@ -53,7 +55,7 @@ fn test_send_through_all_process_union() {
             g = #'int { !'int ~> [~] };
             a = 0 ~> @f ~;
             p = Ok ~> { | =Ok => a | 0 ~> @g ~ };
-            %proc.send [p, 42];
+            p 42;
             !a
         "#,
         )
@@ -70,12 +72,13 @@ fn test_union_send_checks_every_member() {
             f = #'int { !'int };
             h = #'int { !Str['bin]; $ };
             p = Ok ~> { | =Ok => 0 ~> @f ~ | 0 ~> @h ~ };
-            %proc.send [p, 42]
+            p 42
         "#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "in `0`: Str['bin] does not fit 'int".to_string(),
-        ));
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "message compatible with Str['bin]".to_string(),
+            found: "'int".to_string(),
+        });
 }
 
 #[test]
@@ -87,12 +90,13 @@ fn test_send_to_mixed_union_is_error() {
             r#"
             f = #'int { !'int };
             p = Ok ~> { | =Ok => 0 ~> @f ~ | 5 };
-            %proc.send [p, 42]
+            p 42
         "#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "in `0`: 'int is not @'m".to_string(),
-        ));
+        .expect_compile_error(quiver_compiler::compiler::Error::UnionApplication {
+            union: "'int | (@'int !'int ?'int)".to_string(),
+            all_functions: false,
+        });
 }
 
 #[test]
@@ -222,7 +226,7 @@ fn test_spawn_sugar_tuple_type() {
 #[test]
 fn test_receive_simple() {
     quiver()
-        .evaluate("p = @#[] { !#'int } []; %proc.send [p, 42]; !p")
+        .evaluate("p = @#[] { !#'int } []; p 42; !p")
         .expect("42");
 }
 
@@ -232,7 +236,7 @@ fn test_receive_waits_until_match() {
         .evaluate(
             r#"
             p = @#[] { ![#'int { =42 => Ok }] } [];
-            %proc.send [p, 10]; %proc.send [p, 20]; %proc.send [p, 42];
+            p 10; p 20; p 42;
             !p
             "#,
         )
@@ -248,7 +252,7 @@ fn test_receive_filter_accepts_on_any_non_nil() {
         .evaluate(
             r#"
             p = @#[] { ![#'int { =x => 99 }] } [];
-            %proc.send [p, 42];
+            p 42;
             !p
             "#,
         )
@@ -261,7 +265,7 @@ fn test_receive_filter_returns_original_message() {
         .evaluate(
             r#"
             p = @#[] { ![#'int { =x => Ok }] ~> =result => result } [];
-            %proc.send [p, 42];
+            p 42;
             !p
             "#,
         )
@@ -289,7 +293,7 @@ fn test_receive_function_cannot_spawn() {
         .evaluate(
             r#"
             p = @#[] { ![#'int { @#[] { 42 } []; Ok }] } [];
-            %proc.send [p, 10];
+            p 10;
             r = !p;
             r:crash<(message: Str['bin])> ~> =(message: m);
             m
@@ -304,8 +308,8 @@ fn test_receive_function_cannot_send() {
         .evaluate(
             r#"
             p1 = @#[] { !#'int } [];
-            p2 = @#[] { ![#'int { %proc.send [p1, 42]; Ok }] } [];
-            %proc.send [p2, 10];
+            p2 = @#[] { ![#'int { p1 42; Ok }] } [];
+            p2 10;
             r = !p2;
             r:crash<(message: Str['bin])> ~> =(message: m);
             m
@@ -320,7 +324,7 @@ fn test_receive_function_cannot_select() {
         .evaluate(
             r#"
             p = @#[] { ![#'int { !#'int; Ok }] } [];
-            %proc.send [p, 10];
+            p 10;
             r = !p;
             r:crash<(message: Str['bin])> ~> =(message: m);
             m
@@ -338,7 +342,7 @@ fn test_receive_function_cannot_await() {
             r#"
             q = @#[] { 42 } [];
             p = @#[] { ![#'int { !q; Ok }] } [];
-            %proc.send [p, 10];
+            p 10;
             r = !p;
             r:crash<Error(pid: (@))> ~> { =Error(pid: ^p) => Matched | Missed }
             "#,
@@ -353,7 +357,7 @@ fn test_receive_function_cannot_perform_effect() {
         .evaluate(
             r#"
             p = @#[] { ![#'int { ["/dev/null" ~> .0, 0, 0] ~> __file_open__ ~; Ok }] } [];
-            %proc.send [p, 10];
+            p 10;
             r = !p;
             r:crash<(message: Str['bin])> ~> =(message: m);
             m
@@ -392,7 +396,7 @@ fn test_detached_child_survives_parent() {
             r#"
             a = @#[] { p = @#[] { !'int } []; %proc.detach p; [p] } [];
             !a ~> =[b];
-%proc.send [b, 42];
+b 42;
             !b ~> =('int & v);
             v
             "#,
@@ -469,7 +473,7 @@ fn test_sleep_leaves_the_mailbox_untouched() {
     quiver()
         .evaluate(
             r#"
-            %proc.send [@, 7];
+            @ 7;
             %proc.sleep 10;
             !'int
             "#,
@@ -575,7 +579,7 @@ fn test_race_kills_the_losers() {
         .evaluate(
             r#"
             me = @;
-            w = %proc.race [%list{ #[] { 1 }, #[] { %proc.sleep 200; %proc.send [me, 9]; 2 } }];
+            w = %proc.race [%list{ #[] { 1 }, #[] { %proc.sleep 200; me 9; 2 } }];
             [w, { ![#'int, 300] }]
             "#,
         )
@@ -633,7 +637,7 @@ fn test_link_is_silent_on_normal_completion() {
             v = @#[] { !'int } [];
             c = @#[] { %proc.link v; 1 } [];
             !c ~> =('int & one);
-            %proc.send [v, 42];
+            v 42;
             !v ~> =('int & out);
             out
             "#,
@@ -733,9 +737,9 @@ fn test_send_to_completed_process_is_dropped() {
         .evaluate(
             r#"
             p = @#[] { !#Str['bin] } [];
-            %proc.send [p, "first"];
+            p "first";
             !p;
-            %proc.send [p, "second"];
+            p "second";
             !p
             "#,
         )
@@ -839,7 +843,7 @@ fn test_select_single_receive() {
         .evaluate(
             r#"
             p = @#[] { !#'int } [];
-            %proc.send [p, 42]; !p
+            p 42; !p
             "#,
         )
         .expect("42");
@@ -851,7 +855,7 @@ fn test_select_multiple_receive_patterns() {
         .evaluate(
             r#"
             p = @#[] { ![#'int, #'bin] } [];
-            %proc.send [p, 42]; !p
+            p 42; !p
             "#,
         )
         .expect("42");
@@ -864,8 +868,8 @@ fn test_select_receive_pattern_priority() {
             r#"
             f = #[] {
                 @ ~> =self_pid;
-%proc.send [self_pid, 42];
-%proc.send [self_pid, <00>];
+self_pid 42;
+self_pid <00>;
                 ![#'int, #'bin]
             };
             @f [] ~> !
@@ -881,9 +885,9 @@ fn test_select_receive_waits_for_match() {
             r#"
             f = #[] {
                 @ ~> =self_pid;
-%proc.send [self_pid, 10];
-%proc.send [self_pid, 42];
-%proc.send [self_pid, 99];
+self_pid 10;
+self_pid 42;
+self_pid 99;
                 !#'int
             };
             @f [] ~> !
@@ -959,7 +963,7 @@ fn test_mixed_process_and_receive() {
                 ![#'int, fast]
             };
             receiver = @make_receiver [];
-            %proc.send [receiver, 42]; !receiver
+            receiver 42; !receiver
             "#,
         )
         .expect("42");
@@ -974,7 +978,7 @@ fn test_mixed_all_three_types_receive_wins() {
                 slow = @#[] { !#'bin } [];
                 ![#'int, slow, 1000]
             } [];
-            %proc.send [receiver, 42]; !receiver
+            receiver 42; !receiver
             "#,
         )
         .expect("42");
@@ -1047,7 +1051,7 @@ fn test_select_nested_chain_outer_used() {
 #[test]
 fn test_select_receive_with_ripple() {
     quiver()
-        .evaluate("p1 = @#[] { !#'int ~> [~] } []; %proc.send [p1, 0]; !p1")
+        .evaluate("p1 = @#[] { !#'int ~> [~] } []; p1 0; !p1")
         .expect("[0]");
 }
 
@@ -1058,7 +1062,7 @@ fn test_receive_type_from_variable() {
             r#"
             receiver_func = #'int;
             p = @#[] { ![receiver_func] ~> [~, 100] ~> __integer_add__ ~ } [];
-            %proc.send [p, 42]; !p
+            p 42; !p
             "#,
         )
         .expect("142");
@@ -1070,7 +1074,7 @@ fn test_receive_type_from_module_member() {
     // (like an identity function) it is NOT applied to the message — the message passes through
     // unchanged. The module member is used inline, with no intermediate binding.
     quiver()
-        .evaluate("p = @#[] { !%int.and } []; %proc.send [p, [255, 240]]; !p")
+        .evaluate("p = @#[] { !%int.and } []; p [255, 240]; !p")
         .expect("[255, 240]");
 }
 
@@ -1079,10 +1083,10 @@ fn test_body_less_receiver_builtin_matches_identity_function() {
     // A builtin and the equivalent body-less (identity) function behave identically as
     // receivers: both name the message type and return the received message, neither applies.
     quiver()
-        .evaluate("p = @#[] { !%int.and } []; %proc.send [p, [255, 240]]; !p")
+        .evaluate("p = @#[] { !%int.and } []; p [255, 240]; !p")
         .expect("[255, 240]");
     quiver()
-        .evaluate("p = @#[] { !#['int, 'int] } []; %proc.send [p, [255, 240]]; !p")
+        .evaluate("p = @#[] { !#['int, 'int] } []; p [255, 240]; !p")
         .expect("[255, 240]");
 }
 
@@ -1094,7 +1098,7 @@ fn test_postfix_select_with_function() {
         .evaluate(
             r#"
             receiver = #'int;
-            p = @#[] { @ ~> =self_pid;%proc.send [self_pid, 42]; !receiver } [];
+            p = @#[] { @ ~> =self_pid;self_pid 42; !receiver } [];
             !p
             "#,
         )
@@ -1126,7 +1130,7 @@ fn test_nested_select() {
             r#"
             inner = #[] { ![#'int, 500] };
             p = @inner [];
-            %proc.send [p, 42];
+            p 42;
             ![p, 1000]
             "#,
         )
@@ -1153,8 +1157,8 @@ fn test_process_spawns_and_receives_reply() {
     quiver()
         .evaluate(
             r#"
-            child = #[] { ![#(@'int) { =parent => {%proc.send [parent, 42]; Ok } }] };
-            parent = #[] { c = @child []; %proc.send [c, @]; !#'int };
+            child = #[] { ![#(@'int) { =parent => {parent 42; Ok } }] };
+            parent = #[] { c = @child []; c @; !#'int };
             @parent []
             "#,
         )
@@ -1164,17 +1168,66 @@ fn test_process_spawns_and_receives_reply() {
 #[test]
 fn test_send_to_self() {
     quiver()
-        .evaluate("@#[] { me = @; %proc.send [me, 10]; !#'int } [] ~> !")
+        .evaluate("@#[] { me = @; me 10; !#'int } [] ~> !")
         .expect("10");
 }
 
 #[test]
 fn test_send_to_self_with_receive_type_check() {
     quiver()
-        .evaluate("#[] { me = @; %proc.send [me, <00>]; !#'int }")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "in `1`: 'bin does not fit 'int".to_string(),
-        ));
+        .evaluate("#[] { @ <00>; !#'int }")
+        .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "message compatible with 'int".to_string(),
+            found: "'bin".to_string(),
+        });
+}
+
+#[test]
+fn test_send_to_self_applied() {
+    // A bare `@` applies like any other name: `@ x` sends to the current process.
+    quiver()
+        .evaluate("@#[] { @ 10; 20 ~> @ ~; [!#'int, !#'int] } [] ~> !")
+        .expect("[10, 20]");
+}
+
+#[test]
+fn test_send_answers_ok() {
+    quiver()
+        .evaluate("p = @#[] { !#'int } []; p 42")
+        .expect("Ok");
+}
+
+#[test]
+fn test_send_to_ungranted_process_is_error() {
+    // A pid whose type states no send grant accepts nothing, whatever the process
+    // behind it receives.
+    quiver()
+        .evaluate(
+            r#"
+            f = #(@!'int) { $ 1 };
+            p = @#[] { !#'int } [];
+            f p
+        "#,
+        )
+        .expect_compile_error(quiver_compiler::compiler::Error::SendNotGranted {
+            process: "@!'int".to_string(),
+        });
+}
+
+#[test]
+fn test_union_send_accepts_common_message() {
+    // A message every member accepts is sendable, even where the members' grants
+    // differ.
+    quiver()
+        .evaluate(
+            r#"
+            f = #'int { !'int };
+            g = #'int { !('int | 'bin) };
+            p = Ok ~> { | =Ok => 0 ~> @f ~ | 0 ~> @g ~ };
+            p 42
+        "#,
+        )
+        .expect("Ok");
 }
 
 #[test]
@@ -1184,7 +1237,7 @@ fn test_receive_type_in_function_argument() {
         .evaluate(
             r#"
             p = 20 ~> @#'int { [~, !#'int] ~> %int.div ~ } ~;
-            %proc.send [p, 2]; !p
+            p 2; !p
             "#,
         )
         .expect("10");
@@ -1197,7 +1250,7 @@ fn test_receive_type_in_tuple_argument() {
         .evaluate(
             r#"
             p = 10 ~> @#'int { [~, !#'int] } ~;
-            %proc.send [p, 32]; !p
+            p 32; !p
             "#,
         )
         .expect("[10, 32]");
@@ -1210,7 +1263,7 @@ fn test_receive_type_in_builtin_argument() {
         .evaluate(
             r#"
             p = 10 ~> @#'int { [~, !#'int] ~> __integer_add__ ~ } ~;
-            %proc.send [p, 32]; !p
+            p 32; !p
             "#,
         )
         .expect("42");
@@ -1224,7 +1277,7 @@ fn test_receive_type_in_tail_call_argument() {
             r#"
             f = #['int, 'int] { __integer_add__ ~ };
             p = 10 ~> @#'int { [~, !#'int] ~> ^f ~ } ~;
-            %proc.send [p, 32]; !p
+            p 32; !p
             "#,
         )
         .expect("42");
@@ -1236,7 +1289,7 @@ fn test_receive_type_in_tail_call_argument() {
 fn test_sugar_bare_primitive_type() {
     // Test !'int instead of !#'int
     quiver()
-        .evaluate("p = @#[] { !'int } []; %proc.send [p, 42]; !p")
+        .evaluate("p = @#[] { !'int } []; p 42; !p")
         .expect("42");
 }
 
@@ -1250,7 +1303,7 @@ fn test_sugar_type_alias() {
             r#"
             'my_type = 'int;
             p = @#[] { !('my_type) } [];
-            %proc.send [p, 42]; !p
+            p 42; !p
             "#,
         )
         .expect("42");
@@ -1263,7 +1316,7 @@ fn test_sugar_union_type() {
         .evaluate(
             r#"
             p = @#[] { !('int | 'bin) } [];
-            %proc.send [p, 42]; !p
+            p 42; !p
             "#,
         )
         .expect("42");
@@ -1276,7 +1329,7 @@ fn test_sugar_receive_function_with_identifier_type() {
         .evaluate(
             r#"
             p = @#[] { ![#'int { =42 => Ok }] } [];
-            %proc.send [p, 10]; %proc.send [p, 20]; %proc.send [p, 42];
+            p 10; p 20; p 42;
             !p
             "#,
         )
@@ -1290,7 +1343,7 @@ fn test_sugar_receive_function_with_union_type() {
         .evaluate(
             r#"
             p = @#[] { ![#('int | 'bin) { =42 => Ok }] } [];
-            %proc.send [p, <00>]; %proc.send [p, 42];
+            p <00>; p 42;
             !p
             "#,
         )
@@ -1305,7 +1358,7 @@ fn test_sugar_parenthesized_identifier() {
             r#"
             'receiver_type = 'int;
             p = @#[] { !('receiver_type) } [];
-            %proc.send [p, 42]; !p
+            p 42; !p
             "#,
         )
         .expect("42");
@@ -1323,7 +1376,7 @@ fn test_sugar_mixed_with_comma_separation() {
                 ![#'int, fast]
             };
             receiver = @make_receiver [];
-            %proc.send [receiver, 42]; !receiver
+            receiver 42; !receiver
             "#,
         )
         .expect("42");
@@ -1337,7 +1390,7 @@ fn test_sugar_tuple_type() {
         .evaluate(
             r#"
             p = @#[] { !#['int, 'int] } [];
-            %proc.send [p, [42, 100]]; !p
+            p [42, 100]; !p
             "#,
         )
         .expect("[42, 100]");
@@ -1371,8 +1424,8 @@ fn test_filter_shorthand_skips_messages() {
         .evaluate(
             r#"
             p = @#[] {
-                me = @; %proc.send [me, 1];
-                me = @; %proc.send [me, 2];
+                me = @; me 1;
+                me = @; me 2;
                 !'int { =2 => Ok | [] };
                 !'int
             } [];
@@ -1386,7 +1439,7 @@ fn test_filter_shorthand_skips_messages() {
 fn test_partial_type_receive_shorthand() {
     // `!(...)` accepts a partial type — the parens are part of the type syntax.
     quiver()
-        .evaluate("p = @#[] { !(x: 'int) ~> .x } []; %proc.send [p, [x: 7, y: 8]]; !p")
+        .evaluate("p = @#[] { !(x: 'int) ~> .x } []; p [x: 7, y: 8]; !p")
         .expect("7");
 }
 
@@ -1413,7 +1466,7 @@ fn test_receive_type_propagates_through_call() {
             f = #[] { !#'int };
             g = #[] { f [] };
             p = @g [];
-            %proc.send [p, 5];
+            p 5;
             !p
             "#,
         )
@@ -1429,7 +1482,7 @@ fn test_receive_type_propagates_through_tail_call() {
             f = #[] { !#'int };
             g = #[] { ^f [] };
             p = @g [];
-            %proc.send [p, 5];
+            p 5;
             !p
             "#,
         )
@@ -1489,7 +1542,7 @@ fn test_constant_binary_crosses_in_a_message() {
             p = @#[] { !'%str ~> { =Str[b] => %bin.length b } } [];
             r = { 1 ~> =2 };
             r:origin<(module: '%str, line: 'int)> ~> =(module: m);
-            %proc.send [p, m];
+            p m;
             !p
             "#,
         )

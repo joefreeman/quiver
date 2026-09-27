@@ -6,7 +6,7 @@ use crate::common::quiver;
 // then waits: 0 makes it crash, any other int completes it normally.
 //
 // The shared shape:
-//   worker:  @[] { %proc.send [me, @]; !'int ~> { =0 => panic | ... } } []
+//   worker:  @[] { me @; !'int ~> { =0 => panic | ... } } []
 //   start:   spawns the worker, wires its watcher (%sup.watch), answers the pid
 
 #[test]
@@ -19,7 +19,7 @@ fn test_supervisor_restarts_crashed_child() {
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @[] {
-                %proc.send [me, @]
+                me @
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ }
               } []
               %sup.watch [id, w, sup]
@@ -28,7 +28,7 @@ fn test_supervisor_restarts_crashed_child() {
             spec = [id: "w", restart: Permanent, start: mk]
             sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             p1 = !#(@'int)
-%proc.send [p1, 0]
+p1 0
             p2 = !#(@'int)
             [p2] ~> { =[^p1] => "same pid" | "restarted" }
             "#,
@@ -48,7 +48,7 @@ fn test_restart_intensity_limit_escalates() {
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @[] {
-                %proc.send [me, @]
+                me @
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ }
               } []
               %sup.watch [id, w, sup]
@@ -56,9 +56,9 @@ fn test_restart_intensity_limit_escalates() {
             }
             spec = [id: "w", restart: Permanent, start: mk]
             sup = [children: Cons[spec, Nil], max_restarts: 2, window: 5000] ~> %sup.start ~
-            p1 = !#(@'int);%proc.send [p1, 0]
-            p2 = !#(@'int);%proc.send [p2, 0]
-            p3 = !#(@'int);%proc.send [p3, 0]
+            p1 = !#(@'int);p1 0
+            p2 = !#(@'int);p2 0
+            p3 = !#(@'int);p3 0
             r = !sup
             r:crash<Panic(message: Str['bin])> ~> =(message: msg)
             msg
@@ -77,7 +77,7 @@ fn test_temporary_child_is_not_restarted() {
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @[] {
-                %proc.send [me, @]
+                me @
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | Ok }
               } []
               %sup.watch [id, w, sup]
@@ -86,7 +86,7 @@ fn test_temporary_child_is_not_restarted() {
             spec = [id: "w", restart: Temporary, start: mk]
             sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             p1 = !#(@'int)
-%proc.send [p1, 0]
+p1 0
             { | ![#(@'int), 200] ~> =(@'int & p2) => "restarted" | "no restart" }
             "#,
         )
@@ -103,7 +103,7 @@ fn test_transient_child_restarts_on_crash() {
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @[] {
-                %proc.send [me, @]
+                me @
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | Ok }
               } []
               %sup.watch [id, w, sup]
@@ -112,7 +112,7 @@ fn test_transient_child_restarts_on_crash() {
             spec = [id: "w", restart: Transient, start: mk]
             sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             p1 = !#(@'int)
-%proc.send [p1, 0]
+p1 0
             p2 = !#(@'int)
             [p2] ~> { =[^p1] => "same pid" | "restarted" }
             "#,
@@ -130,7 +130,7 @@ fn test_transient_child_not_restarted_after_normal_completion() {
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @[] {
-                %proc.send [me, @]
+                me @
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | Ok }
               } []
               %sup.watch [id, w, sup]
@@ -139,7 +139,7 @@ fn test_transient_child_not_restarted_after_normal_completion() {
             spec = [id: "w", restart: Transient, start: mk]
             sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
             p1 = !#(@'int)
-%proc.send [p1, 1]
+p1 1
             { | ![#(@'int), 200] ~> =(@'int & p2) => "restarted" | "no restart" }
             "#,
         )
@@ -158,7 +158,7 @@ fn test_killing_the_supervisor_tears_down_its_children() {
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @[] {
-                %proc.send [me, @]
+                me @
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ }
               } []
               %sup.watch [id, w, sup]
@@ -189,7 +189,7 @@ fn test_add_supervises_child_dynamically() {
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @[] {
-                %proc.send [me, @]
+                me @
                 !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ }
               } []
               %sup.watch [id, w, sup]
@@ -199,7 +199,7 @@ fn test_add_supervises_child_dynamically() {
             v = %sup.add [sup, [id: "w", restart: Permanent, start: mk]]
             started? = v ~> { =Started[_] => Ok | [] }
             p1 = !#(@'int)
-%proc.send [p1, 0]
+p1 0
             p2 = !#(@'int)
             [started?, [p2] ~> { =[^p1] => "same pid" | "restarted" }]
             "#,
@@ -216,7 +216,7 @@ fn test_add_duplicate_id_rejected() {
             me = @
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @[] { %proc.send [me, @]; !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ } } []
+              w = @[] { me @; !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ } } []
               %sup.watch [id, w, sup]
               w
             }
@@ -243,7 +243,7 @@ fn test_drop_forgets_and_id_is_reusable() {
             me = @
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
-              w = @[] { %proc.send [me, @]; !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ } } []
+              w = @[] { me @; !'int ~> { =0 => "boom" ~> __panic__ ~ | [] ~> ^ ~ } } []
               %sup.watch [id, w, sup]
               w
             }
@@ -256,7 +256,7 @@ fn test_drop_forgets_and_id_is_reusable() {
             // The dead first incarnation must not spawn a third announcement: give
             // any spurious restart a moment, then crash p2 and expect exactly one.
             spurious = ![#(@'int), 100] ~> { =(@'int) => Spurious | Quiet }
-%proc.send [p2, 0]
+p2 0
             p3 = !#(@'int)
             [v ~> { =Started[_] => Ok | [] }, spurious, [p3] ~> { =[^p2] => "same" | "fresh" }]
             "#,

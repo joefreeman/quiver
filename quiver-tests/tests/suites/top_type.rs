@@ -170,7 +170,7 @@ fn test_top_receive() {
     quiver()
         .evaluate(
             "p = @#[] { !#_ ~> { | =('int & n) => n | 0 } } []
-             %proc.send [p, <01>]
+             p <01>
              !p",
         )
         .expect("0");

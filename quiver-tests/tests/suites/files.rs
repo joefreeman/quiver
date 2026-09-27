@@ -206,7 +206,7 @@ fn test_resource_ownership_transfers_on_send() {
                 !#'reader ~> {{ =Read[f] => [f, 0, 5] ~> __file_read__ ~ ~> Str[~] }}
             }} [];
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & file);
-            %proc.send [r, Read[file]];
+            r Read[file];
             !r
         "#,
             path_str
@@ -240,7 +240,7 @@ fn test_resource_ownership_transfers_in_an_annotation() {
                 }}
             }} [];
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & file);
-            Go ~> {{ :handle file }} ~> %proc.send [r, ~];
+            Go ~> {{ :handle file }} ~> r ~;
             !r
         "#,
             path_str
@@ -270,7 +270,7 @@ fn test_resource_ownership_enforced_after_transfer() {
                 !#'holder ~> {{ =Hold[_] => [] ~> ^ ~ }}
             }} [];
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & file);
-            %proc.send [h, Hold[file]];
+            h Hold[file];
             [file, 0, 5] ~> __file_read__ ~
         "#,
             path_str
@@ -301,7 +301,7 @@ fn test_resource_cleanup_on_owner_completion() {
                 !#'reader ~> {{ =Read[f] => [f, 0, 5] ~> __file_read__ ~ ~> Str[~] }}
             }} [];
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & file);
-            %proc.send [r, Read[file]];
+            r Read[file];
             !r;
             [file, 0, 5] ~> __file_read__ ~
         "#,
@@ -332,7 +332,7 @@ fn test_resource_cleanup_on_unawaited_completion() {
                 !#'reader ~> {{ =Read[f] => [f, 0, 5] ~> __file_read__ ~ ~> Str[~] }}
             }} [];
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & file);
-            %proc.send [r, Read[file]];
+            r Read[file];
             %proc.sleep 100;
             Done
         "#,

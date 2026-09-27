@@ -71,6 +71,7 @@ pub enum ErrorKind {
 
     // Spawn errors
     SpawnBlock,
+    SpawnUnglued,
 
     // Sequence errors
     StepComma,
@@ -108,6 +109,9 @@ impl std::fmt::Display for ErrorKind {
 
             ErrorKind::SpawnBlock => {
                 write!(f, "A spawn needs the root function's parameter type")
+            }
+            ErrorKind::SpawnUnglued => {
+                write!(f, "A spawn's function is glued to the '@'")
             }
 
             ErrorKind::StepComma => write!(f, "Unexpected ','; use ';' between steps"),
@@ -156,6 +160,9 @@ impl ErrorKind {
             ErrorKind::InvalidFunctionBody => "A function body should be a valid expression",
             ErrorKind::SpawnBlock => {
                 "A root function's parameter is the process's state, so it is written rather than inferred: '@'t { ... }', or '@[] { ... }' for a root that takes nil"
+            }
+            ErrorKind::SpawnUnglued => {
+                "'@f x' spawns f with the init x, while a bare '@' is the current process, so '@ x' sends x to it"
             }
             ErrorKind::StepComma => {
                 "',' separates tuple fields and type arguments; sequence steps are separated by ';' or a newline"
@@ -320,6 +327,12 @@ pub fn parse(source: &str) -> Result<Sequence, Error> {
                     // the (otherwise unused) `Permutation` code.
                     if is_failure && e.code == nom::error::ErrorKind::Permutation {
                         return Err(Error::new(ErrorKind::SpawnBlock, span));
+                    }
+                    // `term` smuggles a send to self followed by a further argument
+                    // (`@ f x`, meaning `@f x`) out as a hard failure with the (otherwise
+                    // unused) `Switch` code.
+                    if is_failure && e.code == nom::error::ErrorKind::Switch {
+                        return Err(Error::new(ErrorKind::SpawnUnglued, span));
                     }
                     // `assertion` smuggles code following an assertion on its line out as a
                     // hard failure with the (otherwise unused) `CrLf` code.
@@ -1997,6 +2010,10 @@ fn access(input: Span) -> IResult<Span, Access> {
             }
         }),
         map(char('~'), |_| AccessSource::Ripple),
+        // The current process. `primary` tries `spawn_term` first, which claims every `@`
+        // with a glued target, so a bare `@` is what reaches here: `@` is to a process
+        // what `~` is to the flowing value and `$` to the parameter.
+        map(char('@'), |_| AccessSource::Self_),
         // Import: %module or %module/submodule
         map(import, AccessSource::Import),
         // Builtin: __name__ (before identifier; the `__` lexical form is unambiguous)
@@ -2231,6 +2248,10 @@ fn select_term(input: Span) -> IResult<Span, Term> {
                 pair(named_tuple_type, opt(preceded(opt(hspace1), block))),
                 |(param_type, body)| make_receive(param_type, body),
             ),
+            // @N process reference (must come before spawn_term to match @1 before @f), and
+            // @spawn — both before `access`, which would take the `@` as the current process.
+            map(process_ref_term, single_source),
+            map(spawn_term, single_source),
             // access (variable / module member) → a single source. Select sources are a
             // tuple of values, and a name is a value, so `!f` is exactly `![f]`.
             map(access, |acc| single_source(Term::Access(acc))),
@@ -2243,10 +2264,6 @@ fn select_term(input: Span) -> IResult<Span, Term> {
                 ),
                 |(param_type, body)| make_receive(param_type, body),
             ),
-            // @N process reference (must come before spawn_term to match @1 before @f)
-            map(process_ref_term, single_source),
-            // @spawn
-            map(spawn_term, single_source),
             // literal (timeout)
             map(literal, |l| single_source(Term::Literal(l))),
             // nothing - bare ! for postfix form (uses chained value)
@@ -2756,13 +2773,6 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
     Ok((rest, term))
 }
 
-/// The current process, `@`. Tried after `spawn_term`, which claims every `@` with a
-/// glued target, so a bare `@` is what is left: `@` is to a process what `~` is to the
-/// flowing value and `$` to the parameter.
-fn self_term(input: Span) -> IResult<Span, Term> {
-    map(char('@'), |_| Term::Self_)(input)
-}
-
 fn bind_match(input: Span) -> IResult<Span, Term> {
     map(preceded(char('='), match_pattern), Term::Match)(input)
 }
@@ -3039,7 +3049,6 @@ fn primary(input: Span) -> IResult<Span, Term> {
         // Process operations (process_ref_term must come before spawn_term to match @N first)
         process_ref_term,
         spawn_term,
-        self_term,
         // Bind match (must be before literals and identifiers)
         bind_match,
         // Numeric literals: decimal (`1.5`) and fraction (`1/3`) desugar to reduced
@@ -3114,6 +3123,7 @@ fn chain(input: Span) -> IResult<Span, Chain> {
 /// write `~.f`. A literal/tuple/function-literal head isn't applicable either (`#{…} 5` is a
 /// syntax error). Exactly one argument: `f x y` fails at the chain separator.
 fn term(input: Span) -> IResult<Span, Term> {
+    let start = input;
     let (input, head) = primary(input)?;
     let applicable = match &head {
         Term::Access(access) => access.source.is_some(),
@@ -3129,6 +3139,21 @@ fn term(input: Span) -> IResult<Span, Term> {
     let Some(arg) = arg else {
         return Ok((input, head));
     };
+    // `@ f x` reads as a spawn written with a space after the `@`: as a send to self it
+    // would be `@ f` followed by a stray `x`. Point at the glue rather than the chain.
+    if matches!(
+        &head,
+        Term::Access(Access {
+            source: Some(AccessSource::Self_),
+            ..
+        })
+    ) && peek(pair(hspace1, pair(not(tag("~>")), primary)))(input).is_ok()
+    {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            start,
+            nom::error::ErrorKind::Switch,
+        )));
+    }
     let term = match head {
         Term::Access(access) => Term::Apply(access, Box::new(arg)),
         Term::Spawn(function, _, span) => Term::Spawn(function, Some(Box::new(arg)), span),
@@ -3694,6 +3719,26 @@ mod tests {
             };
             assert_eq!(chain.terms.len(), terms, "for {source}");
             assert_eq!(chain.assertions.len(), assertions, "for {source}");
+        }
+    }
+
+    #[test]
+    fn test_unglued_spawn_is_a_pointed_error() {
+        // `@ f x` is a send to self followed by a stray term; the error points at the `@`
+        // and names the glue, rather than asking for a `~>`.
+        for (source, column) in [("@ f 21", 1), ("x = @ f []", 5), ("[@ f 1]", 2)] {
+            let err = parse(source).expect_err(source);
+            assert!(
+                matches!(err.kind, ErrorKind::SpawnUnglued),
+                "for {source}: {:?}",
+                err.kind
+            );
+            let span = err.span.expect(source);
+            assert_eq!((span.line, span.column), (1, column), "for {source}");
+        }
+        // A send to self, a spawn, and a send piped onwards all parse.
+        for source in ["@ x", "@f x", "@ x ~> f ~", "@ [1, 2]", "@"] {
+            parse(source).unwrap_or_else(|e| panic!("{source}: {e:?}"));
         }
     }
 

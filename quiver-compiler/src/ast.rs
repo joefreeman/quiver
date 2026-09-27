@@ -247,9 +247,6 @@ pub enum Term {
     /// a call's argument, nil included (`@f []`) — the flowing value reaches it only through
     /// `~` (`x ~> @f ~`). `@~` spawns the flowing value itself, so its init is the argument.
     Spawn(Box<Term>, Option<Box<Term>>, Spanned),
-    /// The current process, `@` — the pid of whoever is running this code. A bare `@`,
-    /// since every spawn form glues its target to the sigil.
-    Self_,
     /// Select operation. None means bare `!` (postfix form using chained value).
     /// Some(sources) means explicit sources like `![a, b]` or `![]` (discards chained value).
     /// The `Spanned` is the `!`, for hover (shows the received/awaited result type).
@@ -490,6 +487,10 @@ pub enum AccessSource {
     Parameter { depth: usize },
     /// Ripple `~` - references the piped value
     Ripple,
+    /// The current process, `@` — the pid of whoever is running this code. A bare `@`,
+    /// since every spawn form glues its target to the sigil. Applying it sends to self
+    /// (`@ x`).
+    Self_,
     /// Import like `%num` or `%mathx/vec`
     Import(Vec<String>),
     /// Builtin like `__integer_add__` — a globally-resolved callable, looked up in the builtin

@@ -260,7 +260,8 @@ module.exports = grammar({
     ),
 
     // The heads that may take a juxtaposed argument: a *sourced* access (a variable, `$`,
-    // `~`, an import member, a tail call), a builtin, or a spawn (`@f`). A bare `.field`
+    // `~`, an import member, a tail call), a builtin, a spawn (`@f`), or the current
+    // process (`@ x` sends to self). A bare `.field`
     // accessor (a source-less `access`) is deliberately excluded — `.f x` is an error — so
     // the applicable access form is the sourced one only.
     _applicable: $ => choice(
@@ -268,6 +269,7 @@ module.exports = grammar({
       $.builtin,
       $.tail_call,
       $.spawn,
+      $.self,
     ),
 
     // The forms valid as the target of a chain binding (`x = ...`, `[a, b] = ...`,
@@ -442,8 +444,10 @@ module.exports = grammar({
     )),
 
     // A bare `@` referring to the current process. Lower precedence than `spawn`, which
-    // claims every `@` with a target glued to it.
-    self: _ => prec(-1, '@'),
+    // claims every `@` with a target glued to it. Whitespace is `extras` here, so the glue
+    // that separates `@ x` (a send to self) from `@x` (a spawn) is lexical: an `@` followed
+    // by horizontal space is a longer match than the `@` token, so it lexes as self.
+    self: _ => choice(prec(-1, '@'), token(/@[ \t]+/)),
 
     // -------------------------------------------------------------------- select / @
 

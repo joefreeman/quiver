@@ -29,7 +29,7 @@ fn top_level_process_work_runs_at_boot() {
     // (A receive no sender can ever satisfy blocks forever — exactly as it would
     // inside the entry function.)
     expect_output("p = @#[] { !'int } []; #[] { 5 }", "5");
-    expect_output("me = @; %proc.send [me, 42]; !'int; #[] { 5 }", "5");
+    expect_output("me = @; me 42; !'int; #[] { 5 }", "5");
     expect_output("p = @#[] { 42 } []; r = !p; #[] { r }", "42");
 }
 

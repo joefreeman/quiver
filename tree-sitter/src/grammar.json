@@ -586,6 +586,10 @@
         {
           "type": "SYMBOL",
           "name": "spawn"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "self"
         }
       ]
     },
@@ -1437,12 +1441,24 @@
       }
     },
     "self": {
-      "type": "PREC",
-      "value": -1,
-      "content": {
-        "type": "STRING",
-        "value": "@"
-      }
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "PREC",
+          "value": -1,
+          "content": {
+            "type": "STRING",
+            "value": "@"
+          }
+        },
+        {
+          "type": "TOKEN",
+          "content": {
+            "type": "PATTERN",
+            "value": "@[ \\t]+"
+          }
+        }
+      ]
     },
     "select": {
       "type": "PREC_RIGHT",
