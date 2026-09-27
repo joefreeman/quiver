@@ -1972,8 +1972,8 @@ fn test_union_keeps_members_not_known_to_be_inside_another() {
         .expect_type("#[b: Point(x: 'int), n: 'int] -> (Other[x: 'int] | Point(x: 'int))");
     // A type variable is rigid: `'t` is not known to hold, or be held by, `'int`.
     quiver()
-        .evaluate("#<'t>'t { | =0 => $ | 5 }")
-        .expect_type("#'t -> ('int | 't)");
+        .evaluate("#<'t>['t, 'int] { | $1 ~> =0 => $0 | 5 }")
+        .expect_type("#['t, 'int] -> ('int | 't)");
 }
 
 #[test]

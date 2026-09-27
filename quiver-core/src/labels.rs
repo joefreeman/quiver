@@ -99,6 +99,7 @@ pub fn value_labels(
             | Type::Resource(_)
             | Type::Reference
             | Type::Variable(_)
+            | Type::Intersection(_)
             | Type::Top => {}
         }
     }

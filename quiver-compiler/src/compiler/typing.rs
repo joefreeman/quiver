@@ -142,9 +142,11 @@ fn distinct_members(program: &Program, members: impl IntoIterator<Item = usize>)
 /// A cheap pre-check for `is_subsumed_by` between two distinct members: whether their shapes
 /// could relate at all. Only carriers can — identical primitives, variables and resources
 /// share an id — and then only a tuple with a tuple of its name and labels or a partial it
-/// may satisfy, or two partials, callables or processes.
+/// may satisfy, or two partials, callables or processes. An intersection lies inside each of
+/// its members, and is rare enough to always check.
 fn may_relate(program: &Program, member: usize, by: usize) -> bool {
     match (program.lookup_base(member), program.lookup_base(by)) {
+        (Some(Type::Intersection(_)), _) | (_, Some(Type::Intersection(_))) => true,
         (Some(Type::Tuple(t1)), Some(Type::Tuple(t2))) => {
             match (program.lookup_tuple(*t1), program.lookup_tuple(*t2)) {
                 (Some(i1), Some(i2)) => {
@@ -329,6 +331,7 @@ fn productivity_pass(
             | Type::Reference
             | Type::Resource(_)
             | Type::Variable(_)
+            | Type::Intersection(_)
             | Type::Top,
         ) => true,
         // Guarded: closures and process ids are finite values however recursive their types.
@@ -1373,7 +1376,7 @@ pub fn contains_variables(type_id: usize, lookup: &impl TypeLookup) -> bool {
 
     match typ {
         Type::Variable(_) => true,
-        Type::Union(variants) => {
+        Type::Union(variants) | Type::Intersection(variants) => {
             let variants = variants.clone();
             variants.iter().any(|&v| contains_variables(v, lookup))
         }
@@ -1446,7 +1449,7 @@ pub fn collect_type_variables(type_id: usize, lookup: &impl TypeLookup, names: &
                 names.push(name.clone());
             }
         }
-        Type::Union(variants) => {
+        Type::Union(variants) | Type::Intersection(variants) => {
             for v in variants.clone() {
                 collect_type_variables(v, lookup, names);
             }
@@ -1525,7 +1528,7 @@ fn collect_variables_by_variance(
                 contra.insert(name.clone());
             }
         }
-        Type::Union(members) => {
+        Type::Union(members) | Type::Intersection(members) => {
             for &member in members.clone().iter() {
                 collect_variables_by_variance(member, program, covariant, co, contra);
             }
@@ -1906,6 +1909,19 @@ fn substitute_at(
                 .collect();
             union_type_ids(program, new_variants)
         }
+        // Its variables known, an intersection is computed: `'t & []` is `[]` for a `'t` that
+        // holds nil, and nothing for one that does not.
+        Type::Intersection(members) => {
+            let substituted: Vec<usize> = members
+                .iter()
+                .map(|&member| substitute_at(member, bindings, depth, program))
+                .collect();
+            if substituted == members {
+                type_id
+            } else {
+                super::narrowing::meet(substituted, program)
+            }
+        }
         Type::Annotated {
             base,
             exact,
@@ -2153,6 +2169,33 @@ fn unify_bounded(
 
         // Everything fits the top type, and it has no variables to bind.
         (Type::Top, _) => Ok(()),
+
+        // An intersection expected: the value must fit every member, and each binds.
+        (Type::Intersection(members), _) => members.iter().try_for_each(|&member| {
+            unify_bounded(bindings, ctx, contra, member, concrete_id, program)
+        }),
+        // An intersection given: its values lie in every member, so fitting through any one
+        // suffices. Known types are tried before variables, which (unbound, from an enclosing
+        // generic) fit only a variable; the first that fits is replayed for real.
+        (_, Type::Intersection(members)) => {
+            let (variables, known): (Vec<usize>, Vec<usize>) = members
+                .iter()
+                .partition(|&&member| matches!(program.lookup_type(member), Some(Type::Variable(_))));
+            let mut first_error = None;
+            for member in known.into_iter().chain(variables) {
+                let mut trial = bindings.clone();
+                match unify_bounded(&mut trial, &mut ctx.fresh(), contra, pattern_id, member, program)
+                {
+                    Ok(()) => {
+                        return unify_bounded(bindings, ctx, contra, pattern_id, member, program);
+                    }
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+            Err(first_error.expect("an intersection has members"))
+        }
 
         // Annotation rows are transparent to structural unification: a `'t` pattern binds
         // the whole annotated type (the Variable arm above fires first), but a structural

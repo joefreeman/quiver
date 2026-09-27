@@ -32,7 +32,10 @@ pub struct PatternAnalysis {
     /// yields in place of its scrutinee.
     pub ripple_type: Option<usize>,
 }
-type TupleMatchResult = Vec<(usize, Vec<(usize, usize)>)>;
+/// Each tuple a tuple pattern is tested for: its id, the (pattern field, tuple field) pairs,
+/// and the member of the scrutinee involving a type variable it came from, if any — the
+/// narrowed tuple is met with that member, so a generic value keeps its variable.
+type TupleMatchResult = Vec<(usize, Vec<(usize, usize)>, Option<usize>)>;
 // Field info plus how to rebuild a variant's narrowed type: the variant's fields, the matched
 // field indices, and the optional tuple name (`None` for a partial match, which keeps the input type).
 type VariantFieldInfo<'a> = (
@@ -1056,7 +1059,7 @@ fn analyze_match_tuple_pattern(
         || has_partial_sources(program, value_type_id)
         || matching_types.len() > 1;
     let mut witnesses = Vec::new();
-    for (tuple_id, _) in &matching_types {
+    for (tuple_id, _, _) in &matching_types {
         let witness = if needs_tuple_check {
             super::narrowing::declared_shape_witness(scopes, value_provenance, *tuple_id, program)
                 .unwrap_or(*tuple_id)
@@ -1067,7 +1070,7 @@ fn analyze_match_tuple_pattern(
     }
 
     // For each matching type, create binding sets
-    for (member, (tuple_id, field_mappings)) in matching_types.iter().enumerate() {
+    for (member, (tuple_id, field_mappings, within)) in matching_types.iter().enumerate() {
         // Clone identifiers only if there are multiple variants to avoid cross-contamination
         // For a single variant, use the parent's identifiers directly
         let mut variant_identifiers_scope =
@@ -1101,8 +1104,8 @@ fn analyze_match_tuple_pattern(
         let siblings: Vec<usize> = matching_types
             .iter()
             .zip(&witnesses)
-            .filter(|((other, _), witness)| **witness == check_tuple_id && other != tuple_id)
-            .map(|((other, _), _)| *other)
+            .filter(|((other, _, _), witness)| **witness == check_tuple_id && other != tuple_id)
+            .map(|((other, _, _), _)| *other)
             .collect();
         let check_fields: Option<Vec<usize>> = if siblings.is_empty() {
             None
@@ -1250,7 +1253,11 @@ fn analyze_match_tuple_pattern(
         // narrowed field types so the narrowed result carries field-level precision.
         if !current_binding_sets.is_empty() {
             let narrowed_tuple_id = program.register_tuple(tuple_name, narrowed_fields);
-            successful_tuple_ids.push(program.register_type(Type::Tuple(narrowed_tuple_id)));
+            let narrowed = program.register_type(Type::Tuple(narrowed_tuple_id));
+            successful_tuple_ids.push(match within {
+                Some(member) => super::narrowing::meet(vec![*member, narrowed], program),
+                None => narrowed,
+            });
             binding_sets.extend(current_binding_sets);
         }
     }
@@ -1281,13 +1288,14 @@ fn find_matching_match_tuples(
     // A `_` value may be any tuple at all: it is the partial `()` for this purpose.
     if is_top(value_type_id, program) {
         return Ok(partial_as_match_tuple(program, tuple, &None, &[])
+            .map(|(tuple_id, field_mappings)| (tuple_id, field_mappings, None))
             .into_iter()
             .collect());
     }
 
     let mut matching_types = Vec::new();
 
-    for source in extract_field_sources(program, value_type_id) {
+    for (source, within) in pattern_sources(program, value_type_id) {
         let candidate = match source {
             FieldSource::Tuple(tuple_id) => check_match_tuple_match(program, tuple, tuple_id)?
                 .map(|field_mappings| (tuple_id, field_mappings)),
@@ -1295,7 +1303,9 @@ fn find_matching_match_tuples(
                 partial_as_match_tuple(program, tuple, &name, &fields)
             }
         };
-        matching_types.extend(candidate);
+        matching_types.extend(
+            candidate.map(|(tuple_id, field_mappings)| (tuple_id, field_mappings, within)),
+        );
     }
 
     Ok(matching_types)
@@ -1904,9 +1914,7 @@ fn find_types_with_fields_and_name(
 
     let mut matches = Vec::new();
 
-    let field_sources = extract_field_sources(program, value_type_id);
-
-    for source in field_sources {
+    for (source, _) in pattern_sources(program, value_type_id) {
         match source {
             FieldSource::Tuple(tuple_id) => {
                 let tuple_info = program
@@ -2038,12 +2046,51 @@ fn extract_field_sources(program: &Program, type_id: usize) -> Vec<FieldSource> 
     }
 }
 
-/// Whether the type has a partial member, which a tuple pattern can only match by a runtime
-/// test: a partial is never a concrete tuple.
+/// Whether the type has a partial member — or one involving a type variable, tested as the
+/// partial `()` — which a tuple pattern can only match by a runtime test: neither is a
+/// concrete tuple.
 fn has_partial_sources(program: &Program, type_id: usize) -> bool {
-    extract_field_sources(program, type_id)
+    pattern_sources(program, type_id)
         .iter()
-        .any(|source| matches!(source, FieldSource::Partial { .. }))
+        .any(|(source, _)| matches!(source, FieldSource::Partial { .. }))
+}
+
+/// The field sources a tuple or partial pattern is tested for in a value of this type, each
+/// with the member involving a type variable it came from, if any. A variable could be any
+/// tuple, so it is the partial `()`, as the top type is; an intersection's values lie in its
+/// known member, so that member's sources stand for it, or `()` when it has none.
+fn pattern_sources(program: &Program, type_id: usize) -> Vec<(FieldSource, Option<usize>)> {
+    let open = || FieldSource::Partial {
+        name: None,
+        fields: Vec::new(),
+    };
+    match program.lookup_type(type_id) {
+        Some(Type::Annotated { base, .. }) => pattern_sources(program, *base),
+        Some(Type::Union(members)) => members
+            .iter()
+            .flat_map(|&member| pattern_sources(program, member))
+            .collect(),
+        Some(Type::Variable(_)) => vec![(open(), Some(type_id))],
+        Some(Type::Intersection(members)) => {
+            let known: Vec<usize> = members
+                .iter()
+                .copied()
+                .filter(|&member| !matches!(program.lookup_type(member), Some(Type::Variable(_))))
+                .collect();
+            if known.is_empty() {
+                return vec![(open(), Some(type_id))];
+            }
+            known
+                .into_iter()
+                .flat_map(|member| extract_field_sources(program, member))
+                .map(|source| (source, Some(type_id)))
+                .collect()
+        }
+        _ => extract_field_sources(program, type_id)
+            .into_iter()
+            .map(|source| (source, None))
+            .collect(),
+    }
 }
 
 /// Check if a type is a union

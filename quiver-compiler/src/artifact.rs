@@ -801,6 +801,12 @@ fn fingerprint_type(type_id: usize, program: &Program, memo: &mut HashMap<usize,
                 fingerprint_type(*member, program, memo).hash(&mut hasher);
             }
         }
+        Type::Intersection(members) => {
+            13u8.hash(&mut hasher);
+            for member in members {
+                fingerprint_type(*member, program, memo).hash(&mut hasher);
+            }
+        }
         Type::Annotated {
             base,
             exact,
@@ -1360,7 +1366,7 @@ fn type_children(ty: &Type) -> Vec<usize> {
         | Type::Variable(_)
         | Type::Top
         | Type::Tuple(_) => Vec::new(),
-        Type::Union(members) => members.clone(),
+        Type::Union(members) | Type::Intersection(members) => members.clone(),
         Type::Partial { fields, .. } => fields.iter().map(|(_, id)| *id).collect(),
         Type::Callable {
             parameter,
@@ -1754,7 +1760,7 @@ fn collect_type_children(ty: &Type, closure: &mut Closure, queue: &mut Vec<Item>
                 add_type(*states, closure, queue);
             }
         }
-        Type::Union(members) => {
+        Type::Union(members) | Type::Intersection(members) => {
             for member in members {
                 add_type(*member, closure, queue);
             }
@@ -1892,7 +1898,9 @@ fn type_refs(ty: &Type) -> Vec<TypeRef> {
             .chain(states.iter())
             .map(|type_id| TypeRef::Type(*type_id))
             .collect(),
-        Type::Union(members) => members.iter().map(|id| TypeRef::Type(*id)).collect(),
+        Type::Union(members) | Type::Intersection(members) => {
+            members.iter().map(|id| TypeRef::Type(*id)).collect()
+        }
         Type::Annotated { base, entries, .. } => std::iter::once(TypeRef::Type(*base))
             .chain(
                 entries

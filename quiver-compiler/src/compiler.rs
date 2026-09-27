@@ -1602,6 +1602,30 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     }
 
     /// Get type without nil variants
+    /// The nil a step of this (nil-holding) type fails with: its nil members, rows kept, and
+    /// each type variable's own nil, `'t & []` — which is nil exactly when `'t` holds it, so a
+    /// generic step that fails adds nothing its value's type did not already have. A member
+    /// holding nil among other values (the top type, `()`) fails with plain nil.
+    fn nil_part(&mut self, type_id: usize) -> usize {
+        let nil = self.program.register_type(Type::nil());
+        let members = match self.program.lookup_type(type_id) {
+            Some(Type::Union(members)) => members.clone(),
+            _ => vec![type_id],
+        };
+        let mut nils = Vec::new();
+        for member in members {
+            match self.program.lookup_type(member) {
+                Some(Type::Variable(_) | Type::Intersection(_)) if self.contains_nil(member) => {
+                    nils.push(narrowing::meet(vec![member, nil], self.program));
+                }
+                Some(t) if t.is_nil_deep(&*self.program) => nils.push(member),
+                Some(_) if self.contains_nil(member) => nils.push(nil),
+                _ => {}
+            }
+        }
+        typing::union_type_ids(self.program, nils)
+    }
+
     fn without_nil(&mut self, type_id: usize) -> usize {
         if let Some(ty) = self.program.lookup_type(type_id) {
             let without_nil = ty.without_nil(&*self.program);
@@ -3087,7 +3111,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // Compatibility treats a type variable as matching anything, so a generic function's
             // own type parameters are held rigid first: each stands in as a distinct opaque type
             // (a field-less tuple whose name no program can spell), which a body only fits by keeping
-            // it where the declaration has it — whatever the parameter is instantiated to.
+            // it where the declaration has it — whatever the parameter is instantiated to. It may
+            // be instantiated with nil, so its stand-in holds nil too: a body failing on a `'t`
+            // step (its `'t & []`) fits only a declared result admitting nil.
+            let nil = self.program.register_type(Type::nil());
             let rigid: HashMap<String, usize> = function
                 .type_parameters
                 .iter()
@@ -3096,7 +3123,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     let opaque = self
                         .program
                         .register_tuple(Some(format!("'{variable}")), Vec::new());
-                    (variable, self.program.register_type(Type::Tuple(opaque)))
+                    let opaque = self.program.register_type(Type::Tuple(opaque));
+                    (variable, typing::union_type_ids(self.program, vec![opaque, nil]))
                 })
                 .collect();
             let types_match = body_type == expected_return_type || {
@@ -3772,10 +3800,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 return Err(Error::MatchOnlyNil);
             }
             if is_last_branch {
+                // A failure's type is its nil: typed nils with their rows, and a failing
+                // generic step's `'t & []`.
                 last_condition_nils = condition
                     .failures
                     .iter()
-                    .flat_map(|failure| annotations::nil_members(self.program, failure.nil_type))
+                    .map(|failure| failure.nil_type)
                     .collect();
             }
             // Where the failures go: the next branch (or, for the last branch, whatever follows
@@ -4459,11 +4489,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             quiver_core::bytecode::SiteKind::NilResult,
                         );
                     }
-                    let mut nils = annotations::nil_members(self.program, result.ty);
-                    if nils.is_empty() {
-                        nils.push(self.program.register_type(Type::nil()));
-                    }
-                    let nil_type = typing::union_type_ids(self.program, nils);
+                    let nil_type = self.nil_part(result.ty);
                     let truthy = self.without_nil(result.ty);
                     if self.is_never(truthy) {
                         // Always nil: the step always fails, and nothing after it runs.

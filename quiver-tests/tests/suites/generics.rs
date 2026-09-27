@@ -639,7 +639,7 @@ fn test_type_test_on_a_type_variable_is_checked_at_runtime() {
         .expect("[[], 3]");
     quiver()
         .evaluate("f = #<'t>['t, 't] { $ ~> =[x, ('int & y)] }; f")
-        .expect_type("#['t, 't] -> (['t, 't] | [])");
+        .expect_type("#['t, 't] -> (['t, ('t & 'int)] | [])");
     quiver()
         .evaluate(
             "f = #<'t>['t, 't] { $ ~> =[x, ('int & y)] ~> [~, y] }; [f [1, 2], f [<01>, <02>]]",
@@ -668,4 +668,86 @@ fn test_type_test_on_a_type_variable_leaves_the_block_fallible() {
              [f %list{1}, f Nil, f %list{<01>} ~> { =[] => IsNil | NotNil }]",
         )
         .expect("[Int, Empty, IsNil]");
+}
+
+// A generic body's knowledge of a `'t` value is kept as an intersection, `'t & X`, computed
+// once `'t` is known.
+
+#[test]
+fn test_narrowing_a_type_variable_meets_it() {
+    quiver()
+        .evaluate("#<'t>'t { $ ~> =('int & n); n }")
+        .expect_type("#'t -> (('t & 'int) | [])");
+    // Instantiated, the intersection is computed: an int stays, a binary never matches.
+    quiver()
+        .evaluate("f = #<'t>'t { $ ~> =('int & n); n }; g = #'int { f $ }; g")
+        .expect_type("#'int -> ('int | [])");
+    quiver()
+        .evaluate("f = #<'t>'t { $ ~> =('int & n); n }; h = #'bin { f $ }; h")
+        .expect_type("#'bin -> []");
+    // Written, it is checked like any parameter type.
+    quiver()
+        .evaluate("k = #<'t>('t & 'int) { $ }; k 5")
+        .expect("5");
+    quiver()
+        .evaluate("k = #<'t>('t & 'int) { $ }; k <01>")
+        .expect_error_containing("'bin is not 'int");
+}
+
+#[test]
+fn test_a_type_variable_step_fails_on_nil() {
+    // `'t` may be instantiated with nil, so a `'t` step is tested like any fallible one.
+    quiver()
+        .evaluate("f = #<'t>'t { { $; Reached } }; [f [], f 1]")
+        .expect("[[], Reached]");
+    // Its failure is `'t`'s own nil, which is nil only where `'t` holds it.
+    quiver()
+        .evaluate("#<'t>'t { { $; Reached } }")
+        .expect_type("#'t -> (('t & []) | Reached)");
+    quiver()
+        .evaluate("f = #<'t>'t { { $; Reached } }; g = #'int { f $ }; g")
+        .expect_type("#'int -> Reached");
+    quiver()
+        .evaluate("f = #<'t>'t { { $; Reached } }; g = #('int | []) { f $ }; g")
+        .expect_type("#('int | []) -> (Reached | [])");
+    // A failing step whose value is the result adds nothing to its type.
+    quiver()
+        .evaluate("#<'t>'t { | $ }")
+        .expect_type("#'t -> 't");
+    quiver()
+        .evaluate("%iter.fold [%list.iter %list{ 1, 2 }, [], #{ $1 }]")
+        .expect("2");
+}
+
+#[test]
+fn test_a_declared_result_must_admit_a_type_variable_step_failing() {
+    quiver()
+        .evaluate("#<'t>'t -> 'int { $; 5 }")
+        .expect_type_mismatch();
+    quiver()
+        .evaluate("#<'t>'t -> ('int | []) { $; 5 }")
+        .expect_type("#'t -> ('int | [])");
+}
+
+#[test]
+fn test_patterns_test_a_type_variable_value_for_their_own_shape() {
+    quiver()
+        .evaluate("f = #<'t>'t { $ ~> { =[] => Nil | No } }; [f [], f 1, f [x: 1]]")
+        .expect("[Nil, No, No]");
+    quiver()
+        .evaluate("f = #<'t>'t { $ ~> { =[x: a] => a | No } }; [f [x: 5], f 1, f [y: 1]]")
+        .expect("[5, No, No]");
+    quiver()
+        .evaluate("f = #<'t>'t { $ ~> { =(x: a) => a | No } }; [f [x: 5], f 1]")
+        .expect("[5, No]");
+    quiver()
+        .evaluate("f = #<'t>'t { $ ~> { =(\\[] & t) => t | No } }; [f [], f 1]")
+        .expect("[No, 1]");
+    // The match's value keeps the variable, met with the pattern's shape.
+    quiver()
+        .evaluate("#<'t>'t { $ ~> { =[x: a] => ~ | No } }")
+        .expect_type("#'t -> (('t & [x: _]) | No)");
+    quiver()
+        .evaluate("f = #<'t>'t -> 't { $ ~> { =[x: _] => ~ | $ } }; f [x: 1]")
+        .expect("[x: 1]");
 }

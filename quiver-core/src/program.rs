@@ -649,6 +649,9 @@ impl Program {
         let mut next = || parts.next().expect("a part for every part of the type");
         let rebuilt = match typ {
             Type::Union(members) => Type::Union(members.iter().map(|_| next()).collect()),
+            Type::Intersection(members) => {
+                Type::Intersection(members.iter().map(|_| next()).collect())
+            }
             Type::Tuple(tuple_id) => {
                 let info = self.tuples[tuple_id].clone();
                 let fields = info

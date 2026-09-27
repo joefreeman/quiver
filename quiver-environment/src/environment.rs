@@ -192,6 +192,12 @@ fn import_type_value(
                 .map(|t| import_type(program, src, type_remap, tuple_remap, t))
                 .collect(),
         ),
+        Type::Intersection(type_ids) => Type::Intersection(
+            type_ids
+                .into_iter()
+                .map(|t| import_type(program, src, type_remap, tuple_remap, t))
+                .collect(),
+        ),
         Type::Callable {
             parameter,
             result,

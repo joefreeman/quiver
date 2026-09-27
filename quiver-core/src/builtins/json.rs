@@ -282,6 +282,7 @@ fn decode_direct<E: Effect>(
         | Type::Resource(_)
         | Type::Reference
         | Type::Variable(_)
+        | Type::Intersection(_)
         | Type::Top => Ok(None),
     }
 }
@@ -584,6 +585,7 @@ fn encode<E: Effect>(
         | Type::Resource(_)
         | Type::Reference
         | Type::Variable(_)
+        | Type::Intersection(_)
         | Type::Top => Ok(None),
     }
 }

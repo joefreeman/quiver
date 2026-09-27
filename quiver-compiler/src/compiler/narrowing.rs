@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use quiver_core::binders::{BinderPair, is_binder};
 use quiver_core::binders::{close_against, has_free_cycles};
 use quiver_core::program::Program;
-use quiver_core::types::{Type, TypeLookup, is_compatible, types_overlap};
+use quiver_core::types::{Type, TypeLookup, is_compatible, is_subsumed_by, types_overlap};
 
 use super::provenance::Provenance;
 use super::scopes::{Scope, lookup_variable};
@@ -540,8 +540,13 @@ fn intersect_pair(a: usize, b: usize, stacks: &mut Walk, program: &mut Program) 
         // meeting it is resolved first, below, as it is against any concrete type.
         (Type::Top, tb) if !matches!(tb, Type::Cycle(_)) => b,
         (ta, Type::Top) if !matches!(ta, Type::Cycle(_)) => a,
-        // A type variable is opaque; keep the value's own type rather than discard genericity.
-        (Type::Variable(_), _) | (_, Type::Variable(_)) => a,
+        // A type variable meets a recursive reference only through the union the reference
+        // names, which this context may not know; keep `a` (sound, `a ∩ b ⊆ a`).
+        (Type::Variable(_) | Type::Intersection(_), Type::Cycle(_))
+        | (Type::Cycle(_), Type::Variable(_) | Type::Intersection(_)) => a,
+        // Otherwise a type variable meets the other side symbolically, until it is known.
+        (Type::Variable(_) | Type::Intersection(_), _)
+        | (_, Type::Variable(_) | Type::Intersection(_)) => meet(vec![a, b], program),
         // A concrete type meeting `b`'s recursive reference meets the union it names — keeping
         // `a` would leave `a`'s (wider) type where the intersection's own recursion belongs:
         // `('l<'t | []> | []) ∩ 'l<'t>`, flattened with its tail closed as `'l<'t | []>`, keeps
@@ -663,6 +668,59 @@ fn intersect_pair(a: usize, b: usize, stacks: &mut Walk, program: &mut Program) 
                 never
             }
         }
+    }
+}
+
+/// The intersection of `members`, in `Type::Intersection`'s normal form: the variables among
+/// them (by name, distinct) and the intersection of the rest, computed outright. A union among
+/// the rest distributes (`'t & (A | B)` is `('t & A) | ('t & B)`), disjoint rest is `never`,
+/// and without variables the rest is the answer. A rest with a free recursive reference cannot
+/// stand apart from the union it names, so it is dropped, leaving a wider but sound answer.
+pub fn meet(members: Vec<usize>, program: &mut Program) -> usize {
+    let mut variables: Vec<(String, usize)> = Vec::new();
+    let mut rest: Option<usize> = None;
+    let mut pending = members;
+    while let Some(member) = pending.pop() {
+        match program.lookup_type(member).cloned() {
+            Some(Type::Intersection(inner)) => pending.extend(inner),
+            Some(Type::Variable(name)) => {
+                if !variables.iter().any(|(existing, _)| *existing == name) {
+                    variables.push((name, member));
+                }
+            }
+            Some(Type::Top) => {}
+            _ => {
+                rest = Some(match rest {
+                    None => member,
+                    Some(acc) => intersect_types(acc, member, program),
+                });
+            }
+        }
+    }
+    variables.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let variables: Vec<usize> = variables.into_iter().map(|(_, id)| id).collect();
+    let rest = rest.filter(|&rest| !has_free_cycles(rest, program));
+    let Some(rest) = rest else {
+        return match variables[..] {
+            [] => program.register_type(Type::Top),
+            [only] => only,
+            _ => program.register_type(Type::Intersection(variables)),
+        };
+    };
+    if variables.is_empty() {
+        return rest;
+    }
+    match program.lookup_type(rest).cloned() {
+        Some(Type::Union(members)) => {
+            let pieces = members
+                .into_iter()
+                .map(|member| meet(variables.iter().copied().chain([member]).collect(), program))
+                .collect();
+            union_type_ids(program, pieces)
+        }
+        _ => program.register_type(Type::Intersection(
+            variables.into_iter().chain([rest]).collect(),
+        )),
     }
 }
 
@@ -850,6 +908,19 @@ fn subtract_one(a: usize, b: usize, stacks: &mut Walk, program: &mut Program) ->
         return vec![a];
     }
 
+    // A type variable could be instantiated with anything, so the lenient checks below, which
+    // give it the benefit of the doubt, would subtract what is not known to be there. Only a
+    // proven containment removes it. (A variable deeper inside is reached by the structural
+    // difference below, field by field.)
+    let variable = |ty: &Type| matches!(ty, Type::Variable(_) | Type::Intersection(_));
+    if variable(&ta) || variable(&tb) {
+        return if is_subsumed_by(a, b, &*program) {
+            vec![]
+        } else {
+            vec![a]
+        };
+    }
+
     // `is_compatible`/`types_overlap` are exact only for cycle-free types; on a tuple with
     // recursive fields they traverse the `Cycle` optimistically (matching anything), which would
     // unsoundly empty the difference. For cycle-bearing types, skip these shortcuts and rely on
@@ -976,10 +1047,12 @@ pub fn pattern_constrains_recursive_field(
 
 /// Whether `pattern` tests a position whose type is, or has as a member, a type variable.
 ///
-/// Narrowing keeps a variable whole — `='int` on a `'t` narrows to `'t` — so the narrowed type
-/// cannot reflect such a test, and a complement computed from it would exclude values that
-/// failed it. Binders and placeholders test nothing, and a tuple pattern's fields are checked
-/// against the field types, so `=Nil` and `=Cons[h, t]` over `Nil | Cons['t, ^]` stay exact.
+/// Narrowing meets a variable symbolically — `='int` on a `'t` narrows to `'t & 'int` — and
+/// nothing can be subtracted from it (`'t` less `'int` has no spelling), so a complement
+/// computed from such a test would be no narrower than the variable, and one computed through
+/// the lenient checks would exclude values that failed it. Binders and placeholders test
+/// nothing, and a tuple pattern's fields are checked against the field types, so `=Nil` and
+/// `=Cons[h, t]` over `Nil | Cons['t, ^]` stay exact.
 pub fn pattern_constrains_variable(
     pattern: &ast::Match,
     value_type: usize,
@@ -988,7 +1061,12 @@ pub fn pattern_constrains_variable(
     let has_variable_member = |program: &mut Program| {
         get_type_variants(value_type, program)
             .into_iter()
-            .any(|member| matches!(program.lookup_type(member), Some(Type::Variable(_))))
+            .any(|member| {
+                matches!(
+                    program.lookup_type(member),
+                    Some(Type::Variable(_) | Type::Intersection(_))
+                )
+            })
     };
     match pattern {
         ast::Match::Identifier(..) | ast::Match::Placeholder | ast::Match::Ripple => false,

@@ -111,6 +111,14 @@ pub enum Type {
     /// short-circuit like any other nilable one.
     #[serde(rename = "top")]
     Top,
+    /// The values belonging to every member, `'t & 'u`, kept symbolic only while a type
+    /// variable is among them — an intersection of known types is computed outright. It is
+    /// what a generic body knows of a `'t` value after a match (`'t & ['int]`), and the nil a
+    /// failing `'t` step leaves (`'t & []`: nil exactly when `'t` holds it). Substituting the
+    /// variables computes it. Its members are the variables, sorted and distinct, followed by
+    /// at most one other type, which is neither a union, an intersection nor a reference.
+    #[serde(rename = "meet")]
+    Intersection(Vec<usize>),
 }
 
 impl Type {
@@ -151,6 +159,7 @@ impl Type {
                 omittable: omittable.clone(),
             },
             Type::Union(members) => Type::Union(members.iter().map(ty).collect()),
+            Type::Intersection(members) => Type::Intersection(members.iter().map(ty).collect()),
             Type::Annotated {
                 base,
                 exact,
@@ -309,6 +318,8 @@ enum TypeRepr {
     Variable(String),
     #[serde(rename = "top")]
     Top,
+    #[serde(rename = "meet")]
+    Intersection(Vec<usize>),
 }
 
 impl From<Type> for TypeRepr {
@@ -341,6 +352,7 @@ impl From<Type> for TypeRepr {
             Type::Resource(name) => TypeRepr::Resource(name),
             Type::Variable(name) => TypeRepr::Variable(name),
             Type::Top => TypeRepr::Top,
+            Type::Intersection(members) => TypeRepr::Intersection(members),
         }
     }
 }
@@ -375,6 +387,7 @@ impl From<TypeRepr> for Type {
             TypeRepr::Resource(name) => Type::Resource(name),
             TypeRepr::Variable(name) => Type::Variable(name),
             TypeRepr::Top => Type::Top,
+            TypeRepr::Intersection(members) => Type::Intersection(members),
         }
     }
 }
@@ -410,14 +423,15 @@ impl Type {
         matches!(self, Type::Tuple(id) if *id == OK)
     }
 
-    /// This type's parts, in a fixed order: a union's members, a tuple's or partial type's field
+    /// This type's parts, in a fixed order: a union's or intersection's members, a tuple's or
+    /// partial type's field
     /// types, a function type's parameter, result, receive and (when known) states, a process
     /// type's stated send, receive and state, an annotated type's base and entry types. A
     /// binder's parts sit one binder deeper than it (`binders::is_binder`).
     /// `Program::with_parts` rebuilds a type from replacements in the same order.
     pub fn parts(&self, lookup: &impl TypeLookup) -> Vec<usize> {
         match self {
-            Type::Union(members) => members.clone(),
+            Type::Union(members) | Type::Intersection(members) => members.clone(),
             Type::Tuple(tuple_id) => lookup
                 .lookup_tuple(*tuple_id)
                 .map(|info| info.fields.iter().map(|&(_, field)| field).collect())
@@ -516,14 +530,20 @@ impl Type {
         }
     }
 
-    /// Whether this non-union type has nil among its values: nil itself, the top type, or
+    /// Whether this non-union type may have nil among its values: nil itself, the top type,
     /// the unnamed partial with no fields, `()` — the only partial nil satisfies, having
-    /// neither a name nor fields. Sees through annotation rows.
+    /// neither a name nor fields — or a type variable, which may be instantiated with a type
+    /// holding it. An intersection may if each member may. Sees through annotation rows.
     fn holds_nil<T: TypeLookup>(&self, lookup: &T) -> bool {
         match self {
             Type::Tuple(id) => *id == NIL,
-            Type::Top => true,
+            Type::Top | Type::Variable(_) => true,
             Type::Partial { name, fields } => name.is_none() && fields.is_empty(),
+            Type::Intersection(members) => members.iter().all(|&member| {
+                lookup
+                    .lookup_type(member)
+                    .is_some_and(|t| t.holds_nil(lookup))
+            }),
             Type::Annotated { base, .. } => lookup
                 .lookup_type(*base)
                 .is_some_and(|base_type| base_type.holds_nil(lookup)),
@@ -531,26 +551,34 @@ impl Type {
         }
     }
 
-    /// Return a type without NIL variants (annotated nils count as nil). The top type and
-    /// `()` have no spelling for "everything but nil", so they stay whole.
+    /// Return a type without NIL variants (annotated nils count as nil). The top type, `()`
+    /// and a type variable have no spelling for "everything but nil", so they stay whole, as
+    /// does an intersection unless it is some variable's nil (`'t & []`).
     pub fn without_nil<T: TypeLookup>(&self, lookup: &T) -> Type {
         match self {
-            Type::Tuple(id) if *id == NIL => Type::never(),
-            Type::Annotated { .. } if self.is_nil_deep(lookup) => Type::never(),
             Type::Union(type_ids) => {
                 let filtered: Vec<usize> = type_ids
                     .iter()
-                    .filter(|&&id| {
-                        !lookup
-                            .lookup_type(id)
-                            .map(|t| t.is_nil_deep(lookup))
-                            .unwrap_or(false)
-                    })
+                    .filter(|&&id| !lookup.lookup_type(id).is_some_and(|t| t.is_only_nil(lookup)))
                     .copied()
                     .collect();
                 Type::Union(filtered)
             }
+            _ if self.is_only_nil(lookup) => Type::never(),
             _ => self.clone(),
+        }
+    }
+
+    /// Whether every value of this non-union type is nil: nil (annotated or not), or an
+    /// intersection with nil among its members.
+    fn is_only_nil<T: TypeLookup>(&self, lookup: &T) -> bool {
+        match self {
+            Type::Intersection(members) => members.iter().any(|&member| {
+                lookup
+                    .lookup_type(member)
+                    .is_some_and(|t| t.is_nil_deep(lookup))
+            }),
+            _ => self.is_nil_deep(lookup),
         }
     }
 
@@ -737,10 +765,41 @@ fn check_type_relation<T: TypeLookup>(
         // Resource types must have matching identifiers
         (Type::Resource(r1), Type::Resource(r2)) => r1 == r2,
 
+        // An intersection on the right: every member must hold `self`'s values. For overlap, a
+        // shared value lies in each member, so each must overlap — a necessary condition, so an
+        // over-approximation, which is the safe side for overlap. A union on the left is split
+        // first, by its own arm.
+        (self_type, Type::Intersection(members)) if !matches!(self_type, Type::Union(_)) => {
+            members.iter().all(|&member| {
+                check_type_relation(self_id, member, lookup, mode, assumptions, stacks)
+            })
+        }
+        // An intersection on the left: its values lie in every member, so one member fitting
+        // the pattern suffices; for overlap, every member must overlap it. A union on the right
+        // is tried member by member, by its own arm.
+        (Type::Intersection(members), pattern) if !matches!(pattern, Type::Union(_)) => {
+            match mode {
+                UnionMode::All | UnionMode::Subsumption => members.iter().any(|&member| {
+                    check_type_relation(member, pattern_id, lookup, mode, assumptions, stacks)
+                }),
+                UnionMode::Any => members.iter().all(|&member| {
+                    check_type_relation(member, pattern_id, lookup, mode, assumptions, stacks)
+                }),
+            }
+        }
+
         // Type variables match anything, except when proving subsumption, where a variable
         // is rigid: it stands for one unknown type, so only it is known to hold its values.
-        (Type::Variable(v1), Type::Variable(v2)) if mode == UnionMode::Subsumption => v1 == v2,
-        (Type::Variable(_), _) | (_, Type::Variable(_)) => mode != UnionMode::Subsumption,
+        // A union on the other side is split by its own arm.
+        (Type::Variable(_), _) | (_, Type::Variable(_)) if mode != UnionMode::Subsumption => {
+            true
+        }
+        (Type::Variable(v1), Type::Variable(v2)) => v1 == v2,
+        (Type::Variable(_), other) | (other, Type::Variable(_))
+            if !matches!(other, Type::Union(_)) =>
+        {
+            false
+        }
 
         // When both are cycles with same depth, they refer to the same recursive type —
         // presumed, unless proving subsumption, where both must resolve within the walk.

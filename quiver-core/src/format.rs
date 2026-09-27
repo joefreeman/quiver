@@ -194,6 +194,23 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
                 }
             }
         }
+        Type::Intersection(type_ids) => {
+            let formatted = type_ids
+                .iter()
+                .map(|&id| {
+                    lookup
+                        .lookup_type(id)
+                        .map(|t| format_type_impl(lookup, t, true))
+                        .unwrap_or_else(|| format!("Type{}", id))
+                })
+                .collect::<Vec<_>>()
+                .join(" & ");
+            if nested {
+                format!("({})", formatted)
+            } else {
+                formatted
+            }
+        }
         Type::Resource(name) => format!("+{}", name),
         // A `#N` suffix is the compiler's per-definition uniquifier, not part of the
         // source-level name.
