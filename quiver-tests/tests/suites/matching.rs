@@ -207,6 +207,14 @@ fn test_pin_path_captured_in_closure() {
 }
 
 #[test]
+fn test_pin_in_binding_captured_in_closure() {
+    // The leading-binding spelling pins exactly as the `~> =` spelling does.
+    quiver()
+        .evaluate("y = 2; f = #'int { [_, ^y] = [1, $]; Ok }; [f 2, f 3]")
+        .expect("[Ok, []]");
+}
+
+#[test]
 fn test_pin_path_through_union_root() {
     // The field sits at different positions across the union's members, so the pin's
     // access step resolves by name at runtime.

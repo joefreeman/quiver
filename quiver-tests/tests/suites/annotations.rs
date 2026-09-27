@@ -43,6 +43,23 @@ fn test_doc_on_function_retrieved_without_calling() {
 }
 
 #[test]
+fn test_block_annotation_in_closure_captures() {
+    // A nested block's annotation evaluates in the body, so it captures like any expression.
+    quiver()
+        .evaluate("y = \"hi\"; f = #'int { { :doc y; [$] } ~> :doc }; f 1")
+        .expect("\"hi\"");
+}
+
+#[test]
+fn test_nested_function_annotation_captures_at_enclosing_level() {
+    // A literal's annotations attach to its closure and evaluate where the literal is, so
+    // inside another function they are that function's captures.
+    quiver()
+        .evaluate("y = \"hi\"; f = #'int { #'int { :doc y; $ } }; f 1 ~> :doc")
+        .expect("\"hi\"");
+}
+
+#[test]
 fn test_function_annotation_does_not_affect_calls() {
     quiver()
         .evaluate("f = #'int { :doc \"Doubles\"; [~, 2] ~> __integer_multiply__ ~ }; 21 ~> f ~")

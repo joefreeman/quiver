@@ -69,6 +69,19 @@ struct FreeVariableCollector<'a> {
 
 impl<'a> FreeVariableCollector<'a> {
     fn visit_block(&mut self, block: &ast::Block) {
+        self.visit_annotations(block);
+        self.visit_branches(block);
+    }
+
+    /// A block's annotation prefix (`:key value`) evaluates wherever the block does, so its
+    /// values capture like any other expression in the body.
+    fn visit_annotations(&mut self, block: &ast::Block) {
+        for annotation in &block.annotations {
+            self.visit_chain(&annotation.value);
+        }
+    }
+
+    fn visit_branches(&mut self, block: &ast::Block) {
         for branch in &block.branches {
             self.visit_sequence(&branch.condition);
             if let Some(ref consequence) = branch.consequence {
@@ -86,6 +99,10 @@ impl<'a> FreeVariableCollector<'a> {
     fn visit_chain(&mut self, chain: &ast::Chain) {
         for term in &chain.terms {
             self.visit_term(term);
+        }
+        // A leading binding (`[x, ^y] = …`) may pin, exactly as the `~> =[x, ^y]` spelling.
+        if let Some(pattern) = &chain.binding {
+            self.visit_match(pattern);
         }
     }
 
@@ -125,9 +142,12 @@ impl<'a> FreeVariableCollector<'a> {
                 // The nested literal's body is one function level deeper: its own `$` is not
                 // ours, and an `$$` inside it refers to *this* function's parameter (bound
                 // here, captured by the literal itself), so only deeper runs are free.
+                // Its annotation prefix, though, attaches to the closure and is evaluated
+                // where the literal is, so it belongs to this level.
                 if let Some(body) = &func.body {
+                    self.visit_annotations(body);
                     self.function_depth += 1;
-                    self.visit_block(body);
+                    self.visit_branches(body);
                     self.function_depth -= 1;
                 }
             }
@@ -178,7 +198,15 @@ impl<'a> FreeVariableCollector<'a> {
             }
             // A module reference needs no capture: it is a compile-time-known value, so
             // the body emits the single constant that names it, wherever it appears.
-            _ => {}
+            Some(ast::AccessSource::Import(_)) => {}
+            Some(
+                ast::AccessSource::Ripple
+                | ast::AccessSource::Self_
+                | ast::AccessSource::Builtin(_)
+                | ast::AccessSource::TailCall(None)
+                | ast::AccessSource::TailCallRipple,
+            )
+            | None => {}
         }
     }
 
