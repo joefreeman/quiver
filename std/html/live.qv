@@ -1305,8 +1305,7 @@ prune_after = %time{ 45s }
 
 // The entries registered at or after the cutoff (order irrelevant).
 prune_entries = #[(items): 'reg_entries, (cutoff): '%time.mono] {
-  cutoff = $cutoff
-  %list.filter [$items, #{ %time.compare [$at, cutoff] ~> =(0 | 1); $ }]
+  cutoff = $cutoff; %list.filter [$items, #{ %time.compare [$at, cutoff] ~> =(0 | 1); $ }]
 }
 
 // Remove and answer a token's entry: `[found: Found[pid] | Missing, rest: …]`.
@@ -1538,8 +1537,8 @@ alife = #[
 
 classify_frame = #'%str -> 'fclass {
   | %json.parse $
-  ~> ='%json
-  ~> =Array[Cons[_, Cons[vidj, Cons[patchesj, Nil]]]]
+    ~> ='%json
+    ~> =Array[Cons[_, Cons[vidj, Cons[patchesj, Nil]]]]
 
     patchesj ~> jval ~> =Array[Cons[pj, Nil]]
     pj ~> jval ~> =Array[Cons[tagj, Cons[pathj, Cons[htmlj, Nil]]]]

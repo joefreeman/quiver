@@ -154,10 +154,11 @@ fn render_type_parameters(params: &[String]) -> String {
 /// `skip_first_leading` drops the leading trivia of the first chain — used when a caller (a
 /// multi-branch block) has already emitted it elsewhere (before the branch's `|`).
 ///
-/// `continuation_nest` indents the *continuation* chains (the 2nd onward) by that many spaces while
-/// the first chain stays at the sequence's indent. A branch body uses 2 so its wrapped steps align
-/// under the content past the `| `, while a body that is a single chain ending in a block keeps that
-/// block at the bar indent — so the block's `}` lines up with the branch's `|`.
+/// `continuation_nest` indents every line the sequence breaks onto by that many spaces — its later
+/// steps and the first step's own wrapped lines alike, so a step's `~>` continuations stay in line
+/// with the steps around it. The first step itself opens on the caller's line, so it is not moved.
+/// An arm under a `| ` uses 2 so its lines align under the content past the bar (see
+/// [`arm_body_doc`]).
 ///
 /// `set_off_tall` allows blank lines around a step that breaks across lines
 /// ([`breaks_into_pipeline`]). A branch *condition* clears it: its steps are one gating unit — a
@@ -274,10 +275,10 @@ fn sequence_parts(
         }
         prev_tall = tall;
     }
-    pretty::concat(vec![
-        first,
-        pretty::nest(continuation_nest, pretty::concat(rest)),
-    ])
+    pretty::nest(
+        continuation_nest,
+        pretty::concat(vec![first, pretty::concat(rest)]),
+    )
 }
 
 /// A braced expression `{ … }`. A single branch lays its body out directly; multiple branches each
@@ -368,8 +369,24 @@ fn branch_doc(trivia: &Trivia, branch: &Branch, multi_branch: bool) -> Doc {
     let nest = if multi_branch { 2 } else { 0 };
     match &branch.consequence {
         None => {
-            let body = sequence_doc(trivia, &branch.condition, multi_branch, nest, true);
-            wrap_breaking_body(trivia, &branch.condition, body, multi_branch)
+            // A bare body under a lone branch is the block's whole body, laid out as a function
+            // body is; under a `| ` it is one arm among several, which a blank line would split.
+            // A single-chain arm keeps its wrapped lines at the bar, so a tuple it ends in closes
+            // under the `|`; only a compound arm's steps move past it, to line up with each other.
+            let arm_nest = if branch.condition.single_chain().is_some() {
+                0
+            } else {
+                nest
+            };
+            let (body, _) = arm_body_doc(
+                trivia,
+                &branch.condition,
+                multi_branch,
+                multi_branch,
+                arm_nest,
+                !multi_branch,
+            );
+            body
         }
         Some(consequence) => {
             // The guard's own wrapped lines are indented by the `nest` below rather than by
@@ -384,8 +401,14 @@ fn branch_doc(trivia: &Trivia, branch: &Branch, multi_branch: bool) -> Doc {
                 sequence_parts(trivia, &branch.condition, multi_branch, 0, false),
                 GUARD_SOFT_WIDTH,
             );
-            let body = sequence_doc(trivia, consequence, false, nest, true);
-            let body = wrap_breaking_body(trivia, consequence, body, multi_branch);
+            // A consequence opens mid-line, after the ` => `, and is placed under the arm's content
+            // by the `nest` below. A single chain breaks there, so a closing delimiter lines up with
+            // the line that opened it; the steps of a compound one go a level deeper, reading as the
+            // consequence rather than as more of the guard. They are never set off with blank
+            // lines, which would detach the later steps from the arm they belong to.
+            let steps_nest = if consequence.steps.len() > 1 { 2 } else { 0 };
+            let (body, delimited) =
+                arm_body_doc(trivia, consequence, false, multi_branch, steps_nest, false);
             // The threshold decides by width, but a guard carrying a comment or a breaking pipeline
             // forces a break of its own, and flattening that would comment out / collapse the rest of
             // the line. Either way the verdict is `forces_break`, so the two agree.
@@ -403,15 +426,9 @@ fn branch_doc(trivia: &Trivia, branch: &Branch, multi_branch: bool) -> Doc {
                     pretty::text(" => "),
                     body,
                 ]);
-                // A consequence that is already delimited carries the arm's own shape — its `}`
-                // closes at the bar, in line with the `|`. That is a body it opens itself, or the
-                // braces `wrap_breaking_body` just put around a pipeline. Anything else that breaks
-                // is data, and indents under the arm's content so its closing delimiter lines up
+                // A delimited consequence closes at the bar, in line with the `|`. Anything else
+                // that breaks indents under the arm's content, so its closing delimiter lines up
                 // with the term that opened it instead of landing in the bar's gutter.
-                let delimited = consequence.single_chain().is_some_and(|chain| {
-                    chain.terms.last().is_some_and(opens_a_body)
-                        || (multi_branch && breaks_into_pipeline(trivia, chain))
-                });
                 if delimited {
                     content
                 } else {
@@ -420,6 +437,34 @@ fn branch_doc(trivia: &Trivia, branch: &Branch, multi_branch: bool) -> Doc {
             }
         }
     }
+}
+
+/// A branch arm's body — a branch without `=>`, or a consequence — and whether it is *delimited*:
+/// a single chain that carries the arm's own shape, its closing `}` landing at the bar in line with
+/// the `|`. That is a chain ending in a body it opens itself, or a pipeline that
+/// [`wrap_breaking_body`] puts in braces.
+///
+/// Anything else lays every line it breaks onto at `nest` — its later steps and a step's own wrapped
+/// lines alike, so the arm's steps line up with each other and a step's `~>` continuations with its
+/// neighbours.
+fn arm_body_doc(
+    trivia: &Trivia,
+    sequence: &Sequence,
+    skip_first_leading: bool,
+    multi_branch: bool,
+    nest: usize,
+    set_off_tall: bool,
+) -> (Doc, bool) {
+    let delimited = sequence.single_chain().is_some_and(|chain| {
+        chain.terms.last().is_some_and(opens_a_body)
+            || (multi_branch && breaks_into_pipeline(trivia, chain))
+    });
+    let nest = if delimited { 0 } else { nest };
+    let body = sequence_doc(trivia, sequence, skip_first_leading, nest, set_off_tall);
+    (
+        wrap_breaking_body(trivia, sequence, body, multi_branch),
+        delimited,
+    )
 }
 
 /// Wrap a branch body under a `| ` bar in grouping braces when it is a single chain that will break
@@ -2631,6 +2676,46 @@ mod tests {
         assert_formats(
             "x = 5 ~> { =0 => { a; b } | c }",
             "x = 5 ~> { =0 => { a; b } | c }\n",
+        );
+    }
+
+    #[test]
+    fn compound_consequence_steps_line_up() {
+        // A consequence's later steps and its first step's `~>` continuations share one indent, a
+        // level past the arm's content, with no blank line imposed between them.
+        let source = "f = #[] { | cond => fixed [data, iadd [e2, 1], 2, \"two-digit seconds are here to make this long\"] ~> =[sec, e3]; [[m, sec], e3] | 0 }";
+        assert_formats(
+            source,
+            "f = #[] {\n  | cond => fixed [data, iadd [e2, 1], 2, \"two-digit seconds are here to make this long\"]\n      ~> =[sec, e3]\n      [[m, sec], e3]\n  | 0\n}\n",
+        );
+        assert_idempotent(source, "compound consequence with a pipeline step");
+        // Steps that do not break internally sit at the same indent.
+        assert_formats(
+            "f = #[] { | =A => x = fetch_the_value [alpha, beta]; y = combine [x, gamma, delta]; finish [x, y, epsilon, zeta] | 0 }",
+            "f = #[] {\n  | =A => x = fetch_the_value [alpha, beta]\n      y = combine [x, gamma, delta]\n      finish [x, y, epsilon, zeta]\n  | 0\n}\n",
+        );
+        // After a broken guard, the consequence's steps go a level past the guard's.
+        assert_formats(
+            "f = #[] { | first_guard_step [alpha, beta, gamma]; second_guard_step [delta, epsilon] ~> =Ok => x = fetch [a]; finish [x, y, alpha, beta, gamma, delta, epsilon, zeta] | 0 }",
+            "f = #[] {\n  | first_guard_step [alpha, beta, gamma]\n    second_guard_step [delta, epsilon] ~> =Ok => x = fetch [a]\n      finish [x, y, alpha, beta, gamma, delta, epsilon, zeta]\n  | 0\n}\n",
+        );
+    }
+
+    #[test]
+    fn compound_branch_steps_line_up_past_the_bar() {
+        // A multi-step branch without `=>` lays its first step's `~>` continuations and its later
+        // steps under the content past the `| `, not in the bar's gutter.
+        let source = "f = #[] { | fixed [data, iadd [e2, 1], 2, \"two-digit seconds are here to make this long\"] ~> =[sec, e3]; [[m, sec], e3] | 0 }";
+        assert_formats(
+            source,
+            "f = #[] {\n  | fixed [data, iadd [e2, 1], 2, \"two-digit seconds are here to make this long\"]\n    ~> =[sec, e3]\n    [[m, sec], e3]\n  | 0\n}\n",
+        );
+        assert_idempotent(source, "compound branch with a pipeline step");
+        // A single chain ending in data keeps its wrapped lines at the bar, closing its delimiter
+        // under the `|`.
+        assert_formats(
+            "f = #[] { | =A => a | build [alpha_value, beta_value, gamma_value, delta_value, epsilon_value, zeta_value, eta_value, theta] }",
+            "f = #[] {\n  | =A => a\n  | build [\n    alpha_value,\n    beta_value,\n    gamma_value,\n    delta_value,\n    epsilon_value,\n    zeta_value,\n    eta_value,\n    theta,\n  ]\n}\n",
         );
     }
 

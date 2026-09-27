@@ -49,6 +49,7 @@
 'error =
   | OutOfRange['field]
   | Expected[offset: 'int, message: '%str]
+  | InvalidPattern[offset: 'int, message: '%str]
   | UnknownZone['%str]
   | Skipped
   | Repeated
@@ -111,7 +112,7 @@ leap_year? = #'int {
 days_in_month = #[(year): 'int, (month): 'int] {
   :doc "The number of days in the month (1 to 12) of the year."
   $month ~> {
-    | =2 => { | leap_year? $year => 29 | 28 }
+    | =2 => { leap_year? $year => 29 | 28 }
     | =(4 | 6 | 9 | 11) => 30
     | 31
   }
@@ -125,7 +126,10 @@ days_in_year = #'int {
 
 // Days since the epoch of a civil date (Howard Hinnant's days_from_civil).
 days_of = #'civil {
-  y = { | icmp [$month, 2] ~> =(-1 | 0) => isub [$year, 1] | $year }
+  y = {
+    | icmp [$month, 2] ~> =(-1 | 0) => isub [$year, 1]
+    | $year
+  }
   era = fdiv [y, 400]
   yoe = isub [y, imul [era, 400]]
   mp = fmod [iadd [$month, 9], 12]
@@ -152,16 +156,19 @@ civil = #'int {
     ~> isub [~, idiv [doe, 146096]]
     ~> idiv [~, 365]
 
-  doy =
-    iadd [imul [365, yoe], idiv [yoe, 4]]
-    ~> isub [~, idiv [yoe, 100]]
-    ~> isub [doe, ~]
+  doy = iadd [imul [365, yoe], idiv [yoe, 4]] ~> isub [~, idiv [yoe, 100]] ~> isub [doe, ~]
 
   mp = idiv [iadd [imul [5, doy], 2], 153]
   day = idiv [iadd [imul [153, mp], 2], 5] ~> isub [doy, ~] ~> iadd [~, 1]
-  month = { | icmp [mp, 10] ~> =-1 => iadd [mp, 3] | isub [mp, 9] }
+  month = {
+    | icmp [mp, 10] ~> =-1 => iadd [mp, 3]
+    | isub [mp, 9]
+  }
   y = iadd [yoe, imul [era, 400]]
-  year = { | icmp [month, 2] ~> =(-1 | 0) => iadd [y, 1] | y }
+  year = {
+    | icmp [month, 2] ~> =(-1 | 0) => iadd [y, 1]
+    | y
+  }
   Date(year, month, day)
 }
 
@@ -216,7 +223,12 @@ iso_week = #'civil {
   d = days_of $
   thursday = iadd [d, isub [4, iso_day d]]
   Date(year) = civil thursday
-  week = isub [thursday, days_of [year: year, month: 1, day: 1]] ~> idiv [~, 7] ~> iadd [~, 1]
+
+  week =
+    isub [thursday, days_of [year: year, month: 1, day: 1]]
+    ~> idiv [~, 7]
+    ~> iadd [~, 1]
+
   [year: year, week: week]
 }
 
@@ -235,9 +247,7 @@ peek = #['bin, 'int] { icmp [$1, %bin.length $0] ~> =-1; %bin.get_byte [$0, $1] 
 
 // The text of `n` bytes at a position, or nil where it would run past the end.
 text_at = #['bin, 'int, 'int] {
-  e = iadd [$1, $2]
-  icmp [e, %bin.length $0] ~> =(-1 | 0)
-  Str[%bin.slice [$0, $1, e]]
+  e = iadd [$1, $2]; icmp [e, %bin.length $0] ~> =(-1 | 0); Str[%bin.slice [$0, $1, e]]
 }
 
 char_at = #['bin, 'int] { text_at [$0, $1, 1] }
@@ -249,16 +259,9 @@ byte = #'%str { %bin.get_byte [$0, 0] }
 find = #['bin, '%str, 'int] { __binary_index__ [$0, byte $1, $2] }
 
 // Whether a byte lies in the range of two one-character texts.
-between? = #['int, '%str, '%str] {
-  icmp [$0, byte $1] ~> =(0 | 1)
-  icmp [$0, byte $2] ~> =(-1 | 0)
-}
+between? = #['int, '%str, '%str] { icmp [$0, byte $1] ~> =(0 | 1); icmp [$0, byte $2] ~> =(-1 | 0) }
 
-digit = #['bin, 'int] {
-  peek $ ~> =('int & b)
-  between? [b, "0", "9"]
-  isub [b, byte "0"]
-}
+digit = #['bin, 'int] { peek $ ~> =('int & b); between? [b, "0", "9"]; isub [b, byte "0"] }
 
 // The run of decimal digits at a position, as `[value, end]` (`[acc, pos]` when empty).
 run = #['bin, 'int, 'int] {
@@ -287,6 +290,12 @@ sign_at = #['bin, 'int] {
   | [1, $1]
 }
 
+// A two-digit year, read as 1970 to 2069.
+full_year = #'int {
+  | icmp [$, 70] ~> =-1 => iadd [2000, $]
+  | iadd [1900, $]
+}
+
 pow10 = #['int, 'int] {
   | $0 ~> =0 => $1
   | ^ [isub [$0, 1], imul [$1, 10]]
@@ -303,15 +312,15 @@ pad = #[(n): 'int, (width): 'int] { pad_loop [%str.from_int $n, $width] }
 // --- construction --------------------------------------------------------------------
 
 in_range = #[(value): 'int, (min): 'int, (max): 'int, (field): 'field] {
-  | icmp [$value, $min] ~> =(0 | 1); icmp [$value, $max] ~> =(-1 | 0) => Ok
+  | icmp [$value, $min] ~> =(0 | 1)
+    icmp [$value, $max] ~> =(-1 | 0) => Ok
   | [] ~> { :error OutOfRange[$field] }
 }
 
 // Ok when the fields name a real date or time of day; nil carrying OutOfRange[field] for
 // the first that doesn't.
 valid_date = #'civil {
-  in_range [$month, 1, 12, Month]
-  in_range [$day, 1, days_in_month [$year, $month], Day]
+  in_range [$month, 1, 12, Month]; in_range [$day, 1, days_in_month [$year, $month], Day]
 }
 
 valid_time = #'clock {
@@ -323,14 +332,12 @@ valid_time = #'clock {
 
 date = #[(year): 'int, (month): 'int, (day): 'int] {
   :doc "The civil date, or nil carrying :error OutOfRange[field] when the month or day doesn't exist."
-  valid_date $
-  Date[year: $year, month: $month, day: $day]
+  valid_date $; Date[year: $year, month: $month, day: $day]
 }
 
 time = #[(hour): 'int, (minute): 'int = 0, (second): 'int = 0, (nano): 'int = 0] {
   :doc "The time of day, or nil carrying :error OutOfRange[field] when a field is out of range. Minutes, seconds and nanoseconds default to zero."
-  valid_time $
-  Time[hour: $hour, minute: $minute, second: $second, nano: $nano]
+  valid_time $; Time[hour: $hour, minute: $minute, second: $second, nano: $nano]
 }
 
 datetime = #[
@@ -343,9 +350,7 @@ datetime = #[
   (nano): 'int = 0,
 ] {
   :doc "The civil date and time, or nil carrying :error OutOfRange[field] when a field is out of range. The time fields default to midnight."
-  valid_date $
-  valid_time $
-  DateTime[...$]
+  valid_date $; valid_time $; DateTime[...$]
 }
 
 at = #[(date): 'civil, (time): 'clock] {
@@ -414,6 +419,7 @@ counts = #['bin, 'int] {
 // The size of the data block after a header, for times `width` bytes wide.
 block_size = #['counts, 'int] {
   =[c, width]
+
   imul [c.time, iadd [width, 1]]
   ~> iadd [~, imul [c.type, 6]]
   ~> iadd [~, c.char]
@@ -466,7 +472,10 @@ layout_of = #'bin -> 'layout {
     | {
       c2 = counts [data, v1_end]
       start = iadd [v1_end, 44] ~> iadd [~, block_size [c2, 8]] ~> iadd [~, 1]
-      stop = { find [data, "\n", start] | %bin.length data }
+      stop = {
+        | find [data, "\n", start]
+        | %bin.length data
+      }
       place [v1_end, c2, 8, %bin.slice [data, start, stop]]
     }
   }
@@ -477,18 +486,36 @@ layout_of = #'bin -> 'layout {
 check_layout = #'bin {
   =data
   len = %bin.length data
-  { icmp [len, 44] ~> =(0 | 1) | fail [0, "a TZif header"] }
-  { %bin.slice [data, 0, 4] ~> =<545a6966> | fail [0, "TZif data"] }
+  {
+    | icmp [len, 44] ~> =(0 | 1)
+    | fail [0, "a TZif header"]
+  }
+  {
+    | %bin.slice [data, 0, 4] ~> =<545a6966>
+    | fail [0, "TZif data"]
+  }
   v1_end = counts [data, 0] ~> block_size [~, 4] ~> iadd [~, 44]
-  { icmp [len, v1_end] ~> =(0 | 1) | fail [44, "the version 1 data block"] }
+  {
+    | icmp [len, v1_end] ~> =(0 | 1)
+    | fail [44, "the version 1 data block"]
+  }
   {
     | %bin.get_byte [data, 4] ~> =0 => Ok
     | {
-      { icmp [len, iadd [v1_end, 44]] ~> =(0 | 1) | fail [v1_end, "a second header"] }
+      {
+        | icmp [len, iadd [v1_end, 44]] ~> =(0 | 1)
+        | fail [v1_end, "a second header"]
+      }
       end = counts [data, v1_end] ~> block_size [~, 8] ~> iadd [~, iadd [v1_end, 44]]
-      { char_at [data, end] ~> ="\n" | fail [end, "a footer"] }
+      {
+        | char_at [data, end] ~> ="\n"
+        | fail [end, "a footer"]
+      }
       start = iadd [end, 1]
-      { find [data, "\n", start] | fail [start, "the footer's end"] }
+      {
+        | find [data, "\n", start]
+        | fail [start, "the footer's end"]
+      }
     }
   }
 }
@@ -496,7 +523,10 @@ check_layout = #'bin {
 transition_time = #['bin, 'layout, 'int] {
   =[data, l, i]
   bits = imul [l.width, 8]
-  modulus = { | bits ~> =32 => 4294967296 | 18446744073709551616 }
+  modulus = {
+    | bits ~> =32 => 4294967296
+    | 18446744073709551616
+  }
   uint [data, iadd [l.times, imul [i, l.width]], bits] ~> wrap [~, modulus]
 }
 
@@ -504,7 +534,10 @@ ltt_of = #['bin, 'layout, 'int] -> 'ltt {
   =[data, l, i]
   at = iadd [l.types, imul [i, 6]]
   offset = uint [data, at, 32] ~> wrap [~, 4294967296]
-  dst = { | %bin.get_byte [data, iadd [at, 4]] ~> =0 => [] | Ok }
+  dst = {
+    | %bin.get_byte [data, iadd [at, 4]] ~> =0 => []
+    | Ok
+  }
   a = iadd [l.chars, %bin.get_byte [data, iadd [at, 5]]]
   // `check_types` found each abbreviation's NUL within the block.
   e = { __binary_index__ [data, 0, a] | a }
@@ -534,7 +567,11 @@ count_upto = #['bin, 'layout, 'int, 'int, 'int] {
 'posix = [std: 'ltt, dst: ([ltt: 'ltt, start: 'switch, end: 'switch] | [])]
 
 letters_end = #['bin, 'int] {
-  | peek $ ~> =('int & b); { between? [b, "A", "Z"] | between? [b, "a", "z"] } => ^ [$0, iadd [$1, 1]]
+  | peek $ ~> =('int & b)
+    {
+      | between? [b, "A", "Z"]
+      | between? [b, "a", "z"]
+    } => ^ [$0, iadd [$1, 1]]
   | $1
 }
 
@@ -544,11 +581,17 @@ abbr_at = #['bin, 'int] {
   {
     | char_at [data, start] ~> ="<" => {
       from = iadd [start, 1]
-      { find [data, ">", from] | fail [start, "a closing '>'"] } ~> =('int & e)
+
+      {
+        | find [data, ">", from]
+        | fail [start, "a closing '>'"]
+      }
+      ~> =('int & e)
+
       [Str[%bin.slice [data, from, e]], iadd [e, 1]]
     }
-    | letters_end [data, start] ~> =('int & e); icmp [isub [e, start], 3] ~> =(0 | 1) =>
-      [Str[%bin.slice [data, start, e]], e]
+    | letters_end [data, start] ~> =('int & e)
+      icmp [isub [e, start], 3] ~> =(0 | 1) => [Str[%bin.slice [data, start, e]], e]
     | fail [start, "a zone abbreviation"]
   }
 }
@@ -559,18 +602,21 @@ hms_at = #['bin, 'int] {
   sign_at [data, start] ~> =[s, p]
   run [data, p, 0] ~> =[h, e1]
   { icmp [e1, p] ~> =1 | fail [p, "hours"] }
+
   {
     | char_at [data, e1] ~> =":" => {
       fixed [data, iadd [e1, 1], 2, "two-digit minutes"] ~> =[m, e2]
       {
-        | char_at [data, e2] ~> =":" =>
-          fixed [data, iadd [e2, 1], 2, "two-digit seconds"] ~> =[sec, e3]; [[m, sec], e3]
+        | char_at [data, e2] ~> =":" => fixed [data, iadd [e2, 1], 2, "two-digit seconds"]
+            ~> =[sec, e3]
+            [[m, sec], e3]
         | [[m, 0], e2]
       }
     }
     | [[0, 0], e1]
   }
   ~> =[[m, sec], end]
+
   [imul [s, iadd [imul [h, 3600], iadd [imul [m, 60], sec]]], end]
 }
 
@@ -584,16 +630,25 @@ day_rule_at = #['bin, 'int] {
       run [data, p1, 0] ~> =[w, e2]
       expect [data, e2, "."] ~> =('int & p2)
       run [data, p2, 0] ~> =[d, e3]
-      { in_range [m, 1, 12, Month]; in_range [w, 1, 5, Day]; in_range [d, 0, 6, Day] | fail [next, "a valid Mm.w.d rule"] }
+      {
+        | in_range [m, 1, 12, Month]; in_range [w, 1, 5, Day]; in_range [d, 0, 6, Day]
+        | fail [next, "a valid Mm.w.d rule"]
+      }
       [Month[month: m, week: w, weekday: d], e3]
     }
     | char_at [data, start] ~> ="J" => {
       run [data, next, 0] ~> =[n, e]
-      { in_range [n, 1, 365, Day] | fail [next, "a Julian day, 1 to 365"] }
+      {
+        | in_range [n, 1, 365, Day]
+        | fail [next, "a Julian day, 1 to 365"]
+      }
       [Julian[n], e]
     }
     | run [data, start, 0] ~> =[n, e]; icmp [e, start] ~> =1 => {
-      { in_range [n, 0, 365, Day] | fail [start, "a day, 0 to 365"] }
+      {
+        | in_range [n, 0, 365, Day]
+        | fail [start, "a day, 0 to 365"]
+      }
       [Ordinal[n], e]
     }
     | fail [start, "a rule date"]
@@ -605,11 +660,13 @@ switch_at = #['bin, 'int] {
   =[data, start]
   expect [data, start, ","] ~> =('int & p)
   day_rule_at [data, p] ~> =[day, e]
+
   {
     | char_at [data, e] ~> ="/" => hms_at [data, iadd [e, 1]]
     | [7200, e]
   }
   ~> =[time, end]
+
   [[day: day, time: time], end]
 }
 
@@ -622,16 +679,26 @@ posix_at = #'bin {
   {
     | peek [data, p2] ~> =\[] => {
       abbr_at [data, p2] ~> =[dst_abbr, p3]
+
       {
-        | { char_at [data, p3] ~> =("+" | "-") | digit [data, p3] } =>
-          hms_at [data, p3] ~> =[w, e]; [isub [0, w], e]
+        | {
+            | char_at [data, p3] ~> =("+" | "-")
+            | digit [data, p3]
+          } => hms_at [data, p3] ~> =[w, e]; [isub [0, w], e]
         | [iadd [std.offset, 3600], p3]
       }
       ~> =[dst_offset, p4]
+
       switch_at [data, p4] ~> =[start, p5]
       switch_at [data, p5] ~> =[end, p6]
-      { icmp [p6, %bin.length data] ~> =0 | fail [p6, "the end of the TZ string"] }
-      [std: std, dst: [ltt: [offset: dst_offset, dst?: Ok, abbr: dst_abbr], start: start, end: end]]
+      {
+        | icmp [p6, %bin.length data] ~> =0
+        | fail [p6, "the end of the TZ string"]
+      }
+      [
+        std: std,
+        dst: [ltt: [offset: dst_offset, dst?: Ok, abbr: dst_abbr], start: start, end: end],
+      ]
     }
     | [std: std, dst: []]
   }
@@ -652,7 +719,10 @@ rule_day = #['int, 'day_rule] {
       // The month's first such weekday (0 is Sunday; the epoch was a Thursday), then the
       // week, falling back a week when a fifth doesn't exist.
       nth = fmod [isub [d, fmod [iadd [first, 4], 7]], 7] ~> iadd [~, imul [isub [w, 1], 7]]
-      day = { | icmp [nth, days_in_month [y, m]] ~> =(0 | 1) => isub [nth, 7] | nth }
+      day = {
+        | icmp [nth, days_in_month [y, m]] ~> =(0 | 1) => isub [nth, 7]
+        | nth
+      }
       iadd [first, day]
     }
   }
@@ -661,8 +731,7 @@ rule_day = #['int, 'day_rule] {
 // When a switch happens in a year, as seconds since the epoch, given the offset in force
 // before it.
 switch_time = #['int, 'switch, 'int] {
-  =[y, sw, offset]
-  imul [rule_day [y, sw.day], 86400] ~> iadd [~, sw.time] ~> isub [~, offset]
+  =[y, sw, offset]; imul [rule_day [y, sw.day], 86400] ~> iadd [~, sw.time] ~> isub [~, offset]
 }
 
 posix_ltt = #['posix, 'int] -> 'ltt {
@@ -716,11 +785,10 @@ check_types = #['bin, 'layout, 'int] {
   {
     | i ~> =^l.typecnt => Ok
     | {
-      a = %bin.get_byte [data, iadd [l.types, iadd [imul [i, 6], 5]]] ~> iadd [l.chars, ~]
-      __binary_index__ [data, 0, a] ~> =('int & nul)
-      icmp [nul, end] ~> =-1
-    } =>
-      ^ [data, l, iadd [i, 1]]
+        a = %bin.get_byte [data, iadd [l.types, iadd [imul [i, 6], 5]]] ~> iadd [l.chars, ~]
+        __binary_index__ [data, 0, a] ~> =('int & nul)
+        icmp [nul, end] ~> =-1
+      } => ^ [data, l, iadd [i, 1]]
     | fail [iadd [l.types, imul [i, 6]], "an abbreviation index"]
   }
 }
@@ -730,7 +798,10 @@ from_tzif = #[(name): '%str, (data): 'bin] {
   data = $data
   check_layout data
   l = layout_of data
-  { icmp [l.typecnt, 1] ~> =(0 | 1) | fail [36, "a local time type"] }
+  {
+    | icmp [l.typecnt, 1] ~> =(0 | 1)
+    | fail [36, "a local time type"]
+  }
   check_indices [data, l, 0]
   check_types [data, l, 0]
 
@@ -743,15 +814,20 @@ from_tzif = #[(name): '%str, (data): 'bin] {
   Tz[name: $name, rules: #'int -> 'ltt { tz_ltt [data, l, tail, $] }]
 }
 
-offset_text = #'int {
-  sign = { | icmp [$, 0] ~> =-1 => "-" | "+" }
-  a = { | icmp [$, 0] ~> =-1 => isub [0, $] | $ }
-  hm = "{pad [idiv [a, 3600], 2]}:{pad [idiv [imod [a, 3600], 60], 2]}"
+// An offset in seconds as `+hh:mm`, or `+hh:mm:ss` when it has seconds — with the given
+// separator between the fields.
+offset_with = #['int, '%str] {
+  =[o, sep]
+  sign = { icmp [o, 0] ~> =-1 => "-" | "+" }
+  a = { icmp [o, 0] ~> =-1 => isub [0, o] | o }
+  hm = "{pad [idiv [a, 3600], 2]}{sep}{pad [idiv [imod [a, 3600], 60], 2]}"
   {
     | imod [a, 60] ~> =0 => "{sign}{hm}"
-    | "{sign}{hm}:{pad [imod [a, 60], 2]}"
+    | "{sign}{hm}{sep}{pad [imod [a, 60], 2]}"
   }
 }
+
+offset_text = #'int { offset_with [$, ":"] }
 
 // The local time type in force at an instant (seconds since the epoch).
 ltt_at = #['zone, 'int] -> 'ltt {
@@ -785,10 +861,16 @@ candidates = #['zone, 'int] {
   b_fits = { ltt_at [zone, fdiv [b, ns_s]] ~> .offset ~> =^after }
   {
     | before ~> =^after => Unique[a]
-    | a_fits ~> =\[]; b_fits ~> =\[] => { | icmp [a, b] ~> =-1 => Repeated[a, b] | Repeated[b, a] }
+    | a_fits ~> =\[]; b_fits ~> =\[] => {
+      | icmp [a, b] ~> =-1 => Repeated[a, b]
+      | Repeated[b, a]
+    }
     | a_fits ~> =\[] => Unique[a]
     | b_fits ~> =\[] => Unique[b]
-    | { | icmp [a, b] ~> =-1 => Skipped[a, b] | Skipped[b, a] }
+    | {
+      | icmp [a, b] ~> =-1 => Skipped[a, b]
+      | Skipped[b, a]
+    }
   }
 }
 
@@ -812,7 +894,10 @@ exact = #'candidates {
 fixed_zone = #'duration {
   :doc "A zone at a fixed offset from UTC, of whole seconds and less than a day either way; nil carrying :error OutOfRange[Offset] otherwise."
   =Duration[n]
-  { imod [n, ns_s] ~> =0 | [] ~> { :error OutOfRange[Offset] } }
+  {
+    | imod [n, ns_s] ~> =0
+    | [] ~> { :error OutOfRange[Offset] }
+  }
   s = idiv [n, ns_s]
   in_range [s, -86399, 86399, Offset]
   Fixed[s]
@@ -831,26 +916,30 @@ local_zone = #[] {
   | Utc
 }
 
-'zoning = ['instant, 'zone] | ['datetime, 'zone] | ['datetime, 'zone, disambiguation: 'disambiguation]
+'zoning =
+  | ['instant, 'zone]
+  | ['datetime, 'zone]
+  | ['datetime, 'zone, disambiguation: 'disambiguation]
 
 zoned = #'zoning {
   :doc "An instant in a zone, or a civil date-time placed in one. A date-time the zone's clocks skip or repeat (at a daylight saving transition) is resolved by `disambiguation`: Earlier or Later picks one side, Compatible (the default) takes the earlier of a repeated time and moves a skipped one forward by the gap, and Reject answers nil carrying :error Skipped or Repeated."
   | =[('instant & i), ('zone & z)] => Zoned[i, z]
   | =[('datetime & d), ('zone & z)] => Zoned[pick [candidates [z, epoch_nanos d], Compatible], z]
-  | =[('datetime & d), ('zone & z), disambiguation: Reject] =>
-    candidates [z, epoch_nanos d] ~> exact ~> =('instant & i)
-    Zoned[i, z]
-  | =[('datetime & d), ('zone & z), disambiguation: ((Compatible | Earlier | Later) & h)] =>
-    Zoned[pick [candidates [z, epoch_nanos d], h], z]
+  | =[('datetime & d), ('zone & z), disambiguation: Reject] => candidates [z, epoch_nanos d]
+      ~> exact
+      ~> =('instant & i)
+      Zoned[i, z]
+  | =[('datetime & d), ('zone & z), disambiguation: ((Compatible | Earlier | Later) & h)] => Zoned[
+      pick [candidates [z, epoch_nanos d], h],
+      z,
+    ]
 }
 
 zoned_ltt = #'zoned { =Zoned[Instant[n], z]; ltt_at [z, fdiv [n, ns_s]] }
 
 // A zoned value's civil date-time: its instant, moved by the zone's offset.
 zoned_civil = #'zoned {
-  =Zoned[Instant[n], _]
-  off = zoned_ltt $ ~> .offset
-  iadd [n, imul [off, ns_s]] ~> civil_of_nanos
+  =Zoned[Instant[n], _]; off = zoned_ltt $ ~> .offset; iadd [n, imul [off, ns_s]] ~> civil_of_nanos
 }
 
 // A local date-time placed back in a zoned value's zone, as a period or truncation moves it.
@@ -899,7 +988,10 @@ shift = #['civil, 'period] {
   year = fdiv [total, 12]
   month = iadd [fmod [total, 12], 1]
   last = days_in_month [year, month]
-  day = { | icmp [c.day, last] ~> =1 => last | c.day }
+  day = {
+    | icmp [c.day, last] ~> =1 => last
+    | c.day
+  }
   days_of (year, month, day) ~> iadd [~, pd] ~> civil
 }
 
@@ -936,27 +1028,27 @@ add = #'addable {
   | =[Instant[a], Duration[b]] => Instant[iadd [a, b]]
   | =[Mono[a], Duration[b]] => Mono[iadd [a, b]]
   | =[Duration[a], Duration[b]] => Duration[iadd [a, b]]
-  | =[Period[months: am, days: ad], Period[months: bm, days: bd]] =>
-    Period[months: iadd [am, bm], days: iadd [ad, bd]]
+  | =[Period[months: am, days: ad], Period[months: bm, days: bd]] => Period[
+      months: iadd [am, bm],
+      days: iadd [ad, bd],
+    ]
   | =[('time & t), Duration[b]] => iadd [nanos_of t, b] ~> fmod [~, ns_day] ~> clock
   | =[('datetime & t), Duration[b]] => iadd [epoch_nanos t, b] ~> civil_of_nanos
   | =[('date & d), ('period & p)] => shift [d, p]
-  | =[('datetime & t), ('period & p)] => (year, month, day) = shift [t, p]; t[..., year: year, month: month, day: day]
-  | =[('date & d), ('period & p), overflow: o] => fits [d, p, o]; shift [d, p]
-  | =[('datetime & t), ('period & p), overflow: o] =>
-    fits [t, p, o]
-    (year, month, day) = shift [t, p]
-    t[..., year: year, month: month, day: day]
+  | =[('datetime & t), ('period & p)] => (year, month, day) = shift [t, p]
+      t[..., year: year, month: month, day: day]
+  | =[('date & d), ('period & p), overflow: o] => { fits [d, p, o]; shift [d, p] }
+  | =[('datetime & t), ('period & p), overflow: o] => fits [t, p, o]
+      (year, month, day) = shift [t, p]
+      t[..., year: year, month: month, day: day]
   | =[Zoned[Instant[a], z], Duration[b]] => Zoned[Instant[iadd [a, b]], z]
-  | =[('zoned & t), ('period & p)] =>
-    local = zoned_civil t
-    (year, month, day) = shift [local, p]
-    rezone [local[..., year: year, month: month, day: day], t.1, zoned_ltt t ~> .offset]
-  | =[('zoned & t), ('period & p), overflow: o] =>
-    local = zoned_civil t
-    fits [local, p, o]
-    (year, month, day) = shift [local, p]
-    rezone [local[..., year: year, month: month, day: day], t.1, zoned_ltt t ~> .offset]
+  | =[('zoned & t), ('period & p)] => local = zoned_civil t
+      (year, month, day) = shift [local, p]
+      rezone [local[..., year: year, month: month, day: day], t.1, zoned_ltt t ~> .offset]
+  | =[('zoned & t), ('period & p), overflow: o] => local = zoned_civil t
+      fits [local, p, o]
+      (year, month, day) = shift [local, p]
+      rezone [local[..., year: year, month: month, day: day], t.1, zoned_ltt t ~> .offset]
 }
 
 sub = #'addable {
@@ -988,13 +1080,7 @@ key = #('instant | 'mono | 'duration | 'datetime | 'date | 'time | 'zoned) {
   | =('time & t) => nanos_of t
 }
 
-diff = #(
-  | ['instant, 'instant]
-  | ['mono, 'mono]
-  | ['datetime, 'datetime]
-  | ['time, 'time]
-  | ['zoned, 'zoned]
-) {
+diff = #(['instant, 'instant] | ['mono, 'mono] | ['datetime, 'datetime] | ['time, 'time] | ['zoned, 'zoned]) {
   :doc "The exact duration from the second value to the first (first minus second): between instants, monotonic readings, zoned values, civil date-times (as if both were UTC), or times of day."
   Duration[isub [key $0, key $1]]
 }
@@ -1009,8 +1095,10 @@ between = #[(from): 'civil, (to): 'civil] {
       moved = shift [$from, Period[months: months, days: 0]]
       Period[months: months, days: isub [days_of $to, days_of moved]]
     }
-    | icmp [total, 0] ~> =-1; icmp [days, 0] ~> =1 =>
-      Period[months: iadd [total, 1], days: isub [days, days_in_month [$to.year, $to.month]]]
+    | icmp [total, 0] ~> =-1; icmp [days, 0] ~> =1 => Period[
+        months: iadd [total, 1],
+        days: isub [days, days_in_month [$to.year, $to.month]],
+      ]
     | Period[months: total, days: days]
   }
 }
@@ -1080,31 +1168,205 @@ start_of = #['civil, 'date_unit] {
   | =[c, _] => days_of c ~> isub [~, isub [iso_day ~, 1]] ~> civil
 }
 
-truncate = #(
-  | ['instant, 'day_unit]
-  | ['duration, 'clock_unit]
-  | ['time, 'clock_unit]
-  | ['datetime, ('date_unit | 'day_unit)]
-  | ['date, 'date_unit]
-  | ['zoned, ('date_unit | 'day_unit)]
-) {
+truncate = #(['instant, 'day_unit] | ['duration, 'clock_unit] | ['time, 'clock_unit] | ['datetime, ('date_unit | 'day_unit)] | ['date, 'date_unit] | ['zoned, ('date_unit | 'day_unit)]) {
   :doc "The value truncated to a unit: the start of its day, hour, minute, second, millisecond or microsecond, or — for dates and date-times — of its week (Monday), month or year. Instants truncate on the UTC day; durations truncate toward zero."
   | =[Instant[n], ('day_unit & u)] => Instant[isub [n, fmod [n, unit_nanos u]]]
   | =[Duration[n], ('clock_unit & u)] => Duration[isub [n, imod [n, unit_nanos u]]]
   | =[('time & t), ('clock_unit & u)] => nanos_of t ~> isub [~, imod [~, unit_nanos u]] ~> clock
   | =[('datetime & t), ('date_unit & u)] => at [start_of [t, u], midnight]
-  | =[('datetime & t), ('day_unit & u)] => epoch_nanos t ~> isub [~, fmod [~, unit_nanos u]] ~> civil_of_nanos
-  | =[('date & d), ('date_unit & u)] => start_of [d, u]
-  | =[('zoned & t), ('date_unit & u)] =>
-    offset = zoned_ltt t ~> .offset
-    zoned_civil t ~> start_of [~, u] ~> at [~, midnight] ~> rezone [~, t.1, offset]
-  | =[('zoned & t), ('day_unit & u)] =>
-    offset = zoned_ltt t ~> .offset
-    zoned_civil t
-    ~> epoch_nanos
+  | =[('datetime & t), ('day_unit & u)] => epoch_nanos t
     ~> isub [~, fmod [~, unit_nanos u]]
     ~> civil_of_nanos
-    ~> rezone [~, t.1, offset]
+  | =[('date & d), ('date_unit & u)] => start_of [d, u]
+  | =[('zoned & t), ('date_unit & u)] => offset = zoned_ltt t ~> .offset
+      zoned_civil t ~> start_of [~, u] ~> at [~, midnight] ~> rezone [~, t.1, offset]
+  | =[('zoned & t), ('day_unit & u)] => offset = zoned_ltt t ~> .offset
+
+      zoned_civil t
+      ~> epoch_nanos
+      ~> isub [~, fmod [~, unit_nanos u]]
+      ~> civil_of_nanos
+      ~> rezone [~, t.1, offset]
+}
+
+// --- series --------------------------------------------------------------------------
+
+// The way a step goes: a duration by its sign, and a period by its average length — a
+// 400-year cycle is 146097 days and 4800 months — which is zero only for a zero step. Taking
+// it from the step rather than from the first value means a step that first lands back on
+// the start (`1mo-29d` from Feb 1) still heads somewhere.
+step_direction = #('duration | 'period) {
+  | =Duration[n] => icmp [n, 0]
+  | =Period[months: m, days: d] => icmp [iadd [imul [m, 146097], imul [d, 4800]], 0]
+}
+
+// The values `nth 0`, `nth 1`, … — up to, not including, the first at or past the key
+// `until` in the step's direction, or forever.
+walk = #<'t>[(nth): #'int -> 't, (key): #'t -> 'int, (until): (Until['int, 'int] | Forever)] {
+  nth = $nth
+  key = $key
+  until = $until
+  %iter.unfold [
+    0,
+    #'int {
+      v = nth $
+      {
+        | until ~> =Until[u, direction]
+          icmp [key v, u] ~> =(0 | ^direction) => []
+        | [v, iadd [$, 1]]
+      }
+    },
+  ]
+}
+
+'seriesable =
+  | ['instant, 'duration]
+  | ['instant, 'duration, until: 'instant]
+  | ['date, 'period]
+  | ['date, 'period, until: 'date]
+  | ['datetime, 'duration]
+  | ['datetime, 'duration, until: 'datetime]
+  | ['datetime, 'period]
+  | ['datetime, 'period, until: 'datetime]
+  | ['zoned, 'duration]
+  | ['zoned, 'duration, until: 'zoned]
+  | ['zoned, 'period]
+  | ['zoned, 'period, until: 'zoned]
+
+series = #'seriesable {
+  :doc "A lazy `%iter` of values from a start by a step — the start, then the start plus one step, two steps, and so on — forever, or up to (not including) the first value at or past `until`, in the direction the step goes (for a period, by its average length). Each value is computed from the start, so a month step from Jan 31 gives Feb 29, then Mar 31. A start already at or past `until` gives nothing; a zero step repeats the start."
+  | =[('instant & a), ('duration & s)] => walk [
+      #'int { add [a, mul [s, $]] },
+      #'instant { key $ },
+      Forever,
+    ]
+  | =[('instant & a), ('duration & s), until: u] => walk [
+      #'int { add [a, mul [s, $]] },
+      #'instant { key $ },
+      Until[key u, step_direction s],
+    ]
+  | =[('date & a), ('period & s)] => walk [#'int { add [a, mul [s, $]] }, #'date { key $ }, Forever]
+  | =[('date & a), ('period & s), until: u] => walk [
+      #'int { add [a, mul [s, $]] },
+      #'date { key $ },
+      Until[key u, step_direction s],
+    ]
+  | =[('datetime & a), ('duration & s)] => walk [
+      #'int { add [a, mul [s, $]] },
+      #'datetime { key $ },
+      Forever,
+    ]
+  | =[('datetime & a), ('duration & s), until: u] => walk [
+      #'int { add [a, mul [s, $]] },
+      #'datetime { key $ },
+      Until[key u, step_direction s],
+    ]
+  | =[('datetime & a), ('period & s)] => walk [
+      #'int { add [a, mul [s, $]] },
+      #'datetime { key $ },
+      Forever,
+    ]
+  | =[('datetime & a), ('period & s), until: u] => walk [
+      #'int { add [a, mul [s, $]] },
+      #'datetime { key $ },
+      Until[key u, step_direction s],
+    ]
+  | =[('zoned & a), ('duration & s)] => walk [
+      #'int { add [a, mul [s, $]] },
+      #'zoned { key $ },
+      Forever,
+    ]
+  | =[('zoned & a), ('duration & s), until: u] => walk [
+      #'int { add [a, mul [s, $]] },
+      #'zoned { key $ },
+      Until[key u, step_direction s],
+    ]
+  | =[('zoned & a), ('period & s)] => walk [
+      #'int { add [a, mul [s, $]] },
+      #'zoned { key $ },
+      Forever,
+    ]
+  | =[('zoned & a), ('period & s), until: u] => walk [
+      #'int { add [a, mul [s, $]] },
+      #'zoned { key $ },
+      Until[key u, step_direction s],
+    ]
+}
+
+// --- rounding ------------------------------------------------------------------------
+
+'rounding = Floor | Ceil | Trunc | HalfExpand
+
+// A multiple of a positive increment: down, up, toward zero, or to the nearest (halves away
+// from zero).
+round_to = #['int, 'int, 'rounding] {
+  =[v, inc, mode]
+  floor = isub [v, fmod [v, inc]]
+  rest = fmod [v, inc]
+  mode ~> {
+    | =Floor => floor
+    | =Ceil => { rest ~> =0 => floor | iadd [floor, inc] }
+    | =Trunc => isub [v, imod [v, inc]]
+    | {
+      // Half away from zero: a tie rounds up for a positive value, down for a negative one.
+      twice = imul [rest, 2]
+      {
+        | icmp [twice, inc] ~> =1 => iadd [floor, inc]
+        | icmp [twice, inc] ~> =0; icmp [v, 0] ~> =(0 | 1) => iadd [floor, inc]
+        | floor
+      }
+    }
+  }
+}
+
+increment = #'duration {
+  | icmp [$0, 0] ~> =1 => $0
+  | __panic__ "%time.round: the increment must be positive"
+}
+
+'roundable =
+  | ['instant, 'duration]
+  | ['duration, 'duration]
+  | ['time, 'duration]
+  | ['datetime, 'duration]
+  | ['zoned, 'duration]
+  | ['instant, 'duration, mode: 'rounding]
+  | ['duration, 'duration, mode: 'rounding]
+  | ['time, 'duration, mode: 'rounding]
+  | ['datetime, 'duration, mode: 'rounding]
+  | ['zoned, 'duration, mode: 'rounding]
+
+round_zoned = #['zoned, 'int, 'rounding] {
+  =[z, inc, mode]
+  offset = zoned_ltt z ~> .offset
+
+  zoned_civil z
+  ~> epoch_nanos
+  ~> round_to [~, inc, mode]
+  ~> civil_of_nanos
+  ~> rezone [~, z.1, offset]
+}
+
+round = #'roundable {
+  :doc "The value rounded to a multiple of a positive increment — a unit's length such as `%time.hours 1`, or any duration such as `%time\{ 15m }` — to the nearest by default (halves away from zero), or with `mode:` Floor, Ceil or Trunc (toward zero). Instants round on the UTC timeline; times, date-times and zoned values on their own clocks, with a grid that starts each midnight when the increment divides a day. A time wraps at midnight, and a zoned value in a repeated hour keeps its offset."
+  | =[Instant[n], ('duration & i)] => Instant[round_to [n, increment i, HalfExpand]]
+  | =[Instant[n], ('duration & i), mode: m] => Instant[round_to [n, increment i, m]]
+  | =[Duration[n], ('duration & i)] => Duration[round_to [n, increment i, HalfExpand]]
+  | =[Duration[n], ('duration & i), mode: m] => Duration[round_to [n, increment i, m]]
+  | =[('time & t), ('duration & i)] => {
+    round_to [nanos_of t, increment i, HalfExpand]
+    ~> fmod [~, ns_day]
+    ~> clock
+  }
+  | =[('time & t), ('duration & i), mode: m] => round_to [nanos_of t, increment i, m]
+    ~> fmod [~, ns_day]
+    ~> clock
+  | =[('datetime & t), ('duration & i)] => round_to [epoch_nanos t, increment i, HalfExpand]
+    ~> civil_of_nanos
+  | =[('datetime & t), ('duration & i), mode: m] => round_to [epoch_nanos t, increment i, m]
+    ~> civil_of_nanos
+  | =[('zoned & z), ('duration & i)] => round_zoned [z, increment i, HalfExpand]
+  | =[('zoned & z), ('duration & i), mode: m] => round_zoned [z, increment i, m]
 }
 
 // --- formatting ----------------------------------------------------------------------
@@ -1155,41 +1417,30 @@ duration_text = #'int {
   | magnitude_text $
 }
 
-sign_of = #'int {
-  | icmp [$, 0] ~> =-1 => -1
-  | 1
-}
+sign_of = #'int { icmp [$, 0] ~> =-1 => -1 | 1 }
 
 // A period's leading sign is its first component's; the days carry their own sign only
 // where it differs.
 period_text = #[(months): 'int, (days): 'int] {
   | $months ~> =0; $days ~> =0 => "0d"
   | {
-    lead = { | $months ~> =0 => sign_of $days | sign_of $months }
+    lead = {
+      | $months ~> =0 => sign_of $days
+      | sign_of $months
+    }
     months = imul [$months, lead]
     days = imul [$days, lead]
-    head = { | lead ~> =-1 => "-" | "" }
+    head = { lead ~> =-1 => "-" | "" }
     y = component [idiv [months, 12], "y"]
     mo = component [imod [months, 12], "mo"]
     d = component [idiv [days, sign_of days], "d"]
     // Days against the lead: their own sign, which is the lead's opposite.
-    against = { | icmp [days, 0] ~> =-1; lead ~> =1 => "-" | icmp [days, 0] ~> =-1 => "+" | "" }
+    against = {
+      | icmp [days, 0] ~> =-1; lead ~> =1 => "-"
+      | icmp [days, 0] ~> =-1 => "+"
+      | ""
+    }
     "{head}{y}{mo}{against}{d}"
-  }
-}
-
-format = #('instant | 'date | 'time | 'datetime | 'duration | 'period | 'zoned) {
-  :doc "The value as text, in the form `parse` (`parse_zoned`, for a zoned value) and `%time\{ … }` read back: ISO 8601 for instants (RFC 3339, in UTC: \"2024-03-10T09:30:00Z\"), dates (\"2024-03-10\"), times (\"09:30:00.5\" gives \"09:30:00.500\") and date-times (\"2024-03-10T09:30:00\"); unit notation for durations (\"1h30m\", \"-250ms\") and periods (\"1y2mo\", \"3d\", \"1mo-3d\"); RFC 9557 for zoned values (\"2024-03-10T09:30:00+00:00[Europe/London]\"). Fractional seconds print as three, six or nine digits, the fewest that are exact."
-  | =Instant[n] => civil_of_nanos n ~> "{date_text ~}T{clock_text ~}Z"
-  | =('datetime & t) => "{date_text t}T{clock_text t}"
-  | =('date & d) => date_text d
-  | =('time & t) => clock_text t
-  | =Duration[n] => duration_text n
-  | =Period[months: m, days: d] => period_text [m, d]
-  | =('zoned & z) => {
-    c = zoned_civil z
-    off = zoned_ltt z ~> .offset
-    "{date_text c}T{clock_text c}{offset_text off}[{zone_name z.1}]"
   }
 }
 
@@ -1218,6 +1469,227 @@ month_name = #'int {
   | "Dec"
 }
 
+// --- patterns ------------------------------------------------------------------------
+
+// A pattern is text with `%` directives, strftime-style: `%Y-%m-%d`, `%a, %d %b %Y`. A
+// directive may carry a flag before its letter: `-` for no padding, `_` for spaces, `0` for
+// zeros. A pattern the value can't satisfy — `%H` for a date — or an unknown directive
+// answers nil carrying `InvalidPattern[offset, message]`, the offset into the pattern.
+
+fail_pattern = #['int, '%str] { [] ~> { :error InvalidPattern[offset: $0, message: $1] } }
+
+pad_fill = #['%str, 'int, '%str] {
+  | icmp [%bin.length $0.0, $1] ~> =-1 => ^ ["{$2}{$0}", $1, $2]
+  | $0
+}
+
+// A number for a directive: padded to its width with its usual fill, or as the flag says.
+numeric = #['int, 'int, '%str, ('%str | [])] {
+  =[n, width, fill, flag]
+  text = %str.from_int n
+  flag ~> {
+    | ="-" => text
+    | ="_" => pad_fill [text, width, " "]
+    | ="0" => pad_fill [text, width, "0"]
+    | pad_fill [text, width, fill]
+  }
+}
+
+day_full_name = #'weekday {
+  | =Mon => "Monday"
+  | =Tue => "Tuesday"
+  | =Wed => "Wednesday"
+  | =Thu => "Thursday"
+  | =Fri => "Friday"
+  | =Sat => "Saturday"
+  | "Sunday"
+}
+
+month_full_name = #'int {
+  | =1 => "January"
+  | =2 => "February"
+  | =3 => "March"
+  | =4 => "April"
+  | =5 => "May"
+  | =6 => "June"
+  | =7 => "July"
+  | =8 => "August"
+  | =9 => "September"
+  | =10 => "October"
+  | =11 => "November"
+  | "December"
+}
+
+// A directive after its `%`: its flag, if any, and its name — a letter, or `:z`, `.f`, or a
+// precision and `f`.
+'directive = [flag: ('%str | []), name: '%str, end: 'int]
+
+directive_at = #['bin, 'int] {
+  =[pat, pos]
+  flag = { char_at [pat, pos] ~> =("-" | "_" | "0") }
+  p = { flag ~> ='%str => iadd [pos, 1] | pos }
+  {
+    | text_at [pat, p, 2] ~> =((":z" | ".f" | "3f" | "6f" | "9f") & name) => [
+        flag: flag,
+        name: name,
+        end: iadd [p, 2],
+      ]
+    | char_at [pat, p] ~> =('%str & name) => [flag: flag, name: name, end: iadd [p, 1]]
+    | fail_pattern [p, "a directive after '%'"]
+  }
+}
+
+// What a value offers a pattern: its date, its time of day, and — for an instant or a zoned
+// value — its zone at that instant.
+'zone_view = [offset: 'int, abbr: '%str, name: '%str, unix: 'int]
+'shown = [date: ('date | []), time: ('time | []), zone: ('zone_view | [])]
+
+shown = #('instant | 'date | 'time | 'datetime | 'zoned) -> 'shown {
+  | =('date & d) => [date: d, time: [], zone: []]
+  | =('time & t) => [date: [], time: t, zone: []]
+  | =('datetime & c) => [date: to_date c, time: to_time c, zone: []]
+  | =Instant[n] => {
+    c = civil_of_nanos n
+    [
+      date: to_date c,
+      time: to_time c,
+      zone: [offset: 0, abbr: "UTC", name: "UTC", unix: fdiv [n, ns_s]],
+    ]
+  }
+  | =('zoned & z) => {
+    c = zoned_civil z
+    l = zoned_ltt z
+    z ~> =Zoned[Instant[n], zone]
+    [
+      date: to_date c,
+      time: to_time c,
+      zone: [offset: l.offset, abbr: l.abbr, name: zone_name zone, unix: fdiv [n, ns_s]],
+    ]
+  }
+}
+
+// A year for a directive: four digits by default, with a sign when negative.
+year_field = #['int, ('%str | [])] {
+  =[y, flag]
+  {
+    | icmp [y, 0] ~> =-1 => numeric [isub [0, y], 4, "0", flag] ~> "-{~}"
+    | numeric [y, 4, "0", flag]
+  }
+}
+
+date_directive = #['date, ('%str | []), '%str] {
+  =[d, flag, name]
+  name ~> {
+    | ="Y" => year_field [d.year, flag]
+    | ="y" => numeric [fmod [d.year, 100], 2, "0", flag]
+    | ="m" => numeric [d.month, 2, "0", flag]
+    | ="d" => numeric [d.day, 2, "0", flag]
+    | ="e" => numeric [d.day, 2, " ", flag]
+    | ="j" => numeric [day_of_year d, 3, "0", flag]
+    | ="a" => weekday d ~> day_name
+    | ="A" => weekday d ~> day_full_name
+    | ="b" => month_name d.month
+    | ="B" => month_full_name d.month
+    | ="u" => days_of d ~> iso_day ~> %str.from_int
+    | ="w" => days_of d ~> iso_day ~> fmod [~, 7] ~> %str.from_int
+    | ="V" => iso_week d ~> .week ~> numeric [~, 2, "0", flag]
+    | ="G" => iso_week d ~> .year ~> year_field [~, flag]
+    | ="F" => date_text d
+    | ="D" => {
+      m = pad [d.month, 2]; day = pad [d.day, 2]; y = pad [fmod [d.year, 100], 2]; "{m}/{day}/{y}"
+    }
+  }
+}
+
+time_directive = #['time, ('%str | []), '%str] {
+  =[t, flag, name]
+  h12 = fmod [t.hour, 12] ~> { =0 => 12 | ~ }
+  name ~> {
+    | ="H" => numeric [t.hour, 2, "0", flag]
+    | ="k" => numeric [t.hour, 2, " ", flag]
+    | ="I" => numeric [h12, 2, "0", flag]
+    | ="l" => numeric [h12, 2, " ", flag]
+    | ="p" => { icmp [t.hour, 12] ~> =-1 => "AM" | "PM" }
+    | ="M" => numeric [t.minute, 2, "0", flag]
+    | ="S" => numeric [t.second, 2, "0", flag]
+    | ="f" => {
+      | t.nano ~> =0 => "000"
+      | fraction_text t.nano ~> %str.slice [~, 1, 10]
+    }
+    | =".f" => fraction_text t.nano
+    | ="3f" => pad [idiv [t.nano, 1000000], 3]
+    | ="6f" => pad [idiv [t.nano, 1000], 6]
+    | ="9f" => pad [t.nano, 9]
+    | ="R" => "{pad [t.hour, 2]}:{pad [t.minute, 2]}"
+    | ="T" => "{pad [t.hour, 2]}:{pad [t.minute, 2]}:{pad [t.second, 2]}"
+  }
+}
+
+zone_directive = #['zone_view, '%str] {
+  =[z, name]
+  name ~> {
+    | ="z" => offset_with [z.offset, ""]
+    | =":z" => offset_text z.offset
+    | ="Z" => z.abbr
+    | ="Q" => z.name
+    | ="s" => %str.from_int z.unix
+  }
+}
+
+emit = #[(s): 'shown, (d): 'directive, (where): 'int] {
+  name = $d.name
+  flag = $d.flag
+  {
+    | name
+      ~> =("Y" | "y" | "m" | "d" | "e" | "j" | "a" | "A" | "b" | "B" | "u" | "w" | "V" | "G" | "F" | "D") => {
+        | $s.date ~> =('date & dt) => date_directive [dt, flag, name]
+        | fail_pattern [$where, "a date, for %{name}"]
+      }
+    | name
+      ~> =("H" | "k" | "I" | "l" | "p" | "M" | "S" | "f" | ".f" | "3f" | "6f" | "9f" | "T" | "R") => {
+        | $s.time ~> =('time & t) => time_directive [t, flag, name]
+        | fail_pattern [$where, "a time of day, for %{name}"]
+      }
+    | name ~> =("z" | ":z" | "Z" | "Q" | "s") => {
+      | $s.zone ~> =('zone_view & z) => zone_directive [z, name]
+      | fail_pattern [$where, "an instant or zoned value, for %{name}"]
+    }
+    | name ~> ="%" => "%"
+    | name ~> ="n" => "\n"
+    | name ~> ="t" => "\t"
+    | fail_pattern [$where, "a directive: %{name} isn't one"]
+  }
+}
+
+format_loop = #['shown, 'bin, 'int, 'bin] {
+  =[s, pat, pos, acc]
+  {
+    | icmp [pos, %bin.length pat] ~> =(0 | 1) => Str[acc]
+    | char_at [pat, pos] ~> ="%" => {
+      directive_at [pat, iadd [pos, 1]] ~> =('directive & d)
+      emit [s, d, pos] ~> =Str[text]
+      ^ [s, pat, d.end, %bin.concat [acc, text]]
+    }
+    | ^ [s, pat, iadd [pos, 1], %bin.concat [acc, %bin.slice [pat, pos, iadd [pos, 1]]]]
+  }
+}
+
+format = #('instant | 'date | 'time | 'datetime | 'duration | 'period | 'zoned | [('instant | 'date | 'time | 'datetime | 'zoned), pattern: '%str]) {
+  :doc "The value as text, in the form `parse` (`parse_zoned`, for a zoned value) and `%time\{ … }` read back: ISO 8601 for instants (RFC 3339, in UTC: \"2024-03-10T09:30:00Z\"), dates (\"2024-03-10\"), times (\"09:30:00.5\" gives \"09:30:00.500\") and date-times (\"2024-03-10T09:30:00\"); unit notation for durations (\"1h30m\", \"-250ms\") and periods (\"1y2mo\", \"3d\", \"1mo-3d\"); RFC 9557 for zoned values (\"2024-03-10T09:30:00+00:00[Europe/London]\"). Fractional seconds print as three, six or nine digits, the fewest that are exact. With a `pattern:`, writes the value as the pattern's `%` directives say — dates: %Y %y %m %d %e %j %a %A %b %B %u %w %V %G %F %D; times: %H %k %I %l %p %M %S %f %.f %3f %6f %9f %T %R; instants and zoned values: %z %:z %Z %Q %s; and %% %n %t. A flag after the `%` sets the padding: `-` none, `_` spaces, `0` zeros. A directive the value doesn't have answers nil carrying :error InvalidPattern[offset, message]."
+  | =Instant[n] => civil_of_nanos n ~> "{date_text ~}T{clock_text ~}Z"
+  | =('datetime & t) => "{date_text t}T{clock_text t}"
+  | =('date & d) => date_text d
+  | =('time & t) => clock_text t
+  | =Duration[n] => duration_text n
+  | =Period[months: m, days: d] => period_text [m, d]
+  | =[v, pattern: Str[pat]] => format_loop [shown v, pat, 0, <>]
+  | =('zoned & z) => {
+    c = zoned_civil z
+    off = zoned_ltt z ~> .offset
+    "{date_text c}T{clock_text c}{offset_text off}[{zone_name z.1}]"
+  }
+}
+
 http_date = #'instant {
   :doc "The instant as an HTTP date (IMF-fixdate, RFC 9110), to the second: \"Sun, 06 Nov 1994 08:49:37 GMT\"."
   t = civil_of_nanos $0
@@ -1233,12 +1705,21 @@ date_at = #['bin, 'int] {
   =[data, start]
   sign_at [data, start] ~> =[s, p]
   run [data, p, 0] ~> =[y, e]
-  { icmp [isub [e, p], 4] ~> =(0 | 1) | fail [p, "a four-digit year"] }
+  {
+    | icmp [isub [e, p], 4] ~> =(0 | 1)
+    | fail [p, "a four-digit year"]
+  }
   expect [data, e, "-"] ~> =('int & p1)
   fixed [data, p1, 2, "a two-digit month"] ~> =[month, p2]
   expect [data, p2, "-"] ~> =('int & p3)
   fixed [data, p3, 2, "a two-digit day"] ~> =[day, p4]
-  { date [imul [s, y], month, day] | fail [start, "a valid date"] } ~> =('date & d)
+
+  {
+    | date [imul [s, y], month, day]
+    | fail [start, "a valid date"]
+  }
+  ~> =('date & d)
+
   [d, p4]
 }
 
@@ -1247,7 +1728,10 @@ fraction_at = #['bin, 'int] {
   =[data, start]
   run [data, start, 0] ~> =[v, e]
   n = isub [e, start]
-  { icmp [n, 1] ~> =(0 | 1); icmp [n, 9] ~> =(-1 | 0) | fail [start, "one to nine fraction digits"] }
+  {
+    | icmp [n, 1] ~> =(0 | 1); icmp [n, 9] ~> =(-1 | 0)
+    | fail [start, "one to nine fraction digits"]
+  }
   [pow10 [isub [9, n], v], e]
 }
 
@@ -1256,7 +1740,8 @@ seconds_at = #['bin, 'int] {
   =[data, start]
   fixed [data, start, 2, "two-digit seconds"] ~> =[second, p]
   {
-    | char_at [data, p] ~> ="." => fraction_at [data, iadd [p, 1]] ~> =[nano, e]; [[second, nano], e]
+    | char_at [data, p] ~> ="." => fraction_at [data, iadd [p, 1]] ~> =[nano, e]
+        [[second, nano], e]
     | [[second, 0], p]
   }
 }
@@ -1274,7 +1759,12 @@ time_at = #['bin, 'int] {
   }
   ~> =[[second, nano], p4]
 
-  { time [hour, minute, second, nano] | fail [start, "a valid time"] } ~> =('time & t)
+  {
+    | time [hour, minute, second, nano]
+    | fail [start, "a valid time"]
+  }
+  ~> =('time & t)
+
   [t, p4]
 }
 
@@ -1296,9 +1786,7 @@ offset_at = #['bin, 'int] {
       ~> =[sec, p4]
 
       {
-        in_range [h, 0, 23, Hour]
-        in_range [m, 0, 59, Minute]
-        in_range [sec, 0, 59, Second]
+        | in_range [h, 0, 23, Hour]; in_range [m, 0, 59, Minute]; in_range [sec, 0, 59, Second]
         | fail [p, "a valid offset"]
       }
       [imul [s, iadd [imul [h, 3600], iadd [imul [m, 60], sec]]], p4]
@@ -1316,8 +1804,7 @@ temporal_at = #['bin, 'int] {
       dt = at [d, t]
       {
         | char_at [data, q] ~> =("Z" | "z" | "+" | "-") => {
-          offset_at [data, q] ~> =[off, e]
-          [Instant[isub [epoch_nanos dt, imul [off, ns_s]]], e]
+          offset_at [data, q] ~> =[off, e]; [Instant[isub [epoch_nanos dt, imul [off, ns_s]]], e]
         }
         | [dt, q]
       }
@@ -1363,13 +1850,25 @@ unit_at = #['bin, 'int] {
 ]
 
 tally = #[(acc): 'span, (n): 'int, (unit): (Exact['int] | Months['int] | Days['int]), (pos): 'int] {
-  | $unit ~> =Exact[k]; $acc.kind ~> =(Unset | Exact) =>
-    $acc[..., kind: Exact, ns: iadd [$acc.ns, imul [$n, k]]]
-  | $unit ~> =Months[k]; $acc.kind ~> =(Unset | Calendar) =>
-    $acc[..., kind: Calendar, months: iadd [$acc.months, imul [$n, k]]]
-  | $unit ~> =Days[k]; $acc.kind ~> =(Unset | Calendar) =>
-    $acc[..., kind: Calendar, days: iadd [$acc.days, imul [$n, k]]]
-  | fail [$pos, "a unit of the same kind: exact (ns to h) and calendar (d to y) units don't mix"]
+  | $unit ~> =Exact[k]; $acc.kind ~> =(Unset | Exact) => $acc[
+      ...,
+      kind: Exact,
+      ns: iadd [$acc.ns, imul [$n, k]],
+    ]
+  | $unit ~> =Months[k]; $acc.kind ~> =(Unset | Calendar) => $acc[
+      ...,
+      kind: Calendar,
+      months: iadd [$acc.months, imul [$n, k]],
+    ]
+  | $unit ~> =Days[k]; $acc.kind ~> =(Unset | Calendar) => $acc[
+      ...,
+      kind: Calendar,
+      days: iadd [$acc.days, imul [$n, k]],
+    ]
+  | fail [
+    $pos,
+    "a unit of the same kind: exact (ns to h) and calendar (d to y) units don't mix",
+  ]
 }
 
 // Unit notation: components, each a count and a unit, to the end of the input, largest unit
@@ -1377,13 +1876,22 @@ tally = #[(acc): 'span, (n): 'int, (unit): (Exact['int] | Months['int] | Days['i
 // component may carry its own instead.
 span_at = #[(data): 'bin, (pos): 'int, (acc): 'span] {
   sign_at [$data, $pos] ~> =[explicit, p]
-  s = { | p ~> =^$pos => $acc.sign | explicit }
-  lead = { | $acc.kind ~> =Unset => s | $acc.sign }
+  s = { p ~> =^$pos => $acc.sign | explicit }
+  lead = { $acc.kind ~> =Unset => s | $acc.sign }
   run [$data, p, 0] ~> =[v, e]
-  { icmp [e, p] ~> =1 | fail [p, "a number"] }
+  {
+    | icmp [e, p] ~> =1
+    | fail [p, "a number"]
+  }
   unit_at [$data, e] ~> =[u, rank, q]
-  tally [$acc[..., sign: lead, rank: rank], imul [s, v], u, e] ~> =('span & next)
-  { icmp [rank, $acc.rank] ~> =-1 | fail [e, "units largest first, each at most once"] }
+
+  tally [$acc[..., sign: lead, rank: rank], imul [s, v], u, e]
+  ~> =('span & next)
+
+  {
+    | icmp [rank, $acc.rank] ~> =-1
+    | fail [e, "units largest first, each at most once"]
+  }
   {
     | peek [$data, q] ~> =\[] => ^ [$data, q, next]
     | next ~> .kind ~> =Exact => [Duration[next.ns], q]
@@ -1419,9 +1927,392 @@ parse_from = #['bin, 'int] {
   v
 }
 
-parse = #'%str {
-  :doc "Reads a value from text in the forms `format` writes: an instant (a date-time with `Z` or a `+HH:MM`/`-HH:MM` offset, converted to UTC), a date, a date-time, a time (seconds optional), a duration or a period (unit notation: ns, us, ms, s, m, h for durations; d, w, mo, y for periods). A `T`, `t` or space separates date from time. Answers nil carrying :error Expected[offset, message] for malformed text or a date or time that doesn't exist."
-  parse_from [$0, 0]
+// --- reading with a pattern ---
+
+// The fields a pattern has read so far; nil where it has read none.
+'got = [
+  year: ('int | []),
+  month: ('int | []),
+  day: ('int | []),
+  yday: ('int | []),
+  hour: ('int | []),
+  hour12: ('int | []),
+  pm: (AM | PM | []),
+  minute: ('int | []),
+  second: ('int | []),
+  nano: ('int | []),
+  offset: ('int | []),
+  unix: ('int | []),
+  weekday: ('weekday | []),
+]
+
+// Up to `left` digits: `[value, end]`.
+run_upto = #['bin, 'int, 'int, 'int] {
+  =[data, pos, left, acc]
+  {
+    | left ~> =0 => [acc, pos]
+    | digit [data, pos] ~> =('int & d) => ^ [
+        data,
+        iadd [pos, 1],
+        isub [left, 1],
+        iadd [imul [acc, 10], d],
+      ]
+    | [acc, pos]
+  }
+}
+
+skip_spaces = #['bin, 'int] {
+  | char_at $ ~> =" " => ^ [$0, iadd [$1, 1]]
+  | $1
+}
+
+// A number of `width` digits — fewer under the `-` flag, or after spaces under `_` (or
+// where spaces are the directive's usual fill).
+number_at = #['bin, 'int, 'int, '%str, ('%str | [])] {
+  =[data, pos, width, fill, flag]
+  lenient = {
+    | flag ~> ="-" => Ok
+    | flag ~> ="_" => Ok
+    | flag ~> =[]; fill ~> =" " => Ok
+  }
+  start = {
+    | lenient ~> =Ok => skip_spaces [data, pos]
+    | pos
+  }
+  run_upto [data, start, width, 0] ~> =[v, e]
+  n = isub [e, start]
+  {
+    | n ~> =^width => [v, e]
+    | lenient ~> =Ok; icmp [n, 0] ~> =1 => [v, e]
+    | fail [pos, "{%str.from_int width} digits"]
+  }
+}
+
+day_named = #'%str {
+  | =("Mon" | "Monday") => Mon
+  | =("Tue" | "Tuesday") => Tue
+  | =("Wed" | "Wednesday") => Wed
+  | =("Thu" | "Thursday") => Thu
+  | =("Fri" | "Friday") => Fri
+  | =("Sat" | "Saturday") => Sat
+  | =("Sun" | "Sunday") => Sun
+}
+
+month_named = #'%str {
+  | =("Jan" | "January") => 1
+  | =("Feb" | "February") => 2
+  | =("Mar" | "March") => 3
+  | =("Apr" | "April") => 4
+  | ="May" => 5
+  | =("Jun" | "June") => 6
+  | =("Jul" | "July") => 7
+  | =("Aug" | "August") => 8
+  | =("Sep" | "September") => 9
+  | =("Oct" | "October") => 10
+  | =("Nov" | "November") => 11
+  | =("Dec" | "December") => 12
+}
+
+word_at = #['bin, 'int] {
+  =[data, pos]
+  e = letters_end [data, pos]
+  {
+    | icmp [e, pos] ~> =1
+    | fail [pos, "a name"]
+  }
+  [Str[%bin.slice [data, pos, e]], e]
+}
+
+read = #[(text): 'bin, (pos): 'int, (d): 'directive, (where): 'int, (got): 'got] {
+  data = $text
+  pos = $pos
+  flag = $d.flag
+  g = $got
+  $d.name ~> {
+    | ="Y" => {
+      sign_at [data, pos] ~> =[s, p]
+
+      {
+        | p ~> =^pos => number_at [data, p, 4, "0", flag]
+        | run [data, p, 0] ~> =[v, e]
+          icmp [isub [e, p], 4] ~> =(0 | 1) => [v, e]
+        | fail [p, "a year"]
+      }
+      ~> =[y, e]
+
+      [g[..., year: imul [s, y]], e]
+    }
+    | ="y" => number_at [data, pos, 2, "0", flag] ~> =[yy, e]; [g[..., year: full_year yy], e]
+    | ="m" => number_at [data, pos, 2, "0", flag] ~> =[v, e]; [g[..., month: v], e]
+    | ="d" => number_at [data, pos, 2, "0", flag] ~> =[v, e]; [g[..., day: v], e]
+    | ="e" => number_at [data, pos, 2, " ", flag] ~> =[v, e]; [g[..., day: v], e]
+    | ="j" => number_at [data, pos, 3, "0", flag] ~> =[v, e]; [g[..., yday: v], e]
+    | ="H" => number_at [data, pos, 2, "0", flag] ~> =[v, e]; [g[..., hour: v], e]
+    | ="k" => number_at [data, pos, 2, " ", flag] ~> =[v, e]; [g[..., hour: v], e]
+    | ="I" => number_at [data, pos, 2, "0", flag] ~> =[v, e]; [g[..., hour12: v], e]
+    | ="l" => number_at [data, pos, 2, " ", flag] ~> =[v, e]; [g[..., hour12: v], e]
+    | ="M" => number_at [data, pos, 2, "0", flag] ~> =[v, e]; [g[..., minute: v], e]
+    | ="S" => number_at [data, pos, 2, "0", flag] ~> =[v, e]; [g[..., second: v], e]
+    | ="p" => {
+      | text_at [data, pos, 2] ~> =("AM" | "am") => [g[..., pm: AM], iadd [pos, 2]]
+      | text_at [data, pos, 2] ~> =("PM" | "pm") => [g[..., pm: PM], iadd [pos, 2]]
+      | fail [pos, "AM or PM"]
+    }
+    | =("a" | "A") => {
+      word_at [data, pos] ~> =[w, e]
+      { day_named w | fail [pos, "a day name"] } ~> =('weekday & wd)
+      [g[..., weekday: wd], e]
+    }
+    | =("b" | "B") => {
+      word_at [data, pos] ~> =[w, e]
+
+      {
+        | month_named w
+        | fail [pos, "a month name"]
+      }
+      ~> =('int & m)
+
+      [g[..., month: m], e]
+    }
+    | =("f" | "3f" | "6f" | "9f") => {
+      digits = $d.name ~> {
+        | ="3f" => 3
+        | ="6f" => 6
+        | ="9f" => 9
+        | 0
+      }
+      // A fixed width is read at that width, so another field can follow directly.
+      limit = { digits ~> =0 => 9 | digits }
+      run_upto [data, pos, limit, 0] ~> =[v, e]
+      n = isub [e, pos]
+      {
+        | digits ~> =0; icmp [n, 0] ~> =1 => Ok
+        | n ~> =^digits => Ok
+        | fail [pos, "fraction digits"]
+      }
+      [g[..., nano: pow10 [isub [9, n], v]], e]
+    }
+    | =".f" => {
+      | char_at [data, pos] ~> ="." => fraction_at [data, iadd [pos, 1]] ~> =[v, e]
+          [g[..., nano: v], e]
+      | [g, pos]
+    }
+    | =("z" | ":z") => {
+      | char_at [data, pos] ~> =("Z" | "z") => [g[..., offset: 0], iadd [pos, 1]]
+      | {
+        sign_at [data, pos] ~> =[s, p]
+        {
+          | icmp [p, pos] ~> =1
+          | fail [pos, "a sign"]
+        }
+        number_at [data, p, 2, "0", []] ~> =[h, p1]
+        p2 = {
+          | char_at [data, p1] ~> =":" => iadd [p1, 1]
+          | p1
+        }
+        number_at [data, p2, 2, "0", []] ~> =[m, p3]
+
+        // Seconds, as `format` writes them for an offset that has them.
+        {
+          | p2 ~> =^p1; digit [data, p3] ~> ='int => number_at [data, p3, 2, "0", []]
+          | p2 ~> =\^p1; char_at [data, p3] ~> =":" => number_at [data, iadd [p3, 1], 2, "0", []]
+          | [0, p3]
+        }
+        ~> =[sec, p4]
+
+        {
+          | in_range [h, 0, 23, Hour]; in_range [m, 0, 59, Minute]; in_range [sec, 0, 59, Second]
+          | fail [p, "a valid offset"]
+        }
+        [
+          g[..., offset: imul [s, iadd [imul [h, 3600], iadd [imul [m, 60], sec]]]],
+          p4,
+        ]
+      }
+    }
+    | ="s" => {
+      sign_at [data, pos] ~> =[s, p]
+      run [data, p, 0] ~> =[v, e]
+      {
+        | icmp [e, p] ~> =1
+        | fail [p, "seconds since the epoch"]
+      }
+      [g[..., unix: imul [s, v]], e]
+    }
+    | ="F" => date_at [data, pos] ~> =[dt, e]
+        [g[..., year: dt.year, month: dt.month, day: dt.day], e]
+    | =("T" | "R") => {
+      fixed [data, pos, 2, "a two-digit hour"] ~> =[h, p1]
+      expect [data, p1, ":"] ~> =('int & p2)
+      fixed [data, p2, 2, "two-digit minutes"] ~> =[m, p3]
+      {
+        | $d.name ~> ="T" => {
+          expect [data, p3, ":"] ~> =('int & p4)
+          fixed [data, p4, 2, "two-digit seconds"] ~> =[sec, p5]
+          [g[..., hour: h, minute: m, second: sec], p5]
+        }
+        | [g[..., hour: h, minute: m], p3]
+      }
+    }
+    | ="D" => {
+      number_at [data, pos, 2, "0", flag] ~> =[m, p1]
+      expect [data, p1, "/"] ~> =('int & p2)
+      number_at [data, p2, 2, "0", flag] ~> =[dd, p3]
+      expect [data, p3, "/"] ~> =('int & p4)
+      number_at [data, p4, 2, "0", flag] ~> =[yy, e]
+      [g[..., year: full_year yy, month: m, day: dd], e]
+    }
+    | ="%" => expect [data, pos, "%"] ~> =('int & e); [g, e]
+    | ="n" => expect [data, pos, "\n"] ~> =('int & e); [g, e]
+    | ="t" => expect [data, pos, "\t"] ~> =('int & e); [g, e]
+    | =("Z" | "Q") => fail_pattern [
+        $where,
+        "a directive a pattern reads: zone names need parse_zoned",
+      ]
+    | =("u" | "w" | "V" | "G") => fail_pattern [
+        $where,
+        "a directive a pattern reads: %{$d.name} isn't",
+      ]
+    | fail_pattern [$where, "a directive: %{$d.name} isn't one"]
+  }
+}
+
+parse_loop = #['bin, 'int, 'bin, 'int, 'got] {
+  =[text, tpos, pat, ppos, g]
+  {
+    | icmp [ppos, %bin.length pat] ~> =(0 | 1) => {
+      {
+        | icmp [tpos, %bin.length text] ~> =0
+        | fail [tpos, "end of input"]
+      }
+      g
+    }
+    | char_at [pat, ppos] ~> ="%" => {
+      directive_at [pat, iadd [ppos, 1]] ~> =('directive & d)
+      read [text, tpos, d, ppos, g] ~> =[g2, e]
+      ^ [text, e, pat, d.end, g2]
+    }
+    | =_ => {
+      text_at [pat, ppos, 1] ~> =('%str & c)
+      expect [text, tpos, c] ~> =('int & e)
+      ^ [text, e, pat, iadd [ppos, 1], g]
+    }
+  }
+}
+
+// The date the fields name: from year, month and day, or year and day of the year. None
+// when they name no date at all; a failure when they name only part of one.
+got_date = #'got {
+  | $year ~> =('int & y)
+    $month ~> =('int & m)
+    $day ~> =('int & d) => {
+      | date [y, m, d]
+      | fail [0, "a valid date"]
+    }
+  | $year ~> =('int & y); $yday ~> =('int & n) => {
+    {
+      | in_range [n, 1, days_in_year y, Day]
+      | fail [0, "a valid day of the year"]
+    }
+
+    days_of [year: y, month: 1, day: 1]
+    ~> iadd [~, isub [n, 1]]
+    ~> civil
+    ~> =('date & d)
+
+    // A month or day read alongside must be the day of the year's.
+    {
+      | $month ~> =(^d.month | []); $day ~> =(^d.day | []); Ok
+      | fail [0, "a month and day matching the day of the year"]
+    }
+    d
+  }
+  | $year ~> =[]; $month ~> =[]; $day ~> =[]; $yday ~> =[] => None
+  | fail [0, "a complete date: a year with a month and day, or a day of the year"]
+}
+
+got_time = #'got {
+  | $hour ~> =[]; $hour12 ~> =[]; $minute ~> =[]; $second ~> =[] => None
+  | =_ => {
+    {
+      | $hour ~> =('int & h); $pm ~> =[] => h
+      | $hour ~> ='int => fail [0, "a 12-hour clock (%I), for AM or PM"]
+      | $hour12 ~> =('int & h); $pm ~> =AM => { h ~> =12 => 0 | h }
+      | $hour12 ~> =('int & h); $pm ~> =PM => { h ~> =12 => 12 | iadd [h, 12] }
+      | $hour12 ~> ='int => fail [0, "AM or PM, for a 12-hour clock"]
+      | fail [0, "an hour"]
+    }
+    ~> =('int & h)
+
+    m = { $minute ~> =('int & v) => v | 0 }
+    sec = { $second ~> =('int & v) => v | 0 }
+    nano = { $nano ~> =('int & v) => v | 0 }
+    {
+      | time [h, m, sec, nano]
+      | fail [0, "a valid time"]
+    }
+  }
+}
+
+assemble = #'got {
+  =g
+  {
+    | g.unix ~> =('int & u) => {
+      nano = { g.nano ~> =('int & v) => v | 0 }; Instant[iadd [imul [u, ns_s], nano]]
+    }
+    | {
+      got_date g ~> =(('date | None) & d)
+      got_time g ~> =(('time | None) & t)
+      {
+        | g.weekday ~> =('weekday & w); d ~> =('date & dd) => {
+          | weekday dd ~> =^w
+          | fail [0, "the date's day of the week"]
+        }
+        | g.weekday ~> ='weekday => fail [0, "a date, for the day of the week"]
+        | Ok
+      }
+      {
+        | d ~> =('date & dd); t ~> =('time & tt) => {
+          dt = at [dd, tt]
+          {
+            | g.offset ~> =('int & o) => Instant[isub [epoch_nanos dt, imul [o, ns_s]]]
+            | dt
+          }
+        }
+        | g.offset ~> ='int => fail [0, "a date and time, for the offset"]
+        | d ~> =('date & dd) => dd
+        | t ~> =('time & tt) => tt
+        | fail [0, "a date or a time"]
+      }
+    }
+  }
+}
+
+pattern_parse = #['%str, '%str] {
+  =[Str[text], Str[pat]]
+  empty = [
+    year: [],
+    month: [],
+    day: [],
+    yday: [],
+    hour: [],
+    hour12: [],
+    pm: [],
+    minute: [],
+    second: [],
+    nano: [],
+    offset: [],
+    unix: [],
+    weekday: [],
+  ]
+  parse_loop [text, 0, pat, 0, empty] ~> =('got & g)
+  assemble g
+}
+
+parse = #('%str | ['%str, pattern: '%str]) {
+  :doc "Reads a value from text in the forms `format` writes: an instant (a date-time with `Z` or a `+HH:MM`/`-HH:MM` offset, converted to UTC), a date, a date-time, a time (seconds optional), a duration or a period (unit notation: ns, us, ms, s, m, h for durations; d, w, mo, y for periods). A `T`, `t` or space separates date from time. With a `pattern:`, reads the text as the pattern's directives describe (see `format`), answering an instant when the fields give an offset or `%s`, else a date-time, a date or a time. Answers nil carrying :error Expected[offset, message] for malformed text or a date or time that doesn't exist, and InvalidPattern[offset, message] for a pattern it can't read with."
+  | =Str[data] => parse_from [data, 0]
+  | =[text, pattern: pat] => pattern_parse [text, pat]
 }
 
 // --- zoned text: RFC 9557 ---
@@ -1435,7 +2326,13 @@ parse = #'%str {
 zoned_parts_at = #['bin, 'int] {
   =[data, start]
   date_at [data, start] ~> =[d, p]
-  { | char_at [data, p] ~> =("T" | "t" | " ") => iadd [p, 1] | fail [p, "'T'"] } ~> =('int & p1)
+
+  {
+    | char_at [data, p] ~> =("T" | "t" | " ") => iadd [p, 1]
+    | fail [p, "'T'"]
+  }
+  ~> =('int & p1)
+
   time_at [data, p1] ~> =[t, q]
 
   {
@@ -1447,10 +2344,25 @@ zoned_parts_at = #['bin, 'int] {
 
   expect [data, r, "["] ~> =('int & open)
   // A `!` marks the annotation critical, which it always is here.
-  from = { | char_at [data, open] ~> ="!" => iadd [open, 1] | open }
-  { find [data, "]", from] | fail [from, "a closing ']'"] } ~> =('int & close)
-  { icmp [close, from] ~> =1 | fail [from, "a zone name"] }
-  [[at: at [d, t], note: note, note_at: q, name: Str[%bin.slice [data, from, close]]], iadd [close, 1]]
+  from = {
+    | char_at [data, open] ~> ="!" => iadd [open, 1]
+    | open
+  }
+
+  {
+    | find [data, "]", from]
+    | fail [from, "a closing ']'"]
+  }
+  ~> =('int & close)
+
+  {
+    | icmp [close, from] ~> =1
+    | fail [from, "a zone name"]
+  }
+  [
+    [at: at [d, t], note: note, note_at: q, name: Str[%bin.slice [data, from, close]]],
+    iadd [close, 1],
+  ]
 }
 
 // The zone a name gives without the host's database: UTC, or a fixed offset; nil for an
@@ -1460,10 +2372,7 @@ pure_zone = #'%str {
   {
     | $ ~> ="UTC" => Utc
     | char_at [data, 0] ~> =("+" | "-") => {
-      offset_at [data, 0] ~> =[o, e]
-      len = %bin.length data
-      e ~> =^len
-      Fixed[o]
+      offset_at [data, 0] ~> =[o, e]; len = %bin.length data; e ~> =^len; Fixed[o]
     }
   }
 }
@@ -1476,7 +2385,10 @@ settle = #['zoned_parts, 'zone] {
     | =Exact => Zoned[from_utc parts.at, z]
     | =Offset[o] => {
       i = epoch_nanos parts.at ~> isub [~, imul [o, ns_s]]
-      { ltt_at [z, fdiv [i, ns_s]] ~> .offset ~> =^o | fail [parts.note_at, "an offset the zone has then"] }
+      {
+        | ltt_at [z, fdiv [i, ns_s]] ~> .offset ~> =^o
+        | fail [parts.note_at, "an offset the zone has then"]
+      }
       Zoned[Instant[i], z]
     }
     | Zoned[pick [candidates [z, epoch_nanos parts.at], Compatible], z]
@@ -1487,45 +2399,24 @@ parse_zoned = #'%str {
   :doc "Reads a zoned value from RFC 9557 text, as `format` writes it: a date-time, an optional offset (`Z` for an exact instant, or `+HH:MM`, which must be the zone's offset then), and a zone in brackets — \"UTC\", a fixed offset, or an IANA name, looked up with `zone`. Without an offset, a skipped or repeated time resolves as Compatible. Answers nil carrying :error Expected[offset, message] or UnknownZone[name]."
   =Str[data]
   zoned_parts_at [data, 0] ~> =[parts, e]
-  { icmp [e, %bin.length data] ~> =0 | fail [e, "end of input"] }
+  {
+    | icmp [e, %bin.length data] ~> =0
+    | fail [e, "end of input"]
+  }
+
   {
     | pure_zone parts.name ~> =((Utc | Fixed['int]) & z) => z
     | =_ => zone parts.name
   }
   ~> =('zone & z)
+
   settle [parts, z]
-}
-
-month_number = #'%str {
-  | ="Jan" => 1
-  | ="Feb" => 2
-  | ="Mar" => 3
-  | ="Apr" => 4
-  | ="May" => 5
-  | ="Jun" => 6
-  | ="Jul" => 7
-  | ="Aug" => 8
-  | ="Sep" => 9
-  | ="Oct" => 10
-  | ="Nov" => 11
-  | ="Dec" => 12
-}
-
-day_named = #'%str {
-  | =("Mon" | "Monday") => Mon
-  | =("Tue" | "Tuesday") => Tue
-  | =("Wed" | "Wednesday") => Wed
-  | =("Thu" | "Thursday") => Thu
-  | =("Fri" | "Friday") => Fri
-  | =("Sat" | "Saturday") => Sat
-  | =("Sun" | "Sunday") => Sun
 }
 
 day_name_at = #['bin, 'int, 'int] {
   =[data, start, end]
   {
-    text_at [data, start, isub [end, start]] ~> =('%str & name)
-    day_named name
+    | text_at [data, start, isub [end, start]] ~> =('%str & name); day_named name
     | fail [start, "a day name"]
   }
 }
@@ -1533,8 +2424,8 @@ day_name_at = #['bin, 'int, 'int] {
 month_at = #['bin, 'int] {
   =[data, start]
   {
-    | text_at [data, start, 3] ~> =('%str & name); month_number name ~> =('int & m) =>
-      [m, iadd [start, 3]]
+    | text_at [data, start, 3] ~> =('%str & name)
+      month_named name ~> =('int & m) => [m, iadd [start, 3]]
     | fail [start, "a month name"]
   }
 }
@@ -1543,13 +2434,19 @@ month_at = #['bin, 'int] {
 clock_at = #['bin, 'int] {
   =[data, start]
   time_at [data, start] ~> =[t, e]
-  { isub [e, start] ~> =8 | fail [start, "HH:MM:SS"] }
+  {
+    | isub [e, start] ~> =8
+    | fail [start, "HH:MM:SS"]
+  }
   [t, e]
 }
 
 gmt_at = #['bin, 'int] {
   =[data, start]
-  { text_at [data, start, 4] ~> =" GMT"; iadd [start, 4] | fail [start, "' GMT'"] }
+  {
+    | text_at [data, start, 4] ~> =" GMT"; iadd [start, 4]
+    | fail [start, "' GMT'"]
+  }
 }
 
 'http_parts = [weekday: 'weekday, year: 'int, month: 'int, day: 'int, time: 'time, end: 'int]
@@ -1574,7 +2471,13 @@ imf_at = #'bin {
 // `Sunday, 06-Nov-94 08:49:37 GMT` (RFC 850). A two-digit year is read as 1970 to 2069.
 rfc850_at = #'bin {
   =data
-  { find [data, ",", 0] | fail [0, "a day name and ','"] } ~> =('int & comma)
+
+  {
+    | find [data, ",", 0]
+    | fail [0, "a day name and ','"]
+  }
+  ~> =('int & comma)
+
   day_name_at [data, 0, comma] ~> =('weekday & wd)
   expect [data, iadd [comma, 1], " "] ~> =('int & p1)
   fixed [data, p1, 2, "a two-digit day"] ~> =[day, p2]
@@ -1585,8 +2488,7 @@ rfc850_at = #'bin {
   expect [data, p6, " "] ~> =('int & p7)
   clock_at [data, p7] ~> =[t, p8]
   gmt_at [data, p8] ~> =('int & end)
-  year = { | icmp [yy, 70] ~> =-1 => iadd [2000, yy] | iadd [1900, yy] }
-  [weekday: wd, year: year, month: month, day: day, time: t, end: end]
+  [weekday: wd, year: full_year yy, month: month, day: day, time: t, end: end]
 }
 
 // `Sun Nov  6 08:49:37 1994` (C's asctime), the day padded with a space.
@@ -1621,9 +2523,21 @@ parse_http_date = #'%str {
   }
   ~> =('http_parts & h)
 
-  { icmp [h.end, %bin.length data] ~> =0 | fail [h.end, "end of input"] }
-  { date [h.year, h.month, h.day] | fail [0, "a valid date"] } ~> =('date & d)
-  { weekday d ~> =^h.weekday | fail [0, "the date's day of the week"] }
+  {
+    | icmp [h.end, %bin.length data] ~> =0
+    | fail [h.end, "end of input"]
+  }
+
+  {
+    | date [h.year, h.month, h.day]
+    | fail [0, "a valid date"]
+  }
+  ~> =('date & d)
+
+  {
+    | weekday d ~> =^h.weekday
+    | fail [0, "the date's day of the week"]
+  }
   at [d, h.time] ~> from_utc
 }
 
@@ -1639,8 +2553,8 @@ skip_space = #['bin, 'int] {
 
 // The end of the content with trailing whitespace dropped.
 trim_end = #['bin, 'int] {
-  | icmp [$1, 0] ~> =1; char_at [$0, isub [$1, 1]] ~> =(" " | "\t" | "\n" | "\r") =>
-    ^ [$0, isub [$1, 1]]
+  | icmp [$1, 0] ~> =1
+    char_at [$0, isub [$1, 1]] ~> =(" " | "\t" | "\n" | "\r") => ^ [$0, isub [$1, 1]]
   | $1
 }
 
@@ -1649,15 +2563,15 @@ label = #['%str, 'int] { Labeled[label: $0, value: $1] }
 literal = #'parsed {
   | =Instant[n] => Tuple[name: "Instant", fields: %list{ n }]
   | =Duration[n] => Tuple[name: "Duration", fields: %list{ n }]
-  | =Period[months: m, days: d] =>
-    Tuple[name: "Period", fields: %list{ label ["months", m], label ["days", d] }]
-  | =('date & d) =>
-    Tuple[
+  | =Period[months: m, days: d] => Tuple[
+      name: "Period",
+      fields: %list{ label ["months", m], label ["days", d] },
+    ]
+  | =('date & d) => Tuple[
       name: "Date",
       fields: %list{ label ["year", d.year], label ["month", d.month], label ["day", d.day] },
     ]
-  | =('time & t) =>
-    Tuple[
+  | =('time & t) => Tuple[
       name: "Time",
       fields: %list{
         label ["hour", t.hour],
@@ -1666,8 +2580,7 @@ literal = #'parsed {
         label ["nano", t.nano],
       },
     ]
-  | =('datetime & t) =>
-    Tuple[
+  | =('datetime & t) => Tuple[
       name: "DateTime",
       fields: %list{
         label ["year", t.year],
@@ -1691,7 +2604,10 @@ zone_expr = #(Utc | Fixed['int]) {
 zoned_literal = #['bin, 'int] {
   =[data, start]
   zoned_parts_at [data, start] ~> =[parts, e]
-  { icmp [e, %bin.length data] ~> =0 | fail [e, "end of input"] }
+  {
+    | icmp [e, %bin.length data] ~> =0
+    | fail [e, "end of input"]
+  }
   {
     | pure_zone parts.name ~> =((Utc | Fixed['int]) & z) => {
       settle [parts, z] ~> =Zoned[Instant[n], _]
@@ -1836,6 +2752,8 @@ time_dialect = #(content: '%str) {
   parse: parse,
   http_date: http_date,
   parse_http_date: parse_http_date,
+  series: series,
+  round: round,
   zone: zone,
   local_zone: local_zone,
   fixed: fixed_zone,

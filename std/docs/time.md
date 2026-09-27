@@ -408,6 +408,65 @@ are how a zoned value is written down and read back:
 %data.decode<'%time.zone> "Tz[name: \"x\", rules: 1]"   //= []
 ```
 
+## Series
+
+`series` counts out values from a start by a step, as a lazy `%iter`: forever, or up to — not
+including — `until`. A duration steps an instant, date-time or zoned value; a period steps a
+date, date-time or zoned value.
+
+```quiver
+%time.series [%time{ 2024-01-01T00:00Z }, %time.hours 6, until: %time{ 2024-01-02T00:00Z }] ~> %iter.count   //= 4
+%time.series [%time{ 2024-01-10 }, %time.days -3, until: %time{ 2024-01-01 }] ~> %list.collect
+//= Cons[Date[year: 2024, month: 1, day: 10], Cons[Date[year: 2024, month: 1, day: 7], Cons[Date[year: 2024, month: 1, day: 4], Nil]]]
+```
+
+`until` stops the series at the first value at or past it, in the direction the step goes —
+for a period, by its average length — so a step whose first value lands back on the start
+still stops:
+
+```quiver
+%time.series [%time{ 2024-02-01 }, %time{ 1mo-29d }, until: %time{ 2024-02-05 }] ~> %iter.map [~, %time.format] ~> %list.collect
+//= Cons["2024-02-01", Cons["2024-02-01", Cons["2024-02-03", Cons["2024-02-04", Nil]]]]
+```
+
+Each value is the start plus a whole number of steps, not the previous value plus one, so a
+clamped day doesn't carry forward:
+
+```quiver
+%time.series [%time{ 2024-01-31 }, %time.months 1] ~> %iter.take [~, 3] ~> %iter.map [~, %time.format] ~> %list.collect
+//= Cons["2024-01-31", Cons["2024-02-29", Cons["2024-03-31", Nil]]]
+```
+
+In a zone, a day is a calendar day and 24 hours is 24 hours, which part company where the
+clocks change:
+
+```quiver
+london = %time.zone "Europe/London" ~> ='%time.zone
+start = %time.zoned [%time{ 2024-03-30T09:00 }, london]
+%time.series [start, %time.days 1] ~> %iter.take [~, 2] ~> %iter.map [~, %time.format] ~> %list.collect
+//= Cons["2024-03-30T09:00:00+00:00[Europe/London]", Cons["2024-03-31T09:00:00+01:00[Europe/London]", Nil]]
+%time.series [start, %time.hours 24] ~> %iter.take [~, 2] ~> %iter.map [~, %time.format] ~> %list.collect
+//= Cons["2024-03-30T09:00:00+00:00[Europe/London]", Cons["2024-03-31T10:00:00+01:00[Europe/London]", Nil]]
+```
+
+## Rounding
+
+`round` takes a value to a multiple of an increment — a unit's length, or any duration — to
+the nearest by default, with halves going away from zero. `mode:` rounds `Floor`, `Ceil` or
+`Trunc` (toward zero) instead. Instants round on the UTC timeline, and civil and zoned values
+on their own clocks, a time of day wrapping at midnight:
+
+```quiver
+%time.round [%time{ 09:07:31 }, %time{ 15m }]                //= Time[hour: 9, minute: 15, second: 0, nano: 0]
+%time.round [%time{ 09:07:31 }, %time{ 15m }, mode: Floor]   //= Time[hour: 9, minute: 0, second: 0, nano: 0]
+%time.round [%time{ 23:59:31 }, %time.minutes 1]             //= Time[hour: 0, minute: 0, second: 0, nano: 0]
+%time.round [%time{ -1h30m }, %time.hours 1]                 //= Duration[-7200000000000]
+%time.round [%time{ 2024-03-10T09:30:00.123456Z }, %time.ms 1] ~> %time.format   //= "2024-03-10T09:30:00.123Z"
+```
+
+`truncate` is the calendar's counterpart, for weeks, months and years. A zoned value in a
+repeated hour keeps its offset when rounded, as it does when truncated.
+
 ## Text
 
 `format` writes ISO 8601 for instants (always in UTC), dates, times and date-times, and unit
@@ -447,6 +506,70 @@ seconds are optional; nil carries `:error Expected[offset, message]` for malform
 %time.parse "2024-13-01" ~> :error<'%time.error>          //= Expected[offset: 0, message: "a valid date"]
 %time.parse "12:3" ~> :error<'%time.error>                //= Expected[offset: 3, message: "two-digit minutes"]
 ```
+
+### Patterns
+
+With a `pattern:`, `format` writes a value as the pattern's `%` directives say, and `parse`
+reads it back. The directives follow strftime's:
+
+| | |
+| --- | --- |
+| dates | `%Y` year, `%y` its last two digits, `%m` month, `%d` day, `%e` day space-padded, `%j` day of the year, `%a`/`%A` weekday name, `%b`/`%B` month name, `%u` ISO weekday (Monday 1), `%w` weekday (Sunday 0), `%V`/`%G` ISO week and its year, `%F` = `%Y-%m-%d`, `%D` = `%m/%d/%y` |
+| times | `%H` hour, `%k` hour space-padded, `%I`/`%l` 12-hour clock, `%p` AM/PM, `%M` minute, `%S` second, `%f` fraction (3, 6 or 9 digits), `%.f` the same with a dot, or nothing when zero, `%3f`/`%6f`/`%9f` fixed digits, `%T` = `%H:%M:%S`, `%R` = `%H:%M` |
+| instants and zoned values | `%z` offset `+hhmm`, `%:z` offset `+hh:mm`, `%Z` abbreviation, `%Q` zone name, `%s` seconds since the epoch |
+| text | `%%`, `%n` newline, `%t` tab |
+
+A flag between the `%` and its letter sets a number's padding: `-` for none, `_` for spaces,
+`0` for zeros.
+
+```quiver
+%time.format [%time{ 2024-03-10 }, pattern: "%A %-d %B %Y (day %j, week %V)"]   //= "Sunday 10 March 2024 (day 070, week 10)"
+%time.format [%time{ 2024-03-10T21:05:07 }, pattern: "%d/%m/%y %-I:%M %p"]        //= "10/03/24 9:05 PM"
+london = %time.zone "Europe/London" ~> ='%time.zone
+z = %time.zoned [%time{ 2024-07-04T15:05:09.25Z }, london]
+%time.format [z, pattern: "%a, %d %b %Y %T%.f %z %Z"]   //= "Thu, 04 Jul 2024 16:05:09.250 +0100 BST"
+```
+
+A pattern names what it needs, so one the value can't fill fails, as does an unknown
+directive:
+
+```quiver
+%time.format [%time{ 2024-03-10 }, pattern: "%H"] ~> :error<'%time.error>      //= InvalidPattern[offset: 0, message: "a time of day, for %H"]
+%time.format [%time{ 2024-03-10 }, pattern: "%Y %q"] ~> :error<'%time.error>   //= InvalidPattern[offset: 3, message: "a directive: %q isn't one"]
+```
+
+Reading, the kind of value comes from the fields the pattern has: an instant with an offset
+or `%s`, else a date-time, a date or a time. Numbers are read at their width unless a flag
+allows fewer digits, so fields can run together; a two-digit year is read as 1970 to 2069.
+Fields that can disagree are checked rather than ignored: a weekday name against the date, a
+month against a day of the year — and `%p` needs a 12-hour clock, a weekday a date.
+
+```quiver
+%time.parse ["10/03/24 9:05 PM", pattern: "%d/%m/%y %-I:%M %p"]   //= DateTime[year: 2024, month: 3, day: 10, hour: 21, minute: 5, second: 0, nano: 0]
+%time.parse ["20240310T0905", pattern: "%Y%m%dT%H%M"]           //= DateTime[year: 2024, month: 3, day: 10, hour: 9, minute: 5, second: 0, nano: 0]
+%time.parse ["2024-03-10T09:05:07+0100", pattern: "%FT%T%z"] ~> ='%time.instant ~> %time.format   //= "2024-03-10T08:05:07Z"
+%time.parse ["2024-070", pattern: "%Y-%j"]                      //= Date[year: 2024, month: 3, day: 10]
+%time.parse ["090507123", pattern: "%H%M%S%3f"]                 //= Time[hour: 9, minute: 5, second: 7, nano: 123000000]
+%time.parse ["09:05 PM", pattern: "%H:%M %p"] ~> :error<'%time.error>   //= Expected[offset: 0, message: "a 12-hour clock (%I), for AM or PM"]
+%time.parse ["Sunday 09:05", pattern: "%A %H:%M"] ~> :error<'%time.error>   //= Expected[offset: 0, message: "a date, for the day of the week"]
+%time.parse ["Monday 10 March 2024", pattern: "%A %-d %B %Y"] ~> :error<'%time.error>   //= Expected[offset: 0, message: "the date's day of the week"]
+%time.parse ["2024-03", pattern: "%Y-%m"] ~> :error<'%time.error>
+//= Expected[offset: 0, message: "a complete date: a year with a month and day, or a day of the year"]
+```
+
+`%z` and `%:z` read the offsets they write, seconds included, so a pattern round-trips even
+London's pre-1847 local mean time:
+
+```quiver
+london = %time.zone "Europe/London" ~> ='%time.zone
+old = %time.zoned [%time{ 1800-01-01T12:00Z }, london]
+text = %time.format [old, pattern: "%FT%T%z"] ~> ='%str
+text                                                              //= "1800-01-01T11:58:45-000115"
+%time.parse [text, pattern: "%FT%T%z"] ~> ='%time.instant ~> %time.format   //= "1800-01-01T12:00:00Z"
+```
+
+Zone names can't be read with a pattern — `parse_zoned` reads zoned values — and nor can
+the directives that only describe a date (`%u`, `%w`, `%V`, `%G`).
 
 `http_date` writes the HTTP date format (IMF-fixdate). `parse_http_date` reads it, and the
 two obsolete forms RFC 9110 still has recipients accept — RFC 850's, whose two-digit year
