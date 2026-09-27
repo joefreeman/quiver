@@ -306,9 +306,6 @@ fn system_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
         ("random_bytes", int.clone(), bin.clone()),
         // time_now([]) -> int: nanoseconds since the Unix epoch (UTC)
         ("time_now", nil.clone(), int.clone()),
-        // time_monotonic([]) -> int: monotonic nanoseconds from an arbitrary origin —
-        // for measuring durations; unrelated to (and steadier than) the wall clock
-        ("time_monotonic", nil.clone(), int),
         // time_zone(name) -> bin | nil: the named IANA zone's TZif data, from the host's
         // time zone database; nil when the host has no such zone
         (

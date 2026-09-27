@@ -2,6 +2,7 @@ pub mod binary;
 pub mod binders;
 pub mod builtins;
 pub mod bytecode;
+pub mod clock;
 pub mod compatibility;
 pub mod effects;
 pub mod error;

@@ -1,5 +1,6 @@
 use crate::binary::BinaryData;
 use crate::bytecode::{ConcreteType, Constant, Function, Instruction, Opcode};
+use crate::clock::Clock;
 use crate::compatibility::ConcreteTypes;
 use crate::effects::Effect;
 use crate::error::{Error, Operation};
@@ -201,6 +202,10 @@ pub struct Executor<E: Effect> {
     /// module bodies), which must be deterministic: `Purity::HostRead` builtins are
     /// rejected. Set only by the sync driver; runtime workers leave it false.
     pub(crate) compile_time: bool,
+    /// The clock the worker running this executor measures time on (see [`Clock`]), which
+    /// `__time_monotonic__` reads. `None` for an executor with no worker behind it — compile-time
+    /// execution, where host reads are rejected anyway.
+    clock: Option<Arc<dyn Clock>>,
     /// The debug-build assertions that have passed here, by the site they are written at, since
     /// they were last taken — so an assertion counts once however often it runs.
     assertions_passed: HashSet<String>,
@@ -816,6 +821,7 @@ impl<E: Effect> Executor<E> {
             builtin_labels: vec![],
             builtin_result_types: vec![],
             compile_time: false,
+            clock: None,
             assertions_passed: HashSet::new(),
             tuples: vec![0, 0], // NIL and OK have 0 fields
             // Full infos for the same two pre-seeded tuples (updates skip them), keeping
@@ -851,6 +857,19 @@ impl<E: Effect> Executor<E> {
             worker_id,
             next_ref: 0,
         }
+    }
+
+    /// Run on the given clock: what `__time_monotonic__` reads.
+    pub fn set_clock(&mut self, clock: Arc<dyn Clock>) {
+        self.clock = Some(clock);
+    }
+
+    /// Now on this executor's clock, in nanoseconds.
+    pub(crate) fn monotonic_ns(&self) -> Result<u64, Error> {
+        self.clock
+            .as_ref()
+            .map(|clock| clock.now_ns())
+            .ok_or_else(|| Error::InvalidArgument("no clock on this host".to_string()))
     }
 
     /// Create a new unique ref value

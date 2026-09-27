@@ -974,6 +974,15 @@ pub fn register_reference_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>)
     register_builtin!(registry, "reference", reference::builtin_reference, Purity::Stateful, nil => TypeSpec::Reference);
 }
 
+/// Register the monotonic clock: nanoseconds from an arbitrary origin on the calling worker's
+/// clock — the one its select deadlines are measured on, so a program's own timing agrees with
+/// its timeouts. A host read (it varies between calls), so rejected where re-evaluation must be
+/// stable and at compile time.
+pub fn register_clock_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    let nil = TypeSpec::Tuple(None, vec![]);
+    register_builtin!(registry, "time_monotonic", reference::builtin_time_monotonic, Purity::HostRead, nil => TypeSpec::Integer);
+}
+
 /// Abort the current process with a runtime panic carrying the given `Str` message. It
 /// never returns a value (its result type is the empty union), so a chain step after it is
 /// unreachable. This is the language's assertion/trap primitive — debug-mode contract
@@ -1344,6 +1353,7 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
         register_integer_builtins,
         register_vector_builtins,
         register_reference_builtins,
+        register_clock_builtins,
         register_control_builtins,
         register_data_builtins,
         register_json_builtins,

@@ -78,22 +78,6 @@ pub fn builtin_time_now(
     )))
 }
 
-/// time_monotonic([]) -> int: nanoseconds since an arbitrary origin, steady, at the (browser-
-/// coarsened) resolution of `performance.now()`.
-///
-/// `performance.now()` alone is measured from the *context's* start, so a process that moved
-/// between workers would see the origin jump. Adding `timeOrigin` puts every context on one
-/// scale (it is that context's start as epoch milliseconds) while keeping the monotonicity that
-/// makes the reading steadier than the wall clock.
-pub fn builtin_time_monotonic(
-    _arg: &Value,
-    _ctx: &mut BuiltinContext<WebEffect>,
-) -> Result<Completion<WebEffect>, Error> {
-    let performance = global_property::<web_sys::Performance>("performance")?;
-    let ms = performance.time_origin() + performance.now();
-    Ok(Completion::Value(Value::int((ms * 1_000_000.0) as i64)))
-}
-
 /// time_zone(name) -> bin | nil: the named zone's TZif data from the embedded database. The
 /// name must match exactly, as a lookup in a native zoneinfo directory would.
 pub fn builtin_time_zone(
@@ -136,10 +120,9 @@ pub fn builtin_time_zone_local(
 
 /// Attach the browser implementations of the system builtins (entropy, clocks, zones).
 fn attach_system_builtins(registry: &mut BuiltinRegistry<WebEffect>) {
-    let implementations: [(&str, BuiltinFn<WebEffect>); 5] = [
+    let implementations: [(&str, BuiltinFn<WebEffect>); 4] = [
         ("random_bytes", builtin_random_bytes),
         ("time_now", builtin_time_now),
-        ("time_monotonic", builtin_time_monotonic),
         ("time_zone", builtin_time_zone),
         ("time_zone_local", builtin_time_zone_local),
     ];

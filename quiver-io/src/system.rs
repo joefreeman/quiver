@@ -11,8 +11,7 @@ use quiver_core::builtins::{BuiltinContext, BuiltinFn, BuiltinRegistry, Completi
 use quiver_core::error::Error;
 use quiver_core::value::Value;
 use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// random_bytes(n) -> bin: n cryptographically secure bytes from the OS entropy source.
 pub fn builtin_random_bytes(
@@ -58,19 +57,6 @@ pub fn builtin_time_now(
         .as_nanos();
     Ok(Completion::Value(Value::int(
         i64::try_from(ns).expect("system clock beyond 2262"),
-    )))
-}
-
-/// time_monotonic([]) -> int: nanoseconds since an arbitrary per-run origin. Steady (never
-/// steps backwards); only differences are meaningful.
-pub fn builtin_time_monotonic(
-    _arg: &Value,
-    _ctx: &mut BuiltinContext<NativeEffect>,
-) -> Result<Completion<NativeEffect>, Error> {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = *ORIGIN.get_or_init(Instant::now);
-    Ok(Completion::Value(Value::int(
-        i64::try_from(origin.elapsed().as_nanos()).expect("monotonic clock overflow"),
     )))
 }
 
@@ -149,10 +135,9 @@ fn local_zone_name() -> Option<String> {
 
 /// Attach the native implementations of the system builtins (entropy, clocks, zones).
 pub fn attach_system_builtins(registry: &mut BuiltinRegistry<NativeEffect>) {
-    let implementations: [(&str, BuiltinFn<NativeEffect>); 5] = [
+    let implementations: [(&str, BuiltinFn<NativeEffect>); 4] = [
         ("random_bytes", builtin_random_bytes),
         ("time_now", builtin_time_now),
-        ("time_monotonic", builtin_time_monotonic),
         ("time_zone", builtin_time_zone),
         ("time_zone_local", builtin_time_zone_local),
     ];

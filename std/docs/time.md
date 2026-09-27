@@ -47,7 +47,9 @@ dt ~> %time.to_date ~> %time.weekday   //= Sun
 ## Clocks
 
 `now` reads the host's wall clock. `monotonic` reads a steady clock with an arbitrary origin,
-which never steps backwards — `since` gives the time elapsed since a reading. The two kinds
+which never steps backwards — `since` gives the time elapsed since a reading. It is the clock
+that select timeouts and `%proc.sleep` are measured on, so a program timing a sleep sees the
+sleep's own length. The two kinds
 of reading don't mix: an instant can't be compared to or subtracted from a monotonic
 reading.
 

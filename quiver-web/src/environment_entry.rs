@@ -1,5 +1,5 @@
 use crate::effects::WebEffect;
-use crate::pump::{Pump, Tick};
+use crate::pump::{Pump, Tick, WebClock};
 use crate::web_transport::{WebCommandReceiver, WebEventSender};
 use quiver_environment::{Command, EnvironmentError, Event, Worker};
 use std::cell::RefCell;
@@ -81,7 +81,13 @@ pub fn environment_worker_main() {
                     let cmd_receiver = WebCommandReceiver::new(command_queue_for_init.clone());
                     let builtins = crate::builtins::web_builtins();
                     let evt_sender = evt_sender_for_closure.borrow_mut().take().unwrap();
-                    let worker = Worker::new(cmd_receiver, evt_sender, builtins, worker_id);
+                    let worker = Worker::new(
+                        cmd_receiver,
+                        evt_sender,
+                        builtins,
+                        worker_id,
+                        std::sync::Arc::new(crate::pump::WebClock),
+                    );
 
                     *initialized_clone.borrow_mut() = true;
 
@@ -120,25 +126,23 @@ fn start_worker_loop(worker: Worker<WebEffect, WebCommandReceiver, WebEventSende
     let worker = Rc::new(RefCell::new(worker));
 
     let pump = Pump::new(move || {
-        let slice_start = js_sys::Date::now();
+        let slice_start = WebClock::now_ms_f64();
 
         // Run a batch of steps before yielding. One event-loop hop per ~slice (not per
         // `MAX_STEP_UNITS` instructions) is what keeps a long, busy computation fast; see
         // `STEP_SLICE_MS`.
         loop {
-            let current_time_ms = js_sys::Date::now() as u64;
-            if worker.borrow_mut().step(current_time_ms).is_err() {
+            if worker.borrow_mut().step().is_err() {
                 // Worker has sent a WorkerError event to the environment; stop the loop.
                 return Tick::Idle;
             }
             if !worker.borrow().has_runnable() {
                 break;
             }
-            if js_sys::Date::now() - slice_start >= STEP_SLICE_MS {
+            if WebClock::now_ms_f64() - slice_start >= STEP_SLICE_MS {
                 // Budget spent but work remains: yield to the event loop, then resume immediately.
                 // Push subscriptions for the slice's worth of churn, throttled (not forced).
-                let now = js_sys::Date::now() as u64;
-                let _ = worker.borrow_mut().flush_subscriptions(now, false);
+                let _ = worker.borrow_mut().flush_subscriptions(false);
                 return Tick::Busy;
             }
         }
@@ -146,8 +150,7 @@ fn start_worker_loop(worker: Worker<WebEffect, WebCommandReceiver, WebEventSende
         // Settled (nothing runnable): force a final subscription flush so the post-burst state
         // always lands, bypassing the throttle. Process status can only change as a result of a
         // step, so flushing at every tick boundary catches every transition.
-        let now = js_sys::Date::now() as u64;
-        let _ = worker.borrow_mut().flush_subscriptions(now, true);
+        let _ = worker.borrow_mut().flush_subscriptions(true);
 
         let worker = worker.borrow();
         if let Some(deadline_ms) = worker.next_timeout_ms() {

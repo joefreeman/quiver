@@ -26,9 +26,26 @@ fn test_now_is_plausible() {
 }
 
 #[test]
+fn test_monotonic_reads_the_scheduler_clock() {
+    // The harness runs workers on a virtual clock, which is what select timeouts (and so
+    // `%proc.sleep`) measure — and `monotonic` reads the same clock, so a program timing a
+    // sleep sees the sleep's own length, however little real time passed.
+    quiver()
+        .evaluate(
+            "a = %time.monotonic [];
+             %proc.sleep %time{ 5s };
+             elapsed = %time.since a ~> %time.to_ms;
+             __integer_compare__ [elapsed, 5000] ~> =(0 | 1);
+             __integer_compare__ [elapsed, 5100] ~> =-1;
+             Ok",
+        )
+        .expect("Ok")
+        .expect_duration(5000, 5100);
+}
+
+#[test]
 fn test_monotonic_never_goes_backwards() {
     quiver()
-        .with_io()
         .evaluate(
             "a = %time.monotonic [];
              b = %time.monotonic [];

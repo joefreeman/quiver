@@ -36,7 +36,7 @@ type MessageCallback = RefCell<Option<Closure<dyn FnMut(MessageEvent)>>>;
 pub enum Tick {
     /// More runnable work exists; run again as soon as possible.
     Busy,
-    /// Nothing runnable now, but wake at this absolute time (ms, `Date.now()` scale).
+    /// Nothing runnable now, but wake at this absolute time (ms, on the [`WebClock`]).
     WakeAt(f64),
     /// Nothing to do; do not reschedule. The pump sleeps until `wake()`.
     Idle,
@@ -70,8 +70,32 @@ pub struct Pump {
     inner: Rc<PumpInner>,
 }
 
+/// The clock a web worker runs on: `performance.timeOrigin + performance.now()`, in the
+/// browser's (coarsened) resolution. `performance.now()` alone is measured from the *context's*
+/// start, so adding `timeOrigin` puts every worker on one scale — a process that moves between
+/// workers keeps its deadlines — while keeping the monotonicity that `Date.now()` lacks.
+pub struct WebClock;
+
+impl WebClock {
+    /// Now, in (fractional) milliseconds.
+    pub fn now_ms_f64() -> f64 {
+        let performance =
+            js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("performance"))
+                .ok()
+                .and_then(|value| value.dyn_into::<web_sys::Performance>().ok())
+                .expect("`performance` is available in every browser context");
+        performance.time_origin() + performance.now()
+    }
+}
+
+impl quiver_core::clock::Clock for WebClock {
+    fn now_ns(&self) -> u64 {
+        (Self::now_ms_f64() * 1_000_000.0) as u64
+    }
+}
+
 fn now() -> f64 {
-    js_sys::Date::now()
+    WebClock::now_ms_f64()
 }
 
 impl Pump {

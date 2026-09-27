@@ -1,7 +1,9 @@
+use quiver_core::clock::Clock;
 use quiver_environment::{
     Command, CommandReceiver, EnvironmentError, Event, EventSender, Worker, WorkerHandle,
 };
 use quiver_io::NativeEffect;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
@@ -86,50 +88,51 @@ impl WorkerHandle<NativeEffect> for NativeWorkerHandle {
     }
 }
 
-/// The clock a worker runs on, together with how it waits in that clock.
+/// The clock a worker runs on (a [`Clock`]: its select deadlines, and what `%time.monotonic`
+/// reads), together with how it waits in that clock.
 ///
-/// The two belong in one place because a worker's deadlines are in whatever units `now_ms`
-/// returns, while the only wait a command can interrupt (`recv_timeout`) is in real ones.
+/// The two belong in one place because a worker's deadlines are in whatever units the clock
+/// reads, while the only wait a command can interrupt (`recv_timeout`) is in real ones.
 /// Translating between them is something only the clock's owner can do — supplying the clock
 /// alone is what once made a worker sleep 100 *real* ms for a 100 *virtual* ms deadline, firing
 /// a `![2000, 100, 500]` select at 1507 ms.
-pub trait WorkerClock: Send + 'static {
-    /// Now, in this clock's units.
-    fn now_ms(&self) -> u64;
-
+pub trait WorkerClock: Clock + 'static {
     /// How long an idle worker should wait for a command, given the earliest pending select
-    /// deadline in this clock's units. `None` waits indefinitely — correct precisely when no
-    /// deadline is pending, since nothing but a command can then make the worker runnable.
+    /// deadline in this clock's milliseconds. `None` waits indefinitely — correct precisely when
+    /// no deadline is pending, since nothing but a command can then make the worker runnable.
     fn wait_for(&self, deadline_ms: Option<u64>) -> Option<std::time::Duration>;
 }
 
-/// Wall-clock time since the Unix epoch — what a real run uses. Deadlines are real durations,
-/// so an idle worker waits exactly as long as the nearest one, and a command cuts it short.
+/// Real, monotonic time from the first reading in this process — what a real run uses. Every
+/// worker shares the origin, so a deadline set on one worker means the same on another.
+/// Deadlines are real durations, so an idle worker waits exactly as long as the nearest one, and
+/// a command cuts it short.
 pub struct SystemClock;
 
-impl WorkerClock for SystemClock {
-    fn now_ms(&self) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time before the Unix epoch")
-            .as_millis() as u64
+impl Clock for SystemClock {
+    fn now_ns(&self) -> u64 {
+        static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let elapsed = ORIGIN.get_or_init(std::time::Instant::now).elapsed();
+        u64::try_from(elapsed.as_nanos()).expect("monotonic clock overflow")
     }
+}
 
+impl WorkerClock for SystemClock {
     fn wait_for(&self, deadline_ms: Option<u64>) -> Option<std::time::Duration> {
         deadline_ms.map(|at| std::time::Duration::from_millis(at.saturating_sub(self.now_ms())))
     }
 }
 
-/// A clock the *driver* advances, for tests: it moves on by one per idle pass of the environment
-/// loop rather than with the wall clock, which lets a test exercise long timeouts in no time at
-/// all.
+/// A clock the *driver* advances, for tests: it moves on by one millisecond per idle pass of the
+/// environment loop rather than with real time, which lets a test exercise long timeouts in no
+/// time at all — and makes `%time.monotonic` report that same virtual time.
 ///
 /// Time here passes only while someone is looking, so a pending deadline cannot be waited *out*
 /// — the worker has to come back and re-read the clock, which it does on a short real interval.
 /// With no deadline, waiting for a command is still exactly right: nothing else can wake the
 /// worker in either clock.
 pub struct SteppedClock {
-    now_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    now_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl SteppedClock {
@@ -139,16 +142,18 @@ impl SteppedClock {
     /// vs 0.25 s wall, 0.62 s of CPU either way), so the gentler one wins.
     const RECHECK: std::time::Duration = std::time::Duration::from_micros(100);
 
-    pub fn new(now_ms: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
+    pub fn new(now_ms: Arc<std::sync::atomic::AtomicU64>) -> Self {
         SteppedClock { now_ms }
     }
 }
 
-impl WorkerClock for SteppedClock {
-    fn now_ms(&self) -> u64 {
-        self.now_ms.load(std::sync::atomic::Ordering::Relaxed)
+impl Clock for SteppedClock {
+    fn now_ns(&self) -> u64 {
+        self.now_ms.load(std::sync::atomic::Ordering::Relaxed) * 1_000_000
     }
+}
 
+impl WorkerClock for SteppedClock {
     fn wait_for(&self, deadline_ms: Option<u64>) -> Option<std::time::Duration> {
         deadline_ms.map(|_| Self::RECHECK)
     }
@@ -283,18 +288,22 @@ pub fn spawn_worker<C: WorkerClock>(
                 waker,
             };
 
-            let mut worker =
-                Worker::<NativeEffect, _, _>::new(cmd_receiver, evt_sender, builtins, worker_id);
+            let clock = Arc::new(clock);
+            let mut worker = Worker::<NativeEffect, _, _>::new(
+                cmd_receiver,
+                evt_sender,
+                builtins,
+                worker_id,
+                clock.clone(),
+            );
 
             // Run the worker loop
             loop {
-                let current_time_ms = clock.now_ms();
-
-                match worker.step(current_time_ms) {
+                match worker.step() {
                     Ok(true) => {
                         // Work was done; push subscription churn, throttled, so a long
                         // busy burst still streams observable state.
-                        let _ = worker.flush_subscriptions(clock.now_ms(), false);
+                        let _ = worker.flush_subscriptions(false);
                     }
                     Ok(false) => {
                         // Settled: force a final subscription flush so the post-burst
@@ -305,7 +314,7 @@ pub fn spawn_worker<C: WorkerClock>(
                         // which cost no CPU but put those 5 ms on the latency of every
                         // message routed here — an idle worker is precisely one about
                         // to be handed work.
-                        let _ = worker.flush_subscriptions(clock.now_ms(), true);
+                        let _ = worker.flush_subscriptions(true);
                         worker.wait_for_commands(clock.wait_for(worker.next_timeout_ms()));
                     }
                     Err(e) => {

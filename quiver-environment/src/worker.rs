@@ -1,19 +1,22 @@
 use crate::environment::{EnvironmentError, ProcessResultsMap, RuntimeResult};
 use crate::messages::{Command, Event, SubscriptionKind, SubscriptionPayload};
 use crate::transport::{CommandReceiver, EventSender};
+use quiver_core::clock::Clock;
 use quiver_core::effects::Effect;
 use quiver_core::executor::Executor;
 use quiver_core::process::{Action, Frame, ProcessId, ProcessInfo, Watcher};
 use quiver_core::value::Value;
 use quiver_core::wire::WireValue;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const MAX_STEP_UNITS: usize = 1000;
 
-/// Minimum wall-clock gap between non-forced subscription pushes for a given subscription. Coalesces
-/// rapid churn (e.g. a tight spawn/complete loop, or a mailbox filling fast) into at most ~10
-/// updates/sec, which is ample for a human-facing inspector. Bypassed by the forced flush on settle
-/// (see `flush_subscriptions`), so the final state after a burst is never delayed.
+/// Minimum gap, on the worker's clock, between non-forced subscription pushes for a given
+/// subscription. Coalesces rapid churn (e.g. a tight spawn/complete loop, or a mailbox filling
+/// fast) into at most ~10 updates/sec, which is ample for a human-facing inspector. Bypassed by
+/// the forced flush on settle (see `flush_subscriptions`), so the final state after a burst is
+/// never delayed.
 const MIN_FLUSH_INTERVAL_MS: u64 = 100;
 
 /// A pending result request: the request id, plus an optional keep-set whose complement is released
@@ -31,6 +34,9 @@ struct WorkerSubscription {
 
 pub struct Worker<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> {
     executor: Executor<E>,
+    // The clock this worker runs on: its select deadlines, subscription throttle and
+    // `__time_monotonic__` all read it, so they agree.
+    clock: Arc<dyn Clock>,
     // process_id -> pending result requests; each request's keep-set drives orphaned-local release
     // once the process completes (see `Command::GetResult`).
     pending_result_requests: HashMap<ProcessId, Vec<PendingResultRequest>>,
@@ -104,9 +110,13 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         sender: S,
         builtins: quiver_core::builtins::BuiltinRegistry<E>,
         worker_id: u16,
+        clock: Arc<dyn Clock>,
     ) -> Self {
+        let mut executor = Executor::new(builtins, worker_id);
+        executor.set_clock(clock.clone());
         Self {
-            executor: Executor::new(builtins, worker_id),
+            executor,
+            clock,
             pending_result_requests: HashMap::new(),
             subscriptions: HashMap::new(),
             worker_id: worker_id as crate::WorkerId,
@@ -118,7 +128,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
 
     /// Process one iteration of the worker loop
     /// Returns true if work was done, false if idle
-    pub fn step(&mut self, current_time_ms: u64) -> Result<bool, EnvironmentError> {
+    pub fn step(&mut self) -> Result<bool, EnvironmentError> {
         let mut did_work = false;
 
         // Process commands (non-blocking)
@@ -135,7 +145,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
         }
 
         // Execute one step
-        let (executed, action) = self.executor.step(MAX_STEP_UNITS, current_time_ms);
+        let (executed, action) = self.executor.step(MAX_STEP_UNITS, self.clock.now_ms());
         if executed {
             did_work = true;
         }
@@ -181,14 +191,11 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
     /// throttle) and `force = true` on settle to idle (bypassing the throttle so the final state
     /// after a burst always lands). Change-detection is applied either way — an unchanged snapshot
     /// is never re-sent.
-    pub fn flush_subscriptions(
-        &mut self,
-        now_ms: u64,
-        force: bool,
-    ) -> Result<(), EnvironmentError> {
+    pub fn flush_subscriptions(&mut self, force: bool) -> Result<(), EnvironmentError> {
         if self.subscriptions.is_empty() {
             return Ok(());
         }
+        let now_ms = self.clock.now_ms();
         let ids: Vec<u64> = self.subscriptions.keys().copied().collect();
         for id in ids {
             let sub = &self.subscriptions[&id];

@@ -2635,7 +2635,7 @@ time_dialect = #(content: '%str) {
     Instant[__time_now__ []]
   },
   monotonic: #[] {
-    :doc "A reading of the host's monotonic clock: steady, for measuring elapsed time with `since` or `diff`, and unrelated to the wall clock."
+    :doc "A reading of the monotonic clock the calling process runs on: steady, for measuring elapsed time with `since` or `diff`, and unrelated to the wall clock. It is the clock select timeouts and `%proc.sleep` are measured on, so timing a sleep gives the sleep's own length — in real time, or the virtual time a test harness drives."
     Mono[__time_monotonic__ []]
   },
   since: since,
