@@ -73,16 +73,18 @@ quiv run program.qv
 ## CLI commands
 
 - **`quiv repl`** - Start an interactive REPL session
-- **`quiv run [FILE]`** - Run a Quiver program (`.qv` source or `.qx` bytecode)
+- **`quiv run <FILE>`** - Run a Quiver program (`.qv` source or `.qx` bytecode)
   - `-e, --eval <CODE>` - Execute code directly from the command line
   - `-q, --quiet` - Print nothing but the program's own output
   - `--release` - Skip failure-provenance stamps (`run` compiles debug by default)
-- **`quiv compile [FILE]`** - Compile source to bytecode
-  - `-o, --output <FILE>` - Write output to file
+- **`quiv compile <FILE>`** - Compile source to bytecode, writing `foo.qv` to `foo.qx` beside it (`--eval` and stdin write to stdout)
+  - `-o, --output <FILE>` - Write the bytecode here instead, or `-` for stdout
   - `--debug` - Include failure-provenance stamps in the bytecode
   - `--inline` - Inline imported modules into the entry unit, shaken to what it reaches
   - `-e, --eval <CODE>` - Compile code directly from the command line
-- **`quiv inspect <FILE>`** - Inspect compiled bytecode structure
+- **`quiv inspect <FILE>`** - Print a program's bytecode, compiling it first if given source
+  - `-e, --eval <CODE>` - Inspect code directly from the command line
+  - `--debug` - Include failure-provenance stamps when compiling
 - **`quiv format [PATH]...`** - Format files in place, walking any directory given (default: the current one)
   - `--check` - Write nothing; list what would change and exit non-zero
   - `-e, --eval <CODE>` - Format code directly from the command line
@@ -93,7 +95,7 @@ quiv run program.qv
   - `--allow-origin <ORIGIN>` - Allow this browser origin on the TCP listener (repeatable)
   - `quiv server status` / `quiv server stop` - Whether a server is listening, and stop it
 
-Commands read from stdin when no file is specified (`quiv format` spells that `-`).
+A `FILE` of `-` reads stdin instead: `run` and `inspect` accept source or bytecode there, telling them apart by content.
 
 ## REPL commands
 

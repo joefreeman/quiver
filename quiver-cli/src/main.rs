@@ -28,14 +28,15 @@ struct Cli {
 enum Commands {
     Repl,
 
+    /// Compile a program to bytecode. A `.qv` file is written beside it as `.qx`; code from
+    /// `--eval` or stdin is written to stdout.
     Compile {
-        input: Option<String>,
+        #[command(flatten)]
+        input: ProgramInput,
 
+        /// Write the bytecode here instead, or `-` for stdout.
         #[arg(short, long)]
         output: Option<String>,
-
-        #[arg(short, long)]
-        eval: Option<String>,
 
         /// Debug build: stamp nil results with failure provenance (`origin` annotations).
         #[arg(long)]
@@ -48,11 +49,10 @@ enum Commands {
         inline: bool,
     },
 
+    /// Run a program, from source or bytecode.
     Run {
-        input: Option<String>,
-
-        #[arg(short, long)]
-        eval: Option<String>,
+        #[command(flatten)]
+        input: ProgramInput,
 
         #[arg(short, long)]
         quiet: bool,
@@ -62,8 +62,14 @@ enum Commands {
         release: bool,
     },
 
+    /// Print a program's bytecode, compiling it first if given source.
     Inspect {
-        input: Option<String>,
+        #[command(flatten)]
+        input: ProgramInput,
+
+        /// Debug build: stamp nil results with failure provenance (`origin` annotations).
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Format Quiver source in place. Each argument is a file, or a directory to walk for
@@ -128,6 +134,78 @@ enum ServerAction {
     Stop,
 }
 
+/// Where a command's program comes from: exactly one of a file, `-` for stdin, or code
+/// given with `--eval`.
+#[derive(clap::Args)]
+#[group(required = true, multiple = false)]
+struct ProgramInput {
+    /// A `.qv` source or `.qx` bytecode file, or `-` to read either from stdin.
+    input: Option<String>,
+
+    /// Source code given on the command line.
+    #[arg(short, long)]
+    eval: Option<String>,
+}
+
+/// Quiver source to compile, named for diagnostics. `path` is set when it was read from a
+/// file, which locates the project it belongs to.
+struct Source {
+    text: String,
+    id: String,
+    path: Option<String>,
+}
+
+enum Loaded {
+    Source(Source),
+    Compiled(quiver_compiler::CompiledProgram),
+}
+
+impl ProgramInput {
+    /// Read the program. A file's extension says whether it is source or bytecode; stdin
+    /// is bytecode when it parses as a compiled program, and source otherwise.
+    fn load(self) -> Result<Loaded, Box<dyn std::error::Error>> {
+        if let Some(code) = self.eval {
+            return Ok(Loaded::Source(Source {
+                text: code,
+                id: "eval".to_string(),
+                path: None,
+            }));
+        }
+        let path = self.input.expect("clap requires an input or --eval");
+        if path == "-" {
+            let mut buffer = String::new();
+            io::stdin().read_to_string(&mut buffer)?;
+            if buffer.trim_start().starts_with('{')
+                && let Ok(compiled) = serde_json::from_str(&buffer)
+            {
+                return Ok(Loaded::Compiled(compiled));
+            }
+            return Ok(Loaded::Source(Source {
+                text: buffer,
+                id: "stdin".to_string(),
+                path: None,
+            }));
+        }
+        let content =
+            fs::read_to_string(&path).map_err(|e| format!("Cannot read '{path}': {e}"))?;
+        match std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+        {
+            Some("qv") => Ok(Loaded::Source(Source {
+                text: content,
+                id: path.clone(),
+                path: Some(path),
+            })),
+            Some("qx") => Ok(Loaded::Compiled(serde_json::from_str(&content)?)),
+            _ => Err(format!(
+                "Unsupported file extension for '{path}': expected .qv for source or .qx for bytecode"
+            )
+            .into()),
+        }
+    }
+}
+
 fn main() {
     // Print the error's own message rather than returning it: the default `Termination`
     // renders a `Box<dyn Error>` with `Debug`, which for the `String` errors these commands
@@ -145,17 +223,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Compile {
             input,
             output,
-            eval,
             debug,
             inline,
-        }) => compile_command(input, output, eval, debug, inline)?,
+        }) => {
+            exit_on_broken_pipe();
+            compile_command(input, output, debug, inline)?
+        }
         Some(Commands::Run {
             input,
-            eval,
             quiet,
             release,
-        }) => run_command(input, eval, quiet, release)?,
-        Some(Commands::Inspect { input }) => inspect_command(input)?,
+        }) => run_command(input, quiet, release)?,
+        Some(Commands::Inspect { input, debug }) => {
+            exit_on_broken_pipe();
+            inspect_command(input, debug)?
+        }
         Some(Commands::Format { input, eval, check }) => {
             format_cli::format_command(input, eval, check)
         }
@@ -180,6 +262,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Let a closed stdout end the process quietly, as it does any Unix filter, so that output
+/// piped into `head` doesn't panic `println!`. Rust ignores `SIGPIPE` by default, and this is
+/// only for commands that write nothing but stdout: with the signal restored, a peer closing
+/// the server socket would kill the process rather than surface an error.
+fn exit_on_broken_pipe() {
+    // SAFETY: called before any threads are spawned, and resets a signal to its default
+    // disposition without installing a handler.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
 }
 
 fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
@@ -218,39 +310,36 @@ fn entry_resolver(input_path: Option<&str>) -> PackageResolver {
     }
 }
 
-fn compile_command(
-    input: Option<String>,
-    output: Option<String>,
-    eval: Option<String>,
+/// Whether a compile must produce an executable program.
+enum Entry {
+    /// The program must evaluate to a function; anything else is an error.
+    Required,
+    /// A program that doesn't evaluate to a function compiles its top level alone, so it
+    /// is still inspectable. The unit then has no entry rather than no content.
+    Optional,
+}
+
+/// Compile source into a self-contained program: its own code, plus the units of every
+/// module it imports — or, inlined, one unit with the module code shaken into it.
+fn compile_source(
+    source: Source,
     debug: bool,
-    inline: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (source, source_id, resolver_path) = if let Some(code) = eval {
-        (code, "eval".to_string(), None)
-    } else if let Some(path) = input.clone() {
-        (fs::read_to_string(&path)?, path.clone(), Some(path))
-    } else {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-        (buffer, "stdin".to_string(), None)
+    imports: quiver_compiler::Imports,
+    entry: Entry,
+) -> Result<quiver_compiler::CompiledProgram, Box<dyn std::error::Error>> {
+    let parsed = match parse(&source.text) {
+        Ok(ast) => ast,
+        Err(e) => handle_parse_error(e, &source.text, &source.id),
     };
     let options = quiver_compiler::compiler::CompileOptions {
         debug,
-        source_name: source_id.clone(),
+        source_name: source.id,
         ..Default::default()
     };
-
-    // Build registry from core modules and network builtins
     let builtins = build_builtin_registry();
-    let resolver = entry_resolver(resolver_path.as_deref());
+    let resolver = entry_resolver(source.path.as_deref());
     let store = std::rc::Rc::new(quiver_compiler::ArtifactStore::cache());
 
-    // Compile and extract entry function
-    // Note: compile_command allows programs that don't evaluate to a function
-    let parsed = match parse(&source) {
-        Ok(ast) => ast,
-        Err(e) => handle_parse_error(e, &source, &source_id),
-    };
     let (program, module_cache, entry) = match quiver_cli::compile::compile_entry(
         parsed.clone(),
         &resolver,
@@ -259,16 +348,14 @@ fn compile_command(
         Some(std::rc::Rc::clone(&store)),
     ) {
         Ok((program, module_cache, entry)) => (program, module_cache, Some(entry)),
+        Err(e) if matches!(entry, Entry::Required) => return Err(e),
         Err(_) => {
-            // Not executable: compile the top level alone, so the result is still
-            // inspectable. The unit then has no entry rather than no content.
-            let ast = parsed;
             let mut program = Program::new();
             let mut module_cache = ModuleCache::new();
-            module_cache.artifact_store = Some(std::rc::Rc::clone(&store));
+            module_cache.artifact_store = Some(store);
             let nil_type_id = program.register_type(Type::nil());
             Compiler::compile(
-                ast,
+                parsed,
                 &quiver_compiler::compiler::Bindings::default(),
                 Default::default(),
                 &mut module_cache,
@@ -285,102 +372,75 @@ fn compile_command(
         }
     };
 
-    // A `.qx` is a self-contained program: this compile's own code, plus the units of
-    // every module it imports — or, inlined, one unit with the module code shaken into
-    // it. `own_floor` is 0 — the program is freshly compiled, so everything no module
-    // owns is its own.
+    // `own_floor` is 0 — the program is freshly compiled, so everything no module owns is
+    // its own.
+    Ok(quiver_compiler::extract_program(
+        &program,
+        &module_cache,
+        entry,
+        0,
+        imports,
+    ))
+}
+
+fn compile_command(
+    input: ProgramInput,
+    output: Option<String>,
+    debug: bool,
+    inline: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Loaded::Source(source) = input.load()? else {
+        return Err("The input is already compiled".into());
+    };
+    // A source file compiles to the `.qx` beside it; code with no file of its own goes to
+    // stdout.
+    let output = output.or_else(|| {
+        source.path.as_ref().map(|path| {
+            std::path::Path::new(path)
+                .with_extension("qx")
+                .to_string_lossy()
+                .into_owned()
+        })
+    });
     let imports = if inline {
         quiver_compiler::Imports::Inline
     } else {
         quiver_compiler::Imports::Bundle
     };
-    let compiled = quiver_compiler::extract_program(&program, &module_cache, entry, 0, imports);
+    let compiled = compile_source(source, debug, imports, Entry::Optional)?;
     // Compact, not pretty: this is machine output — `quiv inspect` is the readable view,
     // and indentation was over half the file.
     let json = serde_json::to_string(&compiled)?;
 
-    if let Some(output_path) = output {
-        fs::write(output_path, json)?;
-    } else {
-        println!("{}", json);
+    match output.as_deref() {
+        None | Some("-") => println!("{json}"),
+        Some(path) => fs::write(path, json)?,
     }
 
     Ok(())
 }
 
 fn run_command(
-    input: Option<String>,
-    eval: Option<String>,
+    input: ProgramInput,
     quiet: bool,
     release: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let debug = !release;
-
     // Compile client-side (parse and compile errors are local, with the usual
     // diagnostics), or take a compiled program as given. Either way the server is handed
     // a unit and the modules it imports, and links each once.
-    let compiled = {
-        let (source, source_id, path): (String, String, Option<String>) = if let Some(code) = eval {
-            (code, "eval".to_string(), None)
-        } else if let Some(path) = input {
-            let content = fs::read_to_string(&path)?;
-            if path.ends_with(".qx") {
-                let compiled: quiver_compiler::CompiledProgram = serde_json::from_str(&content)?;
-                if compiled.unit.entry.is_none() {
-                    return Err("Compiled program has no entry point".into());
-                }
-                run_on_server(compiled, quiet)?;
-                return Ok(());
-            } else if path.ends_with(".qv") {
-                (content, path.clone(), Some(path))
-            } else {
-                eprintln!(
-                    "Error: Unsupported file extension - expected .qv for source or .qx for bytecode."
-                );
-                std::process::exit(1);
-            }
-        } else {
-            let mut buffer = String::new();
-            io::stdin().read_to_string(&mut buffer)?;
-            // Try to parse as a compiled program first
-            if buffer.trim_start().starts_with('{')
-                && let Ok(compiled) =
-                    serde_json::from_str::<quiver_compiler::CompiledProgram>(&buffer)
-            {
-                if compiled.unit.entry.is_none() {
-                    return Err("Compiled program has no entry point".into());
-                }
-                run_on_server(compiled, quiet)?;
-                return Ok(());
-            }
-            (buffer, "stdin".to_string(), None)
-        };
-
-        let ast = match parse(&source) {
-            Ok(ast) => ast,
-            Err(e) => handle_parse_error(e, &source, &source_id),
-        };
-        let resolver = entry_resolver(path.as_deref());
-        let options = quiver_compiler::compiler::CompileOptions {
-            debug,
-            source_name: source_id,
-            ..Default::default()
-        };
-        let store = std::rc::Rc::new(quiver_compiler::ArtifactStore::cache());
-        let (program, module_cache, entry) = quiver_cli::compile::compile_entry(
-            ast,
-            &resolver,
-            &build_builtin_registry(),
-            options,
-            Some(store),
-        )?;
-        quiver_compiler::extract_program(
-            &program,
-            &module_cache,
-            Some(entry),
-            0,
+    let compiled = match input.load()? {
+        Loaded::Source(source) => compile_source(
+            source,
+            !release,
             quiver_compiler::Imports::Bundle,
-        )
+            Entry::Required,
+        )?,
+        Loaded::Compiled(compiled) => {
+            if compiled.unit.entry.is_none() {
+                return Err("Compiled program has no entry point".into());
+            }
+            compiled
+        }
     };
 
     run_on_server(compiled, quiet)
@@ -485,18 +545,21 @@ fn run_on_server(
     }
     Ok(())
 }
-fn inspect_command(input: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
-    let content = if let Some(path) = input {
-        fs::read_to_string(&path)?
-    } else {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-        buffer
+fn inspect_command(input: ProgramInput, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Source is compiled exactly as `quiv compile` would, so what is shown is what its
+    // `.qx` holds.
+    let compiled = match input.load()? {
+        Loaded::Source(source) => compile_source(
+            source,
+            debug,
+            quiver_compiler::Imports::Bundle,
+            Entry::Optional,
+        )?,
+        Loaded::Compiled(compiled) => compiled,
     };
 
     // A `.qx` is relocatable code, so it is linked into a fresh program before being
     // rendered: the ids shown are the ones a host would assign it.
-    let compiled: quiver_compiler::CompiledProgram = serde_json::from_str(&content)?;
     let mut program = Program::new();
     let entry_id =
         quiver_compiler::link_program(&compiled, &mut program, &build_builtin_registry())
