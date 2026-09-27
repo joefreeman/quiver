@@ -30,10 +30,7 @@ sleep = #'int {
 // into it (closed if it never fires).
 send_after = #<'m>[(to): @'m, (message): 'm, (after): 'int] -> (@!Ok) {
   :doc "Sends a message to a process after a delay, answering the timer: a process owned by the caller, which ends once it has sent. Kill it to cancel the send; it is also cancelled if the caller terminates first. The message is checked against the target's send grant now, and a resource in it moves to the timer at once."
-  to = $to
-  message = $message
-  after = $after
-  @[] { sleep after; to message } []
+  to = $to; message = $message; after = $after; @[] { sleep after; to message } []
 }
 
 // A watchdog races the process's completion against the deadline, so it ends as soon as
@@ -64,15 +61,12 @@ race = #<'r>[(racers): '%list<#[] -> 'r>, timeout: ('int | []) = []] {
     | =0 => []
     | !Done[('r | [])] ~> {
       | =Done[(\[] & v)] => v
-      | __integer_subtract__ [$, 1] ~> ^ ~
+      | __integer_subtract__ [$, 1] ~> ^
     }
   }
   scope = @[] {
-    c = count ~> @collect ~
-    %list.map [
-      racers,
-      #{ f = $; @[] { p = f ~> @~ []; r = !p; c Done[r] } [] },
-    ]
+    c = @collect count
+    %list.map [racers, #{ f = $; @[] { p = f ~> @~ []; r = !p; c Done[r] } [] }]
     !c
   } []
   {

@@ -68,10 +68,10 @@ default_port = #'%str {
 split_authority = #[(data): 'bin, (start): 'int, (end): 'int] {
   ci = {
     // A bracketed host: the port colon, if any, is the one after the closing bracket.
-    | [$data, $start] ~> %bin.get_byte ~ ~> =91
+    | %bin.get_byte [$data, $start] ~> =91
       %bin.index [$data, 93, $start] ~> =('int & rb)
       __integer_compare__ [__integer_add__ [rb, 1], $end] ~> =-1 => __integer_add__ [rb, 1]
-    | [$data, $start] ~> %bin.get_byte ~ ~> =91 => $end
+    | %bin.get_byte [$data, $start] ~> =91 => $end
     | scan_to [$data, $start, $end, <3a>]
   }
   host = %bin.slice [$data, $start, ci] ~> Str[~]
@@ -79,8 +79,7 @@ split_authority = #[(data): 'bin, (start): 'int, (end): 'int] {
     | __integer_compare__ [ci, $end] ~> =(0 | 1) => [host, 0]
     | {
       %bin.slice [$data, __integer_add__ [ci, 1], $end]
-      ~> Str[~]
-      ~> %str.parse_int ~
+      ~> %str.parse_int Str[~]
       ~> =('int & p)
 
       __integer_compare__ [p, 0] ~> =(0 | 1)
@@ -119,16 +118,12 @@ parse = #'%str {
   qend = scan_to [u, pend, len, <23>]
   query = {
     | __integer_compare__ [pend, len] ~> =-1
-      [u, pend] ~> %bin.get_byte ~ ~> =63 => %bin.slice [u, __integer_add__ [pend, 1], qend] ~> Str[
-        ~,
-      ]
+      %bin.get_byte [u, pend] ~> =63 => %bin.slice [u, __integer_add__ [pend, 1], qend] ~> Str[~]
     | ""
   }
   fragment = {
     | __integer_compare__ [qend, len] ~> =-1
-      [u, qend] ~> %bin.get_byte ~ ~> =35 => %bin.slice [u, __integer_add__ [qend, 1], len] ~> Str[
-        ~,
-      ]
+      %bin.get_byte [u, qend] ~> =35 => %bin.slice [u, __integer_add__ [qend, 1], len] ~> Str[~]
     | ""
   }
 

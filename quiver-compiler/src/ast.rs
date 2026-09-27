@@ -302,6 +302,52 @@ impl Term {
             }) if accessors.is_empty()
         )
     }
+
+    /// Whether this term, standing after a `~>`, is applied to the value flowing into it: a
+    /// name that does not itself read the flowing value — a variable, `$`, an import member,
+    /// a builtin, `@`, `^` or `^f` — or a spawn with no init (`@f`). `x ~> f` is `x ~> f ~`.
+    /// At the head of a sequence the same name is just its value.
+    pub fn is_bare_callee(&self) -> bool {
+        match self {
+            Term::Access(access) => matches!(
+                access.source,
+                Some(
+                    AccessSource::Identifier(_)
+                        | AccessSource::Parameter { .. }
+                        | AccessSource::Import(_)
+                        | AccessSource::Builtin(_)
+                        | AccessSource::TailCall(_)
+                        | AccessSource::Self_
+                )
+            ),
+            Term::Spawn(target, None, _) => !matches!(
+                target.as_ref(),
+                Term::Access(Access {
+                    source: None | Some(AccessSource::Ripple),
+                    ..
+                })
+            ),
+            _ => false,
+        }
+    }
+
+    /// A [bare callee](Self::is_bare_callee) as its explicit application to the flowing value:
+    /// `f` → `f ~`, `@f` → `@f ~`.
+    pub fn applied_to_flow(self) -> Term {
+        let ripple = Box::new(Term::Access(Access {
+            source: Some(AccessSource::Ripple),
+            accessors: vec![],
+            type_arguments: vec![],
+            accessor_spans: vec![],
+            base_span: Spanned::default(),
+            span: Spanned::default(),
+        }));
+        match self {
+            Term::Access(access) => Term::Apply(access, ripple),
+            Term::Spawn(target, None, span) => Term::Spawn(target, Some(ripple), span),
+            other => unreachable!("not a bare callee: {other:?}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

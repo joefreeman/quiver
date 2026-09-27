@@ -170,15 +170,19 @@ the input to the next, and `~` — the **ripple** — refers to the value flowin
 3 ~> %num.add [~, 2] ~> %num.mul [~, ~]   //= 25
 ```
 
-Every term after the first must use the value flowing into it.
+Every term after the first must use the value flowing into it. A name — of a function, or
+of a [process](#processes) — does so by being applied to it: `5 ~> double` is `double 5`.
 
 ```quiver
 double = #'int { %num.mul [$, 2] }
 
+5 ~> double           //= 10 // a name is applied to the value
 5 ~> 99               //! must use the value flowing into it // the 99 ignores the 5
 5 ~> [1, 2]           //! must use the value flowing into it // so do both fields
-5 ~> double           //! must use the value flowing into it // naming one is not calling it
 ```
+
+Only a name after a `~>` is applied. One that starts a sequence — a step, a branch, a
+consequence — is just its value, so `=> double` answers the function rather than calling it.
 
 A chain can be spread over multiple lines by starting each line with a continuation (`~>`).
 A comment or an [assertion](#assertions) may end any of those lines, the latter observing the
@@ -329,7 +333,8 @@ A call is a **juxtaposition**: a callable and the argument, separated by a space
 
 ```quiver
 %num.add [3, 4]               //= 7 // write the argument after the callee
-[3, 4] ~> %num.add ~          //= 7 // ... or pipe it in as `~`
+[3, 4] ~> %num.add            //= 7 // ... or pipe it in
+[3, 4] ~> %num.add ~          //= 7 // ... which is short for passing it as `~`
 ```
 
 The flowing value can be used in either part:
@@ -359,6 +364,17 @@ count_down = #['int, 'int] {
   | =[n, acc] => ^ [%num.sub [n, 1], %num.add [acc, n]]
 }
 count_down [4, 0]             //= 10
+```
+
+Like any name after a `~>`, a tail call is applied to the flowing value, so
+`… ~> ^` is `^ …`:
+
+```quiver
+power = #['int, 'int] {
+  | =[0, acc] => acc
+  | =[n, acc] => [%num.sub [n, 1], %num.mul [acc, 2]] ~> ^
+}
+power [3, 1]                  //= 8
 ```
 
 A referenced function can be tail-called with `f ~> ^~`:
@@ -1079,7 +1095,7 @@ answers a pid.
 ```quiver
 worker = #'int { %num.mul [$, 2] }
 a = @worker 21                // the init argument, after the function
-b = 21 ~> @worker ~           // or piped in, as `~`
+b = 21 ~> @worker             // or piped in
 [!a, !b]                      //= [42, 42]
 ```
 

@@ -106,14 +106,14 @@ satisfy = #[(pred): 'pred<'int>, (what): Str['bin]] {
 ws = #' {
   :doc "Zero or more whitespace bytes (space, tab, newline, carriage return); always succeeds."
   {
-    | peek $ ~> =(32 | 9 | 10 | 13) => advance [$, 1] ~> ^ ~
+    | peek $ ~> =(32 | 9 | 10 | 13) => advance [$, 1] ~> ^
     | [Ok, $]
   }
 }
 
 tw_end = #[(data): 'bin, (pos): 'int, (len): 'int, (pred): 'pred<_>] {
   | __integer_compare__ [$pos, $len] ~> =-1
-    %bin.get_byte [$data, $pos] ~> $pred ~ => ^ [$data, __integer_add__ [$pos, 1], $len, $pred]
+    %bin.get_byte [$data, $pos] ~> $pred => ^ [$data, __integer_add__ [$pos, 1], $len, $pred]
   | $pos
 }
 

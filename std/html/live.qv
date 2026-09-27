@@ -157,7 +157,7 @@ live_policy = #'%html.pattr {
 // tree's typed data. The envelope is what the client echoes and `decode` reads back, so
 // it discriminates a decoded event from a dropped one; the `Data` marker is the tree's
 // and never reaches the wire.
-event_value = #<'t>'t { Ev[$] ~> %html.data_value ~ }
+event_value = #<'t>'t { %html.data_value Ev[$] }
 
 // A live view's markup: an `%html` tree whose data attributes carry `'e` events. Spell a
 // view's own type with these rather than `'%html<…>`, which would have to name the wire
@@ -170,7 +170,7 @@ live_dialect = #(content: '%str, term: '%meta.cb) {
   ~> ='%html.pnodes
   ~> %html.rewrite_attrs [~, live_policy]
   ~> ='%html.pnodes
-  ~> %html.expand ~
+  ~> %html.expand
 }
 
 // === Binding options ====================================================================
@@ -630,7 +630,7 @@ diff_of = #[
 
 diff = #[(prev): 'frame, (next): 'frame] {
   :doc "The patch list turning the first frame into the second, in document order: recursing where statics match, and emitting one subsuming patch where a slot's kind, template, or opaque content changed. Equal frames answer Nil. A Nil path addresses the root."
-  diff_of [diff_of, $prev, $next, Nil, Nil] ~> %list.reverse ~
+  diff_of [diff_of, $prev, $next, Nil, Nil] ~> %list.reverse
 }
 
 // === The wire ===========================================================================
@@ -674,8 +674,7 @@ enc_patches = #'patches { %list.map [~, enc_patch] }
 
 encode = #[(vid): '%str, (ps): 'patches] {
   :doc "A frame message: one view's patches for one render as JSON text, `[1, vid, [patch, …]]`. Vids are hierarchical strings — the root view is \"0\", its children \"0.1\", \"0.2\", … — minted locally by each view, so no allocation is coordinated."
-  Array[Cons[1, Cons[$vid, Cons[Array[enc_patches $ps], Nil]]]]
-  ~> %json.stringify ~
+  %json.stringify Array[Cons[1, Cons[$vid, Cons[Array[enc_patches $ps], Nil]]]]
 }
 
 // === The session ========================================================================
@@ -748,7 +747,7 @@ with_nav = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
 // Render inside a tracked region: the process re-subscribes to exactly the stores the
 // view sampled, and their next state change delivers a `Changed` wakeup.
 render_view = #<'i, 's, 'e>[(state): 's, (comp): 'component<'i, 's, 'e>] {
-  %proc.track #{ $$state ~> $$comp.view ~ } ~> frame ~
+  %proc.track #{ $$comp.view $$state } ~> frame
 }
 
 // Re-root a value bound out of a '%json recursive position at the union's root: the
@@ -768,7 +767,7 @@ pairs_of = #'jsons {
       | $0
     },
   ]
-  ~> %list.reverse ~
+  ~> %list.reverse
 }
 
 // A JSON boolean as Quiver's truthiness convention; anything else reads false.
@@ -778,10 +777,10 @@ flag_of = #'%json { =True => Ok | [] }
 // one reads as no modifiers held rather than failing the whole event.
 mods_of = #'%json {
   | =Array[Cons[a, Cons[c, Cons[s, Cons[m, Nil]]]]] => [
-      alt?: a ~> jval ~ ~> flag_of ~,
-      ctrl?: c ~> jval ~ ~> flag_of ~,
-      shift?: s ~> jval ~ ~> flag_of ~,
-      meta?: m ~> jval ~ ~> flag_of ~,
+      alt?: a ~> jval ~> flag_of,
+      ctrl?: c ~> jval ~> flag_of,
+      shift?: s ~> jval ~> flag_of,
+      meta?: m ~> jval ~> flag_of,
     ]
   | [alt?: [], ctrl?: [], shift?: [], meta?: []]
 }
@@ -793,23 +792,23 @@ mods_of = #'%json {
 pointer_of = #'jsons {
   =Cons[xj, Cons[yj, Cons[bj, Cons[mj, Nil]]]]
   [
-    x: xj ~> jval ~ ~> ='int,
-    y: yj ~> jval ~ ~> ='int,
-    button: bj ~> jval ~ ~> ='int,
-    mods: mj ~> jval ~ ~> mods_of ~,
+    x: xj ~> jval ~> ='int,
+    y: yj ~> jval ~> ='int,
+    button: bj ~> jval ~> ='int,
+    mods: mj ~> jval ~> mods_of,
   ]
 }
 
-submit_of = #'jsons { =Cons[~, Nil] ~> jval ~ ~> =Array[~] ~> Submit[fields: pairs_of ~] }
+submit_of = #'jsons { =Cons[~, Nil] ~> jval ~> =Array[~] ~> Submit[fields: pairs_of ~] }
 
 // `input` and `change` report the same thing — the control's value and, for a checkbox or
 // radio, whether it is ticked — so they share a reader and differ only in their tag.
 field_of = #'jsons {
-  =Cons[vj, Cons[cj, Nil]]; [value: vj ~> jval ~ ~> ='%str, checked?: cj ~> jval ~ ~> flag_of ~]
+  =Cons[vj, Cons[cj, Nil]]; [value: vj ~> jval ~> ='%str, checked?: cj ~> jval ~> flag_of]
 }
 
 keydown_of = #'jsons {
-  =Cons[kj, Cons[mj, Nil]]; KeyDown[key: kj ~> jval ~ ~> ='%str, mods: mj ~> jval ~ ~> mods_of ~]
+  =Cons[kj, Cons[mj, Nil]]; KeyDown[key: kj ~> jval ~> ='%str, mods: mj ~> jval ~> mods_of]
 }
 
 // The browser metadata beside a payload, from its wire form — a tagged JSON array, one
@@ -821,7 +820,7 @@ keydown_of = #'jsons {
 // server cannot read is an event it cannot faithfully fold.
 event_of = #'%json {
   =Array[Cons[tagj, rest]]
-  tagj ~> jval ~ ~> =Str[tb]
+  tagj ~> jval ~> =Str[tb]
   Str[tb] ~> {
     | ="click" => pointer_of rest ~> ='pointer ~> Click[...~]
     | ="mousedown" => pointer_of rest ~> ='pointer ~> MouseDown[...~]
@@ -843,7 +842,7 @@ env_of = #'%str {
   ~> ='%json
   ~> =Array[Cons[vidj, Cons[payloadj, Cons[evj, Nil]]]]
 
-  [vidj ~> jval ~ ~> ='%str, payloadj ~> jval ~ ~> ='%str, evj ~> jval ~ ~> event_of ~ ~> ='event]
+  [vidj ~> jval ~> ='%str, payloadj ~> jval ~> ='%str, evj ~> jval ~> event_of ~> ='event]
 }
 
 // A live-navigation message is `["nav", "/path?query"]` — the two-element shape the
@@ -851,8 +850,8 @@ env_of = #'%str {
 // nil for anything else (a three-element event envelope naturally fails to match).
 nav_of = #'%str {
   %json.parse $ ~> ='%json ~> =Array[Cons[tagj, Cons[targetj, Nil]]]
-  tagj ~> jval ~ ~> ="nav"
-  targetj ~> jval ~ ~> ='%str
+  tagj ~> jval ~> ="nav"
+  targetj ~> jval ~> ='%str
 }
 
 // Decode and fold one client event through `update`: a decode answering nil drops
@@ -1091,13 +1090,11 @@ exec_bounds = #[
           p
         }
 
-        csup =
-          [
-            children: Cons[[id: Str[v ~> .0], restart: Permanent, start: cs], Nil],
-            max_restarts: restart_budget,
-            window: restart_window,
-          ]
-          ~> %sup.start ~
+        csup = %sup.start [
+          children: Cons[[id: Str[v ~> .0], restart: Permanent, start: cs], Nil],
+          max_restarts: restart_budget,
+          window: restart_window,
+        ]
 
         %sup.watch [Str[v ~> .0], csup, me]
         ^ [t, Nil, app, me, Cons[[key: k, vid: v, pid: csup], $acc]]
@@ -1129,7 +1126,7 @@ step_view = #<'i, 's, 'e>[
   me = $me
   f2 = render_view [$state, $comp]
   ar = assign_bounds [collect_of [collect_of, f2, Nil], $kids, $vid, $n, Nil]
-  rf = resolve_of [resolve_of, f2, ar.0] ~> as_frame ~
+  rf = resolve_of [resolve_of, f2, ar.0] ~> as_frame
   diff [$prev, rf] ~> {
     | =Nil => Ok
     | =ps => { app Frame[encode [$vid, ps]]; Ok }
@@ -1242,7 +1239,7 @@ view_run = #<'i, 's, 'e>[
   state = $comp.mount $init
   f = settle [state, render_view [state, $comp], $comp, settle_deadline]
   ar = assign_bounds [collect_of [collect_of, f, Nil], Nil, $vid, 1, Nil]
-  rf = resolve_of [resolve_of, f, ar.0] ~> as_frame ~
+  rf = resolve_of [resolve_of, f, ar.0] ~> as_frame
   $boot ~> {
     | =Reply[reply] => { reply Region[render rf]; Ok }
     | =Replace => {
@@ -1273,7 +1270,7 @@ component = #<'e, 'i, 's>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) 
   #<'i>'place<'i> {
     i = $init
     k = $key
-    st = #['%str, @'app_msg, 'vboot] { =[v, a, boot]; [i, comp, v, a, boot] ~> @view_run ~ }
+    st = #['%str, @'app_msg, 'vboot] { =[v, a, boot]; @view_run [i, comp, v, a, boot] }
     Fragment[Nil] ~> { :boundary [key: k, start: st] }
   }
 }
@@ -1336,14 +1333,12 @@ registry_loop = #'reg_entries {
   live = __integer_subtract__ [now, prune_ms] ~> prune_entries [$, ~]
   msg ~> {
     | =Register[t, p] => ^ Cons[[token: t, pid: p, at: now], live]
-    | =Claim[t, reply] => {
-      (found, rest) = take_entry [live, t, Nil]; reply found; ^ rest
-    }
+    | =Claim[t, reply] => { (found, rest) = take_entry [live, t, Nil]; reply found; ^ rest }
   }
 }
 
 // The app registry: token → parked app, one-shot claims, stale entries pruned.
-registry = #[] { Nil ~> @registry_loop ~ }
+registry = #[] { @registry_loop Nil }
 
 // The root the app machinery runs: a placeable component whose init is the HTTP
 // request. The constructor below composes every accepted config into this shape —
@@ -1546,11 +1541,11 @@ classify_frame = #'%str -> 'fclass {
   ~> ='%json
   ~> =Array[Cons[_, Cons[vidj, Cons[patchesj, Nil]]]]
 
-    patchesj ~> jval ~ ~> =Array[Cons[pj, Nil]]
-    pj ~> jval ~ ~> =Array[Cons[tagj, Cons[pathj, Cons[htmlj, Nil]]]]
-    tagj ~> jval ~ ~> ="h"
-    pathj ~> jval ~ ~> =Array[Nil]
-    FirstFrame[vid: vidj ~> jval ~ ~> ='%str, html: htmlj ~> jval ~ ~> ='%str]
+    patchesj ~> jval ~> =Array[Cons[pj, Nil]]
+    pj ~> jval ~> =Array[Cons[tagj, Cons[pathj, Cons[htmlj, Nil]]]]
+    tagj ~> jval ~> ="h"
+    pathj ~> jval ~> =Array[Nil]
+    FirstFrame[vid: vidj ~> jval ~> ='%str, html: htmlj ~> jval ~> ='%str]
   | OtherFrame
 }
 
@@ -1609,7 +1604,7 @@ unfilled? = #'%str { unfilled_from [$, 0] }
 
 // Whether the composed page is complete: the root announced, and no empty
 // boundary pair remains.
-composed? = #('%str | []) { ='%str ~> unfilled? ~ ~> =[]; Ok }
+composed? = #('%str | []) { ='%str ~> unfilled? ~> =[]; Ok }
 
 // Reclassify frames that raced ahead of the root's `Region` (cross-process
 // delivery order is not guaranteed): walk the pending frames oldest-first,
@@ -1642,9 +1637,7 @@ compose = #[
   reg = $registry
   {
     | composed? $page => {
-      $page ~> =Str[pb]
-      handler Str[pb]
-      alife [$req, Parked, $buffer, $token, reg, $routes]
+      $page ~> =Str[pb]; handler Str[pb]; alife [$req, Parked, $buffer, $token, reg, $routes]
     }
     | %num.lt? [%time.monotonic [], $end] => ![#'app_msg, settle_quiet] ~> {
       | =Region[h] => {
@@ -1685,10 +1678,7 @@ compose = #[
     }
     // Deadline: answer with what assembled (a stuck view's boundary stays empty).
     | {
-      $page ~> {
-        | =Str[pb] => handler Str[pb]
-        | Ok
-      }
+      $page ~> { =Str[pb] => handler Str[pb] | Ok }
       alife [$req, Parked, $buffer, $token, reg, $routes]
     }
   }
@@ -1739,10 +1729,7 @@ app_run = #[
 // so it terminates on disconnect instead of parking, and detached, so it survives
 // this connection process ending.
 run_cold = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (registry): @'reg_msg] {
-  a = [$req, $root, $registry, [], Cold] ~> @app_run ~
-  %proc.detach a
-  a Attach[$conn]
-  Ok
+  a = @app_run [$req, $root, $registry, [], Cold]; %proc.detach a; a Attach[$conn]; Ok
 }
 
 // The upgrade side: the client's first frame is its token. A claimed app is sent
@@ -2196,7 +2183,7 @@ handle = #[(req): '%http, (app): 'app] {
     | {
       token = %random.hex 16
       me = @
-      ap = [req, rt, rg, token, Dead[me]] ~> @app_run ~
+      ap = @app_run [req, rt, rg, token, Dead[me]]
       %proc.detach ap
       ![#'%str, 5000] ~> {
         | =Str[region] => {

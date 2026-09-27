@@ -119,7 +119,7 @@ loop = #'state {
                 table: %dict.put [$table, i, [id: i, pid: p, spec: r.spec, restarts: recent]],
               ]
             }
-            | "%sup: restart intensity exceeded" ~> __panic__ ~
+            | __panic__ "%sup: restart intensity exceeded"
           }
         }
         // No restart wanted: the child is done — drop its row.
@@ -155,7 +155,7 @@ run = #[specs: 'specs, max: 'int, window: 'int] {
 
 start = #[children: 'specs, max_restarts: 'int = 3, window: 'int = 5000] {
   :doc "Starts a supervisor over the child specs (one_for_one): each child is restarted per its spec's restart type, at most max_restarts times (default 3) within window ms (default 5000) — beyond that the supervisor gives up and crashes, tearing down its subtree. The child set is dynamic: `add` a child, `drop` one. Answers the supervisor's pid, owned by the caller."
-  [specs: $children, max: $max_restarts, window: $window] ~> @run ~
+  @run [specs: $children, max: $max_restarts, window: $window]
 }
 
 add = #[(sup): @'msg, (spec): 'spec] {

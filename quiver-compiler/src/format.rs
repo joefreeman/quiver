@@ -57,6 +57,8 @@ pub fn format_program(program: &Sequence, source: &str) -> String {
             // bare compound consequence.
             lift: false,
             group_consequences: true,
+            // Calls take their preferred spelling, except across a `~>` carrying comments.
+            restyle_calls: Some(&|gap| !trivia.has_trivia(gap.end) && !trivia.has_trivia(gap.pipe)),
         },
     );
     // The program is one sequence, rendered exactly as a block body's is.
@@ -2163,8 +2165,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// Reduce a program to the compiler's canonical, block-free form: every no-op block stripped or
-    /// lifted (`Compiler::compile` does the same before codegen). Two programs equal here compile
-    /// identically.
+    /// lifted (`Compiler::compile` does the same before codegen), and every call in its preferred
+    /// spelling (each spelling compiles alike). Two programs equal here compile identically.
     fn canonical(program: Sequence) -> Sequence {
         crate::simplify::normalize_blocks(
             program,
@@ -2172,6 +2174,7 @@ mod tests {
                 keep: &|_| false,
                 lift: true,
                 group_consequences: false,
+                restyle_calls: Some(&|_| true),
             },
         )
     }
@@ -2224,7 +2227,7 @@ mod tests {
     fn ripple_patterns_render_as_written() {
         assert_formats("x ~> =[~, [~, _]]\n", "x ~> =[~, [~, _]]\n");
         assert_formats("x ~> =(Ok[~] | ~)\n", "x ~> =(Ok[~] | ~)\n");
-        assert_formats("x ~> =(y: ~) ~> f ~\n", "x ~> =(y: ~) ~> f ~\n");
+        assert_formats("x ~> =(y: ~) ~> f\n", "x ~> =(y: ~) ~> f\n");
     }
 
     #[test]
@@ -2410,15 +2413,15 @@ mod tests {
     fn drops_redundant_blocks() {
         // A single branchless, binding-free block is spliced into the surrounding chain.
         assert_formats(
-            "bit = { [a, b] ~> f ~> [1, ~] ~> g }",
-            "bit = [a, b] ~> f ~> [1, ~] ~> g\n",
+            "bit = { f [a, b] ~> g [1, ~] ~> h }",
+            "bit = f [a, b] ~> g [1, ~] ~> h\n",
         );
         // Nested redundant blocks collapse fully.
         assert_formats("x = { { 5 } }", "x = 5\n");
         // A block in a consequence position is also unwrapped.
         assert_formats(
-            "f = #'int { =0 => { [~, 1] ~> g } | h }",
-            "f = #'int { =0 => [~, 1] ~> g | h }\n",
+            "f = #'int { =0 => { g [~, 1] ~> k } | h }",
+            "f = #'int { =0 => g [~, 1] ~> k | h }\n",
         );
     }
 
@@ -2427,14 +2430,14 @@ mod tests {
         // A consequence block's `}` aligns with the bar (`|`) of the line carrying its `{`, indented
         // from the bar rather than from the content past the `| `.
         assert_formats(
-            "f = #'t { =B[h, t] => { idx ~> =0 => h | [idx, 1] ~> %num.sub ~> [t, ~] ~> ^ } | other_branch }",
-            "f = #'t {\n  | =B[h, t] => {\n    | idx ~> =0 => h\n    | [idx, 1] ~> %num.sub ~> [t, ~] ~> ^\n  }\n  | other_branch\n}\n",
+            "f = #'t { =B[h, t] => { idx ~> =0 => h | %num.sub [idx, 1] ~> ^ [t, ~] } | other_branch }",
+            "f = #'t {\n  | =B[h, t] => {\n    | idx ~> =0 => h\n    | %num.sub [idx, 1] ~> ^ [t, ~]\n  }\n  | other_branch\n}\n",
         );
         // The same when the block ends a branch's *condition* chain (`| lst { … }`): the body is one
         // chain, so the block stays at the bar indent and its `}` aligns with the `|`.
         assert_formats(
-            "f = #'t { lst ~> { =Nil => empty_result | =Cons[h, t] => [h, t] ~> process } | fallback }",
-            "f = #'t {\n  | lst ~> {\n    | =Nil => empty_result\n    | =Cons[h, t] => [h, t] ~> process\n  }\n  | fallback\n}\n",
+            "f = #'t { lst ~> { =Nil => empty_result | =Cons[h, t] => process [h, t] } | fallback }",
+            "f = #'t {\n  | lst ~> {\n    | =Nil => empty_result\n    | =Cons[h, t] => process [h, t]\n  }\n  | fallback\n}\n",
         );
     }
 
@@ -2442,8 +2445,8 @@ mod tests {
     fn tall_steps_get_surrounding_blank_lines() {
         // A `~>` pipeline step is set off from its short neighbours with a blank line on each side…
         assert_formats(
-            "#{ first_step; target_len ~> [~, suffix_len] ~> %num.sub ~> [target, ~, target_len] ~> %bin.slice ~> =^suffix; last_step }",
-            "#{\n  first_step\n\n  target_len\n  ~> [~, suffix_len]\n  ~> %num.sub\n  ~> [target, ~, target_len]\n  ~> %bin.slice\n  ~> =^suffix\n\n  last_step\n}\n",
+            "#{ first_step; %bin.slice [target, %num.sub [target_len, suffix_len], target_len] ~> =^suffix; last_step }",
+            "#{\n  first_step\n\n  %bin.slice [target, %num.sub [target_len, suffix_len], target_len]\n  ~> =^suffix\n\n  last_step\n}\n",
         );
         // …but a body of only short steps stays packed (no imposed blanks).
         assert_formats("#{ aa; bb; cc }", "#{ aa; bb; cc }\n");
@@ -2471,8 +2474,8 @@ mod tests {
         // A binding whose value breaks into a `~>` pipeline breaks after the `=` and indents the
         // pipeline, rather than leaving the head on the `=` line and dangling the continuations.
         assert_formats(
-            "#{ char_end = byte_pos ~> [~, 1] ~> %num.add ~> [data, ~, data_len] ~> skip_continuation }",
-            "#{\n  char_end =\n    byte_pos\n    ~> [~, 1]\n    ~> %num.add\n    ~> [data, ~, data_len]\n    ~> skip_continuation\n}\n",
+            "#{ char_end = byte_position ~> advance_one ~> skip_continuation_bytes ~> clamp_to_length ~> check_boundary }",
+            "#{\n  char_end =\n    byte_position\n    ~> advance_one\n    ~> skip_continuation_bytes\n    ~> clamp_to_length\n    ~> check_boundary\n}\n",
         );
         // A value ending in a call is a pipeline too: the `=` break tracks whether the chain breaks
         // at a `~>` gap, not what its last term happens to be.
@@ -2488,8 +2491,8 @@ mod tests {
         );
         // A short binding stays inline…
         assert_formats(
-            "#{ x = byte_pos ~> [~, 1] ~> %num.add }",
-            "#{ x = byte_pos ~> [~, 1] ~> %num.add }\n",
+            "#{ x = byte_pos ~> %num.add [~, 1] }",
+            "#{ x = byte_pos ~> %num.add [~, 1] }\n",
         );
         // …and a value ending in a self-breaking container stays on the `=` line (the container
         // opens there and breaks internally).
@@ -2504,14 +2507,14 @@ mod tests {
         // A `cond => …` guard that is a single `~>` pipeline indents its continuations under the
         // head (past the `| `), so they read as part of the condition rather than dangling at the bar.
         assert_formats(
-            "#{ x ~> { haystack_len ~> [~, needle_len] ~> %num.sub ~> [haystack, needle, 0, ~] ~> find_index => Ok | other } }",
-            "#{\n  x ~> {\n    | haystack_len\n      ~> [~, needle_len]\n      ~> %num.sub\n      ~> [haystack, needle, 0, ~]\n      ~> find_index => Ok\n    | other\n  }\n}\n",
+            "#{ x ~> { haystack_length ~> subtract_needle_length ~> find_index_in_haystack ~> check_found_index ~> confirm_boundary => Ok | other } }",
+            "#{\n  x ~> {\n    | haystack_length\n      ~> subtract_needle_length\n      ~> find_index_in_haystack\n      ~> check_found_index\n      ~> confirm_boundary => Ok\n    | other\n  }\n}\n",
         );
         // A consequence that follows the last continuation on the same line lays out relative to
         // that deeper indent too — a breaking tuple's fields indent under its `[`, `]` aligned.
         assert_formats(
-            "#{ x ~> { [haystack, delimiter, start_offset, end_offset] ~> find_index_from ~> =('int & index) => [haystack ~> [~, start_offset, index] ~> %bin.slice ~> Str[~], [index, delim_len] ~> %num.add, another_field, one_more_field] | other } }",
-            "#{\n  x ~> {\n    | [haystack, delimiter, start_offset, end_offset]\n      ~> find_index_from\n      ~> =('int & index) => [\n        haystack ~> [~, start_offset, index] ~> %bin.slice ~> Str[~],\n        [index, delim_len] ~> %num.add,\n        another_field,\n        one_more_field,\n      ]\n    | other\n  }\n}\n",
+            "#{ x ~> { find_index_from [haystack, delimiter, start_offset, end_offset] ~> =('int & index) => [%bin.slice [haystack, start_offset, index] ~> Str[~], %num.add [index, delim_len], another_field, one_more_field] | other } }",
+            "#{\n  x ~> {\n    | find_index_from [haystack, delimiter, start_offset, end_offset]\n      ~> =('int & index) => [\n        %bin.slice [haystack, start_offset, index] ~> Str[~],\n        %num.add [index, delim_len],\n        another_field,\n        one_more_field,\n      ]\n    | other\n  }\n}\n",
         );
     }
 
@@ -2526,8 +2529,8 @@ mod tests {
         // A call's argument list is not a body: it may break, but the chain breaks with it rather
         // than gluing the call to what precedes it.
         assert_formats(
-            "#{ $acc ~> %bin.append [~, %int.divide [b0, 4] ~> b64_digit ~, 1] ~> %bin.append [~, %int.modulo [b0, 4] ~> b64_digit ~, 1] ~> =('bin & out) }",
-            "#{\n  $acc\n  ~> %bin.append [~, %int.divide [b0, 4] ~> b64_digit ~, 1]\n  ~> %bin.append [~, %int.modulo [b0, 4] ~> b64_digit ~, 1]\n  ~> =('bin & out)\n}\n",
+            "#{ $acc ~> %bin.append [~, %int.divide [b0, 4] ~> b64_digit, 1] ~> %bin.append [~, %int.modulo [b0, 4] ~> b64_digit, 1] ~> =('bin & out) }",
+            "#{\n  $acc\n  ~> %bin.append [~, %int.divide [b0, 4] ~> b64_digit, 1]\n  ~> %bin.append [~, %int.modulo [b0, 4] ~> b64_digit, 1]\n  ~> =('bin & out)\n}\n",
         );
     }
 
@@ -2597,13 +2600,13 @@ mod tests {
         // A consequence that is a single chain breaking into a `~>` pipeline is wrapped in grouping
         // braces, so the continuation reads as a delimited body instead of dangling at the bar.
         assert_formats(
-            "f = #'t { =Cons[k, t] => dict ~> put_entry ~ ~> normalise ~ ~> rebalance ~ ~> recount ~ ~> settle ~ ~> finish ~ | =Nil => dict }",
-            "f = #'t {\n  | =Cons[k, t] => {\n    dict\n    ~> put_entry ~\n    ~> normalise ~\n    ~> rebalance ~\n    ~> recount ~\n    ~> settle ~\n    ~> finish ~\n  }\n  | =Nil => dict\n}\n",
+            "f = #'t { =Cons[k, t] => dict ~> put_entry_into ~> normalise_keys ~> rebalance_tree ~> recount_nodes ~> settle ~> finish | =Nil => dict }",
+            "f = #'t {\n  | =Cons[k, t] => {\n    dict\n    ~> put_entry_into\n    ~> normalise_keys\n    ~> rebalance_tree\n    ~> recount_nodes\n    ~> settle\n    ~> finish\n  }\n  | =Nil => dict\n}\n",
         );
         // A short consequence stays bare (it does not break).
         assert_formats(
-            "f = #'t { =A => a ~> b | =B => c }",
-            "f = #'t { =A => a ~> b | =B => c }\n",
+            "f = #'t { =A => a ~> b ~> c | =B => d }",
+            "f = #'t { =A => a ~> b ~> c | =B => d }\n",
         );
     }
 
@@ -2616,13 +2619,13 @@ mod tests {
         );
         // …a single-step consequence (one chain, many terms) stays bare…
         assert_formats(
-            "x = 5 ~> { =0 => a ~> b | c }",
-            "x = 5 ~> { =0 => a ~> b | c }\n",
+            "x = 5 ~> { =0 => a ~> b ~> c | d }",
+            "x = 5 ~> { =0 => a ~> b ~> c | d }\n",
         );
         // …a binding consequence keeps its own markers and stays bare…
         assert_formats(
-            "x = 5 ~> { =0 => y = 1; [y, 2] ~> g | c }",
-            "x = 5 ~> { =0 => y = 1; [y, 2] ~> g | c }\n",
+            "x = 5 ~> { =0 => y = 1; g [y, 2] | c }",
+            "x = 5 ~> { =0 => y = 1; g [y, 2] | c }\n",
         );
         // …and an already-braced consequence is not double-wrapped.
         assert_formats(
@@ -2647,6 +2650,33 @@ mod tests {
     }
 
     #[test]
+    fn calls_take_their_preferred_spelling() {
+        // A value piped into a call, and nothing more, is the juxtaposition.
+        assert_formats("x ~> f\n", "f x\n");
+        assert_formats("x ~> f ~\n", "f x\n");
+        assert_formats("y = [1, 2] ~> %num.add\n", "y = %num.add [1, 2]\n");
+        assert_formats("[a, b] ~> ^\n", "^ [a, b]\n");
+        assert_formats("5 ~> @w ~\n", "@w 5\n");
+        assert_formats("7 ~> @\n", "@ 7\n");
+        // In a longer chain a call drops its `~`, and a tuple or string argument moves into it.
+        assert_formats("x ~> f ~ ~> g ~\n", "x ~> f ~> g\n");
+        assert_formats(
+            "x ~> [~, 2] ~> %num.add ~> d\n",
+            "x ~> %num.add [~, 2] ~> d\n",
+        );
+        assert_formats("[a, b] ~> f ~> g\n", "f [a, b] ~> g\n");
+        assert_formats("x ~> \"a{~}\" ~> d\n", "x ~> d \"a{~}\"\n");
+        // A block, a match or a tail call heading the chain stays put.
+        assert_formats("x = 5 ~> { ^ ~> foo }\n", "x = 5 ~> { ^ ~> foo }\n");
+        assert_formats("x ~> { =1 => a | b } ~> g\n", "x ~> { =1 => a | b } ~> g\n");
+        // Braces around a bare name keep it a value, so they are not dropped.
+        assert_formats("5 ~> { d }\n", "5 ~> { d }\n");
+        // A gap carrying an assertion or a comment is not merged away.
+        assert_formats("x //= 1\n~> d\n", "x //= 1\n~> d\n");
+        assert_formats("x // why\n~> d\n", "x // why\n~> d\n");
+    }
+
+    #[test]
     fn keeps_narrowing_barrier_and_unsafe_tail_blocks() {
         // A block wrapping a match can be a deliberate narrowing barrier — never strip it.
         assert_formats(
@@ -2654,11 +2684,11 @@ mod tests {
             "x = 5 ~> { { =A } => 1 | 2 }\n",
         );
         // A tail call that is not the chain's last term keeps its block (no mid-chain dead code)…
-        assert_formats("x = { [a] ~> ^ } ~> f", "x = { [a] ~> ^ } ~> f\n");
+        assert_formats("x = { ^ [a] } ~> f", "x = { ^ [a] } ~> f\n");
         // …a non-final tail call inside the body keeps the block too…
         assert_formats("x = 5 ~> { ^ ~> foo }", "x = 5 ~> { ^ ~> foo }\n");
         // …but a block whose tail call ends up last after splicing is dropped cleanly.
-        assert_formats("x = y ~> { [a] ~> ^ }", "x = y ~> [a] ~> ^\n");
+        assert_formats("x = y ~> { ^ [a] }", "x = y ~> ^ [a]\n");
     }
 
     #[test]
@@ -2668,10 +2698,7 @@ mod tests {
         // Multiple branches are not redundant.
         assert_formats("x = 5 ~> { =0 => a | b }", "x = 5 ~> { =0 => a | b }\n");
         // A comment inside the block keeps it (so the comment is not lost).
-        assert_formats(
-            "x = {\n  // note\n  5 ~> f\n}",
-            "x = {\n  // note\n  5 ~> f\n}\n",
-        );
+        assert_formats("x = {\n  // note\n  f 5\n}", "x = {\n  // note\n  f 5\n}\n");
     }
 
     #[test]

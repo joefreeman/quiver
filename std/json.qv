@@ -169,7 +169,7 @@ number = #'%parse {
 
   frac = {
     | peek_at st2 ~> =46 => {
-      st2[..., pos: %num.add [st2.pos, 1]] ~> digits ~ ~> =[fbb, st3a]
+      digits st2[..., pos: %num.add [st2.pos, 1]] ~> =[fbb, st3a]
 
       {
         | %bin.length fbb ~> =0 => %parse.fail_in [st2, "digits after '.'"]
@@ -310,7 +310,7 @@ strip_zeros = #'bin {
         0,
         __integer_subtract__ [len, 1],
       ]
-      ~> ^ ~
+      ~> ^
     | b
   }
 }
@@ -321,7 +321,7 @@ frac_bytes = #[(fracpart): 'int, (width): 'int] {
   ds = %str.from_int $fracpart ~> .0
   pad = __integer_subtract__ [$width, %bin.length ds]
 
-  [repeat_byte [<>, 48, pad], ds] ~> %bin.concat ~ ~> strip_zeros ~
+  %bin.concat [repeat_byte [<>, 48, pad], ds] ~> strip_zeros
 }
 
 // Format a canonical rational `n/d` (`d > 0`, gcd 1) as a JSON decimal: the exact finite
@@ -497,7 +497,7 @@ set = #[(value): 'opt, (key): 'key, (new): 'opt] -> 'opt {
 
 update = #[(value): 'opt, (key): 'key, (f): #' -> 'opt] -> 'opt {
   :doc "The value with `f` applied to what a key or path names. Nil when the target is absent, or when `f` answers nil."
-  set [$value, $key, get [$value, $key] ~> =' ~> $f ~]
+  set [$value, $key, get [$value, $key] ~> =' ~> $f]
 }
 
 // Remove every binding of `key` from a pair list.
@@ -562,7 +562,7 @@ merge = #[(value): 'opt, (with): 'opt] -> 'opt {
 
 to_dict = #'opt {
   :doc "An object's pairs as a %dict (later duplicates win, matching `get`); order is not preserved. Nil for anything but an object."
-  =' ~> =Object[~] ~> %dict.from ~
+  =' ~> =Object[~] ~> %dict.from
 }
 
 object = #('%dict<'%str, '> | 'pairs) -> ' {

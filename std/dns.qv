@@ -22,6 +22,6 @@ lookup_step = #'lookup {
 [
   resolve: #'%str {
     :doc "Lazily resolves a hostname, yielding its addresses as IPv4 or IPv6 values. A failure ends the iteration carrying its :error — collect with %list.try_collect to see it rather than a short list."
-    .0 ~> __dns_resolve__ ~ ~> %iter.unfold [~, lookup_step]
+    .0 ~> __dns_resolve__ ~> %iter.unfold [~, lookup_step]
   },
 ]

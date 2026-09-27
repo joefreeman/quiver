@@ -231,7 +231,7 @@ ws_only_from = #[(data): 'bin, (pos): 'int] {
 tag_name = #'%parse {
   =st
   {
-    | peek_at st ~> ='int ~> lower? ~ => { tag_rest st ~> =[bytes, st2]; [Str[bytes], st2] }
+    | peek_at st ~> ='int ~> lower? => { tag_rest st ~> =[bytes, st2]; [Str[bytes], st2] }
     | peek_at st ~> =('int & b)
       __integer_compare__ [b, 65] ~> =(0 | 1)
       __integer_compare__ [b, 90] ~> =(-1 | 0) => %parse.fail_in [
@@ -298,7 +298,7 @@ attr_mods_p = #[(cb): '%meta.cb, (state): '%parse] {
 attrs_loop = #[(cb): '%meta.cb, (state): '%parse, (acc): 'pattrs] {
   %parse.ws $state ~> =[_, st]
   {
-    | peek_at st ~> ='int ~> letter? ~ => {
+    | peek_at st ~> ='int ~> letter? => {
       attr_rest st ~> =[nb, st2]
       name = Str[nb]
       {
@@ -345,7 +345,7 @@ void? = #'%str {
 drop_ws = #'pfxs { %list.drop_while [~, #{ =[_, Ok] }] }
 
 // Trim whitespace-only text nodes from both ends of the root node list.
-trim_root = #'pfxs { drop_ws ~ ~> %list.reverse ~ ~> drop_ws ~ ~> %list.reverse ~ }
+trim_root = #'pfxs { drop_ws ~ ~> %list.reverse ~> drop_ws ~> %list.reverse }
 
 // The nodes of a flagged node list, in order.
 strip = #'pfxs { %list.map [~, #{ $0 }] }
@@ -399,7 +399,7 @@ nodes_loop = #[
                 | void? tag => [PElem[tag: tag, attrs: alist, children: Nil], st4]
                 | {
                   $self [$self, $cb, st4, Nil] ~> =[fkids, st5]
-                  kids = fkids ~> strip ~
+                  kids = strip fkids
                   {
                     | peek_at st5 ~> =60; peek_at2 st5 ~> =47 => {
                       st6 = st5[..., pos: __integer_add__ [st5.pos, 2]]
@@ -489,9 +489,9 @@ emit_list = #[(self): ^, (items): 'pnodes, (acc): 'xs] -> 'xs {
             fields: Cons[
               Labeled[label: "tag", value: t],
               Cons[
-                Labeled[label: "attrs", value: emit_attrs alist ~> %meta.list_expr ~],
+                Labeled[label: "attrs", value: emit_attrs alist ~> %meta.list_expr],
                 Cons[
-                  Labeled[label: "children", value: $self [$self, kids, Nil] ~> %meta.list_expr ~],
+                  Labeled[label: "children", value: $self [$self, kids, Nil] ~> %meta.list_expr],
                   Nil,
                 ],
               ],
@@ -692,7 +692,7 @@ parse = #[(content): '%str, (term): '%meta.cb] {
   full = #'%parse {
     nodes_loop [nodes_loop, cb, $, Nil] ~> =[items, st]
     {
-      | __integer_compare__ [st.pos, st.len] ~> =(0 | 1) => [trim_root items ~> strip ~, st]
+      | __integer_compare__ [st.pos, st.len] ~> =(0 | 1) => [trim_root items ~> strip, st]
       | %parse.fail_in [st, "end of input (unmatched close tag?)"]
     }
   }
@@ -709,10 +709,10 @@ expand = #'pnodes {
     arg: Tuple[
       name: Nil,
       fields: Cons[
-        emit_list [emit_list, roots, Nil] ~> root_expr ~,
+        emit_list [emit_list, roots, Nil] ~> root_expr,
         Cons[
-          Cons[ist.cur, ist.runs] ~> statics_exprs ~ ~> %meta.list_expr ~,
-          Cons[%list.reverse ist.holes ~> %meta.list_expr ~, Nil],
+          statics_exprs Cons[ist.cur, ist.runs] ~> %meta.list_expr,
+          Cons[%list.reverse ist.holes ~> %meta.list_expr, Nil],
         ],
       ],
     ],
@@ -727,7 +727,7 @@ html_dialect = #(content: '%str, term: '%meta.cb) {
   ~> ='pnodes
   ~> rewrite_attrs [~, plain_policy]
   ~> ='pnodes
-  ~> expand ~
+  ~> expand
 }
 
 // === Rendering ==========================================================================

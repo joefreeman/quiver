@@ -57,10 +57,10 @@ extend = #[(w): 'bin, (t): 'int] {
   | {
     wt =
       madd [
-        w_at [$w, __integer_subtract__ [$t, 2]] ~> ssig1 ~,
+        w_at [$w, __integer_subtract__ [$t, 2]] ~> ssig1,
         w_at [$w, __integer_subtract__ [$t, 7]],
       ]
-      ~> madd [~, w_at [$w, __integer_subtract__ [$t, 15]] ~> ssig0 ~]
+      ~> madd [~, w_at [$w, __integer_subtract__ [$t, 15]] ~> ssig0]
       ~> madd [~, w_at [$w, __integer_subtract__ [$t, 16]]]
 
     ^ [__binary_append__ [$w, wt, 4], __integer_add__ [$t, 1]]
@@ -155,7 +155,7 @@ sha256 = #'bin {
     w_at [h256, 6],
     w_at [h256, 7],
   ]
-  blocks [pad $, 0, init] ~> digest ~
+  blocks [pad $, 0, init] ~> digest
 }
 
 // --- SHA-1 (FIPS 180-4) ---
@@ -259,11 +259,11 @@ hmac_sha256 = #[(key): 'bin, (msg): 'bin] {
     | $key
   }
 
-  kp = __binary_concat__ [k1, __integer_subtract__ [64, __binary_length__ k1] ~> __binary_new__ ~]
+  kp = __binary_concat__ [k1, __integer_subtract__ [64, __binary_length__ k1] ~> __binary_new__]
 
-  inner = __binary_concat__ [__binary_xor__ [kp, ipad], $msg] ~> sha256 ~
+  inner = __binary_concat__ [__binary_xor__ [kp, ipad], $msg] ~> sha256
 
-  __binary_concat__ [__binary_xor__ [kp, opad], inner] ~> sha256 ~
+  __binary_concat__ [__binary_xor__ [kp, opad], inner] ~> sha256
 }
 
 (sha256, hmac_sha256, sha1)

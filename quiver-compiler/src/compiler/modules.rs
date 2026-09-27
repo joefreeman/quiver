@@ -255,6 +255,7 @@ impl ModuleCache {
                 keep: &|_| false,
                 lift: true,
                 group_consequences: false,
+                restyle_calls: None,
             },
         );
 

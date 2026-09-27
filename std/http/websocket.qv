@@ -24,8 +24,8 @@ accept_key = #'%str {
   =Str[k]
 
   %bin.concat [k, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" ~> .0]
-  ~> %hash.sha1 ~
-  ~> %bin.to_base64 ~
+  ~> %hash.sha1
+  ~> %bin.to_base64
 }
 
 handshake_response = #'%str {
@@ -182,7 +182,7 @@ recv = #' {
           __tcp_socket_close__ $sock
           [Close[code: 1006, reason: ""], $[..., buf: <>, part: Nil]]
         }
-        | $ ~> Conn[..., buf: %bin.concat [$buf, chunk]] ~> ^ ~
+        | $ ~> ^ Conn[..., buf: %bin.concat [$buf, chunk]]
       }
     }
     | =Bad[r] => fail [$ ~> Conn[..., buf: <>, part: Nil], 1002, r]

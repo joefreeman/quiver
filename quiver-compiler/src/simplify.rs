@@ -28,6 +28,10 @@ pub struct Options<'a> {
     /// whose later steps look like outer steps. The formatter enables this; the compiler does not
     /// (it would only lift the block straight back out). Frame-free keeps it bytecode-neutral.
     pub group_consequences: bool,
+    /// **Restyle calls** to the preferred spelling (see [`prefer_calls`]), given whether a `~>`
+    /// gap may be dropped — the formatter keeps any gap carrying comments. The compiler does not
+    /// restyle: every spelling of a call compiles alike.
+    pub restyle_calls: Option<&'a dyn Fn(&Continuation) -> bool>,
 }
 
 /// Normalize the blocks throughout `sequence` — a whole program, or any nested branch body:
@@ -104,6 +108,7 @@ fn strip_chain(chain: Chain, options: &Options) -> Chain {
             !(options.keep)(body)
                 && body.assertions.is_empty()
                 && (!ends_in_tail_call || index == last_index)
+                && (index == 0 || !opens_with_bare_callee(&term))
         };
         if index > 0 {
             // Absent for a chain the compiler synthesized, which has no source `~>` to record.
@@ -129,14 +134,137 @@ fn strip_chain(chain: Chain, options: &Options) -> Chain {
     for assertion in &mut assertions {
         assertion.after = positions[assertion.after];
     }
-    Chain {
+    let chain = Chain {
         binding,
         binding_span,
         span,
         terms: simplified,
         continuations: gaps,
         assertions,
+    };
+    match options.restyle_calls {
+        Some(may_drop_gap) => prefer_calls(chain, may_drop_gap),
+        None => chain,
     }
+}
+
+/// Respell the calls in `chain` the preferred way. A call after a `~>` drops an explicit `~`
+/// argument (`x ~> f ~ ~> g` → `x ~> f ~> g`); a tuple or string argument moves into its
+/// call (`x ~> [~, 2] ~> f` → `x ~> f [~, 2]`, `[a, b] ~> f ~> g` → `f [a, b] ~> g`); and a
+/// chain that is nothing but a value piped into a call becomes the juxtaposition
+/// (`x ~> f` → `f x`). Each merge drops the `~>` gap
+/// between the two terms, so it is skipped where `may_drop_gap` refuses the gap, or where an
+/// assertion observes the value flowing through it.
+fn prefer_calls(chain: Chain, may_drop_gap: &dyn Fn(&Continuation) -> bool) -> Chain {
+    let Chain {
+        binding,
+        binding_span,
+        span,
+        terms,
+        mut continuations,
+        mut assertions,
+    } = chain;
+    let mut terms: Vec<Term> = terms
+        .into_iter()
+        .enumerate()
+        .map(|(i, term)| {
+            if i > 0 {
+                drop_ripple_argument(term)
+            } else {
+                term
+            }
+        })
+        .collect();
+    // Merge term `i` into term `i - 1` as its argument, dropping the gap between them and the
+    // position that gap had.
+    let can_merge = |i: usize, continuations: &[Continuation], assertions: &[Assertion]| {
+        continuations.get(i - 1).is_none_or(may_drop_gap)
+            && assertions.iter().all(|assertion| assertion.after != i)
+    };
+    let merge = |i: usize,
+                 terms: &mut Vec<Term>,
+                 continuations: &mut Vec<Continuation>,
+                 assertions: &mut Vec<Assertion>| {
+        let callee = terms.remove(i);
+        let argument = terms.remove(i - 1);
+        terms.insert(i - 1, apply(callee, argument));
+        if i - 1 < continuations.len() {
+            continuations.remove(i - 1);
+        }
+        for assertion in assertions.iter_mut() {
+            if assertion.after > i {
+                assertion.after -= 1;
+            }
+        }
+    };
+    let mut i = 1;
+    while i < terms.len() {
+        if terms[i].is_bare_callee()
+            && matches!(terms[i - 1], Term::Tuple(_) | Term::String(..))
+            && can_merge(i, &continuations, &assertions)
+        {
+            merge(i, &mut terms, &mut continuations, &mut assertions);
+        } else {
+            i += 1;
+        }
+    }
+    if terms.len() == 2
+        && terms[1].is_bare_callee()
+        && is_head_argument(&terms[0])
+        && can_merge(1, &continuations, &assertions)
+    {
+        merge(1, &mut terms, &mut continuations, &mut assertions);
+    }
+    Chain {
+        binding,
+        binding_span,
+        span,
+        terms,
+        continuations,
+        assertions,
+    }
+}
+
+/// `f ~` → `f` and `@f ~` → `@f`: after a `~>` the explicit ripple argument is implied.
+fn drop_ripple_argument(term: Term) -> Term {
+    match term {
+        Term::Apply(access, argument)
+            if argument.is_bare_ripple() && Term::Access(access.clone()).is_bare_callee() =>
+        {
+            Term::Access(access)
+        }
+        Term::Spawn(target, Some(argument), span)
+            if argument.is_bare_ripple()
+                && Term::Spawn(target.clone(), None, span).is_bare_callee() =>
+        {
+            Term::Spawn(target, None, span)
+        }
+        other => other,
+    }
+}
+
+/// Apply a bare callee to `argument`: `f` → `f argument`, `@f` → `@f argument`.
+fn apply(callee: Term, argument: Term) -> Term {
+    match callee {
+        Term::Access(access) => Term::Apply(access, Box::new(argument)),
+        Term::Spawn(target, None, span) => Term::Spawn(target, Some(Box::new(argument)), span),
+        other => unreachable!("not a bare callee: {other:?}"),
+    }
+}
+
+/// Whether a chain's head reads well as a juxtaposed argument (`x ~> f` → `f x`). It must be a
+/// single term the parser takes as an argument — not an application or a spawn with its init —
+/// and neither a match, a block nor a tail call, which read as the start of a step (or its end)
+/// rather than a value.
+fn is_head_argument(term: &Term) -> bool {
+    !matches!(
+        term,
+        Term::Apply(..)
+            | Term::Spawn(_, Some(_), _)
+            | Term::Match(_)
+            | Term::Block(_)
+            | Term::Select(None, _)
+    ) && !is_tail_call(term)
 }
 
 fn strip_term(term: Term, options: &Options) -> Term {
@@ -260,6 +388,19 @@ pub fn is_redundant_block(term: &Term) -> bool {
         && block.branches[0].condition.single_chain().is_some_and(is_inlinable_chain))
 }
 
+/// Whether `term` is a redundant block whose body opens with a bare callee (`{ f }`, `{ f ~> g }`).
+/// Only a chain's head may be spliced out of it: at the head of the body `f` is its value, but
+/// spliced after a `~>` it would be applied to the flowing value, changing what the block means.
+fn opens_with_bare_callee(term: &Term) -> bool {
+    is_redundant_block(term)
+        && matches!(term, Term::Block(block)
+            if block.branches[0]
+                .condition
+                .single_chain()
+                .and_then(|body| body.terms.first())
+                .is_some_and(Term::is_bare_callee))
+}
+
 /// A chain whose terms can be spliced out of a redundant block: non-empty, frame-free, and with no
 /// tail call before its final term (that would become visibly unreachable mid-chain once spliced).
 fn is_inlinable_chain(chain: &Chain) -> bool {
@@ -311,14 +452,15 @@ fn contains_match(term: &Term) -> bool {
     }
 }
 
-/// Whether a term is a tail call (`^`, `^f`, `^~`).
+/// Whether a term is a tail call (`^`, `^f`, `^~`), bare or applied (`^ [args]`, `^~ x`).
 fn is_tail_call(term: &Term) -> bool {
+    let access = match term {
+        Term::Access(access) | Term::Apply(access, _) => access,
+        _ => return false,
+    };
     matches!(
-        term,
-        Term::Access(Access {
-            source: Some(AccessSource::TailCall(_) | AccessSource::TailCallRipple),
-            ..
-        })
+        access.source,
+        Some(AccessSource::TailCall(_) | AccessSource::TailCallRipple)
     )
 }
 

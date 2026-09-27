@@ -46,8 +46,7 @@ line_step = #['state, '%str] {
     }
     | =State[blocks: bs, cur: Cur[label: label, body: body]] => {
       | end_label line ~> =('%str & end) => {
-        | end ~> =^label
-          Str[body] ~> %bin.from_base64 ~ ~> =('bin & der) => State[
+        | end ~> =^label; %bin.from_base64 Str[body] ~> =('bin & der) => State[
             blocks: Cons[[label: label, der: der], bs],
             cur: Nil,
           ]

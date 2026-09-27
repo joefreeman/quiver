@@ -317,7 +317,9 @@ fn access_reads_flow(access: &ast::Access) -> bool {
 /// way to spell "continue whatever the result", which is otherwise unspellable — `;` is
 /// the other way to drop a value, but it gates on nil. A *redundant* block (`{ Ok }`) is
 /// not one: `simplify` splices it into the chain before this runs, so it discards the
-/// value exactly as its bare contents would, and is rejected the same way.
+/// value exactly as its bare contents would, and is rejected the same way. One that opens
+/// with a bare callee (`{ f }`) is left unspliced, since splicing would turn its value into
+/// a call: it is a real block, whose head is `f` itself.
 fn term_uses_flow(term: &ast::Term) -> bool {
     let chain = |chain: &ast::Chain| chain.terms.first().is_none_or(term_uses_flow);
     match term {
@@ -1327,6 +1329,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 keep: &|_| false,
                 lift: true,
                 group_consequences: false,
+                restyle_calls: None,
             },
         );
 
@@ -5135,7 +5138,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
-        let terms: Vec<_> = chain.terms.into_iter().collect();
+        // A bare callee after a `~>` is applied to the value flowing into it: `x ~> f` is
+        // `x ~> f ~`. Rewriting it here lets everything below treat the two alike.
+        let terms: Vec<_> = chain
+            .terms
+            .into_iter()
+            .enumerate()
+            .map(|(i, term)| {
+                if i > 0 && term.is_bare_callee() {
+                    term.applied_to_flow()
+                } else {
+                    term
+                }
+            })
+            .collect();
         let last_index = terms.len().saturating_sub(1);
         // `Some` once the chain's final term is a match: its failure exits.
         let mut verdict = None;
@@ -5149,9 +5165,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 return Err(Error::DiscardedChainValue);
             }
             // The statically-resolvable callable a non-final literal term flows into — the
-            // piped counterpart of an Apply's head. Only `[…] ~> f ~` pipes a literal into a
-            // call: the literal *is* the argument, so the head is the callee. (A bare access
-            // no longer calls, so nothing else can consume a piped literal.)
+            // piped counterpart of an Apply's head. Only `[…] ~> f ~` (or `[…] ~> f`, rewritten
+            // to it above) pipes a literal into a call: the literal *is* the argument, so the
+            // head is the callee.
             let piped_callee = if i == last_index
                 || !matches!(term, ast::Term::Tuple(_) | ast::Term::Function(_))
             {

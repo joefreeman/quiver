@@ -32,7 +32,7 @@ walk_step = #'walk {
 // index, with `kind` already a `'kind` tag; both nils fall through the match below, the
 // failure keeping its payload on the way out.
 stat = #'%str {
-  .0 ~> __filesystem_stat__ ~ ~> =[k, size, modified, mode]
+  .0 ~> __filesystem_stat__ ~> =[k, size, modified, mode]
 
   Stat[kind: k, size: size, modified: modified, mode: mode]
 }
@@ -42,7 +42,7 @@ stat = #'%str {
   // The underlying directory handle is closed automatically once the iterator is exhausted.
   list: #'%str {
     :doc "Lazily iterates the entries of a directory, yielding an Entry (name and kind) each. A failure ends the iteration carrying its :error — collect with %list.try_collect to see it rather than a short list."
-    .0 ~> __directory_read__ ~ ~> %iter.unfold [~, walk_step]
+    .0 ~> __directory_read__ ~> %iter.unfold [~, walk_step]
   },
 
   stat: #'%str {

@@ -60,9 +60,7 @@ try_each = #[(addrs): '%list<'%dns.ip>, (port): 'int, (last): []] {
     $to ~> {
       | =('bin & ip) => __tcp_connect__ [ip, $port]
       | =('%str & host) => {
-        %dns.resolve host
-        ~> %list.try_collect ~
-        ~> =('%list<'%dns.ip> & addrs)
+        %dns.resolve host ~> %list.try_collect ~> =('%list<'%dns.ip> & addrs)
 
         addrs ~> {
           | =Nil => [] ~> { :error IoError[kind: NotFound, message: "no addresses for {host}"] }

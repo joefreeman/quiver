@@ -210,7 +210,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
 
   empty?: #' {
     :doc "Whether a string is empty."
-    .0 ~> %bin.length ~ ~> =0; Ok
+    .0 ~> %bin.length ~> =0; Ok
   },
 
   concat: #[', '] {
@@ -285,7 +285,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
 
   length: #' {
     :doc "The number of Unicode characters in a string."
-    .0 ~> chars ~ ~> %iter.count ~
+    .0 ~> chars ~> %iter.count
   },
 
   slice: #[(str): ', (start): 'int, (end): 'int] {
@@ -295,7 +295,7 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
     chars data
     ~> %iter.drop [~, $start]
     ~> %iter.take [~, %num.sub [$end, $start]]
-    ~> from_chars ~
+    ~> from_chars
   },
 
   index_of: #[(str): ', (needle): '] {

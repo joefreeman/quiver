@@ -52,7 +52,6 @@ fn test_chain_term_must_use_the_flowing_value() {
         "1 ~> [2, 3 ~> ~]", // no field reads the 1
         "5 ~> 99",
         "5 ~> \"abc\"",
-        "5 ~> __integer_add__",
         "5 ~> #'int { $ }",
         "5 ~> __integer_add__ [1, 2]", // the argument ignores it, so the call does
     ];
@@ -63,6 +62,8 @@ fn test_chain_term_must_use_the_flowing_value() {
     }
     // Only the head is exempt: that is where a chain chooses what it starts from.
     quiver().evaluate("f = #'int { 99 }; 5 ~> f ~").expect("99");
+    // A name uses the value by being applied to it.
+    quiver().evaluate("f = #'int { 99 }; 5 ~> f").expect("99");
     quiver().evaluate("[2, 3 ~> ~]").expect("[2, 3]");
     // A block takes the value and may ignore it, which is how a step runs for its effect
     // and continues whatever its result — `;` would gate on the nil instead.
@@ -172,4 +173,70 @@ fn test_chain_passes_nil_but_sequence_short_circuits() {
     quiver().evaluate("[] ~> [~, 5]").expect("[[], 5]");
     // ...but across a sequence separator (semicolon/newline), a nil step short-circuits to nil.
     quiver().evaluate("[]; [~, 5]").expect("[]");
+}
+
+#[test]
+fn test_bare_callee_after_arrow_is_applied() {
+    // A name after `~>` is applied to the flowing value: `x ~> f` is `x ~> f ~`, is `f x`.
+    let double = "d = #'int { %num.mul [$, 2] };";
+    quiver()
+        .evaluate(&format!("{double} 5 ~> d ~> d"))
+        .expect("20");
+    quiver().evaluate("[2, 3] ~> __integer_add__").expect("5");
+    quiver()
+        .evaluate("5 ~> %num.add [~, 1] ~> %str.from_int")
+        .expect("\"6\"");
+    // A piped literal still infers from the callee it flows into.
+    quiver()
+        .evaluate("[%list{ 1, 2 }, #{ %num.mul [$, 3] }] ~> %list.map")
+        .expect("Cons[3, Cons[6, Nil]]");
+    // A name that is not a callable cannot take the value.
+    quiver().evaluate("x = 3; 5 ~> x").expect_compile_error(
+        quiver_compiler::compiler::Error::TypeMismatch {
+            expected: "a callable or process to apply the argument to".to_string(),
+            found: "'int".to_string(),
+        },
+    );
+}
+
+#[test]
+fn test_bare_callee_at_sequence_head_is_its_value() {
+    // A name that starts a sequence — a block's branch, a consequence — is its value.
+    let double = "d = #'int { %num.mul [$, 2] };";
+    quiver()
+        .evaluate(&format!("{double} 5 ~> {{ =5 => d | d }} ~> ~ 1"))
+        .expect("2");
+    // So braces around a bare name keep it a value rather than splicing it into a call.
+    quiver()
+        .evaluate(&format!("{double} 5 ~> {{ d }} ~> ~ 1"))
+        .expect("2");
+    quiver()
+        .evaluate(&format!("{double} 5 ~> {{ d ~ }}"))
+        .expect("10");
+    // `f ~> g` passes the function `f` to `g`.
+    quiver()
+        .evaluate(&format!("{double} g = #(#'int -> 'int) {{ $ 4 }}; d ~> g"))
+        .expect("8");
+}
+
+#[test]
+fn test_bare_tail_call_and_process_forms_after_arrow() {
+    // `^`, `^f`, `@f` and `@` take the flowing value like any other name.
+    quiver()
+        .evaluate(
+            "power = #['int, 'int] { | =[0, acc] => acc | =[n, acc] => [%num.sub [n, 1], %num.mul [acc, 2]] ~> ^ }; power [3, 1]",
+        )
+        .expect("8");
+    quiver()
+        .evaluate("g = #'int { [$] }; f = #'int { %num.add [$, 1] ~> ^g }; f 1")
+        .expect("[2]");
+    quiver()
+        .evaluate("w = #'int { %num.mul [$, 2] }; p = 21 ~> @w; !p")
+        .expect("42");
+    quiver()
+        .evaluate("@#[] { 7 ~> @; !#'int } [] ~> !")
+        .expect("7");
+    quiver()
+        .evaluate("p = @#[] { !#'int } []; 3 ~> p; !p")
+        .expect("3");
 }

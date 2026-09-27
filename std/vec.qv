@@ -105,8 +105,8 @@ reconcile = #[(sa): '%num, (sb): '%num] {
   ~> =l
 
   norm Rational[g, l] ~> =s
-  %num.div [$sa, s] ~> %num.numer ~ ~> =('int & fa)
-  %num.div [$sb, s] ~> %num.numer ~ ~> =('int & fb)
+  %num.div [$sa, s] ~> %num.numer ~> =('int & fa)
+  %num.div [$sb, s] ~> %num.numer ~> =('int & fb)
   [scale: s, factor_a: fa, factor_b: fb]
 }
 
@@ -160,7 +160,7 @@ align = #['vec, 'vec] {
     $scale ~> =('%num & scale)
     $values ~> =('%list<'%num> & values)
     norm scale ~> =s
-    m = #'%num { %num.div [~, s] ~> %num.round ~ }
+    m = #'%num { %num.div [~, s] ~> %num.round }
     buildValues [Vec[dtype: $dtype, scale: s, data: <>], m, values]
   },
 
@@ -172,7 +172,7 @@ align = #['vec, 'vec] {
     $values ~> =('%list<'%num> & values)
     lcm_denoms [1, values] ~> =('int & cap)
     norm Rational[1, cap] ~> =s
-    m = #'%num { %num.mul [~, cap] ~> %num.numer ~ }
+    m = #'%num { %num.mul [~, cap] ~> %num.numer }
     buildValues [Vec[dtype: $dtype, scale: s, data: <>], m, values]
   },
 

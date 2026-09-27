@@ -84,7 +84,7 @@ impl Drop for TempDir {
 }
 
 const UNFORMATTED: &str = "#[] {[1,2]   ~>  __integer_add__ ~}\n";
-const FORMATTED: &str = "#[] { [1, 2] ~> __integer_add__ ~ }\n";
+const FORMATTED: &str = "#[] { __integer_add__ [1, 2] }\n";
 
 #[test]
 fn formats_a_file_in_place() {

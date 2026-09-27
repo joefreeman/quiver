@@ -63,14 +63,14 @@ conn_loop = #[(sock): +TcpSocket, (handler): 'handler, (buf): 'bin] {
       }
     }
     | =Bad[status: s, reason: r] => {
-      out = plain [s, r] ~> %http.serialize_response ~
+      out = plain [s, r] ~> %http.serialize_response
       __tcp_socket_write__ [$sock, out]
       __tcp_socket_close__ $sock
     }
     | =[req, rest] => {
       // Run the handler in its own process: a crash surfaces here as a stamped nil,
       // degrading to the 500 below exactly like a plain failed handler.
-      hp = req ~> @$handler ~
+      hp = @$handler req
       r = !hp
       {
         | r ~> =Upgrade[handler: wh] => {
@@ -80,10 +80,10 @@ conn_loop = #[(sock): +TcpSocket, (handler): 'handler, (buf): 'bin] {
           // bytes already read past the request seed the connection's buffer.
           | %http.header [req.headers, "sec-websocket-key"] ~> =Str[k] => {
             __tcp_socket_write__ [$sock, %http/websocket.handshake_response Str[k]]
-            %http/websocket.conn [$sock, rest] ~> wh ~
+            %http/websocket.conn [$sock, rest] ~> wh
           }
           | {
-            out = plain [400, "Bad Request"] ~> %http.serialize_response ~
+            out = plain [400, "Bad Request"] ~> %http.serialize_response
 
             __tcp_socket_write__ [$sock, out]
             __tcp_socket_close__ $sock
@@ -99,7 +99,7 @@ conn_loop = #[(sock): +TcpSocket, (handler): 'handler, (buf): 'bin] {
                 ...,
                 headers: %list.prepend [
                   resp.headers,
-                  ["content-length", %bin.length resp.body ~> %str.from_int ~],
+                  ["content-length", %bin.length resp.body ~> %str.from_int],
                 ],
                 body: <>,
               ]
@@ -135,7 +135,7 @@ conn = #[(sock): +TcpSocket, (handler): 'handler, (tls): ('tls | [])] {
 // its `:error` out to `serve`'s caller.
 accept_loop = #[(listener): +TcpListener, (handler): 'handler, (tls): ('tls | [])] {
   __tcp_listener_accept__ $listener ~> =(+TcpSocket & sock)
-  [sock, $handler, $tls] ~> @conn ~
+  @conn [sock, $handler, $tls]
   ^ [$listener, $handler, $tls]
 }
 

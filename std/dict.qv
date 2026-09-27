@@ -24,7 +24,7 @@
 '<'k, 'v> = Empty | Leaf['int, 'k, 'v] | Collision['int, 'list<['k, 'v]>] | Node['int, 'list<^>]
 
 // --- key hashing -------------------------------------------------------------
-hash = #_ { __data_encode__ ~ ~> __binary_hash32__ ~ }
+hash = #_ { __data_encode__ ~ ~> __binary_hash32__ }
 
 // 5-bit hash fragment at `shift` bits, and the compact child index for a slot bit.
 fragment = #[(hash): 'int, (shift): 'int] {
@@ -32,7 +32,7 @@ fragment = #[(hash): 'int, (shift): 'int] {
 }
 
 slot_index = #[(bitmap): 'int, (bit): 'int] {
-  %num.sub [$bit, 1] ~> %int.and [$bitmap, ~] ~> %int.popcount ~
+  %num.sub [$bit, 1] ~> %int.and [$bitmap, ~] ~> %int.popcount
 }
 
 // --- generic list helpers (tail-recursive, à la %list) -----------------------
@@ -453,12 +453,12 @@ dict_dialect = #(content: '%str, chain: '%meta.cb) {
 
   map: #<'k, 'v, 'j, 'u>[(dict): '<'k, 'v>, (f): #['k, 'v] -> ['j, 'u]] {
     :doc "A dict rebuilt with each [key, value] entry transformed; duplicate result keys collapse."
-    to_iter $dict ~> %iter.map [~, $f] ~> from_iter ~
+    to_iter $dict ~> %iter.map [~, $f] ~> from_iter
   },
 
   filter: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
     :doc "A dict keeping only the entries for which the predicate is non-nil."
-    to_iter $dict ~> %iter.filter [~, $pred] ~> from_iter ~
+    to_iter $dict ~> %iter.filter [~, $pred] ~> from_iter
   },
 
   fold: #<'k, 'v, 'acc>[(dict): '<'k, 'v>, (init): 'acc, (f): #['acc, ['k, 'v]] -> 'acc] {
