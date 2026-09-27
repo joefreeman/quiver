@@ -67,6 +67,8 @@ struct ChapterReport {
     /// neither passed nor failed. Reported so a single failure does not read as costing one
     /// assertion when it in fact hid several.
     unreached: usize,
+    /// The compile warnings the chapter's code raised, as plain text. They don't fail it.
+    warnings: Vec<String>,
 }
 
 impl ChapterReport {
@@ -182,6 +184,7 @@ impl Runner {
         // the line in place; anywhere else, emit the finished line alone.
         let interactive = std::io::stdout().is_terminal();
         let mut reports = Vec::new();
+        let mut seen_warnings = std::collections::HashSet::new();
         for chapter in &document.chapters {
             if interactive {
                 print!("{}  {}", "·".bright_black(), title_of(chapter));
@@ -194,11 +197,25 @@ impl Runner {
             let mut report = self.run_chapter(chapter, path);
             report.passed += self.take_passed(path);
 
+            // Each chapter is a fresh session, which reports the warnings of the modules it
+            // loads anew: the document reports them once.
+            report
+                .warnings
+                .retain(|warning| seen_warnings.insert(warning.clone()));
+
             if interactive {
                 print!("\r\x1b[2K");
             }
             println!("{}", summarise(&report));
             reports.push(report);
+        }
+
+        let warnings: Vec<&String> = reports.iter().flat_map(|r| &r.warnings).collect();
+        if !warnings.is_empty() {
+            println!();
+            for warning in warnings {
+                println!("{}", warning.yellow());
+            }
         }
 
         for report in reports.iter().filter(|r| !r.ok()) {
@@ -233,6 +250,7 @@ impl Runner {
             skipped_blocks: chapter.skipped(),
             failures: Vec::new(),
             unreached: 0,
+            warnings: Vec::new(),
         };
 
         let mut session = match self.session(path) {
@@ -275,7 +293,9 @@ impl Runner {
                 // contributes nothing to the session either way — it is not added to `history`.
                 if let Some(expected) = &step.expect_failure {
                     report.total += 1;
-                    match self.evaluate(&mut session, &source) {
+                    let outcome = self.evaluate(&mut session, &source);
+                    self.take_warnings(&mut session, path, &mut report);
+                    match outcome {
                         Ok(()) => report.failures.push(Failure {
                             line: step.line,
                             step: step.source.clone(),
@@ -313,7 +333,9 @@ impl Runner {
                 }
 
                 report.total += step.assertions;
-                match self.evaluate(&mut session, &source) {
+                let outcome = self.evaluate(&mut session, &source);
+                self.take_warnings(&mut session, path, &mut report);
+                match outcome {
                     Ok(()) => history.push(source),
                     // A parse or compile error leaves the session intact — the REPL commits
                     // state only on a successful compile — so the chapter carries on and the
@@ -352,7 +374,7 @@ impl Runner {
         let result = (|| -> Result<(), String> {
             let builtins = quiver_cli::build_builtin_registry();
             let ast = quiver_compiler::parse(&source).map_err(|e| format!("{e}"))?;
-            let (program, module_cache, entry) = quiver_cli::compile::compile_entry(
+            let compiled = quiver_cli::compile::compile_entry(
                 ast,
                 &resolver_for(path),
                 &builtins,
@@ -364,6 +386,14 @@ impl Runner {
                 Some(Rc::clone(&self.artifact_store)),
             )
             .map_err(|e| format!("{e}"))?;
+            report.warnings.extend(
+                compiled
+                    .warnings
+                    .iter()
+                    .map(|warning| plain_warning(warning, path)),
+            );
+            let (program, module_cache, entry) =
+                (compiled.program, compiled.module_cache, compiled.entry);
             // A unit, like every other path: the chapter sessions beside this one already
             // link their modules once into the shared environment, and a program block
             // should reach that same code rather than merge a private copy of it.
@@ -504,6 +534,17 @@ impl Runner {
             .iter()
             .filter(|site| site.starts_with(&prefix))
             .count()
+    }
+
+    /// Move the warnings of the steps the session has committed into the chapter's report.
+    fn take_warnings(&mut self, session: &mut Session, path: &Path, report: &mut ChapterReport) {
+        report.warnings.extend(
+            session
+                .repl()
+                .take_warnings()
+                .iter()
+                .map(|warning| plain_warning(warning, path)),
+        );
     }
 
     fn session(&mut self, path: &Path) -> Result<Session, ReplError> {
@@ -670,6 +711,12 @@ fn truncate_to_line(source: &str, line: usize) -> Option<String> {
     Some(head.join("\n"))
 }
 
+/// A warning as plain text. Steps are compiled at their position in the document, so a
+/// warning in one has its line there.
+fn plain_warning(warning: &quiver_compiler::compiler::LocatedWarning, path: &Path) -> String {
+    crate::diagnostics::plain_warning(warning, &path.display().to_string(), "")
+}
+
 fn resolver_for(path: &Path) -> PackageResolver {
     match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => PackageResolver::for_dir(dir),
@@ -723,6 +770,9 @@ fn summarise(report: &ChapterReport) -> String {
     }
     if report.skipped_blocks > 0 {
         notes.push(format!("{} skipped", report.skipped_blocks));
+    }
+    if !report.warnings.is_empty() {
+        notes.push(count(report.warnings.len(), "warning"));
     }
 
     let tally = if report.runnable_blocks == 0 {
@@ -796,6 +846,7 @@ fn total_line(reports: &[ChapterReport]) -> String {
     let total: usize = reports.iter().map(|r| r.total).sum();
     let not_run: usize = reports.iter().filter_map(not_run).sum();
     let skipped: usize = reports.iter().map(|r| r.skipped_blocks).sum();
+    let warnings: usize = reports.iter().map(|r| r.warnings.len()).sum();
     let chapters = reports.len();
 
     // Coloured by the verdict rather than by the counts: an assertion that never ran has not
@@ -817,9 +868,17 @@ fn total_line(reports: &[ChapterReport]) -> String {
             if skipped == 1 { "" } else { "s" }
         ));
     }
+    if warnings > 0 {
+        notes.push(count(warnings, "warning"));
+    }
     if notes.is_empty() {
         head.to_string()
     } else {
         format!("{head}, {}", notes.join(", ").bright_black())
     }
+}
+
+/// `n` of `noun`, pluralised.
+fn count(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }

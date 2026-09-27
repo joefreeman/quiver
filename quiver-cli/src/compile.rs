@@ -2,12 +2,23 @@
 //! evaluates to. Shared by `quiv run`'s client, `quiv compile`, and `quiv test`'s
 //! program blocks.
 
-use quiver_compiler::compiler::{LocatedError, ModuleCache};
+use quiver_compiler::compiler::{LocatedError, LocatedWarning, ModuleCache};
 use quiver_compiler::{Compiler, ModuleResolver};
 use quiver_core::bytecode::Instruction;
 use quiver_core::program::Program;
 use quiver_core::types::{Type, TypeLookup};
 use std::collections::HashMap;
+
+/// A compiled entry program.
+pub struct CompiledEntry {
+    pub program: Program,
+    /// Unit extraction needs it to tell the compile's own functions from the modules it
+    /// imported, and to name a version of each.
+    pub module_cache: ModuleCache,
+    /// The nilary entry function.
+    pub entry: usize,
+    pub warnings: Vec<LocatedWarning>,
+}
 
 /// Why an entry program didn't compile.
 #[derive(Debug)]
@@ -33,16 +44,13 @@ impl std::error::Error for EntryError {}
 /// Compile source into a Program and a nilary entry function: the program's top level,
 /// followed by a call of the function it evaluates to. The top level thus runs at boot, in
 /// the root process — compilation never executes user code.
-///
-/// The `ModuleCache` comes back with the program: unit extraction needs it to tell the
-/// compile's own functions from the modules it imported, and to name a version of each.
 pub fn compile_entry(
     ast: quiver_compiler::ast::Sequence,
     resolver: &dyn ModuleResolver,
     builtins: &quiver_core::builtins::BuiltinRegistry<quiver_io::NativeEffect>,
     options: quiver_compiler::compiler::CompileOptions,
     artifact_store: Option<std::rc::Rc<quiver_compiler::ArtifactStore>>,
-) -> Result<(Program, ModuleCache, usize), EntryError> {
+) -> Result<CompiledEntry, EntryError> {
     let mut program = Program::new();
     let mut module_cache = ModuleCache::new();
     module_cache.artifact_store = artifact_store;
@@ -121,7 +129,12 @@ pub fn compile_entry(
         type_id: callable_type_id,
     });
 
-    Ok((program, module_cache, entry))
+    Ok(CompiledEntry {
+        program,
+        module_cache,
+        entry,
+        warnings: compilation_result.warnings,
+    })
 }
 
 /// The callable the program's top level evaluates to: its (result, receive) type ids,

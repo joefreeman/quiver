@@ -30,6 +30,9 @@ pub struct CachedModule {
     /// declaration order), restored like the dispatch tables so a caller can explicitly
     /// instantiate an imported generic (`%list.map<'int>`) without recompiling the module.
     pub callable_type_params: HashMap<usize, Vec<String>>,
+    /// The module's own warnings, at positions in its source. Kept (and carried by its
+    /// artifact) so that loading the module reports them whether or not it was compiled.
+    pub warnings: Vec<(super::Warning, crate::parser::SourceSpan)>,
 }
 
 /// A module-compile recording frame (see [`ModuleCache::recording`]): tracks which
@@ -97,6 +100,8 @@ pub struct ModuleCache {
     /// value, so nothing of the module's *code* is baked in, and the calls that would
     /// notice a drift are validated through their own function-reference entries.
     pub module_reads: HashMap<Option<ModuleId>, std::collections::HashSet<ModuleId>>,
+    /// Modules whose warnings this session has reported, so each module reports them once.
+    pub warned: std::collections::HashSet<ModuleId>,
 }
 
 impl Default for ModuleCache {
@@ -121,6 +126,7 @@ impl ModuleCache {
             key_cache: HashMap::new(),
             key_stack: Vec::new(),
             module_reads: HashMap::new(),
+            warned: std::collections::HashSet::new(),
         }
     }
 

@@ -249,12 +249,14 @@ fn evaluate(mut session: Session, source: &str, timeout: std::time::Duration) ->
     };
 
     let last_result_type = repl.get_last_result_type().clone();
+    let warnings = repl.take_warnings();
 
     TestResult {
         result,
         source: source.to_string(),
         session,
         last_result_type,
+        warnings,
     }
 }
 
@@ -514,10 +516,27 @@ pub struct TestResult {
     source: String,
     session: Session,
     last_result_type: quiver_core::types::Type,
+    warnings: Vec<quiver_compiler::compiler::LocatedWarning>,
 }
 
 #[allow(dead_code)]
 impl TestResult {
+    /// The evaluation's compile warnings.
+    pub fn warnings(&self) -> &[quiver_compiler::compiler::LocatedWarning] {
+        &self.warnings
+    }
+
+    /// Assert that compiling raised no warnings.
+    pub fn expect_no_warnings(self) -> Self {
+        assert!(
+            self.warnings.is_empty(),
+            "Expected no warnings, got {:?} for source: {}",
+            self.warnings,
+            self.source
+        );
+        self
+    }
+
     /// The formatted result, for comparing two evaluations against each other rather than
     /// against a literal — e.g. asserting two hosts agree.
     pub fn value_string(&self) -> String {

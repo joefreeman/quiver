@@ -660,3 +660,163 @@ fn an_error_after_an_import_is_not_located_in_the_module() {
     assert!(error.modules.is_empty());
     assert_eq!(error.span.map(|span| span.line), Some(2));
 }
+
+#[test]
+fn the_standard_library_compiles_without_warnings() {
+    // Importers aren't shown std's warnings, so this is where they surface: compile every
+    // std module from source (no artifact store) and read what each recorded.
+    let source: String = quiver_compiler::resolver::std_module_names()
+        .iter()
+        .enumerate()
+        .map(|(index, name)| format!("m{index} = %{name}\n"))
+        .collect();
+    let builtins = quiver_core::builtins::BuiltinRegistry::<quiver_io::NativeEffect>::with_modules(
+        &quiver_core::builtins::universal_modules(),
+    );
+    let mut program = quiver_core::program::Program::new();
+    let mut module_cache = quiver_compiler::compiler::ModuleCache::new();
+    let nil_type_id = program.register_type(quiver_core::types::Type::nil());
+    quiver_compiler::Compiler::compile(
+        quiver_compiler::parse(&source).unwrap(),
+        &quiver_compiler::compiler::Bindings::default(),
+        Default::default(),
+        &mut module_cache,
+        &quiver_compiler::PackageResolver::memory(HashMap::new()),
+        &mut program,
+        nil_type_id,
+        &HashMap::new(),
+        &builtins,
+        None,
+        Default::default(),
+    )
+    .expect("the standard library compiles");
+    let warnings: Vec<String> = module_cache
+        .value_cache
+        .iter()
+        .flat_map(|(id, cached)| {
+            cached.warnings.iter().map(move |(warning, span)| {
+                format!("%{}:{}:{}: {warning}", id.display(), span.line, span.column)
+            })
+        })
+        .collect();
+    assert!(warnings.is_empty(), "{}", warnings.join("\n"));
+}
+
+#[test]
+fn an_unreachable_branch_is_warned_about() {
+    let result = quiver().evaluate("x = 5\nx ~> { | =y => y | 2 }");
+    let warnings = result.warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let span = warnings[0].span.expect("in the compiled source");
+    assert_eq!((span.line, span.column), (2, 20));
+    let quiver_compiler::compiler::Warning::UnreachableBranch { cause } = warnings[0].warning
+    else {
+        panic!(
+            "expected an unreachable branch, got {:?}",
+            warnings[0].warning
+        );
+    };
+    assert_eq!((cause.line, cause.column), (2, 10));
+}
+
+#[test]
+fn a_branch_that_can_fail_is_not_warned_about() {
+    let result = quiver().evaluate("x = 5\nx ~> { | =5 => 1 | =y => y | 3 }");
+    // Only the last fallback is unreachable: `=5` can fail.
+    let lines: Vec<usize> = result
+        .warnings()
+        .iter()
+        .map(|w| w.span.unwrap().column)
+        .collect();
+    assert_eq!(lines, vec![30]);
+}
+
+#[test]
+fn a_module_warning_is_reported_in_the_module_once() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["m".to_string()],
+        "\n[f: #'int { | =x => x | 2 }]".to_string(),
+    );
+    let result = quiver().with_modules(modules).evaluate("%m.f 1");
+    let warnings = result.warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let site = warnings[0].module.as_ref().expect("in the module");
+    assert_eq!(site.name, "%m");
+    assert_eq!(site.span.map(|span| span.line), Some(2));
+    // The session has reported it: a later line using the module doesn't repeat it.
+    let result = result.then_evaluate("%m.f 2");
+    assert!(result.warnings().is_empty(), "{:?}", result.warnings());
+}
+
+/// The warnings an evaluation raised, as `(kind, line, column)` in the compiled source.
+fn warning_sites(result: &crate::common::TestResult) -> Vec<(String, usize, usize)> {
+    result
+        .warnings()
+        .iter()
+        .map(|warning| {
+            let span = warning.span.expect("in the compiled source");
+            let kind = format!("{:?}", warning.warning);
+            let kind = kind.split([' ', '{']).next().unwrap().to_string();
+            (kind, span.line, span.column)
+        })
+        .collect()
+}
+
+#[test]
+fn a_match_that_can_never_succeed_is_warned_about() {
+    let result = quiver().evaluate("x = 5\nx ~> { | =<01> => 1 | ='bin => 2 | =A => 3 | 4 }");
+    assert_eq!(
+        warning_sites(&result),
+        vec![
+            ("ImpossibleMatch".to_string(), 2, 10),
+            ("ImpossibleMatch".to_string(), 2, 23),
+            ("ImpossibleMatch".to_string(), 2, 36),
+        ]
+    );
+}
+
+#[test]
+fn a_step_that_is_always_nil_is_warned_about() {
+    let result = quiver().evaluate("5 ~> { []; 2 }");
+    assert_eq!(
+        warning_sites(&result),
+        vec![("AlwaysNil".to_string(), 1, 8)]
+    );
+    // Not the last step of a branch, though: `| []` is how a block says "otherwise, nil".
+    let result = result.then_evaluate("5 ~> { | =4 => 1 | [] }");
+    assert!(result.warnings().is_empty(), "{:?}", result.warnings());
+}
+
+#[test]
+fn an_unused_binding_is_warned_about() {
+    let result = quiver().evaluate("{ x = 1; y = 2; x }");
+    assert_eq!(
+        warning_sites(&result),
+        vec![("UnusedBinding".to_string(), 1, 10)]
+    );
+}
+
+#[test]
+fn bindings_that_do_their_job_unread_are_not_warned_about() {
+    // A repeated binder tests its occurrences equal; a star binds every field by design; a
+    // pin, a capture and an alternation's binders all read or bind as written.
+    quiver()
+        .evaluate(
+            r#"{
+              [1, 1] ~> =[x, x]
+              * = [a: 1, b: 2]
+              y = 2; 2 ~> =^y
+              z = 3; f = #[] { z }; f []
+              [[], 5] ~> =([w, []] | [[], w]); w
+            }"#,
+        )
+        .expect_no_warnings();
+}
+
+#[test]
+fn a_session_top_level_binding_is_not_warned_about() {
+    // Later lines may read it.
+    let result = quiver().evaluate("x = 1");
+    assert!(result.warnings().is_empty(), "{:?}", result.warnings());
+}

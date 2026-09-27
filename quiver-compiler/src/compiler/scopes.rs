@@ -3,6 +3,8 @@ use crate::{
     compiler::{Error, Narrowings, Provenance, TypeAliasDef, helpers},
 };
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A variable binding: its type, stack slot, and value provenance.
 #[derive(Debug, Clone)]
@@ -13,6 +15,23 @@ pub struct Variable {
     pub index: usize,
     /// Provenance of the value stored in this variable (for tuple field resolution).
     pub provenance: super::Provenance,
+    pub usage: Usage,
+}
+
+/// Whether a binding has been looked up, shared by every copy of it (scopes are cloned
+/// freely). Any lookup counts, including speculative ones, so a binding can only ever be
+/// wrongly thought used, never wrongly thought unused.
+#[derive(Debug, Clone, Default)]
+pub struct Usage(Arc<AtomicBool>);
+
+impl Usage {
+    fn mark(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_used(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
 }
 
 /// Named bindings in a scope. Variables and type aliases are separate namespaces —
@@ -101,6 +120,7 @@ pub fn define_variable(
                 ty: var_type_id,
                 index,
                 provenance,
+                usage: Usage::default(),
             },
         );
     }
@@ -132,6 +152,7 @@ pub fn lookup_variable(
         .enumerate()
         .rev()
         .find_map(|(i, s)| s.bindings.variables.get(&full_name).map(|v| (i, v)))?;
+    variable.usage.mark();
 
     // Check for narrowings from current scope back to binding scope
     // (innermost narrowing takes precedence)
@@ -145,6 +166,15 @@ pub fn lookup_variable(
     Some((variable.ty, variable.index))
 }
 
+/// The local slot of a binding being written — its definition, which is not a read of it.
+pub fn binding_slot(scopes: &[Scope], name: &str) -> Option<usize> {
+    scopes
+        .iter()
+        .rev()
+        .find_map(|s| s.bindings.variables.get(name))
+        .map(|v| v.index)
+}
+
 /// Look up a variable's *declared* type, ignoring any runtime narrowings.
 /// Unlike `lookup_variable`, this returns the type the binding was defined with.
 pub fn lookup_declared_variable_type(scopes: &[Scope], name: &str) -> Option<usize> {
@@ -152,7 +182,11 @@ pub fn lookup_declared_variable_type(scopes: &[Scope], name: &str) -> Option<usi
     scopes
         .iter()
         .rev()
-        .find_map(|s| s.bindings.variables.get(&full_name).map(|v| v.ty))
+        .find_map(|s| s.bindings.variables.get(&full_name))
+        .map(|v| {
+            v.usage.mark();
+            v.ty
+        })
 }
 
 /// Look up the provenance stored for a variable.
@@ -163,7 +197,10 @@ pub fn lookup_variable_provenance(scopes: &[Scope], name: &str) -> Option<super:
         .iter()
         .rev()
         .find_map(|s| s.bindings.variables.get(&full_name))
-        .map(|v| v.provenance.clone())
+        .map(|v| {
+            v.usage.mark();
+            v.provenance.clone()
+        })
 }
 
 /// Look up a type alias in the scope stack

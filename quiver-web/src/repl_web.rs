@@ -169,6 +169,8 @@ export type CompilerResponse =
       /** WirePayload JSON — pass verbatim to `Environment.resumeProcess`. */
       payload: string | null;
       resultType: string;
+      /** The line's compile warnings, formatted for display. */
+      warnings: string[];
     }
   | { type: "variables"; id: number; variables: Variable[] };
 "#;

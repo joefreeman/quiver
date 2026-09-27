@@ -497,9 +497,6 @@ emit_list = #[(self): ^, (items): 'pnodes, (acc): 'xs] -> 'xs {
               ],
             ],
           ]
-        // Unreachable: the arms above cover every variant, but exhaustiveness can't see
-        // through the inner recursive union (see render_list).
-        | Tuple[name: Nil, fields: Nil]
       }
       ^ [$self, rest, Cons[e, $acc]]
     }
@@ -627,8 +624,6 @@ instrument_list = #[(self): ^, (items): 'pnodes, (ist): 'ist] -> 'ist {
             }
           }
         }
-        // Unreachable: the arms above cover every variant (see render_list).
-        | $ist
       }
       ^ [$self, rest, ist2]
     }

@@ -336,20 +336,18 @@ impl ReplCli {
             std::process::exit(1);
         }
         let compiled = match self.compiler.compile(prepared) {
-            Ok(compiled) => compiled,
+            Ok(compiled) => {
+                crate::diagnostics::eprint_warnings(compiled.warnings(), "repl", line);
+                compiled
+            }
             Err(ReplError::Compiler(e)) => {
                 // An interrupted compile aborted cleanly — nothing was committed, so
                 // the session needs no reset.
                 if self.interrupt.swap(false, Ordering::Relaxed) {
                     println!("{}", "Interrupted".red());
                     println!();
-                } else if std::io::stderr().is_terminal() && std::env::var("NO_COLOR").is_err() {
-                    crate::diagnostics::eprint_compile(&e, "repl", line);
                 } else {
-                    eprintln!(
-                        "{}",
-                        crate::diagnostics::plain_compile_error(&e, "repl", line)
-                    );
+                    crate::diagnostics::eprint_compile_error(&e, "repl", line);
                 }
                 return;
             }

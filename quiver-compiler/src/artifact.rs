@@ -197,6 +197,8 @@ pub struct ModuleArtifact {
     pub callable_type_params: Vec<(usize, Vec<String>)>,
     /// The module's type namespace (its `'name = …` aliases and nameless default).
     pub namespace: ArtifactNamespace,
+    /// The module's own warnings (see `CachedModule`).
+    pub warnings: Vec<(crate::compiler::Warning, crate::parser::SourceSpan)>,
 }
 
 /// A module's type namespace in artifact form: each alias as its declared type
@@ -1161,6 +1163,7 @@ pub(crate) fn extract(
                 entries
             },
         },
+        warnings: cached.warnings.clone(),
     };
     Some(artifact)
 }
@@ -2593,6 +2596,7 @@ pub fn link_module<E: Effect>(
             .iter()
             .map(|(type_id, params)| (remaps.types[type_id], params.clone()))
             .collect(),
+        warnings: artifact.warnings.clone(),
     };
     module_cache.cache_module(artifact.id.clone(), cached);
 

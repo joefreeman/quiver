@@ -19,7 +19,7 @@ use num_traits::Zero;
 
 pub type Span<'a> = LocatedSpan<&'a str>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SourceSpan {
     pub offset: usize,
     pub line: usize,

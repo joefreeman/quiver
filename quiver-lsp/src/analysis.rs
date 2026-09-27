@@ -1,7 +1,9 @@
 //! Runs the Quiver front-end (parse + typecheck) over a document and collects diagnostics.
 //! Pure and synchronous — the async backend calls this off-thread.
 
-use crate::diagnostics::{located_error_to_diagnostic, parse_error_to_diagnostic};
+use crate::diagnostics::{
+    located_error_to_diagnostic, parse_error_to_diagnostic, warning_to_diagnostic,
+};
 use crate::documents::LineIndex;
 use crate::effect::NoEffect;
 use crate::symbols::document_symbols;
@@ -90,7 +92,13 @@ pub fn analyze(text: &str, index: &LineIndex, resolver: &dyn ModuleResolver) -> 
     );
 
     let diagnostics = match &result {
-        Ok(_) => Vec::new(),
+        // An imported module's warnings belong to that module, not this document.
+        Ok(compiled) => compiled
+            .warnings
+            .iter()
+            .filter(|warning| warning.module.is_none())
+            .filter_map(|warning| warning_to_diagnostic(warning, text, index))
+            .collect(),
         Err(located) => vec![located_error_to_diagnostic(located, text, index)],
     };
     Analysis {
@@ -139,8 +147,23 @@ mod tests {
     use super::*;
     use quiver_compiler::PackageResolver;
 
+    /// The errors among an analysis's diagnostics: the snippets these tests analyze are
+    /// about typing, and bind names they never read.
+    fn errors(analysis: &Analysis) -> Vec<Diagnostic> {
+        analysis
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR))
+            .cloned()
+            .collect()
+    }
+
     fn diagnostics(text: &str) -> Vec<Diagnostic> {
-        analyze(text, &LineIndex::new(text), &PackageResolver::inline()).diagnostics
+        errors(&analyze(
+            text,
+            &LineIndex::new(text),
+            &PackageResolver::inline(),
+        ))
     }
 
     #[test]
@@ -223,6 +246,18 @@ mod tests {
     }
 
     #[test]
+    fn an_unreachable_branch_is_a_warning() {
+        let text = "5 ~> { | =x => x | 2 }";
+        let diags = analyze(text, &LineIndex::new(text), &PackageResolver::inline()).diagnostics;
+        assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+        assert_eq!(
+            diags[0].severity,
+            Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING)
+        );
+        assert_eq!(diags[0].range.start.character, 19);
+    }
+
+    #[test]
     fn io_builtins_typecheck_via_their_signatures() {
         // `std/file.qv` calls `__file_read__` etc.; importing it must type-check using the IO
         // builtins' signatures, with no native io-uring backend in the language server.
@@ -242,9 +277,9 @@ mod tests {
         let text = "double = #'int { ~ }\n5 ~> double ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
-            analysis.diagnostics.is_empty(),
+            errors(&analysis).is_empty(),
             "should typecheck: {:?}",
-            analysis.diagnostics
+            errors(&analysis)
         );
         let semantics = analysis.semantics.expect("semantics recorded");
         // The `double` *reference* is the last occurrence.
@@ -394,9 +429,9 @@ mod tests {
         let text = "%list.fold [%list{ 1, 2 }, Nil, #{ Cons[$1, $0] }]";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert!(
-            analysis.diagnostics.is_empty(),
+            errors(&analysis).is_empty(),
             "should typecheck: {:?}",
-            analysis.diagnostics
+            errors(&analysis)
         );
         let semantics = analysis.semantics.expect("semantics");
         let program = analysis.program.expect("program");
@@ -427,11 +462,7 @@ mod tests {
         use quiver_compiler::recorder::SymbolKind;
         let text = "[1, 2] ~> __integer_add__ ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
-        assert!(
-            analysis.diagnostics.is_empty(),
-            "{:?}",
-            analysis.diagnostics
-        );
+        assert!(errors(&analysis).is_empty(), "{:?}", errors(&analysis));
         let semantics = analysis.semantics.expect("semantics");
         let program = analysis.program.expect("program");
         let offset = text.find("__integer_add__").unwrap();
@@ -450,11 +481,7 @@ mod tests {
         // type and go-to-definition jumps to its binding.
         let text = "fact = #'int { ~ };\nrun = #'int { ~ ~> ^fact ~ }";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
-        assert!(
-            analysis.diagnostics.is_empty(),
-            "{:?}",
-            analysis.diagnostics
-        );
+        assert!(errors(&analysis).is_empty(), "{:?}", errors(&analysis));
         let semantics = analysis.semantics.expect("semantics");
         let program = analysis.program.expect("program");
         let info = semantics
@@ -472,11 +499,7 @@ mod tests {
         // `~.x` hovers as two components: the `~` (the flowing value) and the `x` (the field).
         let text = "pt = [x: 5, y: 10];\npt ~> ~.x";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
-        assert!(
-            analysis.diagnostics.is_empty(),
-            "{:?}",
-            analysis.diagnostics
-        );
+        assert!(errors(&analysis).is_empty(), "{:?}", errors(&analysis));
         let semantics = analysis.semantics.expect("semantics");
         let program = analysis.program.expect("program");
         let tilde = text.rfind("~.x").unwrap();
@@ -877,11 +900,7 @@ mod tests {
         // The `[` of a call's argument tuple hovers as that tuple's type.
         let text = "[3, 4] ~> __integer_add__ ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
-        assert!(
-            analysis.diagnostics.is_empty(),
-            "{:?}",
-            analysis.diagnostics
-        );
+        assert!(errors(&analysis).is_empty(), "{:?}", errors(&analysis));
         let semantics = analysis.semantics.expect("semantics");
         let program = analysis.program.unwrap();
         let info = semantics
@@ -899,11 +918,7 @@ mod tests {
         use quiver_compiler::recorder::SymbolKind;
         let text = "f = #'int { [~, 1] ~> __integer_add__ ~ };\nt = [a: 1, b: 2]";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
-        assert!(
-            analysis.diagnostics.is_empty(),
-            "{:?}",
-            analysis.diagnostics
-        );
+        assert!(errors(&analysis).is_empty(), "{:?}", errors(&analysis));
         let semantics = analysis.semantics.expect("semantics");
         let is_expression = |offset: usize| {
             semantics
@@ -963,11 +978,7 @@ mod tests {
         use quiver_compiler::recorder::SymbolKind;
         let text = "[1, 2] ~> %num.add ~";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
-        assert!(
-            analysis.diagnostics.is_empty(),
-            "{:?}",
-            analysis.diagnostics
-        );
+        assert!(errors(&analysis).is_empty(), "{:?}", errors(&analysis));
         let semantics = analysis.semantics.expect("semantics");
         let program = analysis.program.expect("program");
         // The member component `add` hovers as its own signature.

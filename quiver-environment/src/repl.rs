@@ -169,9 +169,16 @@ pub struct CompiledLine {
     module_cache: ModuleCache,
     last_result_type: Type,
     payload: Option<LinePayload>,
+    warnings: Vec<quiver_compiler::compiler::LocatedWarning>,
 }
 
 impl CompiledLine {
+    /// The line's compile warnings, and those of modules it loaded for the first time in
+    /// the session.
+    pub fn warnings(&self) -> &[quiver_compiler::compiler::LocatedWarning] {
+        &self.warnings
+    }
+
     /// What this line will hand the host, before committing — for drivers that need to
     /// size or inspect it.
     pub fn payload(&self) -> Option<&LinePayload> {
@@ -331,7 +338,10 @@ impl<E: Effect> LineCompiler<E> {
             &process_type_ids,
             &self.builtins,
             None, // the REPL doesn't build a semantic index
-            self.options.clone(),
+            quiver_compiler::compiler::CompileOptions {
+                session: true,
+                ..self.options.clone()
+            },
         )
         .map_err(ReplError::Compiler)?;
 
@@ -386,6 +396,7 @@ impl<E: Effect> LineCompiler<E> {
             module_cache,
             last_result_type: result_type,
             payload,
+            warnings: result.warnings,
         })
     }
 
@@ -532,6 +543,8 @@ impl<E: Effect> LineCompiler<E> {
 pub struct Repl<E: Effect> {
     repl_process_id: Option<ProcessId>,
     compiler: LineCompiler<E>,
+    /// The warnings of the lines committed since [`Repl::take_warnings`] last took them.
+    warnings: Vec<quiver_compiler::compiler::LocatedWarning>,
 }
 
 impl<E: Effect> Repl<E> {
@@ -547,6 +560,7 @@ impl<E: Effect> Repl<E> {
         Ok(Self {
             repl_process_id: Some(pid),
             compiler,
+            warnings: Vec::new(),
         })
     }
 
@@ -619,6 +633,11 @@ impl<E: Effect> Repl<E> {
         Ok(prepared)
     }
 
+    /// The warnings of the lines committed since this was last called.
+    pub fn take_warnings(&mut self) -> Vec<quiver_compiler::compiler::LocatedWarning> {
+        std::mem::take(&mut self.warnings)
+    }
+
     /// See [`LineCompiler::compile`]. Needs no environment access — a driver holding
     /// a lock on the environment should release it around this call.
     pub fn compile(&self, line: PreparedLine) -> Result<CompiledLine, ReplError> {
@@ -633,6 +652,7 @@ impl<E: Effect> Repl<E> {
         env: &mut Environment<E>,
         line: CompiledLine,
     ) -> Result<Option<u64>, ReplError> {
+        self.warnings.extend_from_slice(line.warnings());
         let Some(CommittedLine {
             payload,
             keep_indices,

@@ -1,7 +1,8 @@
 use ariadne::{Color, Label, Report, ReportKind, Source};
-use quiver_compiler::compiler::{Error as CompileError, LocatedError, ModuleSite};
+use quiver_compiler::compiler::{Error as CompileError, LocatedError, LocatedWarning, ModuleSite};
 use quiver_compiler::parser::{Error, ErrorKind, SourceSpan};
 use quiver_compiler::resolver::ModuleOrigin;
+use std::io::IsTerminal;
 use std::ops::Range;
 
 /// Generate a visual diagnostic report using ariadne
@@ -44,8 +45,8 @@ pub fn eprint(error: &Error, source_id: &str, source: &str) {
         .unwrap();
 }
 
-/// A position in one of the sources a compile error spans: the error itself, or an import on
-/// the way to it.
+/// A position in one of the sources a compile diagnostic spans: the problem itself, or an
+/// import on the way to it.
 struct Frame<'a> {
     source_id: String,
     source: &'a str,
@@ -54,27 +55,176 @@ struct Frame<'a> {
     module: Option<&'a str>,
 }
 
-/// The positions of a compile error, innermost first: where the error is, then each import
-/// that reached it, ending in the compiled source.
-fn frames<'a>(error: &'a LocatedError, source_id: &str, source: &'a str) -> Vec<Frame<'a>> {
-    let mut frames: Vec<Frame> = error
-        .modules
-        .iter()
-        .rev()
-        .map(|site| Frame {
+impl<'a> Frame<'a> {
+    fn in_module(site: &'a ModuleSite) -> Self {
+        Frame {
             source_id: module_source_id(site),
             source: &site.source,
             span: site.span,
             module: Some(&site.name),
-        })
-        .collect();
-    frames.push(Frame {
-        source_id: source_id.to_string(),
-        source,
-        span: error.span,
-        module: None,
-    });
-    frames
+        }
+    }
+
+    fn location(&self) -> String {
+        match self.span {
+            Some(span) => format!("{}:{}:{}", self.source_id, span.line, span.column),
+            None => self.source_id.clone(),
+        }
+    }
+}
+
+/// A compile error or warning, ready to print.
+struct Diagnostic<'a> {
+    warning: bool,
+    message: String,
+    /// What the primary label says.
+    hint: Option<String>,
+    help: Option<String>,
+    note: Option<String>,
+    /// Innermost first: where the problem is, then each import that reached it.
+    frames: Vec<Frame<'a>>,
+    /// Further positions in the innermost frame's source, each with what to say about it.
+    related: Vec<(SourceSpan, &'static str)>,
+}
+
+impl<'a> Diagnostic<'a> {
+    fn error(error: &'a LocatedError, source_id: &str, source: &'a str) -> Self {
+        let mut frames: Vec<Frame> = error.modules.iter().rev().map(Frame::in_module).collect();
+        frames.push(Frame {
+            source_id: source_id.to_string(),
+            source,
+            span: error.span,
+            module: None,
+        });
+        // A module's parse error reads like the compiled source's own.
+        let (message, hint, help) = match &error.error {
+            CompileError::ModuleParse { error, .. } => (
+                error.kind.to_string(),
+                Some(hint(&error.kind)),
+                error.kind.help(),
+            ),
+            error => (error.to_string(), None, None),
+        };
+        // With no position in its module, the report points at the import; say where the
+        // problem is, unless the message does (a failed evaluation names its module).
+        let note = match frames[0].module {
+            Some(module)
+                if frames[0].span.is_none()
+                    && !matches!(error.error, CompileError::ModuleEvaluationFailed { .. }) =>
+            {
+                Some(format!("the error is in {module}"))
+            }
+            _ => None,
+        };
+        Diagnostic {
+            warning: false,
+            message,
+            hint,
+            help,
+            note,
+            frames,
+            related: Vec::new(),
+        }
+    }
+
+    fn warning(warning: &'a LocatedWarning, source_id: &str, source: &'a str) -> Self {
+        let frame = match &warning.module {
+            Some(site) => Frame::in_module(site),
+            None => Frame {
+                source_id: source_id.to_string(),
+                source,
+                span: warning.span,
+                module: None,
+            },
+        };
+        Diagnostic {
+            warning: true,
+            message: warning.warning.to_string(),
+            hint: Some(warning.warning.label().to_string()),
+            help: warning.warning.help().map(str::to_string),
+            note: None,
+            frames: vec![frame],
+            related: warning.warning.related(),
+        }
+    }
+
+    /// Print with ariadne formatting, with a snippet of each source involved.
+    fn eprint(self) {
+        let (kind, color) = if self.warning {
+            (ReportKind::Warning, Color::Yellow)
+        } else {
+            (ReportKind::Error, Color::Red)
+        };
+        let frames = &self.frames;
+        // The problem's own position, or — for one with none in its module, such as a
+        // failure while evaluating it — the import of that module.
+        let primary = frames.iter().position(|frame| frame.span.is_some());
+        let (report_id, offset) = match primary {
+            Some(index) => (
+                frames[index].source_id.clone(),
+                frames[index]
+                    .span
+                    .map_or(0, |span| span_range(frames[index].source, span).start),
+            ),
+            None => (frames[frames.len() - 1].source_id.clone(), 0),
+        };
+
+        let mut report = Report::build(kind, report_id, offset).with_message(&self.message);
+        for (index, frame) in frames.iter().enumerate() {
+            let Some(span) = frame.span else { continue };
+            let label = Label::new((frame.source_id.clone(), span_range(frame.source, span)))
+                .with_color(if Some(index) == primary {
+                    color
+                } else {
+                    Color::Blue
+                });
+            let label = if index == 0 {
+                // ariadne draws no underline for a label without a message.
+                label.with_message(self.hint.as_deref().unwrap_or("here"))
+            } else {
+                // An import on the way to the problem: of the module one frame further in.
+                let imported = frames[index - 1].module.unwrap_or_default();
+                label.with_message(format!("{imported} is imported here"))
+            };
+            report = report.with_label(label);
+        }
+        for (span, message) in &self.related {
+            report = report.with_label(
+                Label::new((
+                    frames[0].source_id.clone(),
+                    span_range(frames[0].source, *span),
+                ))
+                .with_message(message)
+                .with_color(Color::Blue),
+            );
+        }
+        if let Some(note) = &self.note {
+            report = report.with_note(note);
+        }
+        if let Some(help) = &self.help {
+            report = report.with_help(help);
+        }
+
+        let sources: Vec<(String, &str)> = frames
+            .iter()
+            .map(|frame| (frame.source_id.clone(), frame.source))
+            .collect();
+        report.finish().eprint(ariadne::sources(sources)).unwrap();
+    }
+
+    /// As plain text: `file:line:column: message`, then each import that reached it.
+    fn plain(&self) -> String {
+        let mut text = format!(
+            "{}: {}{}",
+            self.frames[0].location(),
+            if self.warning { "warning: " } else { "" },
+            self.message
+        );
+        for frame in &self.frames[1..] {
+            text.push_str(&format!("\n  imported at {}", frame.location()));
+        }
+        text
+    }
 }
 
 /// How a module's source is named in a report: its file, relative to the working directory
@@ -97,90 +247,38 @@ fn span_range(source: &str, span: SourceSpan) -> Range<usize> {
     chars(span.offset)..chars(span.offset + span.length.max(1))
 }
 
-/// The report's message, the primary label's hint, and help: a module's parse error reads
-/// like the compiled source's own.
-fn compile_error_text(error: &CompileError) -> (String, Option<String>, Option<String>) {
-    match error {
-        CompileError::ModuleParse { error, .. } => (
-            error.kind.to_string(),
-            Some(hint(&error.kind)),
-            error.kind.help(),
-        ),
-        error => (error.to_string(), None, None),
+/// Whether to print with ariadne formatting: stderr is a terminal, and colour isn't
+/// turned off.
+pub fn use_color() -> bool {
+    std::io::stderr().is_terminal() && std::env::var("NO_COLOR").is_err()
+}
+
+/// Print a compile error: with ariadne formatting (and a snippet of each source it spans) on
+/// a terminal, otherwise as plain text.
+pub fn eprint_compile_error(error: &LocatedError, source_id: &str, source: &str) {
+    let diagnostic = Diagnostic::error(error, source_id, source);
+    if use_color() {
+        diagnostic.eprint();
+    } else {
+        eprintln!("{}", diagnostic.plain());
     }
 }
 
-/// Print a compile error using ariadne formatting, with a snippet of each source it spans.
-pub fn eprint_compile(error: &LocatedError, source_id: &str, source: &str) {
-    let frames = frames(error, source_id, source);
-    let (message, hint, help) = compile_error_text(&error.error);
-    // The error's own position, or — for one with none in its module, such as a failure
-    // while evaluating it — the import of that module.
-    let primary = frames.iter().position(|frame| frame.span.is_some());
-    let (report_id, offset) = match primary {
-        Some(index) => (
-            frames[index].source_id.clone(),
-            frames[index]
-                .span
-                .map_or(0, |span| span_range(frames[index].source, span).start),
-        ),
-        None => (source_id.to_string(), 0),
-    };
-
-    let mut report = Report::build(ReportKind::Error, report_id, offset).with_message(message);
-    for (index, frame) in frames.iter().enumerate() {
-        let Some(span) = frame.span else { continue };
-        let label = Label::new((frame.source_id.clone(), span_range(frame.source, span)))
-            .with_color(if Some(index) == primary {
-                Color::Red
-            } else {
-                Color::Blue
-            });
-        let label = if index == 0 {
-            // ariadne draws no underline for a label without a message.
-            label.with_message(hint.as_deref().unwrap_or("here"))
+/// Print compile warnings, as [`eprint_compile_error`] prints an error.
+pub fn eprint_warnings(warnings: &[LocatedWarning], source_id: &str, source: &str) {
+    for warning in warnings {
+        let diagnostic = Diagnostic::warning(warning, source_id, source);
+        if use_color() {
+            diagnostic.eprint();
         } else {
-            // An import on the way to the error: of the module one frame further in.
-            let imported = frames[index - 1].module.unwrap_or_default();
-            label.with_message(format!("{imported} is imported here"))
-        };
-        report = report.with_label(label);
+            eprintln!("{}", diagnostic.plain());
+        }
     }
-    // A failed evaluation names its module itself.
-    if frames[0].span.is_none()
-        && !matches!(error.error, CompileError::ModuleEvaluationFailed { .. })
-        && let Some(module) = frames[0].module
-    {
-        report = report.with_note(format!("the error is in {module}"));
-    }
-    if let Some(help) = help {
-        report = report.with_help(help);
-    }
-
-    let sources: Vec<(String, &str)> = frames
-        .iter()
-        .map(|frame| (frame.source_id.clone(), frame.source))
-        .collect();
-    report.finish().eprint(ariadne::sources(sources)).unwrap();
 }
 
-/// A compile error as plain text: `file:line:column: message`, then each import that reached
-/// it.
-pub fn plain_compile_error(error: &LocatedError, source_id: &str, source: &str) -> String {
-    let frames = frames(error, source_id, source);
-    let location = |frame: &Frame| match frame.span {
-        Some(span) => format!("{}:{}:{}", frame.source_id, span.line, span.column),
-        None => frame.source_id.clone(),
-    };
-    let mut text = format!(
-        "{}: {}",
-        location(&frames[0]),
-        compile_error_text(&error.error).0
-    );
-    for frame in &frames[1..] {
-        text.push_str(&format!("\n  imported at {}", location(frame)));
-    }
-    text
+/// A compile warning as plain text: `file:line:column: warning: message`.
+pub fn plain_warning(warning: &LocatedWarning, source_id: &str, source: &str) -> String {
+    Diagnostic::warning(warning, source_id, source).plain()
 }
 
 /// Get a contextual hint message for the error label

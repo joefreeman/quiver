@@ -2,7 +2,7 @@
 
 use crate::convert::span_to_range;
 use crate::documents::LineIndex;
-use quiver_compiler::compiler::LocatedError;
+use quiver_compiler::compiler::{LocatedError, LocatedWarning};
 use quiver_compiler::parser::Error as ParseError;
 use quiver_compiler::resolver::ModuleOrigin;
 use tower_lsp::lsp_types::{
@@ -66,6 +66,22 @@ pub fn located_error_to_diagnostic(
         related_information: (!related.is_empty()).then_some(related),
         ..error(range, err.to_string())
     }
+}
+
+/// Convert a warning in the document into a diagnostic. `None` for a warning with no
+/// position in the document.
+pub fn warning_to_diagnostic(
+    warning: &LocatedWarning,
+    text: &str,
+    index: &LineIndex,
+) -> Option<Diagnostic> {
+    Some(Diagnostic {
+        range: span_to_range(text, index, warning.span?),
+        severity: Some(DiagnosticSeverity::WARNING),
+        source: Some("quiver".to_string()),
+        message: warning.warning.to_string(),
+        ..Default::default()
+    })
 }
 
 pub fn parse_error_to_diagnostic(err: &ParseError, text: &str, index: &LineIndex) -> Diagnostic {

@@ -22,6 +22,7 @@ mod spread;
 mod type_queries;
 mod typing;
 mod variables;
+mod warning;
 
 pub use codegen::InstructionBuilder;
 pub use modules::{
@@ -31,6 +32,7 @@ pub use modules::{
 pub use provenance::{Narrowings, Provenance};
 pub use scopes::{Bindings, Parameter, Scope, ScopeKind, Variable};
 pub use typing::{TupleAccessor, TypeAliasDef, resolve_type_alias_for_display, union_type_ids};
+pub use warning::{LocatedWarning, Warning};
 
 use crate::{
     ast,
@@ -356,6 +358,61 @@ fn term_uses_flow(term: &ast::Term) -> bool {
         // `![a, b]` names its own sources, so it uses the flowing value only if one does.
         ast::Term::Select(Some(sources), _) => sources.iter().any(chain),
     }
+}
+
+/// How often each binder occurs in a pattern, and where it is first written. Alternatives each
+/// bind the same names, so an alternation counts its most repetitive alternative, not all of
+/// them together.
+fn count_binders(pattern: &ast::Match, counts: &mut HashMap<String, (usize, Option<SourceSpan>)>) {
+    fn add(
+        counts: &mut HashMap<String, (usize, Option<SourceSpan>)>,
+        name: &str,
+        span: Option<SourceSpan>,
+    ) {
+        counts.entry(name.to_string()).or_insert((0, span)).0 += 1;
+    }
+    match pattern {
+        ast::Match::Identifier(name, span) => add(counts, name, span.get()),
+        ast::Match::Tuple(tuple) => {
+            for field in &tuple.fields {
+                count_binders(&field.pattern, counts);
+            }
+        }
+        ast::Match::Partial(partial) => {
+            for field in &partial.fields {
+                match &field.pattern {
+                    Some(nested) => count_binders(nested, counts),
+                    None => add(counts, &field.name, field.name_span.get()),
+                }
+            }
+        }
+        ast::Match::Or(alternatives) => {
+            let mut merged: HashMap<String, (usize, Option<SourceSpan>)> = HashMap::new();
+            for alternative in alternatives {
+                let mut own = HashMap::new();
+                count_binders(alternative, &mut own);
+                for (name, (count, span)) in own {
+                    let entry = merged.entry(name).or_insert((0, span));
+                    entry.0 = entry.0.max(count);
+                }
+            }
+            for (name, (count, span)) in merged {
+                let entry = counts.entry(name).or_insert((0, span));
+                entry.0 += count;
+            }
+        }
+        ast::Match::And(conjuncts) => {
+            for conjunct in conjuncts {
+                count_binders(conjunct, counts);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Where a branch starts, when it was written rather than synthesized: its first step.
+fn branch_span(branch: &ast::Branch) -> Option<SourceSpan> {
+    branch.condition.chains().next()?.span.get()
 }
 
 /// The span to blame for a term-level error, for the terms that carry one. A literal
@@ -807,6 +864,9 @@ pub struct Compiled {
     /// What this compilation learned, for a caller that will compile again against the same
     /// program (the REPL). A one-shot caller drops it.
     pub tables: SessionTables,
+    /// The compiled source's warnings, and those of the modules it loaded for the first time
+    /// in this session (the standard library's excepted).
+    pub warnings: Vec<LocatedWarning>,
 }
 
 /// Compilation mode options.
@@ -825,6 +885,9 @@ pub struct CompileOptions {
     /// Cooperative cancellation for compile-time evaluation, polled between execution
     /// slices; a host sets it to abandon a compilation in flight.
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The compiled source is one entry of a session (a REPL line), whose top-level bindings
+    /// are there for the entries after it: none of them is unused for going unread here.
+    pub session: bool,
 }
 
 /// The default compile-time evaluation budget: far above what any reasonable module
@@ -839,6 +902,7 @@ impl Default for CompileOptions {
             source_name: "main".to_string(),
             fuel: DEFAULT_COMPILE_FUEL,
             cancel: None,
+            session: false,
         }
     }
 }
@@ -1087,6 +1151,20 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // survives a failed compile.
     recorder: Option<&'a mut Recorder>,
 
+    // The warnings of the unit being compiled (the compiled source, or the module being
+    // compiled), at positions in its source. Swapped out while a module compiles, like
+    // `current_module`.
+    unit_warnings: Vec<(Warning, SourceSpan)>,
+    // The imported modules' warnings, as they will be reported.
+    module_warnings: Vec<LocatedWarning>,
+    // The unit's bindings, each with where it is written and whether anything has read it —
+    // judged when the unit is done, since a read can come from anywhere in scope.
+    binders: Vec<(String, SourceSpan, scopes::Usage)>,
+    // Matches compiled since the enclosing step began that can never succeed; the step warns.
+    impossible_matches: usize,
+    // See `CompileOptions::session`.
+    session: bool,
+
     _phantom: std::marker::PhantomData<E>,
 }
 
@@ -1221,6 +1299,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             fuel: options.fuel,
             cancel: options.cancel,
             recorder,
+            unit_warnings: Vec::new(),
+            module_warnings: Vec::new(),
+            binders: Vec::new(),
+            impossible_matches: 0,
+            session: options.session,
             _phantom: std::marker::PhantomData,
         };
 
@@ -1334,6 +1417,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         };
 
+        compiler.warn_unused_binders();
+
         Ok(Compiled {
             instructions,
             result_type: result_type_id,
@@ -1346,7 +1431,82 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 case_tables: compiler.case_tables,
                 callable_type_params: compiler.callable_type_params,
             },
+            warnings: compiler
+                .module_warnings
+                .into_iter()
+                .chain(
+                    compiler
+                        .unit_warnings
+                        .into_iter()
+                        .map(|(warning, span)| LocatedWarning {
+                            warning,
+                            span: Some(span),
+                            module: None,
+                        }),
+                )
+                .collect(),
         })
+    }
+
+    /// Warn about the code at `span`. Code with no position was synthesized, not written, so
+    /// there is no one to warn. A body compiled more than once warns once.
+    fn warn(&mut self, warning: Warning, span: Option<SourceSpan>) {
+        if let Some(span) = span
+            && !self
+                .unit_warnings
+                .iter()
+                .any(|(w, s)| *w == warning && *s == span)
+        {
+            self.unit_warnings.push((warning, span));
+        }
+    }
+
+    /// Warn about the unit's bindings nothing read. A binding compiled more than once (a body
+    /// compiled again) counts as read if any copy of it was.
+    fn warn_unused_binders(&mut self) {
+        let binders = std::mem::take(&mut self.binders);
+        for (name, span, _) in &binders {
+            if !binders
+                .iter()
+                .any(|(_, other, usage)| other == span && usage.is_used())
+            {
+                self.warn(Warning::UnusedBinding { name: name.clone() }, Some(*span));
+            }
+        }
+        self.unit_warnings.sort_by_key(|(_, span)| span.offset);
+    }
+
+    /// Report a module's own warnings the first time this session loads it, whether it was
+    /// compiled or linked from an artifact. The standard library's aren't reported: it is
+    /// kept free of them instead.
+    fn report_module_warnings(
+        &mut self,
+        import: &[String],
+        resolved: &crate::resolver::ResolvedModule,
+    ) {
+        if resolved.package == PackageId::Std
+            || !self.module_cache.warned.insert(resolved.id.clone())
+        {
+            return;
+        }
+        let Some(cached) = self.module_cache.get_cached_module(&resolved.id) else {
+            return;
+        };
+        let reported: Vec<LocatedWarning> = cached
+            .warnings
+            .iter()
+            .map(|(warning, span)| LocatedWarning {
+                warning: warning.clone(),
+                span: None,
+                module: Some(ModuleSite {
+                    name: format!("%{}", import.join("/")),
+                    origin: resolved.origin.clone(),
+                    source: resolved.source.clone(),
+                    span: Some(*span),
+                }),
+            })
+            .collect();
+        self.module_warnings.extend(reported);
     }
 
     /// Record a reference to a named symbol (variable) at `span` for the LSP, when recording.
@@ -1911,6 +2071,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let record_mark = helpers::is_inferred_literal(&field.value)
                 .then(|| self.recorder.as_deref().map(|recorder| recorder.mark()))
                 .flatten();
+            // ... as do its warnings and bindings, which a wider parameter may not repeat.
+            let warnings_mark = self.unit_warnings.len();
+            let binders_mark = self.binders.len();
             // An inferred-parameter literal can widen a variable its own parameter mentions —
             // a folder's result widening `'acc` beyond the initial `Nil` — in which case its body
             // was checked against too narrow a parameter, and is compiled again against the
@@ -1989,6 +2152,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 if let (Some(recorder), Some(mark)) = (self.recorder.as_deref_mut(), &record_mark) {
                     recorder.rewind(mark);
                 }
+                self.unit_warnings.truncate(warnings_mark);
+                self.binders.truncate(binders_mark);
                 bindings = trial;
                 field_expected = Some(widened);
             };
@@ -3607,6 +3772,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // The failure still carries a nil scrutinee through (see the failure path below): a
         // pattern that provably cannot match a nil is the degenerate case of failing against
         // one, not a different kind of failure.
+        // No value of the scrutinee's type can match (a type test for another type, a literal of
+        // another type, a tuple of another shape). A scrutinee typed `never` is inference giving
+        // up, not a value nothing matches.
+        if self.is_never(narrowed_type) && !self.is_never(value_type) {
+            self.impossible_matches += 1;
+        }
+
         if self.is_never(result_type) {
             match on_no_match {
                 Some(handler) => self.codegen.emit_jump_to_addr(handler),
@@ -3632,6 +3804,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             _ => false,
         };
 
+        // Which bindings to hold to being read: written ones (a synthesized binding has no
+        // position), written once — a repeated binder tests its occurrences equal, which is its
+        // use — and not a session's top level, which is there for the entries after it.
+        let mut binder_counts = HashMap::new();
+        count_binders(&pattern, &mut binder_counts);
+        let session_top_level = self.session
+            && self.function_depth == 0
+            && self.scopes.len() == 1
+            && self.module_cache.import_stack.is_empty();
+
         // Register locals for all bindings (indices needed for Load)
         for (variable_name, variable_type) in &bindings {
             let local_index = self.local_count;
@@ -3643,6 +3825,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 Provenance::Unknown
             };
 
+            let usage = scopes::Usage::default();
+            if let Some(&(1, Some(span))) = binder_counts.get(variable_name)
+                && !session_top_level
+            {
+                self.binders
+                    .push((variable_name.clone(), span, usage.clone()));
+            }
             if let Some(scope) = self.scopes.last_mut() {
                 scope.bindings.variables.insert(
                     variable_name.clone(),
@@ -3650,6 +3839,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         ty: *variable_type,
                         index: local_index,
                         provenance: var_provenance,
+                        usage,
                     },
                 );
             }
@@ -3860,6 +4050,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Track whether the block exhaustively covers all type variants.
         // Assume not exhaustive until proven otherwise by complement narrowing.
         let mut is_exhaustive = false;
+        let mut warned_unreachable = false;
 
         for (i, branch) in block.branches.iter().enumerate() {
             let is_last_branch = i == block.branches.len() - 1;
@@ -3906,6 +4097,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // not narrow subsequent branches.
             let mut narrowing = Narrowing::new();
             let complement_faithful = condition_complement_faithful(&branch.condition);
+            let binders_before = self.binders.len();
 
             // Compile the condition expression - it can use ~> to access the parameter
             // We need both the type and provenance for forward narrowing
@@ -3986,8 +4178,28 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // A branch that records no narrowing of its own leaves the accumulated complements
             // untouched; they persist to subsequent branches automatically.
 
+            // A branch that can't fail ends the block, so the branches after it never run. A
+            // condition typed `never` is inference giving up rather than a proof of anything.
+            // Only the first is worth pointing at: the rest follow from it.
+            if !is_last_branch
+                && !can_fail
+                && !condition.dead
+                && !self.is_never(condition_type)
+                && !warned_unreachable
+                && let Some(cause) = branch_span(branch)
+            {
+                warned_unreachable = true;
+                self.warn(
+                    Warning::UnreachableBranch { cause },
+                    branch_span(&block.branches[i + 1]),
+                );
+            }
+
             // A condition that can never succeed makes the branch dead: its failures are all it has.
+            // Its consequence isn't compiled, so what reads the condition's bindings is never
+            // seen — and the condition has been warned about already.
             if condition.dead {
+                self.binders.truncate(binders_before);
                 // A statically-dead branch is an unusual shape for a dispatch function; be
                 // conservative and abandon the case table rather than reason about it.
                 if let Some(d) = &mut dispatch {
@@ -4556,6 +4768,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let step_start = self.codegen.instructions.len();
             let failures_before = self.match_failures.len();
             let unwinds_before = self.pending_unwinds.len();
+            let impossible_before = self.impossible_matches;
+            let binders_before = self.binders.len();
             let result = self.compile_chain_with_input(
                 chain.clone(),
                 on_no_match,
@@ -4566,6 +4780,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 None,
                 true, // a step's verdict gates the sequence
             )?;
+            // A match that can never succeed fails the step, wherever it stands in it. This is
+            // the innermost step around it, so the count stops here.
+            if self.impossible_matches > impossible_before {
+                self.impossible_matches = impossible_before;
+                self.warn(Warning::ImpossibleMatch, chain.span.get());
+            }
             // Every match in the step fails it, wherever it stands: the ones before its end (a
             // mid-chain match, a tuple field) left their failures for the step to collect.
             let mut match_failures = self.match_failures.split_off(failures_before);
@@ -4610,7 +4830,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     let nil_type = self.nil_part(result.ty);
                     let truthy = self.without_nil(result.ty);
                     if self.is_never(truthy) {
-                        // Always nil: the step always fails, and nothing after it runs.
+                        // Always nil: the step always fails, and nothing after it runs. The last
+                        // step of a branch is not worth a warning: `| []` is how a block says
+                        // "otherwise, nil".
+                        if !is_last_chain {
+                            self.warn(Warning::AlwaysNil, chain.span.get());
+                        }
                         let jump = self.codegen.emit_jump_placeholder();
                         failures.push(Failure { jump, nil_type });
                         dead = true;
@@ -4653,6 +4878,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             };
 
             if is_last_chain || !can_succeed {
+                // The steps after one that never succeeds aren't compiled, so what reads its
+                // bindings is never seen — and the step has been warned about already.
+                if !can_succeed && !is_last_chain {
+                    self.binders.truncate(binders_before);
+                }
                 success_type = Some(step_success);
                 break;
             }
@@ -5112,17 +5342,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .resolve(package, module)
             .map_err(Error::ModuleLoad)?;
         self.try_link_from_artifacts(module, &resolved)?;
-        if self.module_cache.get_cached_module(&resolved.id).is_some()
-            || self.module_cache.import_stack.contains(&resolved.id)
-        {
-            // Already compiled — or currently compiling further up the stack, in
-            // which case the in-body import reports the cycle exactly as before.
+        if self.module_cache.import_stack.contains(&resolved.id) {
+            // Currently compiling further up the stack: the in-body import reports the
+            // cycle exactly as before.
             return Ok(());
         }
-        self.module_cache.import_stack.push(resolved.id.clone());
-        let result = self.import_and_cache_module(module, &resolved);
-        self.module_cache.import_stack.pop();
-        result.map(|_| ())
+        if self.module_cache.get_cached_module(&resolved.id).is_none() {
+            self.module_cache.import_stack.push(resolved.id.clone());
+            let result = self.import_and_cache_module(module, &resolved);
+            self.module_cache.import_stack.pop();
+            result?;
+        }
+        self.report_module_warnings(module, &resolved);
+        Ok(())
     }
 
     /// If the session's artifact store holds an artifact under this module's key,
@@ -5241,6 +5473,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.module_cache.import_stack.pop();
             cached?
         };
+        self.report_module_warnings(module, &resolved);
 
         // Resolve accessor chain on the cached value
         let module_type_id = self.program.register_type(cached.module_type.clone());
@@ -5334,6 +5567,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let saved_package = std::mem::replace(&mut self.current_package, resolved.package.clone());
         // Provenance sites inside the module name it, not the importing unit.
         let saved_module = std::mem::replace(&mut self.current_module, module_name.clone());
+        // Warnings inside the module are its own, as are its bindings.
+        let saved_warnings = std::mem::take(&mut self.unit_warnings);
+        let saved_binders = std::mem::take(&mut self.binders);
         // NOTE: `type_param_suffix` is deliberately *not* cleared here. Since
         // link-before-compile, modules are pre-compiled at the top level (suffix state
         // `None`, so each top-level definition gets its own suffix — the principled
@@ -5404,6 +5640,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.recorder = saved_recorder;
                 self.current_package = saved_package;
                 self.current_module = saved_module;
+                self.unit_warnings = saved_warnings;
+                self.binders = saved_binders;
                 self.function_depth = saved_function_depth;
                 self.program.set_function_dedup_floor(previous_floor);
                 self.suffix_scopes.pop();
@@ -5430,6 +5668,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.recorder = saved_recorder;
         self.current_package = saved_package;
         self.current_module = saved_module;
+        self.warn_unused_binders();
+        self.binders = saved_binders;
+        let warnings = std::mem::replace(&mut self.unit_warnings, saved_warnings);
         self.function_depth = saved_function_depth;
 
         // Register the callable type for this module wrapper function
@@ -5522,6 +5763,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             fn_case_tables,
             case_tables,
             callable_type_params,
+            warnings,
         };
 
         // Cache the module

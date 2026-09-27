@@ -32,7 +32,12 @@ fn environment() -> Environment<NativeEffect> {
 fn compile(source: &str) -> quiver_compiler::CompiledUnit {
     let ast = quiver_compiler::parse(source).expect("parse failed");
     let resolver = quiver_compiler::PackageResolver::inline();
-    let (program, module_cache, entry) = quiver_cli::compile::compile_entry(
+    let quiver_cli::compile::CompiledEntry {
+        program,
+        module_cache,
+        entry,
+        ..
+    } = quiver_cli::compile::compile_entry(
         ast,
         &resolver,
         &quiver_cli::build_builtin_registry(),

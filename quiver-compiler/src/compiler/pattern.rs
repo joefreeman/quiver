@@ -361,8 +361,8 @@ pub fn generate_pattern_code(
         let mut slotted = bindings
             .into_iter()
             .map(|binding| {
-                super::scopes::lookup_variable(scopes, &binding.name, &[])
-                    .map(|(_, slot)| (slot, binding))
+                super::scopes::binding_slot(scopes, &binding.name)
+                    .map(|slot| (slot, binding))
                     .ok_or_else(|| Error::InternalError {
                         message: format!("binding '{}' has no local slot", binding.name),
                     })

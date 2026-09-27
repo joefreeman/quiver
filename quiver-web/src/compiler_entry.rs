@@ -91,6 +91,8 @@ enum CompilerResponse {
         payload: Option<String>,
         /// The line's inferred result type, formatted for display.
         result_type: String,
+        /// The line's compile warnings, formatted for display.
+        warnings: Vec<String>,
     },
     Variables {
         id: u64,
@@ -158,6 +160,14 @@ impl CompilerState {
             Ok(compiled) => compiled,
             Err(e) => return error(e.to_string()),
         };
+        let warnings = compiled
+            .warnings()
+            .iter()
+            .map(|warning| match warning.span {
+                Some(span) => format!("Warning at {}:{}: {warning}", span.line, span.column),
+                None => format!("Warning: {warning}"),
+            })
+            .collect();
         let (payload, keep_indices) = match self.compiler.commit_line(compiled) {
             Some(CommittedLine {
                 payload,
@@ -177,6 +187,7 @@ impl CompilerState {
             keep_indices,
             payload,
             result_type,
+            warnings,
         }
     }
 }
