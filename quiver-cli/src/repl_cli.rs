@@ -343,8 +343,13 @@ impl ReplCli {
                 if self.interrupt.swap(false, Ordering::Relaxed) {
                     println!("{}", "Interrupted".red());
                     println!();
+                } else if std::io::stderr().is_terminal() && std::env::var("NO_COLOR").is_err() {
+                    crate::diagnostics::eprint_compile(&e, "repl", line);
                 } else {
-                    eprintln!("{}", format!("Compile error: {e}").yellow());
+                    eprintln!(
+                        "{}",
+                        crate::diagnostics::plain_compile_error(&e, "repl", line)
+                    );
                 }
                 return;
             }

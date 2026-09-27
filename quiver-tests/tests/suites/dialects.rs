@@ -15,6 +15,10 @@ fn dialect_module(body: &str, exports: &str) -> HashMap<Vec<String>, String> {
     modules
 }
 
+fn line_column(error: &quiver_compiler::compiler::LocatedError) -> Option<(usize, usize)> {
+    error.span.map(|span| (span.line, span.column))
+}
+
 #[test]
 fn test_constant_expansion() {
     quiver()
@@ -226,17 +230,22 @@ fn test_module_without_dialect_annotation() {
 
 #[test]
 fn test_error_payload_maps_to_a_source_position() {
-    quiver()
+    let error = quiver()
         .with_modules(dialect_module(
             "[] ~> { :error Expected[offset: 2, message: \"a value\"] }",
             "Ok",
         ))
         .evaluate("%m{abc}")
-        .expect_compile_error(Error::DialectFailed {
+        .expect_located_compile_error();
+    assert_eq!(
+        error.error,
+        Error::DialectFailed {
             module: "%m".to_string(),
-            // Content starts at 1:4 (after `%m{`), so offset 2 is column 6.
-            message: "failed: a value (at main:1:6)".to_string(),
-        });
+            message: "failed: a value".to_string(),
+        }
+    );
+    // Content starts at 1:4 (after `%m{`), so offset 2 is column 6.
+    assert_eq!(line_column(&error), Some((1, 6)));
 }
 
 #[test]
@@ -397,12 +406,17 @@ fn test_spaced_brace_is_not_a_dialect() {
 fn test_json_dialect_reports_furthest_failure() {
     // The element failure after `"b":` survives `sep_by`'s backtracking: the error
     // points at the missing-value position, not at `"b"` or the end of the content.
-    quiver()
+    let error = quiver()
         .evaluate(r#"%json{ { "a": 1, "b": } }"#)
-        .expect_compile_error(Error::DialectFailed {
+        .expect_located_compile_error();
+    assert_eq!(
+        error.error,
+        Error::DialectFailed {
             module: "%json".to_string(),
-            message: "failed: '[' (at main:1:23)".to_string(),
-        });
+            message: "failed: '['".to_string(),
+        }
+    );
+    assert_eq!(line_column(&error), Some((1, 23)));
 }
 
 #[test]
@@ -427,16 +441,55 @@ fn test_malformed_field_list_tail_is_an_error() {
 fn test_positional_error_payload_maps_to_a_source_position() {
     // A positionally built `Expected[2, "a value"]` (no field labels) keeps its
     // offset→source-position mapping, like `Splicer::field`'s positional fallback.
-    quiver()
+    let error = quiver()
         .with_modules(dialect_module(
             "[] ~> { :error Expected[2, \"a value\"] }",
             "Ok",
         ))
         .evaluate("%m{abc}")
-        .expect_compile_error(Error::DialectFailed {
+        .expect_located_compile_error();
+    assert_eq!(
+        error.error,
+        Error::DialectFailed {
             module: "%m".to_string(),
-            message: "failed: a value (at main:1:6)".to_string(),
-        });
+            message: "failed: a value".to_string(),
+        }
+    );
+    assert_eq!(line_column(&error), Some((1, 6)));
+}
+
+#[test]
+fn test_a_malformed_unquote_span_is_located_in_the_content() {
+    let error = quiver()
+        .with_modules(dialect_module("Unquote[offset: 1, length: 4]", "Ok"))
+        .evaluate("x = 1\n%m{ab ~>c}")
+        .expect_located_compile_error();
+    assert!(
+        matches!(&error.error, Error::DialectFailed { message, .. }
+            if message.starts_with("returned an Unquote span that is not a single block")),
+        "{error}"
+    );
+    assert_eq!(error.span.map(|span| span.line), Some(2));
+}
+
+#[test]
+fn test_a_failing_dialect_function_is_reported_as_a_dialect_evaluation() {
+    let error = quiver()
+        .with_modules(dialect_module("__panic__ \"no\"", "Ok"))
+        .evaluate("x = 1\n%m{abc}")
+        .expect_located_compile_error();
+    assert!(
+        matches!(&error.error, Error::DialectEvaluationFailed { module, .. } if module == "%m"),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .starts_with("Running dialect %m at compile time failed: no"),
+        "{error}"
+    );
+    // At the invocation: the failure has no position of its own.
+    assert_eq!(line_column(&error), Some((2, 1)));
 }
 
 #[test]

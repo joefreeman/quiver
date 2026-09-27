@@ -170,11 +170,14 @@ pub enum Error {
     ModuleLoad(ModuleError),
     // The embedded errors are boxed to keep `Error` small (it's the `Err` of nearly every
     // compiler function, and these two variants would otherwise dominate its size).
+    /// A module's source failed to parse. Which module is told by the import path the error
+    /// carries (see [`Error::InModule`]).
     ModuleParse {
-        module: String,
         error: Box<crate::parser::Error>,
     },
-    ModuleExecution {
+    /// A module's evaluation, which happens at compile time, failed with a runtime error.
+    ModuleEvaluationFailed {
+        /// The module as an import names it (`%num`).
         module: String,
         error: Box<quiver_core::error::Error>,
     },
@@ -183,6 +186,18 @@ pub enum Error {
         module: String,
     },
     ModuleTypeCycle(String),
+    /// An error inside an imported module, with the import path that reached it. Transient:
+    /// [`LocatedError::new`] unpacks it, so a caller of [`Compiler::compile`] never sees one.
+    InModule {
+        path: Vec<ModuleSite>,
+        error: Box<Error>,
+    },
+    /// An error that knows its own source position, which takes precedence over the
+    /// compiler's current one. Transient, like [`Error::InModule`].
+    Positioned {
+        span: SourceSpan,
+        error: Box<Error>,
+    },
 
     // Dialect errors
     /// A dialect invocation (`%mod{…}`) on a module whose value carries no `:dialect`
@@ -195,6 +210,13 @@ pub enum Error {
     DialectFailed {
         module: String,
         message: String,
+    },
+    /// A dialect function, run at compile time to expand an invocation, failed with a
+    /// runtime error. Distinct from [`Error::DialectFailed`], where the dialect ran and
+    /// reported a problem with the content.
+    DialectEvaluationFailed {
+        module: String,
+        error: Box<quiver_core::error::Error>,
     },
 
     // Language feature errors
@@ -469,12 +491,24 @@ impl std::fmt::Display for Error {
             Error::OperatorOnNonTuple { operator } => {
                 write!(f, "Operator '{operator}' requires a tuple operand")
             }
-            Error::ModuleLoad(error) => write!(f, "Module load error: {error:?}"),
-            Error::ModuleParse { module, error } => {
-                write!(f, "Parse error in module '{module}': {error}")
-            }
-            Error::ModuleExecution { module, error } => {
-                write!(f, "Execution error in module '{module}': {error}",)
+            Error::ModuleLoad(error) => write!(f, "Module load error: {error}"),
+            Error::ModuleParse { error } => write!(f, "Parse error: {}", error.kind),
+            Error::ModuleEvaluationFailed { module, error } => {
+                write!(
+                    f,
+                    "Evaluating module {module} at compile time failed: {error}"
+                )?;
+                // Work a module body can't do at compile time can still be done by the
+                // module's functions, which run when they are called.
+                if matches!(
+                    **error,
+                    quiver_core::error::Error::UnsupportedAtCompileTime { .. }
+                        | quiver_core::error::Error::StalledAtCompileTime
+                        | quiver_core::error::Error::ExhaustedAtCompileTime
+                ) {
+                    write!(f, "; move this work into a function the module exports")?;
+                }
+                Ok(())
             }
             Error::ModuleTypeMissing { type_name, module } => {
                 write!(f, "Type '{type_name}' not found in module '{module}'")
@@ -485,6 +519,13 @@ impl std::fmt::Display for Error {
                     "Cyclic module type reference involving module '{module}'"
                 )
             }
+            Error::InModule { path, error } => match path.last() {
+                Some(site) => write!(f, "{error} (in {})", site.name),
+                None => write!(f, "{error}"),
+            },
+            Error::Positioned { span, error } => {
+                write!(f, "{error} (at {}:{})", span.line, span.column)
+            }
             Error::DialectMissing { module } => {
                 write!(
                     f,
@@ -494,6 +535,10 @@ impl std::fmt::Display for Error {
             Error::DialectFailed { module, message } => {
                 write!(f, "Dialect {module} {message}")
             }
+            Error::DialectEvaluationFailed { module, error } => write!(
+                f,
+                "Running dialect {module} at compile time failed: {error}"
+            ),
             Error::FeatureUnsupported(what) => write!(f, "Unsupported: {what}"),
             Error::DestructuringOnNonTuple(ty) => {
                 write!(f, "Cannot destructure non-tuple value of type {ty}")
@@ -610,9 +655,8 @@ impl std::fmt::Display for Error {
     }
 }
 
-/// A compiler [`Error`] annotated with the source span where it occurred (when known), so
-/// the language server can place type-error diagnostics precisely. `compile` callers that
-/// don't care about the span just read `.error`.
+/// A compiler [`Error`] annotated with where it occurred, so diagnostics can place it
+/// precisely. `compile` callers that don't care about the location just read `.error`.
 ///
 /// A partial semantic index (for hover/go-to-definition on the parts of a file that compiled
 /// before the error) does not live here: the recorder is caller-owned (passed to
@@ -621,24 +665,111 @@ impl std::fmt::Display for Error {
 #[derive(Debug)]
 pub struct LocatedError {
     pub error: Error,
+    /// The position in the compiled source, when known. For an error inside an imported
+    /// module, this is the import that reached it.
     pub span: Option<SourceSpan>,
+    /// Empty for an error in the compiled source itself. Otherwise the import path to the
+    /// module holding the error, outermost first.
+    pub modules: Vec<ModuleSite>,
+}
+
+impl LocatedError {
+    /// Locate `error` at `span` in the compiled source, unpacking an error from an imported
+    /// module into its import path.
+    pub fn new(error: Error, span: Option<SourceSpan>) -> Self {
+        match error {
+            Error::InModule { path, error } => Self {
+                error: *error,
+                span,
+                modules: path,
+            },
+            Error::Positioned { span, error } => Self::new(*error, Some(span)),
+            error => Self {
+                error,
+                span,
+                modules: Vec::new(),
+            },
+        }
+    }
 }
 
 impl From<Error> for LocatedError {
     fn from(error: Error) -> Self {
-        Self { error, span: None }
+        Self::new(error, None)
     }
 }
 
-impl From<LocatedError> for Error {
-    fn from(located: LocatedError) -> Self {
-        located.error
-    }
-}
-
+/// The message, then — for an error inside an imported module — where it is, innermost
+/// first, as module-relative positions. The position in the compiled source is the caller's
+/// to give.
 impl std::fmt::Display for LocatedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.error)
+        write!(f, "{}", self.error)?;
+        let mut sites = self.modules.iter().rev();
+        if let Some(site) = sites.next() {
+            match site.span {
+                Some(span) => write!(f, "\n  at {}:{}:{}", site.name, span.line, span.column)?,
+                None => write!(f, "\n  in {}", site.name)?,
+            }
+        }
+        for site in sites {
+            match site.span {
+                Some(span) => write!(
+                    f,
+                    "\n  imported at {}:{}:{}",
+                    site.name, span.line, span.column
+                )?,
+                None => write!(f, "\n  imported by {}", site.name)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One module on the import path to an error inside an imported module.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModuleSite {
+    /// The module as an import names it (`%num`, `%http/server`).
+    pub name: String,
+    pub origin: ModuleOrigin,
+    pub source: String,
+    /// Within this module: the import of the next module on the path, or — for the last — the
+    /// error itself. `None` when there is no position to give, such as a failure while
+    /// evaluating the module.
+    pub span: Option<SourceSpan>,
+}
+
+impl Error {
+    /// Attribute an error raised while compiling `module`, reached by the import path
+    /// `import`, to it: `span` is the compiler's position in the module when the error
+    /// surfaced.
+    fn in_module(
+        self,
+        import: &[String],
+        module: &crate::resolver::ResolvedModule,
+        span: Option<SourceSpan>,
+    ) -> Self {
+        let (span, mut path, error) = match self {
+            // From a module this one imports: `span` is that import.
+            Error::InModule { path, error } => (span, path, *error),
+            Error::Positioned { span, error } => (Some(span), Vec::new(), *error),
+            // The module's own source failed to parse, and the parse error knows where.
+            Error::ModuleParse { error } => (error.span, Vec::new(), Error::ModuleParse { error }),
+            error => (span, Vec::new(), error),
+        };
+        path.insert(
+            0,
+            ModuleSite {
+                name: format!("%{}", import.join("/")),
+                origin: module.origin.clone(),
+                source: module.source.clone(),
+                span,
+            },
+        );
+        Error::InModule {
+            path,
+            error: Box::new(error),
+        }
     }
 }
 
@@ -1125,12 +1256,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // top-level step's input as whatever type happened to land at that index, so reject
         // an id no type occupies rather than miscompile.
         if compiler.program.lookup_type(parameter_type_id).is_none() {
-            return Err(LocatedError {
-                error: Error::InternalError {
-                    message: format!("parameter_type_id {parameter_type_id} is not a type id"),
-                },
-                span: None,
-            });
+            return Err(Error::InternalError {
+                message: format!("parameter_type_id {parameter_type_id} is not a type id"),
+            }
+            .into());
         }
 
         // Only allocate a parameter slot if there are chain steps; a program of nothing but
@@ -1165,10 +1294,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // source only for the link to overwrite it.
         let entry_package = compiler.current_package.clone();
         if let Err(error) = compiler.precompile_imports(&ast_program, &entry_package) {
-            return Err(LocatedError {
-                error,
-                span: compiler.current_span,
-            });
+            return Err(LocatedError::new(error, compiler.current_span));
         }
 
         // Extract receive type from the program's steps (like we do for function bodies)
@@ -1184,10 +1310,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let result_type_id = match compiler.compile_top_level(ast_program.steps) {
             Ok(ty) => ty,
             Err(error) => {
-                return Err(LocatedError {
-                    error,
-                    span: compiler.current_span,
-                });
+                return Err(LocatedError::new(error, compiler.current_span));
             }
         };
 
@@ -1207,10 +1330,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let instructions = match compiler.finish_body(body, Locals::Filled(filled_locals)) {
             Ok(instructions) => instructions,
             Err(error) => {
-                return Err(LocatedError {
-                    error,
-                    span: compiler.current_span,
-                });
+                return Err(LocatedError::new(error, compiler.current_span));
             }
         };
 
@@ -4991,7 +5111,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .resolver
             .resolve(package, module)
             .map_err(Error::ModuleLoad)?;
-        self.try_link_from_artifacts(&resolved)?;
+        self.try_link_from_artifacts(module, &resolved)?;
         if self.module_cache.get_cached_module(&resolved.id).is_some()
             || self.module_cache.import_stack.contains(&resolved.id)
         {
@@ -5000,7 +5120,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             return Ok(());
         }
         self.module_cache.import_stack.push(resolved.id.clone());
-        let result = self.import_and_cache_module(&resolved);
+        let result = self.import_and_cache_module(module, &resolved);
         self.module_cache.import_stack.pop();
         result.map(|_| ())
     }
@@ -5012,6 +5132,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// recorded) — the artifact's function imports are a subset of them.
     fn try_link_from_artifacts(
         &mut self,
+        import: &[String],
         resolved: &crate::resolver::ResolvedModule,
     ) -> Result<(), Error> {
         if self.module_cache.get_cached_module(&resolved.id).is_some() {
@@ -5035,7 +5156,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
         let parsed = self
             .module_cache
-            .load_and_cache_ast(&resolved.id, &resolved.source)?;
+            .load_and_cache_ast(&resolved.id, &resolved.source)
+            .map_err(|error| error.in_module(import, resolved, None))?;
         for (path, _) in modules::collect_value_imports(&parsed) {
             self.ensure_import_cached(&path, &resolved.package)?;
         }
@@ -5091,7 +5213,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             ));
         }
 
-        self.try_link_from_artifacts(&resolved)?;
+        self.try_link_from_artifacts(module, &resolved)?;
 
         // Get or compute cached module value
         let cached = if let Some(cached) = self.module_cache.get_cached_module(&id) {
@@ -5115,7 +5237,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             cached
         } else {
             self.module_cache.import_stack.push(id.clone());
-            let cached = self.import_and_cache_module(&resolved);
+            let cached = self.import_and_cache_module(module, &resolved);
             self.module_cache.import_stack.pop();
             cached?
         };
@@ -5130,8 +5252,24 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     /// Import a module, execute it, and cache the result. The module is compiled in *its own*
     /// package context, so its imports resolve hermetically against its package's manifest.
+    /// An error inside it is attributed to it (see [`Error::in_module`]).
     fn import_and_cache_module(
         &mut self,
+        import: &[String],
+        resolved: &crate::resolver::ResolvedModule,
+    ) -> Result<modules::CachedModule, Error> {
+        // The importer's position is the import site. It is set aside while the module
+        // compiles, so a position left behind is the module's own, and restored afterwards,
+        // so the importer's later errors don't point into the module's source.
+        let import_site = self.current_span.take();
+        let result = self.compile_module(import, resolved);
+        let module_span = std::mem::replace(&mut self.current_span, import_site);
+        result.map_err(|error| error.in_module(import, resolved, module_span))
+    }
+
+    fn compile_module(
+        &mut self,
+        import: &[String],
         resolved: &crate::resolver::ResolvedModule,
     ) -> Result<modules::CachedModule, Error> {
         let module_name = resolved.id.display();
@@ -5328,8 +5466,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Ok(result) => result,
             Err(e) => {
                 self.module_cache.recording.pop();
-                return Err(Error::ModuleExecution {
-                    module: module_name.clone(),
+                // The failure has no position in the module's source.
+                self.current_span = None;
+                return Err(Error::ModuleEvaluationFailed {
+                    module: format!("%{}", import.join("/")),
                     error: Box::new(e),
                 });
             }
@@ -5400,6 +5540,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             )
         {
             self.module_cache.recording.pop();
+            // Type resolution carries no positions.
+            self.current_span = None;
             return Err(error);
         }
 
@@ -5573,14 +5715,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.fuel,
             self.cancel.as_deref(),
         )
-        .map_err(|e| Error::ModuleExecution {
+        .map_err(|e| Error::DialectEvaluationFailed {
             module: module_name.clone(),
             error: Box::new(e),
         })?;
 
         let error_key = self.program.register_annotation_key("error");
         if expr_value.is_nil() {
-            let message = self.describe_dialect_failure(
+            let (message, span) = self.describe_dialect_failure(
                 &expr_value,
                 error_key,
                 dialect,
@@ -5588,9 +5730,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 &executor,
                 (constant, &content),
             );
-            return Err(Error::DialectFailed {
+            let error = Error::DialectFailed {
                 module: module_name,
                 message,
+            };
+            return Err(match span {
+                Some(span) => Error::Positioned {
+                    span,
+                    error: Box::new(error),
+                },
+                None => error,
             });
         }
 
@@ -5615,7 +5764,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             dialect,
             content: &content,
             escapes: &escapes,
-            current_module: self.current_module.clone(),
             holes: std::cell::RefCell::new(Vec::new()),
         };
         let expansion = splicer.value_to_chain(&expr_value)?;
@@ -5707,8 +5855,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     }
 
     /// Describe a dialect function's nil result: fold an `Expected[offset: 'int,
-    /// message: Str['bin]]`-shaped `:error` payload into a message, mapping the content
-    /// offset to a source position via the invocation's content span. `content_constant`
+    /// message: Str['bin]]`-shaped `:error` payload into a message, and map the content
+    /// offset to the source position it names via the invocation's content span. `content_constant`
     /// is the brace content's temporary constant (index, text), which lives only in the
     /// expansion's bytecode — a message referencing it can't be read off the program.
     fn describe_dialect_failure(
@@ -5719,9 +5867,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         escapes: &[usize],
         _executor: &quiver_core::executor::Executor<E>,
         content_constant: (usize, &str),
-    ) -> String {
+    ) -> (String, Option<SourceSpan>) {
         let Some(payload) = value.get_annotation(error_key) else {
-            return "failed".to_string();
+            return ("failed".to_string(), None);
         };
         let mut offset = None;
         let mut message = None;
@@ -5762,15 +5910,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
         let text = message.unwrap_or_else(|| format!("failed with {payload:?}"));
-        match offset.and_then(|o| dialect::content_position(dialect, escapes, o)) {
-            Some((line, column)) => {
-                format!(
-                    "failed: {text} (at {}:{line}:{column})",
-                    self.current_module
-                )
-            }
-            None => format!("failed: {text}"),
-        }
+        (
+            format!("failed: {text}"),
+            offset.and_then(|offset| dialect::content_span(dialect, escapes, offset, 1)),
+        )
     }
 
     /// Emit a compile-time value as the single constant that names it, answering its type id.

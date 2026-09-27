@@ -4,7 +4,10 @@ use crate::convert::span_to_range;
 use crate::documents::LineIndex;
 use quiver_compiler::compiler::LocatedError;
 use quiver_compiler::parser::Error as ParseError;
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use quiver_compiler::resolver::ModuleOrigin;
+use tower_lsp::lsp_types::{
+    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location, Position, Range, Url,
+};
 
 /// The whole-document start position, used when an error has no span.
 fn fallback_range() -> Range {
@@ -25,6 +28,8 @@ fn error(range: Range, message: String) -> Diagnostic {
 }
 
 /// Convert a (typecheck) compiler error into a diagnostic, located at its span when known.
+/// An error inside an imported module sits on the import that reached it, with related
+/// locations for the positions in module files.
 pub fn located_error_to_diagnostic(
     err: &LocatedError,
     text: &str,
@@ -34,7 +39,33 @@ pub fn located_error_to_diagnostic(
         Some(span) => span_to_range(text, index, span),
         None => fallback_range(),
     };
-    error(range, err.to_string())
+    let related: Vec<DiagnosticRelatedInformation> = err
+        .modules
+        .iter()
+        .enumerate()
+        .filter_map(|(depth, site)| {
+            let ModuleOrigin::Path(path) = &site.origin else {
+                return None;
+            };
+            let span = site.span?;
+            let uri = Url::from_file_path(path).ok()?;
+            let message = match err.modules.get(depth + 1) {
+                Some(next) => format!("{} is imported here", next.name),
+                None => "the error is here".to_string(),
+            };
+            Some(DiagnosticRelatedInformation {
+                location: Location {
+                    uri,
+                    range: span_to_range(&site.source, &LineIndex::new(&site.source), span),
+                },
+                message,
+            })
+        })
+        .collect();
+    Diagnostic {
+        related_information: (!related.is_empty()).then_some(related),
+        ..error(range, err.to_string())
+    }
 }
 
 pub fn parse_error_to_diagnostic(err: &ParseError, text: &str, index: &LineIndex) -> Diagnostic {

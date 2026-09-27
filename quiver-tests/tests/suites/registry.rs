@@ -199,7 +199,7 @@ fn registry_is_rejected_in_module_bodies() {
     quiver()
         .with_modules(modules)
         .evaluate("* = %regmod; x")
-        .expect_error_containing("a registry operation is not supported in compile-time execution");
+        .expect_error_containing("a registry operation is not supported");
 }
 
 #[test]

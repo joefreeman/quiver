@@ -621,6 +621,7 @@ impl TestResult {
                 );
             }
             Err(ReplError::Compiler(actual)) => {
+                let actual = actual.error;
                 assert_eq!(
                     actual, expected,
                     "Expected compile error {:?}, but got {:?} for source: {}",
@@ -636,12 +637,32 @@ impl TestResult {
         }
     }
 
+    /// Assert that compilation fails, handing back the located error for assertions on
+    /// where it is.
+    pub fn expect_located_compile_error(self) -> quiver_compiler::compiler::LocatedError {
+        match self.result {
+            Err(ReplError::Compiler(error)) => error,
+            Ok(result) => panic!(
+                "Expected a compile error, but evaluation succeeded with: {:?} for source: {}",
+                result, self.source
+            ),
+            Err(e) => panic!(
+                "Expected a compile error, but got {:?} for source: {}",
+                e, self.source
+            ),
+        }
+    }
+
     /// Assert that compilation fails with a `TypeMismatch`, without pinning the rendered
     /// type strings (useful when they include large inferred unions).
     #[allow(dead_code)]
     pub fn expect_type_mismatch(self) {
         match self.result {
-            Err(ReplError::Compiler(quiver_compiler::compiler::Error::TypeMismatch { .. })) => {}
+            Err(ReplError::Compiler(e))
+                if matches!(
+                    e.error,
+                    quiver_compiler::compiler::Error::TypeMismatch { .. }
+                ) => {}
             Ok(result) => panic!(
                 "Expected a type mismatch, but evaluation succeeded with: {:?} for source: {}",
                 result, self.source

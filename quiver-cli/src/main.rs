@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use quiver_cli::compile::EntryError;
 use quiver_compiler::compiler::ModuleCache;
 use quiver_compiler::{Compiler, PackageResolver, parse};
 use quiver_core::bytecode;
@@ -295,6 +296,24 @@ fn report_parse_error(err: &quiver_compiler::parser::Error, source: &str, source
     }
 }
 
+/// Report a compile error and exit: with visual formatting if in a TTY, otherwise plain text.
+fn handle_compile_error(
+    err: &quiver_compiler::compiler::LocatedError,
+    source: &str,
+    source_id: &str,
+) -> ! {
+    let use_color = std::io::stderr().is_terminal() && std::env::var("NO_COLOR").is_err();
+    if use_color {
+        diagnostics::eprint_compile(err, source_id, source);
+    } else {
+        eprintln!(
+            "{}",
+            diagnostics::plain_compile_error(err, source_id, source)
+        );
+    }
+    std::process::exit(1);
+}
+
 /// Report a parse error and exit.
 fn handle_parse_error(err: quiver_compiler::parser::Error, source: &str, source_id: &str) -> ! {
     report_parse_error(&err, source, source_id);
@@ -333,7 +352,7 @@ fn compile_source(
     };
     let options = quiver_compiler::compiler::CompileOptions {
         debug,
-        source_name: source.id,
+        source_name: source.id.clone(),
         ..Default::default()
     };
     let builtins = build_builtin_registry();
@@ -348,13 +367,18 @@ fn compile_source(
         Some(std::rc::Rc::clone(&store)),
     ) {
         Ok((program, module_cache, entry)) => (program, module_cache, Some(entry)),
-        Err(e) if matches!(entry, Entry::Required) => return Err(e),
+        Err(EntryError::Compile(e)) if matches!(entry, Entry::Required) => {
+            handle_compile_error(&e, &source.text, &source.id)
+        }
+        Err(e @ EntryError::NotExecutable) if matches!(entry, Entry::Required) => {
+            return Err(e.into());
+        }
         Err(_) => {
             let mut program = Program::new();
             let mut module_cache = ModuleCache::new();
             module_cache.artifact_store = Some(store);
             let nil_type_id = program.register_type(Type::nil());
-            Compiler::compile(
+            if let Err(e) = Compiler::compile(
                 parsed,
                 &quiver_compiler::compiler::Bindings::default(),
                 Default::default(),
@@ -366,8 +390,9 @@ fn compile_source(
                 &builtins,
                 None, // no semantic recorder for the CLI
                 options,
-            )
-            .map_err(|e| quiver_cli::compile::format_compile_error(&e))?;
+            ) {
+                handle_compile_error(&e, &source.text, &source.id);
+            }
             (program, module_cache, None)
         }
     };

@@ -197,6 +197,32 @@ mod tests {
     }
 
     #[test]
+    fn an_error_in_a_module_is_reported_at_its_import() {
+        let modules = std::collections::HashMap::from([(
+            vec!["bad".to_string()],
+            "x = 1\n\n[f: #[] { __integer_add__ [x, <01>] }]".to_string(),
+        )]);
+        let text = "%bad.f []";
+        let analysis = analyze(
+            text,
+            &LineIndex::new(text),
+            &PackageResolver::memory(modules),
+        );
+        let diags = analysis.diagnostics;
+        assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+        // On the import, not at the module's own position (line 3) in this document.
+        assert_eq!(
+            diags[0].range.start,
+            tower_lsp::lsp_types::Position::new(0, 0)
+        );
+        assert!(
+            diags[0].message.contains("at %bad:3:"),
+            "{}",
+            diags[0].message
+        );
+    }
+
+    #[test]
     fn io_builtins_typecheck_via_their_signatures() {
         // `std/file.qv` calls `__file_read__` etc.; importing it must type-check using the IO
         // builtins' signatures, with no native io-uring backend in the language server.

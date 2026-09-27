@@ -151,6 +151,8 @@ impl fmt::Display for Error {
                 write!(f, "{operation} is not allowed in {context}")
             }
             Error::NotAnOwnedChild => f.write_str("detach requires an owned child of the caller"),
+            // The compile-time errors leave "at compile time" unsaid: they reach a reader only
+            // through the compile error wrapping them, which says it and names what ran.
             Error::UnsupportedAtCompileTime { operation } => {
                 let doing = match operation {
                     Operation::Spawn => "spawning a process",
@@ -167,24 +169,13 @@ impl fmt::Display for Error {
                     Operation::CreateRef => "creating a ref",
                     Operation::Registry => "a registry operation",
                 };
-                write!(
-                    f,
-                    "{doing} is not supported in compile-time execution (module bodies \
-                     are evaluated at compile time — move process and effect work into a \
-                     function the module exports, or into the program that imports it)"
-                )
+                write!(f, "{doing} is not supported")
             }
-            Error::StalledAtCompileTime => f.write_str(
-                "waiting to receive a message that can never arrive in compile-time \
-                 execution (module bodies are evaluated at compile time — receive inside \
-                 a function instead)",
-            ),
-            Error::ExhaustedAtCompileTime => f.write_str(
-                "compile-time execution exceeded its step budget (module bodies are \
-                 evaluated at compile time — move long-running work into a function the \
-                 module exports)",
-            ),
-            Error::CancelledAtCompileTime => f.write_str("compile-time execution was cancelled"),
+            Error::StalledAtCompileTime => {
+                f.write_str("waiting to receive a message that can never arrive")
+            }
+            Error::ExhaustedAtCompileTime => f.write_str("exceeded the step budget"),
+            Error::CancelledAtCompileTime => f.write_str("cancelled"),
 
             // Broken internal invariants from here down.
             Error::StackUnderflow => f.write_str("internal error: stack underflow"),

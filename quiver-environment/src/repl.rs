@@ -28,7 +28,7 @@ use std::rc::Rc;
 #[derive(Debug)]
 pub enum ReplError {
     Parser(Box<quiver_compiler::parser::Error>),
-    Compiler(quiver_compiler::compiler::Error),
+    Compiler(quiver_compiler::compiler::LocatedError),
     Runtime(quiver_core::error::Error),
     Environment(EnvironmentError),
 }
@@ -333,7 +333,7 @@ impl<E: Effect> LineCompiler<E> {
             None, // the REPL doesn't build a semantic index
             self.options.clone(),
         )
-        .map_err(|e| ReplError::Compiler(e.error))?;
+        .map_err(ReplError::Compiler)?;
 
         let instructions = result.instructions;
         let result_type_id = result.result_type;

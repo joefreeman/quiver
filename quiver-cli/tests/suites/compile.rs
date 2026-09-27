@@ -187,3 +187,28 @@ fn unknown_extensions_are_rejected() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("Unsupported file extension"));
 }
+
+#[test]
+fn a_compile_error_in_a_module_names_its_file_and_the_import() {
+    let dir = TempDir::new();
+    dir.file(
+        "quiver.toml",
+        r#"modules = [{ std = true }, { path = "./src" }]"#,
+    );
+    std::fs::create_dir(dir.0.join("src")).unwrap();
+    dir.file("src/bad.qv", "x = 1\n[f: #[] { %num.add [x, <01>] }]");
+    dir.file("main.qv", "#[] {\n  %bad.f []\n}");
+    let out = quiv()
+        .current_dir(&dir.0)
+        .args(["run", "main.qv"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert!(
+        lines[0].starts_with("src/bad.qv:2:11: Type mismatch"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(lines[1], "  imported at main.qv:2:3", "stderr: {stderr}");
+}

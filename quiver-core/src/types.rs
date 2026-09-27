@@ -559,7 +559,11 @@ impl Type {
             Type::Union(type_ids) => {
                 let filtered: Vec<usize> = type_ids
                     .iter()
-                    .filter(|&&id| !lookup.lookup_type(id).is_some_and(|t| t.is_only_nil(lookup)))
+                    .filter(|&&id| {
+                        !lookup
+                            .lookup_type(id)
+                            .is_some_and(|t| t.is_only_nil(lookup))
+                    })
                     .copied()
                     .collect();
                 Type::Union(filtered)
@@ -769,11 +773,9 @@ fn check_type_relation<T: TypeLookup>(
         // shared value lies in each member, so each must overlap — a necessary condition, so an
         // over-approximation, which is the safe side for overlap. A union on the left is split
         // first, by its own arm.
-        (self_type, Type::Intersection(members)) if !matches!(self_type, Type::Union(_)) => {
-            members.iter().all(|&member| {
-                check_type_relation(self_id, member, lookup, mode, assumptions, stacks)
-            })
-        }
+        (self_type, Type::Intersection(members)) if !matches!(self_type, Type::Union(_)) => members
+            .iter()
+            .all(|&member| check_type_relation(self_id, member, lookup, mode, assumptions, stacks)),
         // An intersection on the left: its values lie in every member, so one member fitting
         // the pattern suffices; for overlap, every member must overlap it. A union on the right
         // is tried member by member, by its own arm.
@@ -791,9 +793,7 @@ fn check_type_relation<T: TypeLookup>(
         // Type variables match anything, except when proving subsumption, where a variable
         // is rigid: it stands for one unknown type, so only it is known to hold its values.
         // A union on the other side is split by its own arm.
-        (Type::Variable(_), _) | (_, Type::Variable(_)) if mode != UnionMode::Subsumption => {
-            true
-        }
+        (Type::Variable(_), _) | (_, Type::Variable(_)) if mode != UnionMode::Subsumption => true,
         (Type::Variable(v1), Type::Variable(v2)) => v1 == v2,
         (Type::Variable(_), other) | (other, Type::Variable(_))
             if !matches!(other, Type::Union(_)) =>

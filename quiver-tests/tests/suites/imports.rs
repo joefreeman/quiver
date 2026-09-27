@@ -281,7 +281,9 @@ fn test_module_ref_minting_rejected() {
     quiver()
         .with_modules(modules)
         .evaluate("%tagged.tag")
-        .expect_error_containing("creating a ref is not supported in compile-time execution");
+        .expect_error_containing(
+            "creating a ref is not supported; move this work into a function the module exports",
+        );
 }
 
 #[test]
@@ -295,7 +297,7 @@ fn test_module_host_read_rejected() {
     quiver()
         .with_modules(modules)
         .evaluate("%stamped.at")
-        .expect_error_containing("reading host state is not supported in compile-time execution");
+        .expect_error_containing("reading host state is not supported");
 }
 
 #[test]
@@ -404,7 +406,7 @@ fn module_spawn_rejected_at_compile_time() {
     quiver()
         .with_modules(modules)
         .evaluate("%spawner.x")
-        .expect_error_containing("spawning a process is not supported in compile-time execution");
+        .expect_error_containing("spawning a process is not supported");
 }
 
 #[test]
@@ -538,4 +540,123 @@ fn test_the_std_listing_is_stable_and_unique() {
     let mut deduped = names.clone();
     deduped.dedup();
     assert_eq!(names, deduped, "std module names must be unique");
+}
+
+/// Where a compile error in an imported module is, as `(name, line, column)` per module on
+/// the import path, outermost first.
+fn module_path(
+    error: &quiver_compiler::compiler::LocatedError,
+) -> Vec<(String, Option<(usize, usize)>)> {
+    error
+        .modules
+        .iter()
+        .map(|site| {
+            (
+                site.name.clone(),
+                site.span.map(|span| (span.line, span.column)),
+            )
+        })
+        .collect()
+}
+
+fn line_column(span: Option<quiver_compiler::parser::SourceSpan>) -> Option<(usize, usize)> {
+    span.map(|span| (span.line, span.column))
+}
+
+#[test]
+fn an_error_in_a_module_is_located_in_that_module() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["bad".to_string()],
+        "x = 1\n[f: #[] { __integer_add__ [x, <01>] }]".to_string(),
+    );
+    let error = quiver()
+        .with_modules(modules)
+        .evaluate("y = 2\ny ~> %bad.f ~")
+        .expect_located_compile_error();
+    assert!(matches!(
+        error.error,
+        quiver_compiler::compiler::Error::TypeMismatch { .. }
+    ));
+    // The position in the compiled source is the import; the module holds the error.
+    assert_eq!(line_column(error.span), Some((2, 6)));
+    assert_eq!(
+        module_path(&error),
+        vec![("%bad".to_string(), Some((2, 11)))]
+    );
+}
+
+#[test]
+fn an_error_in_a_nested_module_carries_its_import_path() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["inner".to_string()],
+        "[f: #[] { __integer_add__ [1, <01>] }]".to_string(),
+    );
+    modules.insert(
+        vec!["outer".to_string()],
+        "\ni = %inner\n[g: #[] { 1 }]".to_string(),
+    );
+    let error = quiver()
+        .with_modules(modules)
+        .evaluate("%outer.g []")
+        .expect_located_compile_error();
+    assert_eq!(line_column(error.span), Some((1, 1)));
+    assert_eq!(
+        module_path(&error),
+        vec![
+            ("%outer".to_string(), Some((2, 5))),
+            ("%inner".to_string(), Some((1, 11))),
+        ]
+    );
+}
+
+#[test]
+fn a_module_parse_error_is_located_in_that_module() {
+    let mut modules = HashMap::new();
+    modules.insert(vec!["broken".to_string()], "x = 1\ny = [".to_string());
+    let error = quiver()
+        .with_modules(modules)
+        .evaluate("%broken")
+        .expect_located_compile_error();
+    assert!(matches!(
+        error.error,
+        quiver_compiler::compiler::Error::ModuleParse { .. }
+    ));
+    assert_eq!(error.modules.len(), 1);
+    assert_eq!(error.modules[0].span.map(|span| span.line), Some(2));
+}
+
+#[test]
+fn a_module_evaluation_error_has_no_position_in_the_module() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["failing".to_string()],
+        "x = 1\n__panic__ \"boom\"".to_string(),
+    );
+    let error = quiver()
+        .with_modules(modules)
+        .evaluate("[] ~> { %failing }")
+        .expect_located_compile_error();
+    assert!(
+        error
+            .to_string()
+            .starts_with("Evaluating module %failing at compile time failed: boom"),
+        "{error}"
+    );
+    // Evaluation has no source position, so the import is all there is to point at.
+    assert_eq!(line_column(error.span), Some((1, 9)));
+    assert_eq!(module_path(&error), vec![("%failing".to_string(), None)]);
+}
+
+#[test]
+fn an_error_after_an_import_is_not_located_in_the_module() {
+    let mut modules = HashMap::new();
+    modules.insert(vec!["fine".to_string()], "\n\n\n[f: #[] { 1 }]".to_string());
+    let error = quiver()
+        .with_modules(modules)
+        .evaluate("x = %fine\nnope")
+        .expect_located_compile_error();
+    assert!(error.modules.is_empty());
+    assert_eq!(error.span.map(|span| span.line), Some(2));
 }

@@ -116,6 +116,27 @@ pub fn content_position(
     }
 }
 
+/// The source span of `length` bytes at an offset into the (unescaped) content, as
+/// [`content_position`] maps it.
+pub fn content_span(
+    dialect: &ast::Dialect,
+    escapes: &[usize],
+    offset: usize,
+    length: usize,
+) -> Option<SourceSpan> {
+    let base = dialect.content_span.get()?;
+    let (line, column) = content_position(dialect, escapes, offset)?;
+    let to_raw = |offset: usize| {
+        (offset + escapes.iter().filter(|&&e| e < offset).count()).min(dialect.raw.len())
+    };
+    Some(SourceSpan {
+        offset: base.offset + to_raw(offset),
+        line,
+        column,
+        length: to_raw(offset + length) - to_raw(offset),
+    })
+}
+
 /// An `Unquote` hole collected during splicing: its dedupe key — the same span spliced
 /// twice shares one binding, so it evaluates once — and the chain that evaluates it into
 /// its `~dialect-hole-N` binding.
@@ -209,8 +230,6 @@ pub struct Splicer<'a, F: Fn(&Binary) -> Option<Vec<u8>>> {
     /// recorded by [`unescape_content`].
     pub content: &'a str,
     pub escapes: &'a [usize],
-    /// The invoking module's name, for positions in `Unquote` error messages.
-    pub current_module: String,
     /// `Unquote` holes collected while walking the returned IR (bind-once).
     pub holes: RefCell<Vec<Hole>>,
 }
@@ -424,14 +443,25 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 ))
             })?;
         let mut chain = crate::parser::parse_chain_exact(text).map_err(|parse_error| {
-            let content_offset = offset + parse_error.span.map_or(0, |s| s.offset);
-            let position = content_position(self.dialect, self.escapes, content_offset)
-                .map(|(line, column)| format!(" (at {}:{line}:{column})", self.current_module))
-                .unwrap_or_default();
-            self.error(&format!(
-                "returned an Unquote span that is not a single block: {}{position}",
+            let error = self.error(&format!(
+                "returned an Unquote span that is not a single block: {}",
                 parse_error.kind
-            ))
+            ));
+            let (error_offset, error_length) = parse_error
+                .span
+                .map_or((0, length), |span| (span.offset, span.length));
+            match content_span(
+                self.dialect,
+                self.escapes,
+                offset + error_offset,
+                error_length,
+            ) {
+                Some(span) => Error::Positioned {
+                    span,
+                    error: Box::new(error),
+                },
+                None => error,
+            }
         })?;
         self.remap_chain_spans(&mut chain, offset);
 
@@ -507,20 +537,13 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
     }
 
     fn remap_span(&self, span: SourceSpan, hole_offset: usize, base: SourceSpan) -> SourceSpan {
-        let to_raw = |content_offset: usize| {
-            content_offset + self.escapes.iter().filter(|&&e| e < content_offset).count()
-        };
-        let start = hole_offset + span.offset;
-        let raw_start = to_raw(start);
-        let raw_end = to_raw(start + span.length);
-        let (line, column) =
-            content_position(self.dialect, self.escapes, start).unwrap_or((base.line, base.column));
-        SourceSpan {
-            offset: base.offset + raw_start,
-            line,
-            column,
-            length: raw_end - raw_start,
-        }
+        content_span(
+            self.dialect,
+            self.escapes,
+            hole_offset + span.offset,
+            span.length,
+        )
+        .unwrap_or(base)
     }
 
     /// The holes collected while splicing, for [`wrap_expansion`].

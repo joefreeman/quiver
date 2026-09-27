@@ -2,25 +2,33 @@
 //! evaluates to. Shared by `quiv run`'s client, `quiv compile`, and `quiv test`'s
 //! program blocks.
 
-use quiver_compiler::compiler::ModuleCache;
+use quiver_compiler::compiler::{LocatedError, ModuleCache};
 use quiver_compiler::{Compiler, ModuleResolver};
 use quiver_core::bytecode::Instruction;
 use quiver_core::program::Program;
 use quiver_core::types::{Type, TypeLookup};
 use std::collections::HashMap;
 
-/// Render a compile failure for the terminal: the source position, then the error's own
-/// message. `Display` is what carries the guidance an author can act on (`Debug` shows the
-/// variant's fields instead), so it is what a user-facing path prints.
-pub fn format_compile_error(e: &quiver_compiler::compiler::LocatedError) -> String {
-    match e.span {
-        Some(span) => format!(
-            "Compile error at {}:{}: {}",
-            span.line, span.column, e.error
-        ),
-        None => format!("Compile error: {}", e.error),
+/// Why an entry program didn't compile.
+#[derive(Debug)]
+pub enum EntryError {
+    Compile(LocatedError),
+    /// The program compiled, but doesn't evaluate to a function to run.
+    NotExecutable,
+}
+
+impl std::fmt::Display for EntryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EntryError::Compile(error) => write!(f, "{error}"),
+            EntryError::NotExecutable => {
+                write!(f, "Program is not executable. Must evaluate to a function.")
+            }
+        }
     }
 }
+
+impl std::error::Error for EntryError {}
 
 /// Compile source into a Program and a nilary entry function: the program's top level,
 /// followed by a call of the function it evaluates to. The top level thus runs at boot, in
@@ -34,7 +42,7 @@ pub fn compile_entry(
     builtins: &quiver_core::builtins::BuiltinRegistry<quiver_io::NativeEffect>,
     options: quiver_compiler::compiler::CompileOptions,
     artifact_store: Option<std::rc::Rc<quiver_compiler::ArtifactStore>>,
-) -> Result<(Program, ModuleCache, usize), Box<dyn std::error::Error>> {
+) -> Result<(Program, ModuleCache, usize), EntryError> {
     let mut program = Program::new();
     let mut module_cache = ModuleCache::new();
     module_cache.artifact_store = artifact_store;
@@ -55,7 +63,7 @@ pub fn compile_entry(
         None, // no semantic recorder for the CLI
         options,
     )
-    .map_err(|e| format_compile_error(&e))?;
+    .map_err(EntryError::Compile)?;
 
     let instructions = compilation_result.instructions;
     let receive_type = compilation_result.receive_type;
@@ -64,7 +72,7 @@ pub fn compile_entry(
     let Some((call_result, call_receive)) =
         resolve_program_callable(&program, compilation_result.result_type)
     else {
-        return Err("Program is not executable. Must evaluate to a function.".into());
+        return Err(EntryError::NotExecutable);
     };
 
     // The entry runs the top level — leaving the program's function on the stack — then

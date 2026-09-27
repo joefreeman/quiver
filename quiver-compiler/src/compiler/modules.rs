@@ -239,10 +239,8 @@ impl ModuleCache {
             return Ok(cached_ast);
         }
 
-        let parsed = parser::parse(source).map_err(|e| Error::ModuleParse {
-            module: id.display(),
-            error: Box::new(e),
-        })?;
+        let parsed =
+            parser::parse(source).map_err(|e| Error::ModuleParse { error: Box::new(e) })?;
         // Strip/lift no-op blocks so a module compiles identically whether or not it has been
         // formatted (the formatter strips/keeps the same blocks). See `Compiler::compile`.
         let parsed = crate::simplify::normalize_blocks(
@@ -283,7 +281,10 @@ pub fn module_type_namespace(
     let resolved = resolver
         .resolve(from_package, module)
         .map_err(Error::ModuleLoad)?;
+    // Type resolution carries no positions, so an error is attributed to the module alone
+    // (a parse error still knows where it is).
     resolved_type_namespace(&resolved, resolver, module_cache, program)
+        .map_err(|error| error.in_module(module, &resolved, None))
 }
 
 /// [`module_type_namespace`] for a module that is already resolved.
