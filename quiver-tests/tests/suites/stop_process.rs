@@ -120,7 +120,7 @@ fn stop_resolves_blocked_evaluation_with_killed() {
         .expect("stop_process failed");
 
     match poll(&mut environment, request_id) {
-        RequestResult::Result(Err(Error::Killed)) => {}
+        RequestResult::Result(Err(Error::Killed(None))) => {}
         other => panic!("expected the Killed error, got {other:?}"),
     }
 }
@@ -142,7 +142,7 @@ fn stop_tears_down_spawned_children() {
         .stop_process(session_pid)
         .expect("stop_process failed");
     match poll(&mut environment, request_id) {
-        RequestResult::Result(Err(Error::Killed)) => {}
+        RequestResult::Result(Err(Error::Killed(None))) => {}
         other => panic!("expected the Killed error, got {other:?}"),
     }
 
@@ -261,7 +261,7 @@ fn stop_releases_a_listener_with_an_accept_in_flight() {
         .stop_process(repl.process_id())
         .expect("stop_process failed");
     match poll(&mut environment, request_id) {
-        RequestResult::Result(Err(Error::Killed)) => {}
+        RequestResult::Result(Err(Error::Killed(None))) => {}
         other => panic!("expected the Killed error, got {other:?}"),
     }
 

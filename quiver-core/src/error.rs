@@ -1,4 +1,5 @@
 use crate::process::RestrictedContext;
+use crate::wire::WireValue;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -112,10 +113,11 @@ pub enum Error {
     // contract whose verdict was nil, or an `assert`/`unreachable` helper.
     Panic(String),
 
-    // Terminated from outside: containment teardown of a terminated parent's subtree
-    // (and, later, an explicit `%proc.kill` or link propagation). Reified for awaiters
-    // as the `Killed` crash kind.
-    Killed,
+    // Terminated from outside: an explicit `%proc.kill`, link propagation, or containment
+    // teardown of a terminated parent's subtree. Reified for awaiters as the
+    // `Killed[reason]` crash kind; the reason is the data value `%proc.kill` was given,
+    // absent (nil) for every other kind of kill.
+    Killed(Option<Box<WireValue>>),
 
     // Scope management errors
     ScopeCountInvalid {
@@ -138,7 +140,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Panic(message) => f.write_str(message),
-            Error::Killed => f.write_str("killed"),
+            Error::Killed(_) => f.write_str("killed"),
             Error::TypeMismatch { expected, found } => {
                 write!(f, "type mismatch: expected {expected}, found {found}")
             }

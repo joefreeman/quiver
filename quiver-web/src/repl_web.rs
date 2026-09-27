@@ -739,7 +739,7 @@ impl Environment {
                 // A `Killed` result can only come from a host stop (`Repl.interrupt`) —
                 // no in-language kill reaches a persistent session process — so report
                 // it as the interruption it is rather than a runtime error.
-                let message = if matches!(e, quiver_core::error::Error::Killed) {
+                let message = if matches!(e, quiver_core::error::Error::Killed(_)) {
                     "Interrupted".to_string()
                 } else {
                     format!("Runtime error: {e}")

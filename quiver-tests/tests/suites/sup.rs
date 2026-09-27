@@ -169,12 +169,12 @@ fn test_killing_the_supervisor_tears_down_its_children() {
             // The declared message type spells the await grant (`-> []`): a declared
             // type grants only what it spells, and this test awaits the child.
             p1 = !#(@'int ![])
-            %proc.kill sup
+            %proc.kill [sup]
             r = !p1
-            r:crash<Killed>
+            r:crash<Killed()>
             "#,
         )
-        .expect("Killed");
+        .expect("Killed[reason: []]");
 }
 
 #[test]

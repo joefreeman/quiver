@@ -271,11 +271,13 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                 {
                     self.sender.send(Event::KillAction {
                         target: spawned_pid,
+                        reason: None,
                     })?;
                 }
             }
-            Command::KillProcess { id } => {
-                self.executor.kill(id, quiver_core::error::Error::Killed);
+            Command::KillProcess { id, reason } => {
+                self.executor
+                    .kill(id, quiver_core::error::Error::Killed(reason.map(Box::new)));
             }
             Command::StopProcess { id } => {
                 self.executor.stop(id);
@@ -291,7 +293,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     .and_then(|p| p.result.as_ref())
                 {
                     None => self.executor.add_link(target, peer),
-                    Some(Err(_)) => self.sender.send(Event::KillAction { target: peer })?,
+                    Some(Err(_)) => self.sender.send(Event::KillAction {
+                        target: peer,
+                        reason: None,
+                    })?,
                     Some(Ok(_)) => {}
                 }
             }
@@ -553,9 +558,13 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     subscribe,
                 })?;
             }
-            Action::Kill { target } => {
+            Action::Kill { target, reason } => {
                 // Fire-and-forget (the caller was answered Ok at the call site).
-                self.sender.send(Event::KillAction { target })?;
+                let reason = reason
+                    .map(|reason| self.executor.to_wire(&reason))
+                    .transpose()
+                    .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))?;
+                self.sender.send(Event::KillAction { target, reason })?;
             }
             Action::Link { caller, target } => {
                 self.sender.send(Event::LinkAction { caller, target })?;
@@ -952,7 +961,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                     // with it. Routed through the environment (like every delivery) so
                     // it crosses workers and resource cleanup sees it; the cascade
                     // continues at each child's own tombstone flush.
-                    self.sender.send(Event::KillAction { target: pid })?;
+                    self.sender.send(Event::KillAction {
+                        target: pid,
+                        reason: None,
+                    })?;
                 }
                 Watcher::Link { pid } => {
                     // A link fires on *abnormal* termination only (crash or kill) — a
@@ -963,7 +975,10 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
                         .get_process(target)
                         .is_some_and(|p| matches!(p.result, Some(Err(_))));
                     if abnormal {
-                        self.sender.send(Event::KillAction { target: pid })?;
+                        self.sender.send(Event::KillAction {
+                            target: pid,
+                            reason: None,
+                        })?;
                     }
                 }
                 Watcher::Registered => {

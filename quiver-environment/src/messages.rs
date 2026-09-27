@@ -143,9 +143,13 @@ pub enum Command<E: Effect> {
     Unsubscribe { subscription_id: u64 },
 
     /// Kill a process — containment teardown of a terminated parent's subtree, an
-    /// explicit `%proc.kill`, or link propagation. The worker records `Killed` as its
-    /// result and tombstones it, cascading to its own watchers.
-    KillProcess { id: ProcessId },
+    /// explicit `%proc.kill`, or link propagation. The worker records `Killed` (with the
+    /// reason an explicit kill gave) as its result and tombstones it, cascading to its
+    /// own watchers.
+    KillProcess {
+        id: ProcessId,
+        reason: Option<WireValue>,
+    },
 
     /// Stop a host-started (persistent) process — the host's session-teardown verb
     /// (REPL interrupt and reset), which `KillProcess` deliberately refuses. The worker
@@ -279,7 +283,10 @@ pub enum Event<E: Effect> {
     /// Action: kill a process (containment teardown, `%proc.kill`, or link
     /// propagation; routed like every cross-process effect, and the point where its
     /// resources are freed)
-    KillAction { target: ProcessId },
+    KillAction {
+        target: ProcessId,
+        reason: Option<WireValue>,
+    },
 
     /// Action: establish the target-side half of a link (`%proc.link` — the
     /// caller-side half was recorded at the call site)

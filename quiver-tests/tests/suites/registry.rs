@@ -91,7 +91,7 @@ fn name_frees_on_kill_and_can_be_reused() {
     quiver()
         .evaluate("p = @#[] { !'int } []; %registry.register [Restart, p]")
         .expect("Ok")
-        .then_evaluate("%proc.kill p; !p ~> =[]; %registry.lookup<@'int> Restart")
+        .then_evaluate("%proc.kill [p]; !p ~> =[]; %registry.lookup<@'int> Restart")
         .expect("[]")
         .then_evaluate("q = @#[] { !'int } []; %registry.register [Restart, q]")
         .expect("Ok");
@@ -106,7 +106,7 @@ fn cascade_teardown_frees_the_name() {
             "parent = @#(@Ready) { c = @#[] { !'int } []; %registry.register [Child, c]; \
              %proc.send [$, Ready]; !'bin } @; \
              !Ready; %registry.lookup<@'int !'int> Child ~> =((@'int !'int) & c); \
-             %proc.kill parent; !c ~> =[]; %registry.lookup<@'int> Child",
+             %proc.kill [parent]; !c ~> =[]; %registry.lookup<@'int> Child",
         )
         .expect("[]");
 }
@@ -119,7 +119,7 @@ fn all_names_of_a_process_free_together() {
         )
         .expect("Ok")
         .then_evaluate(
-            "%proc.kill p; !p ~> =[]; \
+            "%proc.kill [p]; !p ~> =[]; \
              [first: %registry.lookup<@'int> First, second: %registry.lookup<@'int> Second]",
         )
         .expect("[first: [], second: []]");

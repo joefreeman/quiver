@@ -1129,7 +1129,8 @@ r ~> {
 }   //= "boom"
 ```
 
-The payload is `Error[pid, message]`, `Panic[pid, message]` or `Killed`.
+The payload is `Error[pid, message]`, `Panic[pid, message]` or `Killed[reason]`, where the
+reason is whatever the killer passed to `%proc.kill`, or nil.
 
 ### Sampling state
 
@@ -1195,7 +1196,17 @@ travels upward, so a child's death is only ever observed by its parent.
 p = @#[] { !'int } []
 %proc.link p       //= Ok // fate-sharing: either dying abnormally kills the other
 %proc.detach p     //= Ok // relinquish ownership; p outlives this process
-%proc.kill p       //= Ok // terminate p and its subtree
+%proc.kill [p]     //= Ok // terminate p and its subtree
+```
+
+A kill may give a reason, which its awaiters read from the `Killed` payload. The reason
+must be data (no pids, refs, functions or resources), as it outlives the killer.
+
+```quiver
+p = @#[] { !'int } []
+%proc.kill [p, reason: Expired]
+r = !p
+r:crash<'%proc.crash>   //= Killed[reason: Expired]
 ```
 
 ### The registry

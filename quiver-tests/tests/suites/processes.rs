@@ -379,10 +379,10 @@ fn test_parent_termination_tears_down_children() {
             !a ~> =[b1, b2];
             r1 = !b1;
             r2 = !b2;
-            [r1:crash<Killed>, r2:crash<Killed>]
+            [r1:crash<Killed()>, r2:crash<Killed()>]
             "#,
         )
-        .expect("[Killed, Killed]");
+        .expect("[Killed[reason: []], Killed[reason: []]]");
 }
 
 #[test]
@@ -419,18 +419,49 @@ fn test_detach_requires_ownership() {
 fn test_kill_terminates_a_running_process() {
     // Retrieves with the `'%proc.crash` module alias (the documented general form):
     // the union admits any crash kind, and the expectation pins it to `Killed`. The
-    // neighbouring tests use narrow shapes (`(Killed)`, `(Panic(message: …))`), where
+    // neighbouring tests use narrow shapes (`Killed()`, `(Panic(message: …))`), where
     // the retrieval gate itself asserts the kind.
     quiver()
         .evaluate(
             r#"
             p = @#[] { !'int } [];
-            %proc.kill p;
+            %proc.kill [p];
             r = !p;
             r:crash<'%proc.crash>
             "#,
         )
-        .expect("Killed");
+        .expect("Killed[reason: []]");
+}
+
+#[test]
+fn test_kill_reason_reaches_awaiters() {
+    // The reason is delivered in the `Killed` payload. It is built at `reason: _`, so a
+    // field pattern (not a narrower checked retrieval) reads it.
+    quiver()
+        .evaluate(
+            r#"
+            p = @#[] { !'int } [];
+            %proc.kill [p, reason: Timeout[5000]];
+            r = !p;
+            r:crash<'%proc.crash> ~> =Killed[reason: Timeout[~]]
+            "#,
+        )
+        .expect("5000");
+}
+
+#[test]
+fn test_kill_reason_must_be_data() {
+    // The reason outlives the killer in the target's tombstone, so identity is refused.
+    quiver()
+        .evaluate(
+            r#"
+            p = @#[] { !'int } [];
+            %proc.kill [p, reason: [by: @]]
+            "#,
+        )
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "invalid kill reason: cannot encode a process: %data notation carries data only (integers, binaries, and tuples)".to_string(),
+        ));
 }
 
 #[test]
@@ -440,7 +471,7 @@ fn test_kill_of_completed_process_is_noop() {
             r#"
             p = @#[] { 42 } [];
             !p ~> =('int & v);
-            %proc.kill p;
+            %proc.kill [p];
             v
             "#,
         )
@@ -457,10 +488,10 @@ fn test_link_fires_on_abnormal_termination() {
             c = @#[] { %proc.link v; "die" ~> __panic__ ~ } [];
             rc = !c;
             rv = !v;
-            rv:crash<Killed>
+            rv:crash<Killed()>
             "#,
         )
-        .expect("Killed");
+        .expect("Killed[reason: []]");
 }
 
 #[test]
@@ -491,10 +522,10 @@ fn test_link_to_crashed_process_kills_immediately() {
             { ![50] | Ok };
             c = @#[] { %proc.link dead; !'int } [];
             r = !c;
-            r:crash<Killed>
+            r:crash<Killed()>
             "#,
         )
-        .expect("Killed");
+        .expect("Killed[reason: []]");
 }
 
 #[test]

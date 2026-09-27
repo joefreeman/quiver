@@ -561,7 +561,7 @@ impl<E: Effect> Executor<E> {
         process.persistent = false;
         let running = process.result.is_none();
         if running {
-            self.kill(pid, Error::Killed);
+            self.kill(pid, Error::Killed(None));
         } else {
             self.tombstone(pid);
         }
@@ -598,8 +598,15 @@ impl<E: Effect> Executor<E> {
             .clone()
             .ok_or_else(|| Error::InvalidArgument("crash table not installed".to_string()))?;
         let payload = match error {
-            // A teardown/kill answers the bare `Killed` kind.
-            Error::Killed => Value::tuple(table.killed_tuple, vec![]),
+            // A kill answers `Killed[reason]`: the reason `%proc.kill` was given, or nil
+            // for a plain kill, a link, or a teardown.
+            Error::Killed(reason) => {
+                let reason = match reason {
+                    Some(reason) => self.from_wire((**reason).clone())?,
+                    None => Value::nil(),
+                };
+                Value::tuple(table.killed_tuple, vec![reason])
+            }
             _ => {
                 let function_index = self
                     .process_function_indices
@@ -3798,7 +3805,7 @@ mod process_adjacency_tests {
     fn error_result_contributes_no_edges() {
         let mut ex = executor();
         let mut p = Process::new(false);
-        p.result = Some(Err(Box::new(Error::Killed))); // Error carries no Value
+        p.result = Some(Err(Box::new(Error::Killed(None)))); // Error carries no Value
         ex.processes.insert(0, p);
 
         let a = adjacency_of(&ex, 0);

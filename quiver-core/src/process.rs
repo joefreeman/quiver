@@ -150,8 +150,12 @@ pub enum Action<E: Effect> {
         target: ProcessId,
         subscribe: bool,
     },
-    /// Kill a process (`%proc.kill` — fire-and-forget; the caller is not parked)
-    Kill { target: ProcessId },
+    /// Kill a process (`%proc.kill` — fire-and-forget; the caller is not parked), with the
+    /// data value its awaiters see as the `Killed` reason
+    Kill {
+        target: ProcessId,
+        reason: Option<Value>,
+    },
     /// Establish the target-side half of a link (`%proc.link` — the caller-side half
     /// was recorded at the call site; fire-and-forget)
     Link {

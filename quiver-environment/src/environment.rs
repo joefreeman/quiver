@@ -1521,7 +1521,7 @@ impl<E: Effect> Environment<E> {
             Event::AwaitAction { awaiter, targets } => {
                 self.handle_await_processes(awaiter, targets)
             }
-            Event::KillAction { target } => self.handle_kill(target),
+            Event::KillAction { target, reason } => self.handle_kill(target, reason),
             Event::LinkAction { caller, target } => self.handle_link(caller, target),
             Event::ProcessResults { awaiter, results } => {
                 self.handle_process_results(awaiter, results)
@@ -2020,14 +2020,18 @@ impl<E: Effect> Environment<E> {
     /// environment reliably learns of it. (The process may still run a final slice
     /// before the command lands; an operation on a just-freed resource then fails,
     /// which only hastens the death already in progress.)
-    fn handle_kill(&mut self, target: ProcessId) -> Result<(), EnvironmentError> {
+    fn handle_kill(
+        &mut self,
+        target: ProcessId,
+        reason: Option<WireValue>,
+    ) -> Result<(), EnvironmentError> {
         self.cleanup_process_resources(target);
         let worker_id = self
             .process_router
             .get(&target)
             .ok_or(EnvironmentError::ProcessNotFound(target))?;
         self.workers[*worker_id]
-            .send(Command::KillProcess { id: target })
+            .send(Command::KillProcess { id: target, reason })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))
     }
 

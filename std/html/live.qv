@@ -1069,7 +1069,7 @@ exec_bounds = #[
   $drops ~> {
     | =Cons[kd, t] => {
       kd ~> =(vid: v, pid: p)
-      %proc.kill p
+      %proc.kill [p]
       %proc.send [app, Unroute[Str[v ~> .0]]]
       ^ [$assigns, t, app, me, $acc]
     }

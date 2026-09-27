@@ -142,7 +142,7 @@ loop = #'state {
     | =Drop[i] => {
       // Remove the row BEFORE the kill, so the watcher's report finds nothing.
       | %dict.get [$table, i] ~> =('row & r) => {
-        t2 = %dict.remove [$table, i]; r ~> =(pid: p); %proc.kill p; ^ $[..., table: t2]
+        t2 = %dict.remove [$table, i]; r ~> =(pid: p); %proc.kill [p]; ^ $[..., table: t2]
       }
       | ^ $
     }

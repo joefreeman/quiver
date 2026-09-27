@@ -190,9 +190,9 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
     /// Kill `target` (`%proc.kill`): fire-and-forget — the kill routes through the
     /// environment while the caller carries on. A self-kill lands at the next
     /// command-processing point, once the caller is back in the map.
-    pub fn kill(&mut self, target: ProcessId) -> Result<(), Error> {
+    pub fn kill(&mut self, target: ProcessId, reason: Option<Value>) -> Result<(), Error> {
         self.allow(Operation::Kill)?;
-        self.queue(Action::Kill { target });
+        self.queue(Action::Kill { target, reason });
         Ok(())
     }
 
@@ -1137,20 +1137,47 @@ pub fn builtin_process_detach<E: Effect>(
     Ok(Completion::Value(Value::ok()))
 }
 
-/// Kill a process (`%proc.kill`): always effective — there
-/// is no trap flag — and idempotent on an already-terminated target. Awaiters observe
-/// the `Killed` crash kind; the target's owned subtree is torn down with it.
+/// Kill a process (`%proc.kill [pid, reason]`): always effective — there is no trap
+/// flag — and idempotent on an already-terminated target. Awaiters observe the
+/// `Killed[reason]` crash kind; the target's owned subtree is torn down with it.
+///
+/// The reason must be data, as a registry key must: it outlives the killer in the
+/// target's tombstone, which the process collector does not trace, and it is delivered
+/// to every awaiter, so it can carry no identity (pid, ref, function) or resource.
 pub fn builtin_process_kill<E: Effect>(
     arg: &Value,
     ctx: &mut BuiltinContext<E>,
 ) -> Result<Completion<E>, Error> {
-    let Value::Process(target, _) = arg else {
+    let Value::Tuple(_, payload) = arg else {
         return Err(Error::TypeMismatch {
-            expected: "process".to_string(),
+            expected: "[process, reason]".to_string(),
             found: arg.type_name().to_string(),
         });
     };
-    ctx.kill(*target)?;
+    let [target, reason] = &payload[..] else {
+        return Err(Error::ArityMismatch {
+            expected: 2,
+            found: payload.len(),
+        });
+    };
+    let Value::Process(target, _) = target else {
+        return Err(Error::TypeMismatch {
+            expected: "process".to_string(),
+            found: target.type_name().to_string(),
+        });
+    };
+    let reason = if reason.is_nil() {
+        None
+    } else {
+        data::encode_value(reason, ctx, &mut String::new()).map_err(|error| match error {
+            Error::InvalidArgument(message) => {
+                Error::InvalidArgument(format!("invalid kill reason: {message}"))
+            }
+            other => other,
+        })?;
+        Some(reason.clone())
+    };
+    ctx.kill(*target, reason)?;
     Ok(Completion::Value(Value::ok()))
 }
 
@@ -1286,7 +1313,8 @@ pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     );
     register_builtin!(registry, "process_send", builtin_process_send, Purity::Process, send_param => ok.clone());
     register_builtin!(registry, "process_detach", builtin_process_detach, Purity::Process, pid.clone() => ok.clone());
-    register_builtin!(registry, "process_kill", builtin_process_kill, Purity::Process, pid.clone() => ok.clone());
+    let kill_param = TypeSpec::Tuple(None, vec![(None, pid.clone()), (None, TypeSpec::Top)]);
+    register_builtin!(registry, "process_kill", builtin_process_kill, Purity::Process, kill_param => ok.clone());
     register_builtin!(registry, "process_link", builtin_process_link, Purity::Process, pid => ok);
     // `track`'s polymorphic type `#(#[] -> 'v) -> 'v`: it takes a nilary thunk and returns
     // whatever the thunk returns. The `'v` variable is unified/substituted fresh per call
@@ -1312,7 +1340,7 @@ pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     registry.declare_crash(CrashDecl {
         error: TypeSpec::Tuple(Some("Error"), crash_fields(&str_spec)),
         panic: TypeSpec::Tuple(Some("Panic"), crash_fields(&str_spec)),
-        killed: TypeSpec::Tuple(Some("Killed"), vec![]),
+        killed: TypeSpec::Tuple(Some("Killed"), vec![(Some("reason"), TypeSpec::Top)]),
         str: str_spec,
         crash_key: "crash".to_string(),
         timeout_key: "timeout".to_string(),
