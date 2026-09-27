@@ -111,8 +111,10 @@ fn test_a_silent_peer_times_out_rather_than_hanging() {
     // await is the only thing that can be raced against a clock.
     quiver()
         .with_mock_io(MockIo::Stalls)
-        .evaluate(r#"%http/client.request [url: "http://e.com/", timeout: 50] ~> :timeout<'int>"#)
-        .expect("50");
+        .evaluate(
+            r#"%http/client.request [url: "http://e.com/", timeout: %time{ 50ms }] ~> :timeout<'%time.duration>"#,
+        )
+        .expect("Duration[50000000]");
 }
 
 #[test]

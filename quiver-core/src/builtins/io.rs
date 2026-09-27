@@ -304,9 +304,9 @@ fn system_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     vec![
         // random_bytes(n) -> bin: n cryptographically secure random bytes
         ("random_bytes", int.clone(), bin),
-        // time_now([]) -> int: milliseconds since the Unix epoch (UTC)
+        // time_now([]) -> int: nanoseconds since the Unix epoch (UTC)
         ("time_now", nil.clone(), int.clone()),
-        // time_monotonic([]) -> int: monotonic milliseconds from an arbitrary origin —
+        // time_monotonic([]) -> int: monotonic nanoseconds from an arbitrary origin —
         // for measuring durations; unrelated to (and steadier than) the wall clock
         ("time_monotonic", nil, int),
     ]

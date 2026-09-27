@@ -44,19 +44,21 @@ pub fn builtin_random_bytes(
     Ok(Completion::Value(Value::Binary(binary)))
 }
 
-/// time_now([]) -> int: milliseconds since the Unix epoch (UTC).
+/// time_now([]) -> int: nanoseconds since the Unix epoch (UTC).
 pub fn builtin_time_now(
     _arg: &Value,
     _ctx: &mut BuiltinContext<NativeEffect>,
 ) -> Result<Completion<NativeEffect>, Error> {
-    let ms = SystemTime::now()
+    let ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| Error::InvalidArgument(format!("system clock before epoch: {e}")))?
-        .as_millis() as i64;
-    Ok(Completion::Value(Value::int(ms)))
+        .as_nanos();
+    Ok(Completion::Value(Value::int(
+        i64::try_from(ns).expect("system clock beyond 2262"),
+    )))
 }
 
-/// time_monotonic([]) -> int: milliseconds since an arbitrary per-run origin. Steady (never
+/// time_monotonic([]) -> int: nanoseconds since an arbitrary per-run origin. Steady (never
 /// steps backwards); only differences are meaningful.
 pub fn builtin_time_monotonic(
     _arg: &Value,
@@ -65,7 +67,7 @@ pub fn builtin_time_monotonic(
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     let origin = *ORIGIN.get_or_init(Instant::now);
     Ok(Completion::Value(Value::int(
-        origin.elapsed().as_millis() as i64
+        i64::try_from(origin.elapsed().as_nanos()).expect("monotonic clock overflow"),
     )))
 }
 

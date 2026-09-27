@@ -8066,8 +8066,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         self.codegen.instructions.truncate(tuple_at);
         if juggled {
-            self.codegen
-                .add_instruction(Instruction::rotate(field_count + 1));
+            // With no fields `X` is already on top, so dropping it needs no rotation.
+            if field_count > 0 {
+                self.codegen
+                    .add_instruction(Instruction::rotate(field_count + 1));
+            }
             self.codegen.add_instruction(Instruction::pop());
         }
         for source in &sources[field_count..] {

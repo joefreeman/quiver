@@ -199,7 +199,7 @@ fn test_system_only_host_runs_clocks_and_entropy() {
     // job: no effect backend, nothing parks, and `%time`/`%random` run unchanged.
     quiver()
         .scoped_system_only()
-        .evaluate(r#"%time.now [] ~> %num.gt? [~, 1700000000000]"#)
+        .evaluate(r#"%time.now [] ~> %time.to_unix ~ ~> %num.gt? [~, 1700000000]"#)
         .expect("Ok");
     quiver()
         .scoped_system_only()
@@ -208,8 +208,8 @@ fn test_system_only_host_runs_clocks_and_entropy() {
     // The pure half of the module composes over the host reading, as it does natively.
     quiver()
         .scoped_system_only()
-        .evaluate(r#"0 ~> %time.iso8601 ~"#)
-        .expect(r#""1970-01-01T00:00:00.000Z""#);
+        .evaluate(r#"%time.now [] ~> %time.utc ~ ~> .year ~> %num.gt? [~, 2024]"#)
+        .expect("Ok");
 }
 
 #[test]

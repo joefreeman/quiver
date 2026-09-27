@@ -474,7 +474,7 @@ fn test_sleep_leaves_the_mailbox_untouched() {
         .evaluate(
             r#"
             @ 7;
-            %proc.sleep 10;
+            %proc.sleep %time{ 10ms };
             !'int
             "#,
         )
@@ -488,8 +488,8 @@ fn test_send_after_delivers_unless_cancelled() {
     quiver()
         .evaluate(
             r#"
-            %proc.send_after [@, 1, after: 300];
-            t = %proc.send_after [@, 2, after: 200];
+            %proc.send_after [@, 1, after: %time{ 300ms }];
+            t = %proc.send_after [@, 2, after: %time{ 200ms }];
             %proc.kill [t];
             !'int
             "#,
@@ -504,7 +504,7 @@ fn test_send_after_is_cancelled_with_its_sender() {
         .evaluate(
             r#"
             me = @;
-            s = @[] { %proc.send_after [me, 1, after: 200]; Ok } [];
+            s = @[] { %proc.send_after [me, 1, after: %time{ 200ms }]; Ok } [];
             !s;
             { ![#'int, 300] }
             "#,
@@ -518,12 +518,12 @@ fn test_expire_kills_with_a_timeout_reason() {
         .evaluate(
             r#"
             p = @[] { !'int } [];
-            %proc.expire [p, 10];
+            %proc.expire [p, %time{ 10ms }];
             r = !p;
             r:crash<'%proc.crash>
             "#,
         )
-        .expect("Killed[reason: Timeout[10]]");
+        .expect("Killed[reason: Timeout[Duration[10000000]]]");
 }
 
 #[test]
@@ -534,7 +534,7 @@ fn test_expire_watchdog_ends_with_its_process() {
         .evaluate(
             r#"
             p = @[] { 5 } [];
-            w = %proc.expire [p, 100000];
+            w = %proc.expire [p, %time{ 100s }];
             [!p, ![w, 1000]]
             "#,
         )
@@ -550,8 +550,8 @@ fn test_race_answers_the_first_success() {
             %proc.race [%list{
               #[] { [] },
               #[] { __panic__ "x" },
-              #[] { %proc.sleep 20; 2 },
-              #[] { %proc.sleep 500; 3 },
+              #[] { %proc.sleep %time{ 20ms }; 2 },
+              #[] { %proc.sleep %time{ 500ms }; 3 },
             }]
             "#,
         )
@@ -579,7 +579,7 @@ fn test_race_kills_the_losers() {
         .evaluate(
             r#"
             me = @;
-            w = %proc.race [%list{ #[] { 1 }, #[] { %proc.sleep 200; me 9; 2 } }];
+            w = %proc.race [%list{ #[] { 1 }, #[] { %proc.sleep %time{ 200ms }; me 9; 2 } }];
             [w, { ![#'int, 300] }]
             "#,
         )
@@ -591,11 +591,11 @@ fn test_race_timeout_abandons_an_undecided_race() {
     quiver()
         .evaluate(
             r#"
-            r = %proc.race [%list{ #[] { %proc.sleep 1000; 1 } }, timeout: 10];
+            r = %proc.race [%list{ #[] { %proc.sleep %time{ 1000ms }; 1 } }, timeout: %time{ 10ms }];
             r:crash<'%proc.crash>
             "#,
         )
-        .expect("Killed[reason: Timeout[10]]");
+        .expect("Killed[reason: Timeout[Duration[10000000]]]");
 }
 
 #[test]

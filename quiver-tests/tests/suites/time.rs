@@ -1,62 +1,24 @@
+//! What a document cannot assert about `%time`.
+//!
+//! The module's semantics — the calendar, arithmetic, comparison, formatting and parsing —
+//! are specified and checked in `std/docs/time.md`, which `quiv test` runs. What stays here
+//! needs the harness: the host clocks read through real builtins (`with_io`), the purity
+//! gate that rejects them in restricted contexts, and where a `%time{ … }` compile error
+//! points.
+
 use crate::common::*;
-
-// `%time` (std/time.qv): the host clocks (`now`, `monotonic` — the
-// `__time_*__` builtins, so those tests need with_io) and the pure calendar functions
-// (`parts`, `http_date`, `iso8601`), which are fully deterministic.
-
-#[test]
-fn test_parts_of_epoch() {
-    quiver()
-        .evaluate("0 ~> %time.parts ~")
-        .expect("[year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0, millisecond: 0, weekday: Thu]");
-}
-
-#[test]
-fn test_parts_of_known_timestamp() {
-    // 2024-01-01T00:00:00Z was a Monday.
-    quiver()
-        .evaluate("1704067200000 ~> %time.parts ~")
-        .expect("[year: 2024, month: 1, day: 1, hour: 0, minute: 0, second: 0, millisecond: 0, weekday: Mon]");
-    // A leap day, late in the day: 2024-02-29T23:59:59.500Z (Thursday).
-    quiver()
-        .evaluate("1709251199500 ~> %time.parts ~")
-        .expect("[year: 2024, month: 2, day: 29, hour: 23, minute: 59, second: 59, millisecond: 500, weekday: Thu]");
-}
-
-#[test]
-fn test_parts_before_the_epoch() {
-    // Floored (not truncating) division: one millisecond before the epoch is the last
-    // millisecond of 1969, not a mangled day.
-    quiver()
-        .evaluate("-1 ~> %time.parts ~")
-        .expect("[year: 1969, month: 12, day: 31, hour: 23, minute: 59, second: 59, millisecond: 999, weekday: Wed]");
-}
-
-#[test]
-fn test_http_date() {
-    // RFC 9110's canonical IMF-fixdate example.
-    quiver()
-        .evaluate("784111777000 ~> %time.http_date ~")
-        .expect(r#""Sun, 06 Nov 1994 08:49:37 GMT""#);
-}
-
-#[test]
-fn test_iso8601() {
-    quiver()
-        .evaluate("1704067200123 ~> %time.iso8601 ~")
-        .expect(r#""2024-01-01T00:00:00.123Z""#);
-}
+use quiver_compiler::compiler::Error;
 
 #[test]
 fn test_now_is_plausible() {
-    // Between mid-2025 and the year 3000 — catches unit mistakes (seconds vs millis)
-    // and epoch mix-ups without depending on the actual date.
+    // Between mid-2025 and the year 3000 — catches unit mistakes (the builtin answers
+    // nanoseconds) and epoch mix-ups without depending on the actual date.
     quiver()
         .with_io()
         .evaluate(
             "n = %time.now [];
-             [n, 1750000000000] ~> __integer_compare__ ~ ~> =1;
-             [n, 32503680000000] ~> __integer_compare__ ~ ~> =-1;
+             %time.after? [n, %time{ 2025-06-01T00:00Z }];
+             %time.before? [n, %time{ 3000-01-01T00:00Z }];
              Ok",
         )
         .expect("Ok");
@@ -69,7 +31,8 @@ fn test_monotonic_never_goes_backwards() {
         .evaluate(
             "a = %time.monotonic [];
              b = %time.monotonic [];
-             [b, a] ~> __integer_compare__ ~ ~> =(0 | 1);
+             %time.compare [b, a] ~> =(0 | 1);
+             %time.since a ~> %time.compare [~, %time.nanos 0] ~> =(0 | 1);
              Ok",
         )
         .expect("Ok");
@@ -91,4 +54,37 @@ fn test_clock_rejected_in_receive_filter() {
             "#,
         )
         .expect("\"host read is not allowed in receive function\"");
+}
+
+#[test]
+fn test_dialect_error_points_into_the_content() {
+    // `2024-13-01` is well-formed but no date: the failure is positioned at the date's
+    // start, column 8 (after `%time{ `).
+    let error = quiver()
+        .evaluate("%time{ 2024-13-01 }")
+        .expect_located_compile_error();
+    assert_eq!(
+        error.error,
+        Error::DialectFailed {
+            module: "%time".to_string(),
+            message: "failed: a valid date".to_string(),
+        }
+    );
+    assert_eq!(error.span.map(|s| (s.line, s.column)), Some((1, 8)));
+}
+
+#[test]
+fn test_dialect_error_at_a_malformed_component() {
+    // The minutes are one digit short: the error points at them, not at the literal.
+    let error = quiver()
+        .evaluate("%time{ 09:3 }")
+        .expect_located_compile_error();
+    assert_eq!(
+        error.error,
+        Error::DialectFailed {
+            module: "%time".to_string(),
+            message: "failed: two-digit minutes".to_string(),
+        }
+    );
+    assert_eq!(error.span.map(|s| (s.line, s.column)), Some((1, 11)));
 }

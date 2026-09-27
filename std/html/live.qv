@@ -938,7 +938,7 @@ drain_changed = #[] { ![#'%proc.changed, 0] ~> { ='%proc.changed => ^ [] | Ok } 
 // supervisor gives up and the boundary falls back. A slow trickle of crashes never
 // exhausts it; a crash loop does.
 restart_budget = 3
-restart_window = 30000
+restart_window = %time{ 30s }
 
 crash_html = "<em>view crashed</em>"
 
@@ -1291,7 +1291,7 @@ component = #<'e, 'i, 's>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) 
 
 'app_pid = @'app_msg
 'claim = Found['app_pid] | Missing
-'reg_entry = [token: '%str, pid: 'app_pid, at: 'int]
+'reg_entry = [token: '%str, pid: 'app_pid, at: '%time.mono]
 'reg_entries = '%list<'reg_entry>
 'reg_msg = Register['%str, 'app_pid] | Claim['%str, @'claim]
 
@@ -1301,12 +1301,12 @@ component = #<'e, 'i, 's>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) 
 // and close it, costing the client a retry. The window where that can still happen is
 // an app *crashing* while parked.
 park_ms = 60000
-prune_ms = 45000
+prune_after = %time{ 45s }
 
-// The entries younger than the cutoff (order irrelevant).
-prune_entries = #[(items): 'reg_entries, (cutoff): 'int] {
+// The entries registered at or after the cutoff (order irrelevant).
+prune_entries = #[(items): 'reg_entries, (cutoff): '%time.mono] {
   cutoff = $cutoff
-  %list.filter [$items, #{ __integer_compare__ [$at, cutoff] ~> =(0 | 1); $ }]
+  %list.filter [$items, #{ %time.compare [$at, cutoff] ~> =(0 | 1); $ }]
 }
 
 // Remove and answer a token's entry: `[found: Found[pid] | Missing, rest: …]`.
@@ -1330,7 +1330,7 @@ take_entry = #[(items): 'reg_entries, (token): '%str, (acc): 'reg_entries] {
 registry_loop = #'reg_entries {
   !'reg_msg ~> =msg
   now = %time.monotonic []
-  live = __integer_subtract__ [now, prune_ms] ~> prune_entries [$, ~]
+  live = %time.sub [now, prune_after] ~> prune_entries [$, ~]
   msg ~> {
     | =Register[t, p] => ^ Cons[[token: t, pid: p, at: now], live]
     | =Claim[t, reply] => { (found, rest) = take_entry [live, t, Nil]; reply found; ^ rest }
@@ -1629,7 +1629,7 @@ compose = #[
   (token): ('%str | []),
   (registry): @'reg_msg,
   (routes): 'routes,
-  (end): 'int,
+  (end): '%time.mono,
   (req): '%http,
 ] {
   // The loop closes over these, so bind them locally.
@@ -1639,7 +1639,7 @@ compose = #[
     | composed? $page => {
       $page ~> =Str[pb]; handler Str[pb]; alife [$req, Parked, $buffer, $token, reg, $routes]
     }
-    | %num.lt? [%time.monotonic [], $end] => ![#'app_msg, settle_quiet] ~> {
+    | %time.before? [%time.monotonic [], $end] => ![#'app_msg, settle_quiet] ~> {
       | =Region[h] => {
         r = reprocess [h, %list.reverse $buffer, Nil]
         ^ [handler, r.0, r.1, $token, reg, $routes, $end, $req]
@@ -1713,7 +1713,7 @@ app_run = #[
     | =Dead[handler] => {
       v = st ["0", me, Reply[me]]
       %proc.link v
-      end = %num.add [%time.monotonic [], settle_deadline]
+      end = %time.add [%time.monotonic [], %time.ms settle_deadline]
       compose [handler, [], Nil, $token, $reg, Cons[[vid: "0", pid: v], Nil], end, $req]
     }
     | =Cold => {

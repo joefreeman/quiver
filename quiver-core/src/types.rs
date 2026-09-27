@@ -892,7 +892,8 @@ fn check_type_relation<T: TypeLookup>(
 
         // Union on left side: mode determines ALL vs ANY semantics
         (Type::Union(variants), _) => {
-            // Insert assumption for recursive types
+            // The coinductive hypothesis for recursive types, scoped to this pair's own proof
+            // (see the union-on-right arm).
             assumptions.insert(key);
 
             // A union is a binder its members' `^` count back to, on this side's stack (see the
@@ -907,6 +908,7 @@ fn check_type_relation<T: TypeLookup>(
                 }),
             };
             stacks.left.leave(self_id);
+            assumptions.remove(&key);
             result
         }
 
@@ -916,6 +918,12 @@ fn check_type_relation<T: TypeLookup>(
             // that returns to this same pair — e.g. a recursive type reached through a
             // union-on-right then a cycle — terminates at the assumption check above instead of
             // recursing without bound.
+            //
+            // A hypothesis holds only within the proof of its own pair, so it is retracted once
+            // that is decided. Left in place, one made inside an alternative that failed is
+            // taken as established by a later sibling: proving `[D | [], P]` against
+            // `[D, P] | [T, U] | [T, P]`, the `[T, U]` attempt assumes `D | [] <: T`, and the
+            // `[T, P]` attempt would then accept the nil the assumption never proved.
             assumptions.insert(key);
 
             // Push unconditionally, even for a union already on the stack. A `Cycle(n)` is
@@ -931,6 +939,7 @@ fn check_type_relation<T: TypeLookup>(
                 check_type_relation(self_id, variant_id, lookup, mode, assumptions, stacks)
             });
             stacks.right.leave(pattern_id);
+            assumptions.remove(&key);
             result
         }
 

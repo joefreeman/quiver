@@ -67,15 +67,19 @@ pub fn builtin_random_bytes(
     Ok(Completion::Value(Value::Binary(binary)))
 }
 
-/// time_now([]) -> int: milliseconds since the Unix epoch (UTC).
+/// time_now([]) -> int: nanoseconds since the Unix epoch (UTC), at the millisecond resolution
+/// `Date.now()` gives.
 pub fn builtin_time_now(
     _arg: &Value,
     _ctx: &mut BuiltinContext<WebEffect>,
 ) -> Result<Completion<WebEffect>, Error> {
-    Ok(Completion::Value(Value::int(js_sys::Date::now() as i64)))
+    Ok(Completion::Value(Value::int(
+        js_sys::Date::now() as i64 * 1_000_000,
+    )))
 }
 
-/// time_monotonic([]) -> int: milliseconds since an arbitrary origin, steady.
+/// time_monotonic([]) -> int: nanoseconds since an arbitrary origin, steady, at the (browser-
+/// coarsened) resolution of `performance.now()`.
 ///
 /// `performance.now()` alone is measured from the *context's* start, so a process that moved
 /// between workers would see the origin jump. Adding `timeOrigin` puts every context on one
@@ -87,7 +91,7 @@ pub fn builtin_time_monotonic(
 ) -> Result<Completion<WebEffect>, Error> {
     let performance = global_property::<web_sys::Performance>("performance")?;
     let ms = performance.time_origin() + performance.now();
-    Ok(Completion::Value(Value::int(ms as i64)))
+    Ok(Completion::Value(Value::int((ms * 1_000_000.0) as i64)))
 }
 
 /// Attach the browser implementations of the system builtins (entropy + clocks).

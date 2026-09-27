@@ -15,7 +15,7 @@
 // watcher sees that crash as an ordinary Down: escalation is just crashing.
 //
 //   spec = [id: "worker", restart: Permanent, start: start_worker]
-//   sup = [children: %list{ spec }, max_restarts: 3, window: 5000] ~> %sup.start
+//   sup = [children: %list{ spec }, max_restarts: 3, window: %time{ 5s }] ~> %sup.start
 //
 // A start closure spawns the child, wires its watcher, and answers the (widened)
 // pid — a pid sits in argument position as a plain name:
@@ -41,10 +41,10 @@
 'msg = 'down | Add['spec, @'started] | Drop['%str]
 'specs = '%list<'spec>
 
-'stamps = '%list<'int>
+'stamps = '%list<'%time.mono>
 'row = [id: '%str, pid: @, spec: 'spec, restarts: 'stamps]
 'table = '%dict<'%str, 'row>
-'state = [table: 'table, max: 'int, window: 'int]
+'state = [table: 'table, max: 'int, window: '%time.duration]
 
 watch = #[(id): '%str, (child): @!_, (sup): @'down] {
   :doc "Spawns a watcher for a child: awaits it, classifies the outcome (Done, or Crashed with the '%proc.crash payload), and reports Down[id, pid, outcome] to the supervisor — the pid identifies WHICH incarnation went down, so a late report for a reused id is harmless. Call from a start closure, passing the child and supervisor by reference."
@@ -83,9 +83,9 @@ seed = #[(specs): 'specs, (sup): @'down] {
 // cutoff (the sliding intensity window), and allow while at most `max` remain.
 // `Allowed` carries the pruned stamps to store back. (Internal; exportable if an
 // embedded supervisor — a live-view boundary, say — ever wants to share the policy.)
-allow? = #[stamps: 'stamps, now: 'int, max: 'int, window: 'int] -> 'verdict {
-  cutoff = __integer_subtract__ [$now, $window]
-  recent = Cons[$now, %list.filter [$stamps, #{ __integer_compare__ [~, cutoff] ~> =1; $ }]]
+allow? = #[stamps: 'stamps, now: '%time.mono, max: 'int, window: '%time.duration] -> 'verdict {
+  cutoff = %time.sub [$now, $window]
+  recent = Cons[$now, %list.filter [$stamps, #{ %time.after? [~, cutoff]; $ }]]
   {
     | __integer_compare__ [%list.count recent, $max] ~> =1 => Exceeded
     | Allowed[recent]
@@ -149,12 +149,12 @@ loop = #'state {
   }
 }
 
-run = #[specs: 'specs, max: 'int, window: 'int] {
+run = #[specs: 'specs, max: 'int, window: '%time.duration] {
   ^loop [table: seed [$specs, @], max: $max, window: $window]
 }
 
-start = #[children: 'specs, max_restarts: 'int = 3, window: 'int = 5000] {
-  :doc "Starts a supervisor over the child specs (one_for_one): each child is restarted per its spec's restart type, at most max_restarts times (default 3) within window ms (default 5000) — beyond that the supervisor gives up and crashes, tearing down its subtree. The child set is dynamic: `add` a child, `drop` one. Answers the supervisor's pid, owned by the caller."
+start = #[children: 'specs, max_restarts: 'int = 3, window: '%time.duration = %time{ 5s }] {
+  :doc "Starts a supervisor over the child specs (one_for_one): each child is restarted per its spec's restart type, at most max_restarts times (default 3) within the window (default 5s) — beyond that the supervisor gives up and crashes, tearing down its subtree. The child set is dynamic: `add` a child, `drop` one. Answers the supervisor's pid, owned by the caller."
   @run [specs: $children, max: $max_restarts, window: $window]
 }
 

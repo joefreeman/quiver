@@ -26,7 +26,7 @@ fn test_supervisor_restarts_crashed_child() {
               w
             }
             spec = [id: "w", restart: Permanent, start: mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: %time{ 5s }] ~> %sup.start ~
             p1 = !#(@'int)
 p1 0
             p2 = !#(@'int)
@@ -55,7 +55,7 @@ fn test_restart_intensity_limit_escalates() {
               w
             }
             spec = [id: "w", restart: Permanent, start: mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 2, window: 5000] ~> %sup.start ~
+            sup = [children: Cons[spec, Nil], max_restarts: 2, window: %time{ 5s }] ~> %sup.start ~
             p1 = !#(@'int);p1 0
             p2 = !#(@'int);p2 0
             p3 = !#(@'int);p3 0
@@ -84,7 +84,7 @@ fn test_temporary_child_is_not_restarted() {
               w
             }
             spec = [id: "w", restart: Temporary, start: mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: %time{ 5s }] ~> %sup.start ~
             p1 = !#(@'int)
 p1 0
             { | ![#(@'int), 200] ~> =(@'int & p2) => "restarted" | "no restart" }
@@ -110,7 +110,7 @@ fn test_transient_child_restarts_on_crash() {
               w
             }
             spec = [id: "w", restart: Transient, start: mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: %time{ 5s }] ~> %sup.start ~
             p1 = !#(@'int)
 p1 0
             p2 = !#(@'int)
@@ -137,7 +137,7 @@ fn test_transient_child_not_restarted_after_normal_completion() {
               w
             }
             spec = [id: "w", restart: Transient, start: mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: %time{ 5s }] ~> %sup.start ~
             p1 = !#(@'int)
 p1 1
             { | ![#(@'int), 200] ~> =(@'int & p2) => "restarted" | "no restart" }
@@ -165,7 +165,7 @@ fn test_killing_the_supervisor_tears_down_its_children() {
               w
             }
             spec = [id: "w", restart: Permanent, start: mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: %time{ 5s }] ~> %sup.start ~
             // The declared message type spells the await grant (`-> []`): a declared
             // type grants only what it spells, and this test awaits the child.
             p1 = !#(@'int ![])
@@ -195,7 +195,7 @@ fn test_add_supervises_child_dynamically() {
               %sup.watch [id, w, sup]
               w
             }
-            sup = [children: Nil, max_restarts: 3, window: 5000] ~> %sup.start ~
+            sup = [children: Nil, max_restarts: 3, window: %time{ 5s }] ~> %sup.start ~
             v = %sup.add [sup, [id: "w", restart: Permanent, start: mk]]
             started? = v ~> { =Started[_] => Ok | [] }
             p1 = !#(@'int)
@@ -221,7 +221,7 @@ fn test_add_duplicate_id_rejected() {
               w
             }
             spec = [id: "w", restart: Permanent, start: mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: %time{ 5s }] ~> %sup.start ~
             !#(@'int)
             %sup.add [sup, spec]
             "#,
@@ -248,7 +248,7 @@ fn test_drop_forgets_and_id_is_reusable() {
               w
             }
             spec = [id: "w", restart: Permanent, start: mk]
-            sup = [children: Cons[spec, Nil], max_restarts: 3, window: 5000] ~> %sup.start ~
+            sup = [children: Cons[spec, Nil], max_restarts: 3, window: %time{ 5s }] ~> %sup.start ~
             p1 = !#(@'int)
             %sup.drop [sup, "w"]
             v = %sup.add [sup, spec]

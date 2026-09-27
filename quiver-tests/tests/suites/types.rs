@@ -2013,3 +2013,52 @@ fn test_union_of_functions_keeps_the_narrower_calling_convention() {
         )
         .expect_type_mismatch();
 }
+
+#[test]
+fn test_union_argument_must_fit_one_parameter_member_per_value() {
+    // The `[[], P]` case of the argument fits no member. Proving `[T, U]` fails on its
+    // second field after assuming `D['int] | [] <: T['int]`; that assumption must not
+    // survive to vouch for the first field of `[T, P]`.
+    quiver()
+        .evaluate(
+            "mk = #'int { | =0 => [] | D[$] }
+             f = #([D['int], P] | [T['int], U] | [T['int], P]) { Nope }
+             f [mk 5, P]",
+        )
+        .expect_type_mismatch();
+    quiver()
+        .evaluate(
+            "mk = #'int { | =0 => [] | D[$] }
+             f = #([D['int], P] | [T['int], U] | [T['int], P]) {
+               | =[D[n], P] => n
+               | =[T[_], U] => 0
+               | =[T[_], P] => 1
+             }
+             f [mk 5, P]",
+        )
+        .expect_type_mismatch();
+    // A member that does admit the nil still accepts it.
+    quiver()
+        .evaluate(
+            "mk = #'int { | =0 => [] | D[$] }
+             f = #([(D['int] | []), P] | [T['int], U] | [T['int], P]) { Ok }
+             f [mk 5, P]",
+        )
+        .expect("Ok");
+}
+
+#[test]
+fn test_union_parameter_dispatch_keeps_the_matched_members_result() {
+    quiver()
+        .evaluate(
+            "f = #([I['int], D] | [T['int], P]) { | =[I[n], D] => n | =[T[_], P] => Other }
+             f [I[4], D] ~> %num.add [~, 1]",
+        )
+        .expect("5");
+    quiver()
+        .evaluate(
+            "f = #([I['int], D] | [T['int], P]) { | =[I[n], D] => n | =[T[_], P] => Other }
+             f [T[4], P] ~> %num.add [~, 1]",
+        )
+        .expect_type_mismatch();
+}

@@ -1,102 +1,567 @@
-// Clocks and calendar arithmetic. Two host clocks: `now` — wall
-// time as milliseconds since the Unix epoch (UTC) — and `monotonic` — milliseconds
-// from an arbitrary per-run origin, steady, for measuring durations. Everything else
-// is pure: `parts` breaks an epoch timestamp into UTC calendar components (proleptic
-// Gregorian, exact for negative timestamps too), and the formatters render HTTP and
-// ISO 8601 date strings. No timezones: UTC only.
+// Time: instants on the UTC timeline, civil dates and times, exact durations and calendar
+// periods, and the clocks that read them.
+//
+// Every value has exactly one representation, so structural equality (and a pin) means
+// "the same time":
+//
+//   - an `Instant` is nanoseconds since the Unix epoch, and a `Mono` a monotonic reading in
+//     nanoseconds from an arbitrary per-run origin — the two never mix;
+//   - a `Duration` is an exact, signed count of nanoseconds;
+//   - a `Period` is a calendar span of months and days (a year is twelve months, a week
+//     seven days), whose length depends on where it is applied;
+//   - `Date`, `Time` and `DateTime` are civil (wall-calendar) values with no zone, their
+//     fields flat so that a function over `(year, month, day)` reads any of them.
+//
+// Moving between civil and absolute time always names the zone (`utc`, `from_utc`). The
+// calendar is proleptic Gregorian, exact for any year; leap seconds are not modelled (Unix
+// time). Constructors and parsers validate, answering nil carrying `:error` — an
+// `OutOfRange` field, or an `Expected[offset, message]` for text.
 
-'weekday = Mon | Tue | Wed | Thu | Fri | Sat | Sun
-
-' = [
+'instant = Instant['int]
+'duration = Duration['int]
+'period = Period[months: 'int, days: 'int]
+'date = Date[year: 'int, month: 'int, day: 'int]
+'time = Time[hour: 'int, minute: 'int, second: 'int, nano: 'int]
+'datetime = DateTime[
   year: 'int,
   month: 'int,
   day: 'int,
   hour: 'int,
   minute: 'int,
   second: 'int,
-  millisecond: 'int,
-  weekday: 'weekday,
+  nano: 'int,
 ]
+'mono = Mono['int]
 
-// Floored division and modulo (the builtins truncate, which misplaces negative
-// timestamps by a day/second).
-fmod = #[(a): 'int, (b): 'int] {
-  __integer_modulo__ [__integer_add__ [__integer_modulo__ [$a, $b], $b], $b]
+' = 'instant
+
+'weekday = Mon | Tue | Wed | Thu | Fri | Sat | Sun
+
+// The civil fields a calendar or clock computation reads, whichever value carries them.
+'civil = (year: 'int, month: 'int, day: 'int)
+'clock = (hour: 'int, minute: 'int, second: 'int, nano: 'int)
+
+'field = Year | Month | Day | Hour | Minute | Second | Nano
+'error = OutOfRange['field] | Expected[offset: 'int, message: '%str]
+
+// What adding a period does when the day doesn't exist in the target month.
+'overflow = Clamp | Reject
+
+'clock_unit = Hour | Minute | Second | Millisecond | Microsecond
+'day_unit = Day | Hour | Minute | Second | Millisecond | Microsecond
+'date_unit = Year | Month | Week
+
+// Everything `parse` (and the `%time{ … }` dialect) can produce.
+'parsed = 'instant | 'date | 'time | 'datetime | 'duration | 'period
+
+iadd = __integer_add__
+isub = __integer_subtract__
+imul = __integer_multiply__
+icmp = __integer_compare__
+
+// Truncating division and remainder (toward zero).
+idiv = __integer_divide__
+imod = __integer_modulo__
+
+// Floored division and modulo, which place negative (pre-epoch) values correctly.
+fmod = #[(a): 'int, (b): 'int] { imod [iadd [imod [$a, $b], $b], $b] }
+fdiv = #[(a): 'int, (b): 'int] { idiv [isub [$a, fmod [$a, $b]], $b] }
+
+ns_us = 1000
+ns_ms = 1000000
+ns_s = 1000000000
+ns_m = 60000000000
+ns_h = 3600000000000
+ns_day = 86400000000000
+
+// --- the calendar --------------------------------------------------------------------
+
+leap_year? = #'int {
+  :doc "Whether the year is a leap year in the proleptic Gregorian calendar."
+  | fmod [$, 400] ~> =0 => Ok
+  | fmod [$, 100] ~> =0 => []
+  | fmod [$, 4] ~> =0 => Ok
+  | []
 }
 
-fdiv = #[(a): 'int, (b): 'int] { __integer_divide__ [__integer_subtract__ [$a, fmod [$a, $b]], $b] }
+days_in_month = #[(year): 'int, (month): 'int] {
+  :doc "The number of days in the month (1 to 12) of the year."
+  $month ~> {
+    | =2 => { | leap_year? $year => 29 | 28 }
+    | =(4 | 6 | 9 | 11) => 30
+    | 31
+  }
+}
 
-parts = #'int {
-  :doc "The UTC calendar components of an epoch-milliseconds timestamp: [year, month, day, hour, minute, second, millisecond, weekday]."
-  =total
-  millisecond = fmod [total, 1000]
-  secs = fdiv [total, 1000]
-  sod = fmod [secs, 86400]
-  days = fdiv [secs, 86400]
+days_in_year = #'int {
+  :doc "The number of days in the year: 365, or 366 in a leap year."
+  | leap_year? $ => 366
+  | 365
+}
 
-  hour = __integer_divide__ [sod, 3600]
+// Days since the epoch of a civil date (Howard Hinnant's days_from_civil).
+days_of = #'civil {
+  y = { | icmp [$month, 2] ~> =(-1 | 0) => isub [$year, 1] | $year }
+  era = fdiv [y, 400]
+  yoe = isub [y, imul [era, 400]]
+  mp = fmod [iadd [$month, 9], 12]
+  doy = idiv [iadd [imul [153, mp], 2], 5] ~> iadd [~, $day] ~> isub [~, 1]
 
-  minute = __integer_divide__ [__integer_modulo__ [sod, 3600], 60]
+  doe =
+    imul [yoe, 365]
+    ~> iadd [~, idiv [yoe, 4]]
+    ~> isub [~, idiv [yoe, 100]]
+    ~> iadd [~, doy]
 
-  second = __integer_modulo__ [sod, 60]
+  iadd [imul [era, 146097], doe] ~> isub [~, 719468]
+}
 
-  weekday = fmod [__integer_add__ [days, 4], 7] ~> {
-    | =0 => Sun
+// The civil date of a day count since the epoch (Hinnant's civil_from_days).
+civil = #'int {
+  z = iadd [$, 719468]
+  era = fdiv [z, 146097]
+  doe = isub [z, imul [era, 146097]]
+
+  yoe =
+    isub [doe, idiv [doe, 1460]]
+    ~> iadd [~, idiv [doe, 36524]]
+    ~> isub [~, idiv [doe, 146096]]
+    ~> idiv [~, 365]
+
+  doy =
+    iadd [imul [365, yoe], idiv [yoe, 4]]
+    ~> isub [~, idiv [yoe, 100]]
+    ~> isub [doe, ~]
+
+  mp = idiv [iadd [imul [5, doy], 2], 153]
+  day = idiv [iadd [imul [153, mp], 2], 5] ~> isub [doy, ~] ~> iadd [~, 1]
+  month = { | icmp [mp, 10] ~> =-1 => iadd [mp, 3] | isub [mp, 9] }
+  y = iadd [yoe, imul [era, 400]]
+  year = { | icmp [month, 2] ~> =(-1 | 0) => iadd [y, 1] | y }
+  Date(year, month, day)
+}
+
+// Nanoseconds since midnight of a clock reading, and back.
+nanos_of = #'clock {
+  imul [$hour, ns_h]
+  ~> iadd [~, imul [$minute, ns_m]]
+  ~> iadd [~, imul [$second, ns_s]]
+  ~> iadd [~, $nano]
+}
+
+clock = #'int {
+  hour = idiv [$, ns_h]
+  minute = idiv [imod [$, ns_h], ns_m]
+  second = idiv [imod [$, ns_m], ns_s]
+  nano = imod [$, ns_s]
+  Time(hour, minute, second, nano)
+}
+
+// A civil date-time as nanoseconds since the epoch, read as UTC, and back.
+epoch_nanos = #('civil & 'clock) { iadd [imul [days_of $, ns_day], nanos_of $] }
+
+civil_of_nanos = #'int {
+  (year, month, day) = fdiv [$, ns_day] ~> civil
+  (hour, minute, second, nano) = fmod [$, ns_day] ~> clock
+  DateTime(year, month, day, hour, minute, second, nano)
+}
+
+// The ISO day of the week of a day count: Monday is 1, Sunday 7.
+iso_day = #'int { fmod [iadd [$, 3], 7] ~> iadd [~, 1] }
+
+weekday = #'civil {
+  :doc "The day of the week of a date (or anything with year, month and day fields)."
+  days_of $ ~> iso_day ~> {
     | =1 => Mon
     | =2 => Tue
     | =3 => Wed
     | =4 => Thu
     | =5 => Fri
-    | Sat
+    | =6 => Sat
+    | Sun
   }
-
-  // Civil-from-days (Howard Hinnant's algorithm), proleptic Gregorian.
-  z = __integer_add__ [days, 719468]
-  era = fdiv [z, 146097]
-
-  doe = __integer_subtract__ [z, __integer_multiply__ [era, 146097]]
-
-  yoe =
-    __integer_subtract__ [doe, __integer_divide__ [doe, 1460]]
-    ~> __integer_add__ [~, __integer_divide__ [doe, 36524]]
-    ~> __integer_subtract__ [~, __integer_divide__ [doe, 146096]]
-    ~> __integer_divide__ [~, 365]
-
-  y = __integer_add__ [yoe, __integer_multiply__ [era, 400]]
-
-  doy =
-    __integer_add__ [__integer_multiply__ [365, yoe], __integer_divide__ [yoe, 4]]
-    ~> __integer_subtract__ [~, __integer_divide__ [yoe, 100]]
-    ~> __integer_subtract__ [doe, ~]
-
-  mp = __integer_divide__ [__integer_add__ [__integer_multiply__ [5, doy], 2], 153]
-
-  day =
-    __integer_divide__ [__integer_add__ [__integer_multiply__ [153, mp], 2], 5]
-    ~> __integer_subtract__ [doy, ~]
-    ~> __integer_add__ [~, 1]
-
-  month = {
-    | __integer_compare__ [mp, 10] ~> =-1 => __integer_add__ [mp, 3]
-    | __integer_subtract__ [mp, 9]
-  }
-  year = {
-    | __integer_compare__ [month, 2] ~> =(-1 | 0) => __integer_add__ [y, 1]
-    | y
-  }
-
-  (year, month, day, hour, minute, second, millisecond, weekday)
 }
 
-pad2 = #'int {
-  | __integer_compare__ [$, 10] ~> =-1 => "0{%str.from_int $}"
-  | %str.from_int $
+day_of_year = #'civil {
+  :doc "The day of the year, from 1 for January 1st."
+  isub [days_of $, days_of [year: $year, month: 1, day: 1]] ~> iadd [~, 1]
 }
 
-pad3 = #'int {
-  | __integer_compare__ [$, 10] ~> =-1 => "00{%str.from_int $}"
-  | __integer_compare__ [$, 100] ~> =-1 => "0{%str.from_int $}"
-  | %str.from_int $
+iso_week = #'civil {
+  :doc "The ISO 8601 week-numbering year and week (1 to 53) of a date: weeks start on Monday, and week 1 is the one holding the year's first Thursday."
+  d = days_of $
+  thursday = iadd [d, isub [4, iso_day d]]
+  Date(year) = civil thursday
+  week = isub [thursday, days_of [year: year, month: 1, day: 1]] ~> idiv [~, 7] ~> iadd [~, 1]
+  [year: year, week: week]
+}
+
+// --- construction --------------------------------------------------------------------
+
+in_range = #[(value): 'int, (min): 'int, (max): 'int, (field): 'field] {
+  | icmp [$value, $min] ~> =(0 | 1); icmp [$value, $max] ~> =(-1 | 0) => Ok
+  | [] ~> { :error OutOfRange[$field] }
+}
+
+date = #[(year): 'int, (month): 'int, (day): 'int] {
+  :doc "The civil date, or nil carrying :error OutOfRange[field] when the month or day doesn't exist."
+  in_range [$month, 1, 12, Month]
+  in_range [$day, 1, days_in_month [$year, $month], Day]
+  Date[year: $year, month: $month, day: $day]
+}
+
+time = #[(hour): 'int, (minute): 'int = 0, (second): 'int = 0, (nano): 'int = 0] {
+  :doc "The time of day, or nil carrying :error OutOfRange[field] when a field is out of range. Minutes, seconds and nanoseconds default to zero."
+  in_range [$hour, 0, 23, Hour]
+  in_range [$minute, 0, 59, Minute]
+  in_range [$second, 0, 59, Second]
+  in_range [$nano, 0, 999999999, Nano]
+  Time[hour: $hour, minute: $minute, second: $second, nano: $nano]
+}
+
+datetime = #[
+  (year): 'int,
+  (month): 'int,
+  (day): 'int,
+  (hour): 'int = 0,
+  (minute): 'int = 0,
+  (second): 'int = 0,
+  (nano): 'int = 0,
+] {
+  :doc "The civil date and time, or nil carrying :error OutOfRange[field] when a field is out of range. The time fields default to midnight."
+  in_range [$month, 1, 12, Month]
+  in_range [$day, 1, days_in_month [$year, $month], Day]
+  in_range [$hour, 0, 23, Hour]
+  in_range [$minute, 0, 59, Minute]
+  in_range [$second, 0, 59, Second]
+  in_range [$nano, 0, 999999999, Nano]
+  DateTime[...$]
+}
+
+at = #[(date): 'civil, (time): 'clock] {
+  :doc "The date at the time of day, as a civil date-time."
+  DateTime[
+    year: $date.year,
+    month: $date.month,
+    day: $date.day,
+    hour: $time.hour,
+    minute: $time.minute,
+    second: $time.second,
+    nano: $time.nano,
+  ]
+}
+
+to_date = #'civil {
+  :doc "The date part of a date-time (or of anything with year, month and day fields)."
+  Date[year: $year, month: $month, day: $day]
+}
+
+to_time = #'clock {
+  :doc "The time-of-day part of a date-time (or of anything with hour, minute, second and nano fields)."
+  Time[hour: $hour, minute: $minute, second: $second, nano: $nano]
+}
+
+utc = #'instant {
+  :doc "The instant's civil date and time in UTC."
+  civil_of_nanos $0
+}
+
+from_utc = #('civil & 'clock) {
+  :doc "The instant at which UTC reads the civil date-time."
+  Instant[epoch_nanos $]
+}
+
+// --- spans ---------------------------------------------------------------------------
+
+neg = #('duration | 'period) {
+  :doc "The span negated: a duration of opposite sign, or a period with both components negated."
+  | =Duration[n] => Duration[isub [0, n]]
+  | =Period[months: m, days: d] => Period[months: isub [0, m], days: isub [0, d]]
+}
+
+abs = #'duration {
+  :doc "The duration's magnitude."
+  | icmp [$0, 0] ~> =-1 => Duration[isub [0, $0]]
+  | $
+}
+
+mul = #(['duration, 'int] | ['period, 'int]) {
+  :doc "The span scaled by an integer."
+  | =[Duration[n], k] => Duration[imul [n, k]]
+  | =[Period[months: m, days: d], k] => Period[months: imul [m, k], days: imul [d, k]]
+}
+
+// Months since year 0 of a civil date.
+month_count = #'civil { iadd [imul [$year, 12], isub [$month, 1]] }
+
+// A period applied to a civil date: months first, clamping the day into the target month,
+// then days.
+shift = #['civil, 'period] {
+  =[c, Period[months: pm, days: pd]]
+  total = iadd [month_count c, pm]
+  year = fdiv [total, 12]
+  month = iadd [fmod [total, 12], 1]
+  last = days_in_month [year, month]
+  day = { | icmp [c.day, last] ~> =1 => last | c.day }
+  days_of (year, month, day) ~> iadd [~, pd] ~> civil
+}
+
+// Whether a period's month shift keeps the date's day in the target month: Ok, or nil
+// carrying OutOfRange[Day] when the overflow policy rejects the clamp.
+fits = #['civil, 'period, 'overflow] {
+  =[c, Period(months), o]
+  total = iadd [month_count c, months]
+  last = days_in_month [fdiv [total, 12], iadd [fmod [total, 12], 1]]
+  {
+    | o ~> =Clamp => Ok
+    | icmp [c.day, last] ~> =(-1 | 0) => Ok
+    | [] ~> { :error OutOfRange[Day] }
+  }
+}
+
+'addable =
+  | ['instant, 'duration]
+  | ['mono, 'duration]
+  | ['duration, 'duration]
+  | ['period, 'period]
+  | ['time, 'duration]
+  | ['datetime, 'duration]
+  | ['date, 'period]
+  | ['datetime, 'period]
+  | ['date, 'period, overflow: 'overflow]
+  | ['datetime, 'period, overflow: 'overflow]
+
+add = #'addable {
+  :doc "Adds a span: a duration to an instant, monotonic reading, time of day (wrapping at midnight) or date-time, or to another duration; a period to a date or date-time, or to another period. A period moves the month first, clamping the day into a shorter month (Jan 31 + 1 month is Feb 28 or 29), then the days; `overflow: Reject` answers nil carrying :error OutOfRange[Day] instead of clamping."
+  | =[Instant[a], Duration[b]] => Instant[iadd [a, b]]
+  | =[Mono[a], Duration[b]] => Mono[iadd [a, b]]
+  | =[Duration[a], Duration[b]] => Duration[iadd [a, b]]
+  | =[Period[months: am, days: ad], Period[months: bm, days: bd]] =>
+    Period[months: iadd [am, bm], days: iadd [ad, bd]]
+  | =[('time & t), Duration[b]] => iadd [nanos_of t, b] ~> fmod [~, ns_day] ~> clock
+  | =[('datetime & t), Duration[b]] => iadd [epoch_nanos t, b] ~> civil_of_nanos
+  | =[('date & d), ('period & p)] => shift [d, p]
+  | =[('datetime & t), ('period & p)] => (year, month, day) = shift [t, p]; t[..., year: year, month: month, day: day]
+  | =[('date & d), ('period & p), overflow: o] => fits [d, p, o]; shift [d, p]
+  | =[('datetime & t), ('period & p), overflow: o] =>
+    fits [t, p, o]
+    (year, month, day) = shift [t, p]
+    t[..., year: year, month: month, day: day]
+}
+
+sub = #'addable {
+  :doc "Subtracts a span: `add` with the span negated, under the same pairings and overflow policy."
+  | =[('instant & a), ('duration & b)] => add [a, neg b]
+  | =[('mono & a), ('duration & b)] => add [a, neg b]
+  | =[('duration & a), ('duration & b)] => add [a, neg b]
+  | =[('period & a), ('period & b)] => add [a, neg b]
+  | =[('time & a), ('duration & b)] => add [a, neg b]
+  | =[('datetime & a), ('duration & b)] => add [a, neg b]
+  | =[('date & a), ('period & b)] => add [a, neg b]
+  | =[('datetime & a), ('period & b)] => add [a, neg b]
+  | =[('date & a), ('period & b), overflow: o] => add [a, neg b, overflow: o]
+  | =[('datetime & a), ('period & b), overflow: o] => add [a, neg b, overflow: o]
+}
+
+// The value's position on its own line, as one integer: nanoseconds for instants,
+// readings, durations, date-times (read as UTC) and times of day; days for dates.
+key = #('instant | 'mono | 'duration | 'datetime | 'date | 'time) {
+  | =Instant[n] => n
+  | =Mono[n] => n
+  | =Duration[n] => n
+  | =('datetime & t) => epoch_nanos t
+  | =('date & d) => days_of d
+  | =('time & t) => nanos_of t
+}
+
+diff = #(['instant, 'instant] | ['mono, 'mono] | ['datetime, 'datetime] | ['time, 'time]) {
+  :doc "The exact duration from the second value to the first (first minus second): between instants, monotonic readings, civil date-times (as if both were UTC), or times of day."
+  Duration[isub [key $0, key $1]]
+}
+
+between = #[(from): 'civil, (to): 'civil] {
+  :doc "The calendar period from one date to another, in months and days, such that adding it to `from` gives `to` whenever `to` is later."
+  total = isub [month_count $to, month_count $from]
+  days = isub [$to.day, $from.day]
+  {
+    | icmp [total, 0] ~> =1; icmp [days, 0] ~> =-1 => {
+      months = isub [total, 1]
+      moved = shift [$from, Period[months: months, days: 0]]
+      Period[months: months, days: isub [days_of $to, days_of moved]]
+    }
+    | icmp [total, 0] ~> =-1; icmp [days, 0] ~> =1 =>
+      Period[months: iadd [total, 1], days: isub [days, days_in_month [$to.year, $to.month]]]
+    | Period[months: total, days: days]
+  }
+}
+
+days_between = #[(from): 'civil, (to): 'civil] {
+  :doc "The number of days from one date to another; negative when `to` is earlier."
+  isub [days_of $to, days_of $from]
+}
+
+since = #'mono {
+  :doc "The duration elapsed since a monotonic reading."
+  Duration[isub [__time_monotonic__ [], $0]]
+}
+
+// --- comparison ----------------------------------------------------------------------
+
+'comparable =
+  | ['instant, 'instant]
+  | ['mono, 'mono]
+  | ['duration, 'duration]
+  | ['date, 'date]
+  | ['time, 'time]
+  | ['datetime, 'datetime]
+
+compare = #'comparable {
+  :doc "Compares two values of the same kind: -1 if the first is earlier (or shorter), 0 if equal, 1 if later. Periods have no order (a month is not a fixed number of days)."
+  icmp [key $0, key $1]
+}
+
+before? = #'comparable {
+  :doc "Whether the first value is earlier (or shorter) than the second."
+  icmp [key $0, key $1] ~> =-1; Ok
+}
+
+after? = #'comparable {
+  :doc "Whether the first value is later (or longer) than the second."
+  icmp [key $0, key $1] ~> =1; Ok
+}
+
+min = #'comparable {
+  :doc "The earlier (or shorter) of two values of the same kind; the first when equal."
+  | icmp [key $0, key $1] ~> =1 => $1
+  | $0
+}
+
+max = #'comparable {
+  :doc "The later (or longer) of two values of the same kind; the first when equal."
+  | icmp [key $0, key $1] ~> =-1 => $1
+  | $0
+}
+
+// --- truncation ----------------------------------------------------------------------
+
+unit_nanos = #'day_unit {
+  | =Day => ns_day
+  | =Hour => ns_h
+  | =Minute => ns_m
+  | =Second => ns_s
+  | =Millisecond => ns_ms
+  | ns_us
+}
+
+start_of = #['civil, 'date_unit] {
+  | =[c, Year] => Date[year: c.year, month: 1, day: 1]
+  | =[c, Month] => Date[year: c.year, month: c.month, day: 1]
+  | =[c, _] => days_of c ~> isub [~, isub [iso_day ~, 1]] ~> civil
+}
+
+truncate = #(
+  | ['instant, 'day_unit]
+  | ['duration, 'clock_unit]
+  | ['time, 'clock_unit]
+  | ['datetime, ('date_unit | 'day_unit)]
+  | ['date, 'date_unit]
+) {
+  :doc "The value truncated to a unit: the start of its day, hour, minute, second, millisecond or microsecond, or — for dates and date-times — of its week (Monday), month or year. Instants truncate on the UTC day; durations truncate toward zero."
+  | =[Instant[n], ('day_unit & u)] => Instant[isub [n, fmod [n, unit_nanos u]]]
+  | =[Duration[n], ('clock_unit & u)] => Duration[isub [n, imod [n, unit_nanos u]]]
+  | =[('time & t), ('clock_unit & u)] => nanos_of t ~> isub [~, imod [~, unit_nanos u]] ~> clock
+  | =[('datetime & t), ('date_unit & u)] => at [start_of [t, u], Time[hour: 0, minute: 0, second: 0, nano: 0]]
+  | =[('datetime & t), ('day_unit & u)] => epoch_nanos t ~> isub [~, fmod [~, unit_nanos u]] ~> civil_of_nanos
+  | =[('date & d), ('date_unit & u)] => start_of [d, u]
+}
+
+// --- formatting ----------------------------------------------------------------------
+
+pad_loop = #['%str, 'int] {
+  | icmp [%bin.length $0.0, $1] ~> =-1 => ^ ["0{$0}", $1]
+  | $0
+}
+
+// The decimal digits of a non-negative integer, zero-padded to a width.
+pad = #[(n): 'int, (width): 'int] { pad_loop [%str.from_int $n, $width] }
+
+year_text = #'int {
+  | icmp [$, 0] ~> =-1 => "-{pad [isub [0, $], 4]}"
+  | icmp [$, 9999] ~> =1 => "+{%str.from_int $}"
+  | pad [$, 4]
+}
+
+// A fraction of a second: none when zero, else three, six or nine digits — the fewest
+// that are exact.
+fraction_text = #'int {
+  | =0 => ""
+  | imod [$, ns_ms] ~> =0 => ".{pad [idiv [$, ns_ms], 3]}"
+  | imod [$, ns_us] ~> =0 => ".{pad [idiv [$, ns_us], 6]}"
+  | ".{pad [$, 9]}"
+}
+
+date_text = #'civil { "{year_text $year}-{pad [$month, 2]}-{pad [$day, 2]}" }
+
+clock_text = #'clock {
+  "{pad [$hour, 2]}:{pad [$minute, 2]}:{pad [$second, 2]}{fraction_text $nano}"
+}
+
+// One component of unit notation: a count and its unit, or nothing when the count is zero.
+component = #['int, '%str] {
+  | $0 ~> =0 => ""
+  | "{%str.from_int $0}{$1}"
+}
+
+// The components of a positive duration, largest first.
+magnitude_text = #'int {
+  h = component [idiv [$, ns_h], "h"]
+  m = component [idiv [imod [$, ns_h], ns_m], "m"]
+  s = component [idiv [imod [$, ns_m], ns_s], "s"]
+  ms = component [idiv [imod [$, ns_s], ns_ms], "ms"]
+  us = component [idiv [imod [$, ns_ms], ns_us], "us"]
+  ns = component [imod [$, ns_us], "ns"]
+  "{h}{m}{s}{ms}{us}{ns}"
+}
+
+// A duration's components share its sign, so a negative one is written with a single
+// leading `-`.
+duration_text = #'int {
+  | =0 => "0s"
+  | icmp [$, 0] ~> =-1 => isub [0, $] ~> magnitude_text ~> "-{~}"
+  | magnitude_text $
+}
+
+sign_of = #'int {
+  | icmp [$, 0] ~> =-1 => -1
+  | 1
+}
+
+// A period's leading sign is its first component's; the days carry their own sign only
+// where it differs.
+period_text = #[(months): 'int, (days): 'int] {
+  | $months ~> =0; $days ~> =0 => "0d"
+  | {
+    lead = { | $months ~> =0 => sign_of $days | sign_of $months }
+    months = imul [$months, lead]
+    days = imul [$days, lead]
+    head = { | lead ~> =-1 => "-" | "" }
+    y = component [idiv [months, 12], "y"]
+    mo = component [imod [months, 12], "mo"]
+    d = component [idiv [days, sign_of days], "d"]
+    // Days against the lead: their own sign, which is the lead's opposite.
+    against = { | icmp [days, 0] ~> =-1; lead ~> =1 => "-" | icmp [days, 0] ~> =-1 => "+" | "" }
+    "{head}{y}{mo}{against}{d}"
+  }
+}
+
+format = #('instant | 'date | 'time | 'datetime | 'duration | 'period) {
+  :doc "The value as text, in the form `parse` and `%time\{ … }` read back: ISO 8601 for instants (RFC 3339, in UTC: \"2024-03-10T09:30:00Z\"), dates (\"2024-03-10\"), times (\"09:30:00.5\" gives \"09:30:00.500\") and date-times (\"2024-03-10T09:30:00\"); unit notation for durations (\"1h30m\", \"-250ms\") and periods (\"1y2mo\", \"3d\", \"1mo-3d\"). Fractional seconds print as three, six or nine digits, the fewest that are exact."
+  | =Instant[n] => civil_of_nanos n ~> "{date_text ~}T{clock_text ~}Z"
+  | =('datetime & t) => "{date_text t}T{clock_text t}"
+  | =('date & d) => date_text d
+  | =('time & t) => clock_text t
+  | =Duration[n] => duration_text n
+  | =Period[months: m, days: d] => period_text [m, d]
 }
 
 day_name = #'weekday {
@@ -124,24 +589,434 @@ month_name = #'int {
   | "Dec"
 }
 
-http_date = #'int {
-  :doc "An epoch-milliseconds timestamp as an HTTP date (IMF-fixdate), e.g. \"Sun, 06 Nov 1994 08:49:37 GMT\"."
-  p = parts $
-  "{day_name p.weekday}, {pad2 p.day} {month_name p.month} {%str.from_int p.year} {pad2 p.hour}:{pad2 p.minute}:{pad2 p.second} GMT"
+http_date = #'instant {
+  :doc "The instant as an HTTP date (IMF-fixdate, RFC 9110), to the second: \"Sun, 06 Nov 1994 08:49:37 GMT\"."
+  t = civil_of_nanos $0
+  wd = weekday t ~> day_name
+  mn = month_name t.month
+  "{wd}, {pad [t.day, 2]} {mn} {year_text t.year} {pad [t.hour, 2]}:{pad [t.minute, 2]}:{pad [t.second, 2]} GMT"
 }
 
-iso8601 = #'int {
-  :doc "An epoch-milliseconds timestamp as UTC ISO 8601, e.g. \"2024-01-01T00:00:00.123Z\"."
-  p = parts $
-  "{%str.from_int p.year}-{pad2 p.month}-{pad2 p.day}T{pad2 p.hour}:{pad2 p.minute}:{pad2 p.second}.{pad3 p.millisecond}Z"
+// --- parsing -------------------------------------------------------------------------
+
+// Parsing works over a binary and a byte position. A parser answers `[value, end]`, or nil
+// carrying `Expected[offset, message]` — the dialect failure contract, so the `%time{ … }`
+// dialect reports positioned compile errors.
+
+fail = #[(offset): 'int, (message): '%str] {
+  [] ~> { :error Expected[offset: $offset, message: $message] }
+}
+
+// The byte at a position, or nil past the end.
+peek = #['bin, 'int] { icmp [$1, %bin.length $0] ~> =-1; %bin.get_byte [$0, $1] }
+
+digit = #['bin, 'int] {
+  peek $ ~> =('int & b)
+  icmp [b, 48] ~> =(0 | 1)
+  icmp [b, 57] ~> =(-1 | 0)
+  isub [b, 48]
+}
+
+// The run of decimal digits at a position, as `[value, end]` (`[acc, pos]` when empty).
+run = #['bin, 'int, 'int] {
+  =[data, pos, acc]
+  {
+    | digit [data, pos] ~> =('int & d) => ^ [data, iadd [pos, 1], iadd [imul [acc, 10], d]]
+    | [acc, pos]
+  }
+}
+
+// Exactly `width` digits.
+fixed = #[(data): 'bin, (pos): 'int, (width): 'int, (what): '%str] {
+  | run [$data, $pos, 0] ~> =[v, e]; isub [e, $pos] ~> =^$width => [v, e]
+  | fail [$pos, $what]
+}
+
+expect = #[(data): 'bin, (pos): 'int, (b): 'int, (what): '%str] {
+  | peek [$data, $pos] ~> =^$b => iadd [$pos, 1]
+  | fail [$pos, $what]
+}
+
+// An optional sign: `[multiplier, end]`.
+sign_at = #['bin, 'int] {
+  | peek $ ~> =45 => [-1, iadd [$1, 1]]
+  | peek $ ~> =43 => [1, iadd [$1, 1]]
+  | [1, $1]
+}
+
+pow10 = #['int, 'int] {
+  | $0 ~> =0 => $1
+  | ^ [isub [$0, 1], imul [$1, 10]]
+}
+
+// `YYYY-MM-DD`, with an optionally signed year of four or more digits.
+date_at = #['bin, 'int] {
+  =[data, start]
+  sign_at [data, start] ~> =[s, p]
+  run [data, p, 0] ~> =[y, e]
+  { icmp [isub [e, p], 4] ~> =(0 | 1) | fail [p, "a four-digit year"] }
+  expect [data, e, 45, "'-'"] ~> =('int & p1)
+  fixed [data, p1, 2, "a two-digit month"] ~> =[month, p2]
+  expect [data, p2, 45, "'-'"] ~> =('int & p3)
+  fixed [data, p3, 2, "a two-digit day"] ~> =[day, p4]
+  { date [imul [s, y], month, day] | fail [start, "a valid date"] } ~> =('date & d)
+  [d, p4]
+}
+
+// `.` and one to nine digits, as nanoseconds.
+fraction_at = #['bin, 'int] {
+  =[data, start]
+  run [data, start, 0] ~> =[v, e]
+  n = isub [e, start]
+  { icmp [n, 1] ~> =(0 | 1); icmp [n, 9] ~> =(-1 | 0) | fail [start, "one to nine fraction digits"] }
+  [pow10 [isub [9, n], v], e]
+}
+
+// `:SS` and an optional fraction, after the minutes: `[[second, nano], end]`.
+seconds_at = #['bin, 'int] {
+  =[data, start]
+  fixed [data, start, 2, "two-digit seconds"] ~> =[second, p]
+  {
+    | peek [data, p] ~> =46 => fraction_at [data, iadd [p, 1]] ~> =[nano, e]; [[second, nano], e]
+    | [[second, 0], p]
+  }
+}
+
+// `HH:MM`, with optional seconds and fraction.
+time_at = #['bin, 'int] {
+  =[data, start]
+  fixed [data, start, 2, "a two-digit hour"] ~> =[hour, p1]
+  expect [data, p1, 58, "':'"] ~> =('int & p2)
+  fixed [data, p2, 2, "two-digit minutes"] ~> =[minute, p3]
+
+  {
+    | peek [data, p3] ~> =58 => seconds_at [data, iadd [p3, 1]]
+    | [[0, 0], p3]
+  }
+  ~> =[[second, nano], p4]
+
+  { time [hour, minute, second, nano] | fail [start, "a valid time"] } ~> =('time & t)
+  [t, p4]
+}
+
+// A UTC offset after a date-time: `Z`, or `+HH:MM` / `-HH:MM`, as `[seconds, end]`.
+offset_at = #['bin, 'int] {
+  =[data, start]
+  {
+    | peek [data, start] ~> =(90 | 122) => [0, iadd [start, 1]]
+    | {
+      sign_at [data, start] ~> =[s, p]
+      fixed [data, p, 2, "a two-digit offset hour"] ~> =[h, p1]
+      expect [data, p1, 58, "':'"] ~> =('int & p2)
+      fixed [data, p2, 2, "two-digit offset minutes"] ~> =[m, p3]
+      { in_range [h, 0, 23, Hour]; in_range [m, 0, 59, Minute] | fail [p, "a valid offset"] }
+      [imul [s, iadd [imul [h, 3600], imul [m, 60]]], p3]
+    }
+  }
+}
+
+// A date, date-time, or — with an offset — an instant.
+temporal_at = #['bin, 'int] {
+  =[data, start]
+  date_at [data, start] ~> =[d, p]
+  {
+    | peek [data, p] ~> =(84 | 116 | 32) => {
+      time_at [data, iadd [p, 1]] ~> =[t, q]
+      dt = at [d, t]
+      {
+        | peek [data, q] ~> =(90 | 122 | 43 | 45) => {
+          offset_at [data, q] ~> =[off, e]
+          [Instant[isub [epoch_nanos dt, imul [off, ns_s]]], e]
+        }
+        | [dt, q]
+      }
+    }
+    | [d, p]
+  }
+}
+
+// A unit in unit notation: an exact nanosecond multiplier, or a calendar one.
+unit_at = #['bin, 'int] {
+  =[data, p]
+  next = iadd [p, 1]
+  after = iadd [p, 2]
+  {
+    | peek [data, p] ~> =110; peek [data, next] ~> =115 => [Exact[1], after]
+    | peek [data, p] ~> =117; peek [data, next] ~> =115 => [Exact[ns_us], after]
+    | peek [data, p] ~> =109; peek [data, next] ~> =115 => [Exact[ns_ms], after]
+    | peek [data, p] ~> =109; peek [data, next] ~> =111 => [Months[1], after]
+    | peek [data, p] ~> =109 => [Exact[ns_m], next]
+    | peek [data, p] ~> =115 => [Exact[ns_s], next]
+    | peek [data, p] ~> =104 => [Exact[ns_h], next]
+    | peek [data, p] ~> =100 => [Days[1], next]
+    | peek [data, p] ~> =119 => [Days[7], next]
+    | peek [data, p] ~> =121 => [Months[12], next]
+    | fail [p, "a unit: ns, us, ms, s, m, h, d, w, mo or y"]
+  }
+}
+
+'span = [kind: (Unset | Exact | Calendar), sign: 'int, ns: 'int, months: 'int, days: 'int]
+
+tally = #[(acc): 'span, (n): 'int, (unit): (Exact['int] | Months['int] | Days['int]), (pos): 'int] {
+  | $unit ~> =Exact[k]; $acc.kind ~> =(Unset | Exact) =>
+    $acc[..., kind: Exact, ns: iadd [$acc.ns, imul [$n, k]]]
+  | $unit ~> =Months[k]; $acc.kind ~> =(Unset | Calendar) =>
+    $acc[..., kind: Calendar, months: iadd [$acc.months, imul [$n, k]]]
+  | $unit ~> =Days[k]; $acc.kind ~> =(Unset | Calendar) =>
+    $acc[..., kind: Calendar, days: iadd [$acc.days, imul [$n, k]]]
+  | fail [$pos, "a unit of the same kind: exact (ns to h) and calendar (d to y) units don't mix"]
+}
+
+// Unit notation: components, each a count and a unit, to the end of the input. A leading
+// sign applies to every component, and a later component may carry its own instead.
+span_at = #[(data): 'bin, (pos): 'int, (acc): 'span] {
+  sign_at [$data, $pos] ~> =[explicit, p]
+  s = { | p ~> =^$pos => $acc.sign | explicit }
+  lead = { | $acc.kind ~> =Unset => s | $acc.sign }
+  run [$data, p, 0] ~> =[v, e]
+  { icmp [e, p] ~> =1 | fail [p, "a number"] }
+  unit_at [$data, e] ~> =[u, q]
+  tally [$acc[..., sign: lead], imul [s, v], u, e] ~> =('span & next)
+  {
+    | peek [$data, q] ~> =\[] => ^ [$data, q, next]
+    | next ~> .kind ~> =Exact => [Duration[next.ns], q]
+    | [Period[months: next.months, days: next.days], q]
+  }
+}
+
+// Any parsable value at a position, told apart by its first number: four or more digits
+// then `-` begins a date, two digits then `:` a time, and anything else is unit notation.
+value_at = #['bin, 'int] {
+  =[data, start]
+  sign_at [data, start] ~> =[_, p]
+  run [data, p, 0] ~> =[_, e]
+  width = isub [e, p]
+  {
+    | peek [data, e] ~> =45; icmp [width, 4] ~> =(0 | 1) => temporal_at [data, start]
+    | peek [data, e] ~> =58; width ~> =2; p ~> =^start => time_at [data, start]
+    | span_at [data, start, [kind: Unset, sign: 1, ns: 0, months: 0, days: 0]]
+  }
+}
+
+// A value spanning the whole input from `start`.
+parse_from = #['bin, 'int] {
+  =[data, start]
+  value_at [data, start] ~> =[v, e]
+  { icmp [e, %bin.length data] ~> =0 | fail [e, "end of input"] }
+  v
+}
+
+parse = #'%str {
+  :doc "Reads a value from text in the forms `format` writes: an instant (a date-time with `Z` or a `+HH:MM`/`-HH:MM` offset, converted to UTC), a date, a date-time, a time (seconds optional), a duration or a period (unit notation: ns, us, ms, s, m, h for durations; d, w, mo, y for periods). A `T`, `t` or space separates date from time. Answers nil carrying :error Expected[offset, message] for malformed text or a date or time that doesn't exist."
+  parse_from [$0, 0]
+}
+
+month_number = #'%str {
+  | ="Jan" => 1
+  | ="Feb" => 2
+  | ="Mar" => 3
+  | ="Apr" => 4
+  | ="May" => 5
+  | ="Jun" => 6
+  | ="Jul" => 7
+  | ="Aug" => 8
+  | ="Sep" => 9
+  | ="Oct" => 10
+  | ="Nov" => 11
+  | ="Dec" => 12
+}
+
+parse_http_date = #'%str {
+  :doc "Reads an HTTP date (IMF-fixdate, RFC 9110: \"Sun, 06 Nov 1994 08:49:37 GMT\") as an instant; nil carrying :error Expected[offset, message] when malformed."
+  =Str[data]
+  { %bin.length data ~> =29 | fail [0, "an IMF-fixdate"] }
+  { Str[%bin.slice [data, 0, 3]] ~> =("Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat" | "Sun") | fail [0, "a day name"] }
+  expect [data, 3, 44, "','"] ~> =('int & p1)
+  expect [data, p1, 32, "' '"] ~> =('int & p2)
+  fixed [data, p2, 2, "a two-digit day"] ~> =[day, p3]
+  expect [data, p3, 32, "' '"]
+  { month_number Str[%bin.slice [data, 8, 11]] | fail [8, "a month name"] } ~> =('int & month)
+  expect [data, 11, 32, "' '"]
+  fixed [data, 12, 4, "a four-digit year"] ~> =[year, p4]
+  expect [data, p4, 32, "' '"] ~> =('int & p5)
+  time_at [data, p5] ~> =[t, p6]
+  { Str[%bin.slice [data, p6, 29]] ~> =" GMT" | fail [p6, "' GMT'"] }
+  { date [year, month, day] | fail [p2, "a valid date"] } ~> =('date & d)
+  at [d, t] ~> from_utc
+}
+
+// --- the `%time{ … }` dialect ----------------------------------------------------------
+
+// The content is read by `parse` at compile time, around surrounding whitespace, and spliced
+// as the constant it denotes; anything `parse` rejects is a compile error at its position.
+
+skip_space = #['bin, 'int] {
+  | peek $ ~> =(32 | 9 | 10 | 13) => ^ [$0, iadd [$1, 1]]
+  | $1
+}
+
+// The end of the content with trailing whitespace dropped.
+trim_end = #['bin, 'int] {
+  | icmp [$1, 0] ~> =1; peek [$0, isub [$1, 1]] ~> =(32 | 9 | 10 | 13) => ^ [$0, isub [$1, 1]]
+  | $1
+}
+
+label = #['%str, 'int] { Labeled[label: $0, value: $1] }
+
+literal = #'parsed {
+  | =Instant[n] => Tuple[name: "Instant", fields: Cons[n, Nil]]
+  | =Duration[n] => Tuple[name: "Duration", fields: Cons[n, Nil]]
+  | =Period[months: m, days: d] =>
+    Tuple[name: "Period", fields: Cons[label ["months", m], Cons[label ["days", d], Nil]]]
+  | =('date & d) =>
+    Tuple[
+      name: "Date",
+      fields: Cons[label ["year", d.year], Cons[label ["month", d.month], Cons[label ["day", d.day], Nil]]],
+    ]
+  | =('time & t) =>
+    Tuple[
+      name: "Time",
+      fields: Cons[
+        label ["hour", t.hour],
+        Cons[label ["minute", t.minute], Cons[label ["second", t.second], Cons[label ["nano", t.nano], Nil]]],
+      ],
+    ]
+  | =('datetime & t) =>
+    Tuple[
+      name: "DateTime",
+      fields: Cons[
+        label ["year", t.year],
+        Cons[
+          label ["month", t.month],
+          Cons[
+            label ["day", t.day],
+            Cons[
+              label ["hour", t.hour],
+              Cons[label ["minute", t.minute], Cons[label ["second", t.second], Cons[label ["nano", t.nano], Nil]]],
+            ],
+          ],
+        ],
+      ],
+    ]
+}
+
+time_dialect = #(content: '%str) {
+  $content ~> =Str[data]
+  end = trim_end [data, %bin.length data]
+  parse_from [%bin.slice [data, 0, end], skip_space [data, 0]] ~> =('parsed & v)
+  literal v
 }
 
 [
-  now: __time_now__ ~> { :doc "The wall-clock time as milliseconds since the Unix epoch (UTC)." },
-  monotonic: __time_monotonic__ ~> {
-    :doc "Milliseconds since an arbitrary per-run origin: steady, for measuring durations; unrelated to the wall clock."
+  now: #[] {
+    :doc "The current time, from the host's wall clock."
+    Instant[__time_now__ []]
   },
-  parts: parts,
+  monotonic: #[] {
+    :doc "A reading of the host's monotonic clock: steady, for measuring elapsed time with `since` or `diff`, and unrelated to the wall clock."
+    Mono[__time_monotonic__ []]
+  },
+  since: since,
+  epoch: Instant[0],
+  date: date,
+  time: time,
+  datetime: datetime,
+  at: at,
+  to_date: to_date,
+  to_time: to_time,
+  utc: utc,
+  from_utc: from_utc,
+  from_unix: #'int {
+    :doc "The instant a whole number of seconds after the Unix epoch."
+    Instant[imul [$, ns_s]]
+  },
+  to_unix: #'instant {
+    :doc "The whole seconds since the Unix epoch, rounded down."
+    fdiv [$0, ns_s]
+  },
+  from_unix_ms: #'int {
+    :doc "The instant a number of milliseconds after the Unix epoch."
+    Instant[imul [$, ns_ms]]
+  },
+  to_unix_ms: #'instant {
+    :doc "The milliseconds since the Unix epoch, rounded down."
+    fdiv [$0, ns_ms]
+  },
+  nanos: #'int {
+    :doc "A duration of nanoseconds."
+    Duration[$]
+  },
+  micros: #'int {
+    :doc "A duration of microseconds."
+    Duration[imul [$, ns_us]]
+  },
+  ms: #'int {
+    :doc "A duration of milliseconds."
+    Duration[imul [$, ns_ms]]
+  },
+  seconds: #'int {
+    :doc "A duration of seconds."
+    Duration[imul [$, ns_s]]
+  },
+  minutes: #'int {
+    :doc "A duration of minutes."
+    Duration[imul [$, ns_m]]
+  },
+  hours: #'int {
+    :doc "A duration of hours."
+    Duration[imul [$, ns_h]]
+  },
+  days: #'int {
+    :doc "A period of calendar days."
+    Period[months: 0, days: $]
+  },
+  weeks: #'int {
+    :doc "A period of weeks, as seven calendar days each."
+    Period[months: 0, days: imul [$, 7]]
+  },
+  months: #'int {
+    :doc "A period of calendar months."
+    Period[months: $, days: 0]
+  },
+  years: #'int {
+    :doc "A period of years, as twelve months each."
+    Period[months: imul [$, 12], days: 0]
+  },
+  to_nanos: #'duration {
+    :doc "The duration in nanoseconds."
+    $0
+  },
+  to_ms: #'duration {
+    :doc "The duration in whole milliseconds, truncated toward zero."
+    idiv [$0, ns_ms]
+  },
+  to_seconds: #'duration {
+    :doc "The duration in whole seconds, truncated toward zero."
+    idiv [$0, ns_s]
+  },
+  neg: neg,
+  abs: abs,
+  mul: mul,
+  add: add,
+  sub: sub,
+  diff: diff,
+  between: between,
+  days_between: days_between,
+  compare: compare,
+  before?: before?,
+  after?: after?,
+  min: min,
+  max: max,
+  truncate: truncate,
+  leap_year?: leap_year?,
+  days_in_month: days_in_month,
+  days_in_year: days_in_year,
+  weekday: weekday,
+  day_of_year: day_of_year,
+  iso_week: iso_week,
+  format: format,
+  parse: parse,
   http_date: http_date,
-  iso8601: iso8601,
+  parse_http_date: parse_http_date,
 ]
+~> { :dialect time_dialect }

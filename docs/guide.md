@@ -1293,8 +1293,8 @@ belongs to whoever set it, dies with them, and is cancelled by killing it.
 
 ```quiver
 tick = #[] {
-  %proc.send_after [@, Tick, after: 10]    // answers the timer, a process
-  %proc.sleep 20                           //= Ok
+  %proc.send_after [@, Tick, after: %time{ 10ms }]   // answers the timer, a process
+  %proc.sleep %time{ 20ms }                          //= Ok
   !Tick
 }
 tick []                                    //= Tick
@@ -1304,17 +1304,17 @@ tick []                                    //= Tick
 killed with a `Timeout` reason, and a watchdog whose process finishes first simply ends.
 
 ```quiver
-p = @[] { %proc.sleep 1000; Done } []
-%proc.expire [p, 10]
+p = @[] { %proc.sleep %time{ 1s }; Done } []
+%proc.expire [p, %time{ 10ms }]
 r = !p
-r:crash<'%proc.crash>                      //= Killed[reason: Timeout[10]]
+r:crash<'%proc.crash>                      //= Killed[reason: Timeout[Duration[10000000]]]
 ```
 
 `%proc.race` runs thunks in processes of their own and answers the first non-nil result,
 killing the others. It answers nil once every racer has failed.
 
 ```quiver
-%proc.race [%list{ #[] { %proc.sleep 500; Slow }, #[] { Fast } }]   //= Fast
+%proc.race [%list{ #[] { %proc.sleep %time{ 500ms }; Slow }, #[] { Fast } }]   //= Fast
 ```
 
 ### Filters and handlers
@@ -1605,9 +1605,10 @@ name = "world"
 ```
 
 The standard library ships `%num{ … }`, `%list{ … }`, `%dict{ … }`, `%json{ … }`,
-`%html{ … }` and `%html/live{ … }`. A dialect is an ordinary exported function built from `%parse`
-combinators, returning the code IR that `%meta` defines. `%html` exports its grammar seam
-so other modules can layer their own attribute policies over it.
+`%time{ … }`, `%html{ … }` and `%html/live{ … }`. A dialect is an ordinary exported
+function, usually built from `%parse` combinators, returning the code IR that `%meta`
+defines. `%html` exports its grammar seam so other modules can layer their own attribute
+policies over it.
 
 ## Built-ins
 
@@ -1661,7 +1662,7 @@ __integer_add__ [3, 4]                       //= 7
 | `%html` | an HTML grammar, node tree and renderer, plus `%html{ … }` |
 | `%html/live` | live views: `%html/live{ … }`, frames and patches |
 | `%hash` | cryptographic hashing |
-| `%time` | clocks and calendar arithmetic |
+| `%time` | instants, civil dates and times, durations and periods, clocks, and `%time{ … }` |
 | `%random` | randomness from the host's entropy source |
 
 Per-function documentation lives in each module's `:doc` annotations, which an editor

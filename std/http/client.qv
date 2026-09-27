@@ -105,6 +105,8 @@ follow_loop = #[
   }
 }
 
+default_timeout = %time{ 30s }
+
 // The whole request in its own process, under one deadline. An expiry is reported as
 // `:timeout`, as a select's timeout is, rather than as the kill that enforced it.
 bounded = #[
@@ -112,7 +114,7 @@ bounded = #[
   (method): '%http.method,
   (headers): '%http.pairs,
   (body): 'bin,
-  (timeout): 'int,
+  (timeout): '%time.duration,
   (redirects): 'int,
 ] {
   u = $url
@@ -124,7 +126,7 @@ bounded = #[
   %proc.expire [p, $timeout]
   r = !p
   {
-    | r:crash<'%proc.crash> ~> =Killed[reason: Timeout[ms]] => [] ~> { :timeout ms }
+    | r:crash<'%proc.crash> ~> =Killed[reason: Timeout[d]] => [] ~> { :timeout d }
     | r ~> =_
   }
 }
@@ -135,7 +137,7 @@ bounded = #[
     method: '%http.method = GET,
     headers: '%http.pairs = Nil,
     body: 'bin = <>,
-    timeout: 'int = 30000,
+    timeout: '%time.duration = default_timeout,
     redirects: 'int = 5,
   ] {
     :doc "Performs a request, following redirects. The timeout is a deadline for the whole request, redirects included. Nil on failure, carrying :error (exchange), :timeout (deadline) or :crash (the exchange died)."
@@ -144,16 +146,16 @@ bounded = #[
 
   get: #'%str {
     :doc "A GET for the URL, with default headers and timeout."
-    %url.parse $ ~> =('%url & u); bounded [u, GET, Nil, <>, 30000, 5]
+    %url.parse $ ~> =('%url & u); bounded [u, GET, Nil, <>, default_timeout, 5]
   },
 
   head: #'%str {
     :doc "A HEAD for the URL, with default headers and timeout."
-    %url.parse $ ~> =('%url & u); bounded [u, HEAD, Nil, <>, 30000, 5]
+    %url.parse $ ~> =('%url & u); bounded [u, HEAD, Nil, <>, default_timeout, 5]
   },
 
   post: #[(url): '%str, (body): 'bin, headers: '%http.pairs = Nil] {
     :doc "A POST of the body to the URL, with the default timeout."
-    %url.parse $url ~> =('%url & u); bounded [u, POST, $headers, $body, 30000, 5]
+    %url.parse $url ~> =('%url & u); bounded [u, POST, $headers, $body, default_timeout, 5]
   },
 ]

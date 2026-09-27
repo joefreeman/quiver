@@ -333,7 +333,7 @@ fn test_resource_cleanup_on_unawaited_completion() {
             }} [];
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & file);
             r Read[file];
-            %proc.sleep 100;
+            %proc.sleep %time{{ 100ms }};
             Done
         "#,
             path_str
@@ -388,7 +388,7 @@ fn test_race_answers_a_usable_resource() {
             r#"
             path = "{}" ~> .0;
             h = %proc.race [%list{{
-                #[] {{ %proc.sleep 10000; [path, 0, 0] ~> __file_open__ ~ }},
+                #[] {{ %proc.sleep %time{{ 10000ms }}; [path, 0, 0] ~> __file_open__ ~ }},
                 #[] {{ [path, 0, 0] ~> __file_open__ ~ }},
             }}];
             h ~> =(+File & f);
@@ -420,7 +420,7 @@ fn test_unawaited_result_resource_closes_with_the_owner() {
             r#"
             owner = @[] {{
                 c = @[] {{ ["{}" ~> .0, 0, 0] ~> __file_open__ ~ }} [];
-                %proc.sleep 50;
+                %proc.sleep %time{{ 50ms }};
                 Ok
             }} [];
             !owner
@@ -448,7 +448,7 @@ fn test_unawaited_result_resource_closes_on_reclamation() {
         .evaluate(&format!(
             r#"
             {{ @[] {{ ["{}" ~> .0, 0, 0] ~> __file_open__ ~ }} []; Ok }};
-            %proc.sleep 50;
+            %proc.sleep %time{{ 50ms }};
             Done
         "#,
             path_str

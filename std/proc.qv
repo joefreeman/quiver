@@ -19,28 +19,36 @@ kill = #[(pid): @, reason: _ = []] {
   __process_kill__ [$pid, $reason]
 }
 
+// A duration as the milliseconds a select waits: rounded up, so a timer never fires early,
+// and none for a duration that isn't positive.
+wait_ms = #'%time.duration {
+  | __integer_compare__ [$0, 0] ~> =(-1 | 0) => 0
+  | __integer_divide__ [__integer_add__ [$0, 999999], 1000000]
+}
+
 // A timeout's nil would end the sequence, so the block recovers it: a sleep succeeds.
-sleep = #'int {
-  :doc "Suspends the calling process for the given number of milliseconds, answering Ok. Its mailbox is untouched: messages arriving meanwhile stay queued."
-  { !$ | Ok }
+sleep = #'%time.duration {
+  :doc "Suspends the calling process for the duration (to the millisecond, rounded up), answering Ok. Its mailbox is untouched: messages arriving meanwhile stay queued."
+  { wait_ms $ ~> ![~] | Ok }
 }
 
 // The timer is an ordinary process, so ownership gives its semantics: it is torn down
 // with the sender, killing it cancels the send, and a resource in the message moves
 // into it (closed if it never fires).
-send_after = #<'m>[(to): @'m, (message): 'm, (after): 'int] -> (@!Ok) {
+send_after = #<'m>[(to): @'m, (message): 'm, (after): '%time.duration] -> (@!Ok) {
   :doc "Sends a message to a process after a delay, answering the timer: a process owned by the caller, which ends once it has sent. Kill it to cancel the send; it is also cancelled if the caller terminates first. The message is checked against the target's send grant now, and a resource in it moves to the timer at once."
   to = $to; message = $message; after = $after; @[] { sleep after; to message } []
 }
 
 // A watchdog races the process's completion against the deadline, so it ends as soon as
 // the process does rather than outliving it.
-expire = #[(pid): @!_, (after): 'int] -> (@!Ok) {
-  :doc "Gives a process a deadline: if it has not terminated within the given milliseconds, it is killed with reason Timeout[ms], which its awaiters observe as Killed[reason: Timeout[ms]]. Answers the watchdog, a process owned by the caller; kill it to lift the deadline. The deadline is lifted too if the caller terminates first, so a detached process outliving its spawner outlives the deadline as well."
+expire = #[(pid): @!_, (after): '%time.duration] -> (@!Ok) {
+  :doc "Gives a process a deadline: if it has not terminated within the duration, it is killed with reason Timeout[duration], which its awaiters observe as Killed[reason: Timeout[duration]]. Answers the watchdog, a process owned by the caller; kill it to lift the deadline. The deadline is lifted too if the caller terminates first, so a detached process outliving its spawner outlives the deadline as well."
   pid = $pid
   after = $after
+  ms = wait_ms after
   @[] {
-    r = ![pid, after]
+    r = ![pid, ms]
     {
       | r:timeout<'int> => kill [pid, reason: Timeout[after]]
       | Ok
@@ -53,8 +61,8 @@ expire = #[(pid): @!_, (after): 'int] -> (@!Ok) {
 // thunk in a process of its own, so a crash reaches the collector as a failure rather
 // than as silence. The collector is spawned before the racers because they are handed its
 // pid, which a spawn types from the collector's receive.
-race = #<'r>[(racers): '%list<#[] -> 'r>, timeout: ('int | []) = []] {
-  :doc "Runs each thunk in its own process and answers the first non-nil result; nil and crashed results count as failures, and the race answers nil once every racer has failed (at once, for no racers). The losers are killed as soon as it is decided. With a timeout, a race still undecided after that many milliseconds is abandoned, answering nil carrying :crash Killed[reason: Timeout[ms]]."
+race = #<'r>[(racers): '%list<#[] -> 'r>, timeout: ('%time.duration | []) = []] {
+  :doc "Runs each thunk in its own process and answers the first non-nil result; nil and crashed results count as failures, and the race answers nil once every racer has failed (at once, for no racers). The losers are killed as soon as it is decided. With a timeout, a race still undecided after that duration is abandoned, answering nil carrying :crash Killed[reason: Timeout[duration]]."
   racers = $racers
   count = %list.count racers
   collect = #'int {
@@ -70,7 +78,7 @@ race = #<'r>[(racers): '%list<#[] -> 'r>, timeout: ('int | []) = []] {
     !c
   } []
   {
-    | $timeout ~> ='int ~> expire [scope, ~]
+    | $timeout ~> ='%time.duration ~> expire [scope, ~]
     | Ok
   }
   !scope

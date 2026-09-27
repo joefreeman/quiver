@@ -64,7 +64,10 @@ fn entry_function_spawns_are_unaffected() {
 fn top_level_host_reads_run_at_boot() {
     // Host reads at the top level happen per program run, at boot — nothing is baked
     // into the emitted bytecode, so determinism of compilation is preserved.
-    expect_output("t = %time.now []; #[] { t ~> { ='int => 1 | 2 } }", "1");
+    expect_output(
+        "t = %time.now []; #[] { t ~> { ='%time.instant => 1 | 2 } }",
+        "1",
+    );
     expect_output("r = %random.bytes 8; #[] { %bin.length r }", "8");
 }
 
