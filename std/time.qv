@@ -10,12 +10,16 @@
 //   - a `Period` is a calendar span of months and days (a year is twelve months, a week
 //     seven days), whose length depends on where it is applied;
 //   - `Date`, `Time` and `DateTime` are civil (wall-calendar) values with no zone, their
-//     fields flat so that a function over `(year, month, day)` reads any of them.
+//     fields flat so that a function over `(year, month, day)` reads any of them;
+//   - a `Zoned` value is an instant in a zone — `Utc`, a `Fixed` offset, or a named `Tz`
+//     zone carrying its TZif data — which gives it a civil date and time.
 //
-// Moving between civil and absolute time always names the zone (`utc`, `from_utc`). The
-// calendar is proleptic Gregorian, exact for any year; leap seconds are not modelled (Unix
+// Moving between civil and absolute time always names the zone (`utc`, `from_utc`, `zoned`).
+// The calendar is proleptic Gregorian, exact for any year; leap seconds are not modelled (Unix
 // time). Constructors and parsers validate, answering nil carrying `:error` — an
-// `OutOfRange` field, or an `Expected[offset, message]` for text.
+// `OutOfRange` field, an `Expected[offset, message]` for text, an `UnknownZone`, or a
+// `Skipped` or `Repeated` local time. Only `now`, `monotonic`, `since`, `zone`, `local_zone`
+// and `parse_zoned` read host state; the rest is pure.
 
 'instant = Instant['int]
 'duration = Duration['int]
@@ -41,8 +45,26 @@
 'civil = (year: 'int, month: 'int, day: 'int)
 'clock = (hour: 'int, minute: 'int, second: 'int, nano: 'int)
 
-'field = Year | Month | Day | Hour | Minute | Second | Nano
-'error = OutOfRange['field] | Expected[offset: 'int, message: '%str]
+'field = Year | Month | Day | Hour | Minute | Second | Nano | Offset
+'error =
+  | OutOfRange['field]
+  | Expected[offset: 'int, message: '%str]
+  | UnknownZone['%str]
+  | Skipped
+  | Repeated
+
+// A local time type: the offset from UTC in seconds, whether it is daylight saving time,
+// and its abbreviation.
+'ltt = [offset: 'int, dst?: (Ok | []), abbr: '%str]
+
+// A zone: UTC, a fixed offset from it in seconds, or a named zone with its rules — the local
+// time type in force at a time, in seconds since the epoch. A zoned value is an instant in a
+// zone, which gives it a civil date and time.
+'zone = Utc | Fixed['int] | Tz[name: '%str, rules: #'int -> 'ltt]
+'zoned = Zoned['instant, 'zone]
+
+// How to place a civil time that a zone's clocks skip or repeat.
+'disambiguation = Compatible | Earlier | Later | Reject
 
 // What adding a period does when the day doesn't exist in the target month.
 'overflow = Clamp | Reject
@@ -73,6 +95,8 @@ ns_s = 1000000000
 ns_m = 60000000000
 ns_h = 3600000000000
 ns_day = 86400000000000
+
+midnight = Time[hour: 0, minute: 0, second: 0, nano: 0]
 
 // --- the calendar --------------------------------------------------------------------
 
@@ -196,6 +220,86 @@ iso_week = #'civil {
   [year: year, week: week]
 }
 
+// --- reading text and bytes -------------------------------------------------------
+
+// Parsing works over a binary and a byte position. A parser answers `[value, end]`, or nil
+// carrying `Expected[offset, message]` — the dialect failure contract, so the `%time{ … }`
+// dialect reports positioned compile errors.
+
+fail = #[(offset): 'int, (message): '%str] {
+  [] ~> { :error Expected[offset: $offset, message: $message] }
+}
+
+// The byte at a position, or nil past the end.
+peek = #['bin, 'int] { icmp [$1, %bin.length $0] ~> =-1; %bin.get_byte [$0, $1] }
+
+// The text of `n` bytes at a position, or nil where it would run past the end.
+text_at = #['bin, 'int, 'int] {
+  e = iadd [$1, $2]
+  icmp [e, %bin.length $0] ~> =(-1 | 0)
+  Str[%bin.slice [$0, $1, e]]
+}
+
+char_at = #['bin, 'int] { text_at [$0, $1, 1] }
+
+// The byte a one-character text is.
+byte = #'%str { %bin.get_byte [$0, 0] }
+
+// The position of a one-character text at or after a position, or nil.
+find = #['bin, '%str, 'int] { __binary_index__ [$0, byte $1, $2] }
+
+// Whether a byte lies in the range of two one-character texts.
+between? = #['int, '%str, '%str] {
+  icmp [$0, byte $1] ~> =(0 | 1)
+  icmp [$0, byte $2] ~> =(-1 | 0)
+}
+
+digit = #['bin, 'int] {
+  peek $ ~> =('int & b)
+  between? [b, "0", "9"]
+  isub [b, byte "0"]
+}
+
+// The run of decimal digits at a position, as `[value, end]` (`[acc, pos]` when empty).
+run = #['bin, 'int, 'int] {
+  =[data, pos, acc]
+  {
+    | digit [data, pos] ~> =('int & d) => ^ [data, iadd [pos, 1], iadd [imul [acc, 10], d]]
+    | [acc, pos]
+  }
+}
+
+// Exactly `width` digits.
+fixed = #[(data): 'bin, (pos): 'int, (width): 'int, (what): '%str] {
+  | run [$data, $pos, 0] ~> =[v, e]; isub [e, $pos] ~> =^$width => [v, e]
+  | fail [$pos, $what]
+}
+
+expect = #[(data): 'bin, (pos): 'int, (c): '%str] {
+  | char_at [$data, $pos] ~> =^$c => iadd [$pos, 1]
+  | fail [$pos, "'{$c}'"]
+}
+
+// An optional sign: `[multiplier, end]`.
+sign_at = #['bin, 'int] {
+  | char_at $ ~> ="-" => [-1, iadd [$1, 1]]
+  | char_at $ ~> ="+" => [1, iadd [$1, 1]]
+  | [1, $1]
+}
+
+pow10 = #['int, 'int] {
+  | $0 ~> =0 => $1
+  | ^ [isub [$0, 1], imul [$1, 10]]
+}
+
+pad_loop = #['%str, 'int] {
+  | icmp [%bin.length $0.0, $1] ~> =-1 => ^ ["0{$0}", $1]
+  | $0
+}
+
+// The decimal digits of a non-negative integer, zero-padded to a width.
+pad = #[(n): 'int, (width): 'int] { pad_loop [%str.from_int $n, $width] }
+
 // --- construction --------------------------------------------------------------------
 
 in_range = #[(value): 'int, (min): 'int, (max): 'int, (field): 'field] {
@@ -203,19 +307,29 @@ in_range = #[(value): 'int, (min): 'int, (max): 'int, (field): 'field] {
   | [] ~> { :error OutOfRange[$field] }
 }
 
-date = #[(year): 'int, (month): 'int, (day): 'int] {
-  :doc "The civil date, or nil carrying :error OutOfRange[field] when the month or day doesn't exist."
+// Ok when the fields name a real date or time of day; nil carrying OutOfRange[field] for
+// the first that doesn't.
+valid_date = #'civil {
   in_range [$month, 1, 12, Month]
   in_range [$day, 1, days_in_month [$year, $month], Day]
+}
+
+valid_time = #'clock {
+  in_range [$hour, 0, 23, Hour]
+  in_range [$minute, 0, 59, Minute]
+  in_range [$second, 0, 59, Second]
+  in_range [$nano, 0, 999999999, Nano]
+}
+
+date = #[(year): 'int, (month): 'int, (day): 'int] {
+  :doc "The civil date, or nil carrying :error OutOfRange[field] when the month or day doesn't exist."
+  valid_date $
   Date[year: $year, month: $month, day: $day]
 }
 
 time = #[(hour): 'int, (minute): 'int = 0, (second): 'int = 0, (nano): 'int = 0] {
   :doc "The time of day, or nil carrying :error OutOfRange[field] when a field is out of range. Minutes, seconds and nanoseconds default to zero."
-  in_range [$hour, 0, 23, Hour]
-  in_range [$minute, 0, 59, Minute]
-  in_range [$second, 0, 59, Second]
-  in_range [$nano, 0, 999999999, Nano]
+  valid_time $
   Time[hour: $hour, minute: $minute, second: $second, nano: $nano]
 }
 
@@ -229,12 +343,8 @@ datetime = #[
   (nano): 'int = 0,
 ] {
   :doc "The civil date and time, or nil carrying :error OutOfRange[field] when a field is out of range. The time fields default to midnight."
-  in_range [$month, 1, 12, Month]
-  in_range [$day, 1, days_in_month [$year, $month], Day]
-  in_range [$hour, 0, 23, Hour]
-  in_range [$minute, 0, 59, Minute]
-  in_range [$second, 0, 59, Second]
-  in_range [$nano, 0, 999999999, Nano]
+  valid_date $
+  valid_time $
   DateTime[...$]
 }
 
@@ -269,6 +379,493 @@ utc = #'instant {
 from_utc = #('civil & 'clock) {
   :doc "The instant at which UTC reads the civil date-time."
   Instant[epoch_nanos $]
+}
+
+// --- zones ---------------------------------------------------------------------------
+
+// A zone's rules come from its TZif data (RFC 8536). `from_tzif` checks the data once and
+// closes a function over it, its layout and its footer's parsed rule: the transitions stay a
+// packed array of times, searched in place. Holding the rules as a function means no text
+// can decode into a zone — only `from_tzif` makes one — so a lookup can trust its data.
+
+// Two's-complement from an unsigned read of the given modulus.
+wrap = #['int, 'int] {
+  | icmp [$0, idiv [$1, 2]] ~> =-1 => $0
+  | isub [$0, $1]
+}
+
+uint = #['bin, 'int, 'int] { __binary_get__ [$0, $1, 0, $2] }
+
+'counts = [isut: 'int, isstd: 'int, leap: 'int, time: 'int, type: 'int, char: 'int]
+
+// The six counts of a header at a position.
+counts = #['bin, 'int] {
+  =[data, at]
+  [
+    isut: uint [data, iadd [at, 20], 32],
+    isstd: uint [data, iadd [at, 24], 32],
+    leap: uint [data, iadd [at, 28], 32],
+    time: uint [data, iadd [at, 32], 32],
+    type: uint [data, iadd [at, 36], 32],
+    char: uint [data, iadd [at, 40], 32],
+  ]
+}
+
+// The size of the data block after a header, for times `width` bytes wide.
+block_size = #['counts, 'int] {
+  =[c, width]
+  imul [c.time, iadd [width, 1]]
+  ~> iadd [~, imul [c.type, 6]]
+  ~> iadd [~, c.char]
+  ~> iadd [~, imul [c.leap, iadd [width, 4]]]
+  ~> iadd [~, c.isstd]
+  ~> iadd [~, c.isut]
+}
+
+// Where a TZif file's parts lie. A version 2+ file repeats its header and data with 64-bit
+// times after the version 1 block, and ends with a POSIX TZ string for times past its last
+// transition; a version 1 file has only 32-bit times and no footer.
+'layout = [
+  width: 'int,
+  count: 'int,
+  times: 'int,
+  indices: 'int,
+  types: 'int,
+  typecnt: 'int,
+  chars: 'int,
+  charcnt: 'int,
+  footer: 'bin,
+]
+
+place = #['int, 'counts, 'int, 'bin] {
+  =[header, c, width, footer]
+  times = iadd [header, 44]
+  indices = iadd [times, imul [c.time, width]]
+  types = iadd [indices, c.time]
+  chars = iadd [types, imul [c.type, 6]]
+  [
+    width: width,
+    count: c.time,
+    times: times,
+    indices: indices,
+    types: types,
+    typecnt: c.type,
+    chars: chars,
+    charcnt: c.char,
+    footer: footer,
+  ]
+}
+
+// The layout of TZif data that `check_layout` has passed.
+layout_of = #'bin -> 'layout {
+  =data
+  c1 = counts [data, 0]
+  v1_end = iadd [44, block_size [c1, 4]]
+  {
+    | %bin.get_byte [data, 4] ~> =0 => place [0, c1, 4, <>]
+    | {
+      c2 = counts [data, v1_end]
+      start = iadd [v1_end, 44] ~> iadd [~, block_size [c2, 8]] ~> iadd [~, 1]
+      stop = { find [data, "\n", start] | %bin.length data }
+      place [v1_end, c2, 8, %bin.slice [data, start, stop]]
+    }
+  }
+}
+
+// Whether the blocks the header counts fit the data, as does the footer of a version 2+
+// file; nil carrying `Expected[offset, message]` where they don't.
+check_layout = #'bin {
+  =data
+  len = %bin.length data
+  { icmp [len, 44] ~> =(0 | 1) | fail [0, "a TZif header"] }
+  { %bin.slice [data, 0, 4] ~> =<545a6966> | fail [0, "TZif data"] }
+  v1_end = counts [data, 0] ~> block_size [~, 4] ~> iadd [~, 44]
+  { icmp [len, v1_end] ~> =(0 | 1) | fail [44, "the version 1 data block"] }
+  {
+    | %bin.get_byte [data, 4] ~> =0 => Ok
+    | {
+      { icmp [len, iadd [v1_end, 44]] ~> =(0 | 1) | fail [v1_end, "a second header"] }
+      end = counts [data, v1_end] ~> block_size [~, 8] ~> iadd [~, iadd [v1_end, 44]]
+      { char_at [data, end] ~> ="\n" | fail [end, "a footer"] }
+      start = iadd [end, 1]
+      { find [data, "\n", start] | fail [start, "the footer's end"] }
+    }
+  }
+}
+
+transition_time = #['bin, 'layout, 'int] {
+  =[data, l, i]
+  bits = imul [l.width, 8]
+  modulus = { | bits ~> =32 => 4294967296 | 18446744073709551616 }
+  uint [data, iadd [l.times, imul [i, l.width]], bits] ~> wrap [~, modulus]
+}
+
+ltt_of = #['bin, 'layout, 'int] -> 'ltt {
+  =[data, l, i]
+  at = iadd [l.types, imul [i, 6]]
+  offset = uint [data, at, 32] ~> wrap [~, 4294967296]
+  dst = { | %bin.get_byte [data, iadd [at, 4]] ~> =0 => [] | Ok }
+  a = iadd [l.chars, %bin.get_byte [data, iadd [at, 5]]]
+  // `check_types` found each abbreviation's NUL within the block.
+  e = { __binary_index__ [data, 0, a] | a }
+  [offset: offset, dst?: dst, abbr: Str[%bin.slice [data, a, e]]]
+}
+
+// The number of transitions at or before a time, by binary search between `lo` and `hi`.
+count_upto = #['bin, 'layout, 'int, 'int, 'int] {
+  =[data, l, t, lo, hi]
+  {
+    | lo ~> =^hi => lo
+    | {
+      mid = idiv [iadd [lo, hi], 2]
+      {
+        | icmp [transition_time [data, l, mid], t] ~> =1 => ^ [data, l, t, lo, mid]
+        | ^ [data, l, t, iadd [mid, 1], hi]
+      }
+    }
+  }
+}
+
+// --- POSIX TZ strings: the rule past a zone's last transition ---
+
+// When a POSIX rule switches: a day of the year, and a local time of day in seconds.
+'day_rule = Month[month: 'int, week: 'int, weekday: 'int] | Julian['int] | Ordinal['int]
+'switch = [day: 'day_rule, time: 'int]
+'posix = [std: 'ltt, dst: ([ltt: 'ltt, start: 'switch, end: 'switch] | [])]
+
+letters_end = #['bin, 'int] {
+  | peek $ ~> =('int & b); { between? [b, "A", "Z"] | between? [b, "a", "z"] } => ^ [$0, iadd [$1, 1]]
+  | $1
+}
+
+// An abbreviation: three or more letters, or anything but `>` between `<` and `>`.
+abbr_at = #['bin, 'int] {
+  =[data, start]
+  {
+    | char_at [data, start] ~> ="<" => {
+      from = iadd [start, 1]
+      { find [data, ">", from] | fail [start, "a closing '>'"] } ~> =('int & e)
+      [Str[%bin.slice [data, from, e]], iadd [e, 1]]
+    }
+    | letters_end [data, start] ~> =('int & e); icmp [isub [e, start], 3] ~> =(0 | 1) =>
+      [Str[%bin.slice [data, start, e]], e]
+    | fail [start, "a zone abbreviation"]
+  }
+}
+
+// `[+-]h[h][:mm[:ss]]` as signed seconds (hours may run to 167, for a switch time).
+hms_at = #['bin, 'int] {
+  =[data, start]
+  sign_at [data, start] ~> =[s, p]
+  run [data, p, 0] ~> =[h, e1]
+  { icmp [e1, p] ~> =1 | fail [p, "hours"] }
+  {
+    | char_at [data, e1] ~> =":" => {
+      fixed [data, iadd [e1, 1], 2, "two-digit minutes"] ~> =[m, e2]
+      {
+        | char_at [data, e2] ~> =":" =>
+          fixed [data, iadd [e2, 1], 2, "two-digit seconds"] ~> =[sec, e3]; [[m, sec], e3]
+        | [[m, 0], e2]
+      }
+    }
+    | [[0, 0], e1]
+  }
+  ~> =[[m, sec], end]
+  [imul [s, iadd [imul [h, 3600], iadd [imul [m, 60], sec]]], end]
+}
+
+day_rule_at = #['bin, 'int] {
+  =[data, start]
+  next = iadd [start, 1]
+  {
+    | char_at [data, start] ~> ="M" => {
+      run [data, next, 0] ~> =[m, e1]
+      expect [data, e1, "."] ~> =('int & p1)
+      run [data, p1, 0] ~> =[w, e2]
+      expect [data, e2, "."] ~> =('int & p2)
+      run [data, p2, 0] ~> =[d, e3]
+      { in_range [m, 1, 12, Month]; in_range [w, 1, 5, Day]; in_range [d, 0, 6, Day] | fail [next, "a valid Mm.w.d rule"] }
+      [Month[month: m, week: w, weekday: d], e3]
+    }
+    | char_at [data, start] ~> ="J" => {
+      run [data, next, 0] ~> =[n, e]
+      { in_range [n, 1, 365, Day] | fail [next, "a Julian day, 1 to 365"] }
+      [Julian[n], e]
+    }
+    | run [data, start, 0] ~> =[n, e]; icmp [e, start] ~> =1 => {
+      { in_range [n, 0, 365, Day] | fail [start, "a day, 0 to 365"] }
+      [Ordinal[n], e]
+    }
+    | fail [start, "a rule date"]
+  }
+}
+
+// `,date[/time]`, the time defaulting to 02:00.
+switch_at = #['bin, 'int] {
+  =[data, start]
+  expect [data, start, ","] ~> =('int & p)
+  day_rule_at [data, p] ~> =[day, e]
+  {
+    | char_at [data, e] ~> ="/" => hms_at [data, iadd [e, 1]]
+    | [7200, e]
+  }
+  ~> =[time, end]
+  [[day: day, time: time], end]
+}
+
+// A POSIX offset is west-positive; a zone's is east-positive.
+posix_at = #'bin {
+  =data
+  abbr_at [data, 0] ~> =[std_abbr, p1]
+  hms_at [data, p1] ~> =[std_west, p2]
+  std = [offset: isub [0, std_west], dst?: [], abbr: std_abbr]
+  {
+    | peek [data, p2] ~> =\[] => {
+      abbr_at [data, p2] ~> =[dst_abbr, p3]
+      {
+        | { char_at [data, p3] ~> =("+" | "-") | digit [data, p3] } =>
+          hms_at [data, p3] ~> =[w, e]; [isub [0, w], e]
+        | [iadd [std.offset, 3600], p3]
+      }
+      ~> =[dst_offset, p4]
+      switch_at [data, p4] ~> =[start, p5]
+      switch_at [data, p5] ~> =[end, p6]
+      { icmp [p6, %bin.length data] ~> =0 | fail [p6, "the end of the TZ string"] }
+      [std: std, dst: [ltt: [offset: dst_offset, dst?: Ok, abbr: dst_abbr], start: start, end: end]]
+    }
+    | [std: std, dst: []]
+  }
+}
+
+// The days since the epoch of a rule's day in a year.
+rule_day = #['int, 'day_rule] {
+  =[y, rule]
+  jan1 = days_of [year: y, month: 1, day: 1]
+  rule ~> {
+    | =Julian[n] => {
+      | leap_year? y; icmp [n, 60] ~> =(0 | 1) => iadd [jan1, n]
+      | iadd [jan1, isub [n, 1]]
+    }
+    | =Ordinal[n] => iadd [jan1, n]
+    | =Month[month: m, week: w, weekday: d] => {
+      first = days_of [year: y, month: m, day: 1]
+      // The month's first such weekday (0 is Sunday; the epoch was a Thursday), then the
+      // week, falling back a week when a fifth doesn't exist.
+      nth = fmod [isub [d, fmod [iadd [first, 4], 7]], 7] ~> iadd [~, imul [isub [w, 1], 7]]
+      day = { | icmp [nth, days_in_month [y, m]] ~> =(0 | 1) => isub [nth, 7] | nth }
+      iadd [first, day]
+    }
+  }
+}
+
+// When a switch happens in a year, as seconds since the epoch, given the offset in force
+// before it.
+switch_time = #['int, 'switch, 'int] {
+  =[y, sw, offset]
+  imul [rule_day [y, sw.day], 86400] ~> iadd [~, sw.time] ~> isub [~, offset]
+}
+
+posix_ltt = #['posix, 'int] -> 'ltt {
+  =[p, t]
+  {
+    | p.dst ~> =[ltt: d, start: s, end: e] => {
+      year = iadd [t, p.std.offset] ~> fdiv [~, 86400] ~> civil ~> .year
+      begins = switch_time [year, s, p.std.offset]
+      ends = switch_time [year, e, d.offset]
+      {
+        // Northern: daylight saving between the switches. Southern: outside them.
+        | icmp [begins, ends] ~> =-1 => {
+          | icmp [t, begins] ~> =(0 | 1); icmp [t, ends] ~> =-1 => d
+          | p.std
+        }
+        | icmp [t, begins] ~> =(0 | 1) => d
+        | icmp [t, ends] ~> =-1 => d
+        | p.std
+      }
+    }
+    | p.std
+  }
+}
+
+// The local time type in force at a time (seconds since the epoch), from TZif data.
+tz_ltt = #['bin, 'layout, (None | Rule['posix]), 'int] -> 'ltt {
+  =[data, l, tail, t]
+  n = count_upto [data, l, t, 0, l.count]
+  {
+    // Past the last transition, the footer's rule — when there is one.
+    | n ~> =^l.count; tail ~> =Rule[p] => posix_ltt [p, t]
+    | n ~> =0 => ltt_of [data, l, 0]
+    | %bin.get_byte [data, iadd [l.indices, isub [n, 1]]] ~> ltt_of [data, l, ~]
+  }
+}
+
+// Every transition's type index names a type, and every type's abbreviation starts in the
+// abbreviation block and ends with a NUL inside it.
+check_indices = #['bin, 'layout, 'int] {
+  =[data, l, i]
+  {
+    | i ~> =^l.count => Ok
+    | icmp [%bin.get_byte [data, iadd [l.indices, i]], l.typecnt] ~> =-1 => ^ [data, l, iadd [i, 1]]
+    | fail [iadd [l.indices, i], "a local time type index"]
+  }
+}
+
+check_types = #['bin, 'layout, 'int] {
+  =[data, l, i]
+  end = iadd [l.chars, l.charcnt]
+  {
+    | i ~> =^l.typecnt => Ok
+    | {
+      a = %bin.get_byte [data, iadd [l.types, iadd [imul [i, 6], 5]]] ~> iadd [l.chars, ~]
+      __binary_index__ [data, 0, a] ~> =('int & nul)
+      icmp [nul, end] ~> =-1
+    } =>
+      ^ [data, l, iadd [i, 1]]
+    | fail [iadd [l.types, imul [i, 6]], "an abbreviation index"]
+  }
+}
+
+from_tzif = #[(name): '%str, (data): 'bin] {
+  :doc "A zone from TZif data (RFC 8536), under the given name; nil carrying :error Expected[offset, message] when the data isn't well-formed. `zone` reads the host's database; this takes the data from anywhere. A zone holds its rules as a function, so it has no data notation: write a zoned value with `format`, and read it with `parse_zoned`."
+  data = $data
+  check_layout data
+  l = layout_of data
+  { icmp [l.typecnt, 1] ~> =(0 | 1) | fail [36, "a local time type"] }
+  check_indices [data, l, 0]
+  check_types [data, l, 0]
+
+  {
+    | l.footer ~> =<> => None
+    | =_ => posix_at l.footer ~> =('posix & p); Rule[p]
+  }
+  ~> =((None | Rule['posix]) & tail)
+
+  Tz[name: $name, rules: #'int -> 'ltt { tz_ltt [data, l, tail, $] }]
+}
+
+offset_text = #'int {
+  sign = { | icmp [$, 0] ~> =-1 => "-" | "+" }
+  a = { | icmp [$, 0] ~> =-1 => isub [0, $] | $ }
+  hm = "{pad [idiv [a, 3600], 2]}:{pad [idiv [imod [a, 3600], 60], 2]}"
+  {
+    | imod [a, 60] ~> =0 => "{sign}{hm}"
+    | "{sign}{hm}:{pad [imod [a, 60], 2]}"
+  }
+}
+
+// The local time type in force at an instant (seconds since the epoch).
+ltt_at = #['zone, 'int] -> 'ltt {
+  | =[Utc, _] => [offset: 0, dst?: [], abbr: "UTC"]
+  | =[Fixed[o], _] => [offset: o, dst?: [], abbr: offset_text o]
+  | =[Tz(rules), t] => rules t
+}
+
+zone_name = #'zone {
+  :doc "The zone's name: \"UTC\", an offset such as \"+05:30\", or an IANA name such as \"Europe/London\"."
+  | =Utc => "UTC"
+  | =Fixed[o] => offset_text o
+  | =Tz(name) => name
+}
+
+// Where a local time (nanoseconds since the epoch, read as UTC) falls in a zone: at one
+// instant, or — across a transition — at two (a repeated hour) or none (a skipped one,
+// bounded by the instants the offsets either side give it).
+'candidates = Unique['int] | Repeated['int, 'int] | Skipped['int, 'int]
+
+// The offsets a day either side bound the search: this assumes a zone changes offset at
+// most once within any 48 hours, which no zone has come close to.
+candidates = #['zone, 'int] {
+  =[zone, local]
+  secs = fdiv [local, ns_s]
+  before = ltt_at [zone, isub [secs, 86400]] ~> .offset
+  after = ltt_at [zone, iadd [secs, 86400]] ~> .offset
+  a = isub [local, imul [before, ns_s]]
+  b = isub [local, imul [after, ns_s]]
+  a_fits = { ltt_at [zone, fdiv [a, ns_s]] ~> .offset ~> =^before }
+  b_fits = { ltt_at [zone, fdiv [b, ns_s]] ~> .offset ~> =^after }
+  {
+    | before ~> =^after => Unique[a]
+    | a_fits ~> =\[]; b_fits ~> =\[] => { | icmp [a, b] ~> =-1 => Repeated[a, b] | Repeated[b, a] }
+    | a_fits ~> =\[] => Unique[a]
+    | b_fits ~> =\[] => Unique[b]
+    | { | icmp [a, b] ~> =-1 => Skipped[a, b] | Skipped[b, a] }
+  }
+}
+
+// The instant for a local time: a repeated time's earlier or later instant, or, for a
+// skipped time, the instant the offset before (later) or after (earlier) the gap gives it.
+// Compatible is earlier when repeated and later when skipped, as clocks read on either side.
+pick = #['candidates, (Compatible | Earlier | Later)] {
+  | =[Unique[n], _] => Instant[n]
+  | =[Repeated[e, _], (Compatible | Earlier)] => Instant[e]
+  | =[Repeated[_, l], Later] => Instant[l]
+  | =[Skipped[e, _], Earlier] => Instant[e]
+  | =[Skipped[_, l], _] => Instant[l]
+}
+
+exact = #'candidates {
+  | =Unique[n] => Instant[n]
+  | =Repeated[_, _] => [] ~> { :error Repeated }
+  | [] ~> { :error Skipped }
+}
+
+fixed_zone = #'duration {
+  :doc "A zone at a fixed offset from UTC, of whole seconds and less than a day either way; nil carrying :error OutOfRange[Offset] otherwise."
+  =Duration[n]
+  { imod [n, ns_s] ~> =0 | [] ~> { :error OutOfRange[Offset] } }
+  s = idiv [n, ns_s]
+  in_range [s, -86399, 86399, Offset]
+  Fixed[s]
+}
+
+zone = #'%str {
+  :doc "The named zone from the host's time zone database (IANA names such as \"Europe/London\"), or UTC for \"UTC\"; nil carrying :error UnknownZone[name] when the host has no such zone. It reads host state, so a module can't call it at compile time."
+  | ="UTC" => Utc
+  | __time_zone__ $0 ~> =('bin & data) => from_tzif [$, data]
+  | [] ~> { :error UnknownZone[$] }
+}
+
+local_zone = #[] {
+  :doc "The host's own zone, or UTC when the host doesn't name one. Nil carrying :error UnknownZone[name] when the host names a zone its database doesn't have."
+  | __time_zone_local__ [] ~> =('bin & name) => zone Str[name]
+  | Utc
+}
+
+'zoning = ['instant, 'zone] | ['datetime, 'zone] | ['datetime, 'zone, disambiguation: 'disambiguation]
+
+zoned = #'zoning {
+  :doc "An instant in a zone, or a civil date-time placed in one. A date-time the zone's clocks skip or repeat (at a daylight saving transition) is resolved by `disambiguation`: Earlier or Later picks one side, Compatible (the default) takes the earlier of a repeated time and moves a skipped one forward by the gap, and Reject answers nil carrying :error Skipped or Repeated."
+  | =[('instant & i), ('zone & z)] => Zoned[i, z]
+  | =[('datetime & d), ('zone & z)] => Zoned[pick [candidates [z, epoch_nanos d], Compatible], z]
+  | =[('datetime & d), ('zone & z), disambiguation: Reject] =>
+    candidates [z, epoch_nanos d] ~> exact ~> =('instant & i)
+    Zoned[i, z]
+  | =[('datetime & d), ('zone & z), disambiguation: ((Compatible | Earlier | Later) & h)] =>
+    Zoned[pick [candidates [z, epoch_nanos d], h], z]
+}
+
+zoned_ltt = #'zoned { =Zoned[Instant[n], z]; ltt_at [z, fdiv [n, ns_s]] }
+
+// A zoned value's civil date-time: its instant, moved by the zone's offset.
+zoned_civil = #'zoned {
+  =Zoned[Instant[n], _]
+  off = zoned_ltt $ ~> .offset
+  iadd [n, imul [off, ns_s]] ~> civil_of_nanos
+}
+
+// A local date-time placed back in a zoned value's zone, as a period or truncation moves it.
+// Where the time is repeated, it keeps the offset the value had — so moving by nothing, or
+// truncating within the repeated hour, stays on the same side — and is otherwise placed as
+// Compatible.
+rezone = #['datetime, 'zone, 'int] {
+  =[local, z, offset]
+  n = epoch_nanos local
+  c = candidates [z, n]
+  kept = isub [n, imul [offset, ns_s]]
+  {
+    | c ~> =Repeated[e, l]; kept ~> =(^e | ^l) => Zoned[Instant[kept], z]
+    | Zoned[pick [c, Compatible], z]
+  }
 }
 
 // --- spans ---------------------------------------------------------------------------
@@ -328,8 +925,11 @@ fits = #['civil, 'period, 'overflow] {
   | ['datetime, 'duration]
   | ['date, 'period]
   | ['datetime, 'period]
+  | ['zoned, 'duration]
+  | ['zoned, 'period]
   | ['date, 'period, overflow: 'overflow]
   | ['datetime, 'period, overflow: 'overflow]
+  | ['zoned, 'period, overflow: 'overflow]
 
 add = #'addable {
   :doc "Adds a span: a duration to an instant, monotonic reading, time of day (wrapping at midnight) or date-time, or to another duration; a period to a date or date-time, or to another period. A period moves the month first, clamping the day into a shorter month (Jan 31 + 1 month is Feb 28 or 29), then the days; `overflow: Reject` answers nil carrying :error OutOfRange[Day] instead of clamping."
@@ -347,6 +947,16 @@ add = #'addable {
     fits [t, p, o]
     (year, month, day) = shift [t, p]
     t[..., year: year, month: month, day: day]
+  | =[Zoned[Instant[a], z], Duration[b]] => Zoned[Instant[iadd [a, b]], z]
+  | =[('zoned & t), ('period & p)] =>
+    local = zoned_civil t
+    (year, month, day) = shift [local, p]
+    rezone [local[..., year: year, month: month, day: day], t.1, zoned_ltt t ~> .offset]
+  | =[('zoned & t), ('period & p), overflow: o] =>
+    local = zoned_civil t
+    fits [local, p, o]
+    (year, month, day) = shift [local, p]
+    rezone [local[..., year: year, month: month, day: day], t.1, zoned_ltt t ~> .offset]
 }
 
 sub = #'addable {
@@ -361,12 +971,16 @@ sub = #'addable {
   | =[('datetime & a), ('period & b)] => add [a, neg b]
   | =[('date & a), ('period & b), overflow: o] => add [a, neg b, overflow: o]
   | =[('datetime & a), ('period & b), overflow: o] => add [a, neg b, overflow: o]
+  | =[('zoned & a), ('duration & b)] => add [a, neg b]
+  | =[('zoned & a), ('period & b)] => add [a, neg b]
+  | =[('zoned & a), ('period & b), overflow: o] => add [a, neg b, overflow: o]
 }
 
 // The value's position on its own line, as one integer: nanoseconds for instants,
 // readings, durations, date-times (read as UTC) and times of day; days for dates.
-key = #('instant | 'mono | 'duration | 'datetime | 'date | 'time) {
+key = #('instant | 'mono | 'duration | 'datetime | 'date | 'time | 'zoned) {
   | =Instant[n] => n
+  | =Zoned[Instant[n], _] => n
   | =Mono[n] => n
   | =Duration[n] => n
   | =('datetime & t) => epoch_nanos t
@@ -374,13 +988,19 @@ key = #('instant | 'mono | 'duration | 'datetime | 'date | 'time) {
   | =('time & t) => nanos_of t
 }
 
-diff = #(['instant, 'instant] | ['mono, 'mono] | ['datetime, 'datetime] | ['time, 'time]) {
-  :doc "The exact duration from the second value to the first (first minus second): between instants, monotonic readings, civil date-times (as if both were UTC), or times of day."
+diff = #(
+  | ['instant, 'instant]
+  | ['mono, 'mono]
+  | ['datetime, 'datetime]
+  | ['time, 'time]
+  | ['zoned, 'zoned]
+) {
+  :doc "The exact duration from the second value to the first (first minus second): between instants, monotonic readings, zoned values, civil date-times (as if both were UTC), or times of day."
   Duration[isub [key $0, key $1]]
 }
 
 between = #[(from): 'civil, (to): 'civil] {
-  :doc "The calendar period from one date to another, in months and days, such that adding it to `from` gives `to` whenever `to` is later."
+  :doc "The calendar period from one date to another, in months and days, such that adding it to `from` gives `to` whenever `to` is later. Backwards it is the forward period negated, which adding doesn't always undo: month lengths differ, and a clamped day can't be recovered."
   total = isub [month_count $to, month_count $from]
   days = isub [$to.day, $from.day]
   {
@@ -414,6 +1034,7 @@ since = #'mono {
   | ['date, 'date]
   | ['time, 'time]
   | ['datetime, 'datetime]
+  | ['zoned, 'zoned]
 
 compare = #'comparable {
   :doc "Compares two values of the same kind: -1 if the first is earlier (or shorter), 0 if equal, 1 if later. Periods have no order (a month is not a fixed number of days)."
@@ -465,25 +1086,28 @@ truncate = #(
   | ['time, 'clock_unit]
   | ['datetime, ('date_unit | 'day_unit)]
   | ['date, 'date_unit]
+  | ['zoned, ('date_unit | 'day_unit)]
 ) {
   :doc "The value truncated to a unit: the start of its day, hour, minute, second, millisecond or microsecond, or — for dates and date-times — of its week (Monday), month or year. Instants truncate on the UTC day; durations truncate toward zero."
   | =[Instant[n], ('day_unit & u)] => Instant[isub [n, fmod [n, unit_nanos u]]]
   | =[Duration[n], ('clock_unit & u)] => Duration[isub [n, imod [n, unit_nanos u]]]
   | =[('time & t), ('clock_unit & u)] => nanos_of t ~> isub [~, imod [~, unit_nanos u]] ~> clock
-  | =[('datetime & t), ('date_unit & u)] => at [start_of [t, u], Time[hour: 0, minute: 0, second: 0, nano: 0]]
+  | =[('datetime & t), ('date_unit & u)] => at [start_of [t, u], midnight]
   | =[('datetime & t), ('day_unit & u)] => epoch_nanos t ~> isub [~, fmod [~, unit_nanos u]] ~> civil_of_nanos
   | =[('date & d), ('date_unit & u)] => start_of [d, u]
+  | =[('zoned & t), ('date_unit & u)] =>
+    offset = zoned_ltt t ~> .offset
+    zoned_civil t ~> start_of [~, u] ~> at [~, midnight] ~> rezone [~, t.1, offset]
+  | =[('zoned & t), ('day_unit & u)] =>
+    offset = zoned_ltt t ~> .offset
+    zoned_civil t
+    ~> epoch_nanos
+    ~> isub [~, fmod [~, unit_nanos u]]
+    ~> civil_of_nanos
+    ~> rezone [~, t.1, offset]
 }
 
 // --- formatting ----------------------------------------------------------------------
-
-pad_loop = #['%str, 'int] {
-  | icmp [%bin.length $0.0, $1] ~> =-1 => ^ ["0{$0}", $1]
-  | $0
-}
-
-// The decimal digits of a non-negative integer, zero-padded to a width.
-pad = #[(n): 'int, (width): 'int] { pad_loop [%str.from_int $n, $width] }
 
 year_text = #'int {
   | icmp [$, 0] ~> =-1 => "-{pad [isub [0, $], 4]}"
@@ -554,14 +1178,19 @@ period_text = #[(months): 'int, (days): 'int] {
   }
 }
 
-format = #('instant | 'date | 'time | 'datetime | 'duration | 'period) {
-  :doc "The value as text, in the form `parse` and `%time\{ … }` read back: ISO 8601 for instants (RFC 3339, in UTC: \"2024-03-10T09:30:00Z\"), dates (\"2024-03-10\"), times (\"09:30:00.5\" gives \"09:30:00.500\") and date-times (\"2024-03-10T09:30:00\"); unit notation for durations (\"1h30m\", \"-250ms\") and periods (\"1y2mo\", \"3d\", \"1mo-3d\"). Fractional seconds print as three, six or nine digits, the fewest that are exact."
+format = #('instant | 'date | 'time | 'datetime | 'duration | 'period | 'zoned) {
+  :doc "The value as text, in the form `parse` (`parse_zoned`, for a zoned value) and `%time\{ … }` read back: ISO 8601 for instants (RFC 3339, in UTC: \"2024-03-10T09:30:00Z\"), dates (\"2024-03-10\"), times (\"09:30:00.5\" gives \"09:30:00.500\") and date-times (\"2024-03-10T09:30:00\"); unit notation for durations (\"1h30m\", \"-250ms\") and periods (\"1y2mo\", \"3d\", \"1mo-3d\"); RFC 9557 for zoned values (\"2024-03-10T09:30:00+00:00[Europe/London]\"). Fractional seconds print as three, six or nine digits, the fewest that are exact."
   | =Instant[n] => civil_of_nanos n ~> "{date_text ~}T{clock_text ~}Z"
   | =('datetime & t) => "{date_text t}T{clock_text t}"
   | =('date & d) => date_text d
   | =('time & t) => clock_text t
   | =Duration[n] => duration_text n
   | =Period[months: m, days: d] => period_text [m, d]
+  | =('zoned & z) => {
+    c = zoned_civil z
+    off = zoned_ltt z ~> .offset
+    "{date_text c}T{clock_text c}{offset_text off}[{zone_name z.1}]"
+  }
 }
 
 day_name = #'weekday {
@@ -599,65 +1228,15 @@ http_date = #'instant {
 
 // --- parsing -------------------------------------------------------------------------
 
-// Parsing works over a binary and a byte position. A parser answers `[value, end]`, or nil
-// carrying `Expected[offset, message]` — the dialect failure contract, so the `%time{ … }`
-// dialect reports positioned compile errors.
-
-fail = #[(offset): 'int, (message): '%str] {
-  [] ~> { :error Expected[offset: $offset, message: $message] }
-}
-
-// The byte at a position, or nil past the end.
-peek = #['bin, 'int] { icmp [$1, %bin.length $0] ~> =-1; %bin.get_byte [$0, $1] }
-
-digit = #['bin, 'int] {
-  peek $ ~> =('int & b)
-  icmp [b, 48] ~> =(0 | 1)
-  icmp [b, 57] ~> =(-1 | 0)
-  isub [b, 48]
-}
-
-// The run of decimal digits at a position, as `[value, end]` (`[acc, pos]` when empty).
-run = #['bin, 'int, 'int] {
-  =[data, pos, acc]
-  {
-    | digit [data, pos] ~> =('int & d) => ^ [data, iadd [pos, 1], iadd [imul [acc, 10], d]]
-    | [acc, pos]
-  }
-}
-
-// Exactly `width` digits.
-fixed = #[(data): 'bin, (pos): 'int, (width): 'int, (what): '%str] {
-  | run [$data, $pos, 0] ~> =[v, e]; isub [e, $pos] ~> =^$width => [v, e]
-  | fail [$pos, $what]
-}
-
-expect = #[(data): 'bin, (pos): 'int, (b): 'int, (what): '%str] {
-  | peek [$data, $pos] ~> =^$b => iadd [$pos, 1]
-  | fail [$pos, $what]
-}
-
-// An optional sign: `[multiplier, end]`.
-sign_at = #['bin, 'int] {
-  | peek $ ~> =45 => [-1, iadd [$1, 1]]
-  | peek $ ~> =43 => [1, iadd [$1, 1]]
-  | [1, $1]
-}
-
-pow10 = #['int, 'int] {
-  | $0 ~> =0 => $1
-  | ^ [isub [$0, 1], imul [$1, 10]]
-}
-
 // `YYYY-MM-DD`, with an optionally signed year of four or more digits.
 date_at = #['bin, 'int] {
   =[data, start]
   sign_at [data, start] ~> =[s, p]
   run [data, p, 0] ~> =[y, e]
   { icmp [isub [e, p], 4] ~> =(0 | 1) | fail [p, "a four-digit year"] }
-  expect [data, e, 45, "'-'"] ~> =('int & p1)
+  expect [data, e, "-"] ~> =('int & p1)
   fixed [data, p1, 2, "a two-digit month"] ~> =[month, p2]
-  expect [data, p2, 45, "'-'"] ~> =('int & p3)
+  expect [data, p2, "-"] ~> =('int & p3)
   fixed [data, p3, 2, "a two-digit day"] ~> =[day, p4]
   { date [imul [s, y], month, day] | fail [start, "a valid date"] } ~> =('date & d)
   [d, p4]
@@ -677,7 +1256,7 @@ seconds_at = #['bin, 'int] {
   =[data, start]
   fixed [data, start, 2, "two-digit seconds"] ~> =[second, p]
   {
-    | peek [data, p] ~> =46 => fraction_at [data, iadd [p, 1]] ~> =[nano, e]; [[second, nano], e]
+    | char_at [data, p] ~> ="." => fraction_at [data, iadd [p, 1]] ~> =[nano, e]; [[second, nano], e]
     | [[second, 0], p]
   }
 }
@@ -686,11 +1265,11 @@ seconds_at = #['bin, 'int] {
 time_at = #['bin, 'int] {
   =[data, start]
   fixed [data, start, 2, "a two-digit hour"] ~> =[hour, p1]
-  expect [data, p1, 58, "':'"] ~> =('int & p2)
+  expect [data, p1, ":"] ~> =('int & p2)
   fixed [data, p2, 2, "two-digit minutes"] ~> =[minute, p3]
 
   {
-    | peek [data, p3] ~> =58 => seconds_at [data, iadd [p3, 1]]
+    | char_at [data, p3] ~> =":" => seconds_at [data, iadd [p3, 1]]
     | [[0, 0], p3]
   }
   ~> =[[second, nano], p4]
@@ -703,14 +1282,26 @@ time_at = #['bin, 'int] {
 offset_at = #['bin, 'int] {
   =[data, start]
   {
-    | peek [data, start] ~> =(90 | 122) => [0, iadd [start, 1]]
+    | char_at [data, start] ~> =("Z" | "z") => [0, iadd [start, 1]]
     | {
       sign_at [data, start] ~> =[s, p]
       fixed [data, p, 2, "a two-digit offset hour"] ~> =[h, p1]
-      expect [data, p1, 58, "':'"] ~> =('int & p2)
+      expect [data, p1, ":"] ~> =('int & p2)
       fixed [data, p2, 2, "two-digit offset minutes"] ~> =[m, p3]
-      { in_range [h, 0, 23, Hour]; in_range [m, 0, 59, Minute] | fail [p, "a valid offset"] }
-      [imul [s, iadd [imul [h, 3600], imul [m, 60]]], p3]
+
+      {
+        | char_at [data, p3] ~> =":" => fixed [data, iadd [p3, 1], 2, "two-digit offset seconds"]
+        | [0, p3]
+      }
+      ~> =[sec, p4]
+
+      {
+        in_range [h, 0, 23, Hour]
+        in_range [m, 0, 59, Minute]
+        in_range [sec, 0, 59, Second]
+        | fail [p, "a valid offset"]
+      }
+      [imul [s, iadd [imul [h, 3600], iadd [imul [m, 60], sec]]], p4]
     }
   }
 }
@@ -720,11 +1311,11 @@ temporal_at = #['bin, 'int] {
   =[data, start]
   date_at [data, start] ~> =[d, p]
   {
-    | peek [data, p] ~> =(84 | 116 | 32) => {
+    | char_at [data, p] ~> =("T" | "t" | " ") => {
       time_at [data, iadd [p, 1]] ~> =[t, q]
       dt = at [d, t]
       {
-        | peek [data, q] ~> =(90 | 122 | 43 | 45) => {
+        | char_at [data, q] ~> =("Z" | "z" | "+" | "-") => {
           offset_at [data, q] ~> =[off, e]
           [Instant[isub [epoch_nanos dt, imul [off, ns_s]]], e]
         }
@@ -735,27 +1326,41 @@ temporal_at = #['bin, 'int] {
   }
 }
 
-// A unit in unit notation: an exact nanosecond multiplier, or a calendar one.
+// A unit in unit notation: an exact nanosecond multiplier, or a calendar one, with its rank
+// (larger units rank higher) and its width.
 unit_at = #['bin, 'int] {
   =[data, p]
-  next = iadd [p, 1]
-  after = iadd [p, 2]
+  two = text_at [data, p, 2]
+  one = char_at [data, p]
+
   {
-    | peek [data, p] ~> =110; peek [data, next] ~> =115 => [Exact[1], after]
-    | peek [data, p] ~> =117; peek [data, next] ~> =115 => [Exact[ns_us], after]
-    | peek [data, p] ~> =109; peek [data, next] ~> =115 => [Exact[ns_ms], after]
-    | peek [data, p] ~> =109; peek [data, next] ~> =111 => [Months[1], after]
-    | peek [data, p] ~> =109 => [Exact[ns_m], next]
-    | peek [data, p] ~> =115 => [Exact[ns_s], next]
-    | peek [data, p] ~> =104 => [Exact[ns_h], next]
-    | peek [data, p] ~> =100 => [Days[1], next]
-    | peek [data, p] ~> =119 => [Days[7], next]
-    | peek [data, p] ~> =121 => [Months[12], next]
+    | two ~> ="ns" => [Exact[1], 1, 2]
+    | two ~> ="us" => [Exact[ns_us], 2, 2]
+    | two ~> ="ms" => [Exact[ns_ms], 3, 2]
+    | two ~> ="mo" => [Months[1], 9, 2]
+    | one ~> ="s" => [Exact[ns_s], 4, 1]
+    | one ~> ="m" => [Exact[ns_m], 5, 1]
+    | one ~> ="h" => [Exact[ns_h], 6, 1]
+    | one ~> ="d" => [Days[1], 7, 1]
+    | one ~> ="w" => [Days[7], 8, 1]
+    | one ~> ="y" => [Months[12], 10, 1]
     | fail [p, "a unit: ns, us, ms, s, m, h, d, w, mo or y"]
   }
+  ~> =[unit, rank, width]
+
+  [unit, rank, iadd [p, width]]
 }
 
-'span = [kind: (Unset | Exact | Calendar), sign: 'int, ns: 'int, months: 'int, days: 'int]
+// A span being read: its kind once a unit fixes it, the leading sign, the rank of the last
+// unit read, and the totals so far.
+'span = [
+  kind: (Unset | Exact | Calendar),
+  sign: 'int,
+  rank: 'int,
+  ns: 'int,
+  months: 'int,
+  days: 'int,
+]
 
 tally = #[(acc): 'span, (n): 'int, (unit): (Exact['int] | Months['int] | Days['int]), (pos): 'int] {
   | $unit ~> =Exact[k]; $acc.kind ~> =(Unset | Exact) =>
@@ -767,16 +1372,18 @@ tally = #[(acc): 'span, (n): 'int, (unit): (Exact['int] | Months['int] | Days['i
   | fail [$pos, "a unit of the same kind: exact (ns to h) and calendar (d to y) units don't mix"]
 }
 
-// Unit notation: components, each a count and a unit, to the end of the input. A leading
-// sign applies to every component, and a later component may carry its own instead.
+// Unit notation: components, each a count and a unit, to the end of the input, largest unit
+// first and each at most once. A leading sign applies to every component, and a later
+// component may carry its own instead.
 span_at = #[(data): 'bin, (pos): 'int, (acc): 'span] {
   sign_at [$data, $pos] ~> =[explicit, p]
   s = { | p ~> =^$pos => $acc.sign | explicit }
   lead = { | $acc.kind ~> =Unset => s | $acc.sign }
   run [$data, p, 0] ~> =[v, e]
   { icmp [e, p] ~> =1 | fail [p, "a number"] }
-  unit_at [$data, e] ~> =[u, q]
-  tally [$acc[..., sign: lead], imul [s, v], u, e] ~> =('span & next)
+  unit_at [$data, e] ~> =[u, rank, q]
+  tally [$acc[..., sign: lead, rank: rank], imul [s, v], u, e] ~> =('span & next)
+  { icmp [rank, $acc.rank] ~> =-1 | fail [e, "units largest first, each at most once"] }
   {
     | peek [$data, q] ~> =\[] => ^ [$data, q, next]
     | next ~> .kind ~> =Exact => [Duration[next.ns], q]
@@ -792,9 +1399,9 @@ value_at = #['bin, 'int] {
   run [data, p, 0] ~> =[_, e]
   width = isub [e, p]
   {
-    | peek [data, e] ~> =45; icmp [width, 4] ~> =(0 | 1) => temporal_at [data, start]
-    | peek [data, e] ~> =58; width ~> =2; p ~> =^start => time_at [data, start]
-    | span_at [data, start, [kind: Unset, sign: 1, ns: 0, months: 0, days: 0]]
+    | char_at [data, e] ~> ="-"; icmp [width, 4] ~> =(0 | 1) => temporal_at [data, start]
+    | char_at [data, e] ~> =":"; width ~> =2; p ~> =^start => time_at [data, start]
+    | span_at [data, start, [kind: Unset, sign: 1, rank: 11, ns: 0, months: 0, days: 0]]
   }
 }
 
@@ -802,13 +1409,91 @@ value_at = #['bin, 'int] {
 parse_from = #['bin, 'int] {
   =[data, start]
   value_at [data, start] ~> =[v, e]
-  { icmp [e, %bin.length data] ~> =0 | fail [e, "end of input"] }
+
+  {
+    | icmp [e, %bin.length data] ~> =0
+    | char_at [data, e] ~> ="[" => fail [e, "no zone annotation: parse_zoned reads one"]
+    | fail [e, "end of input"]
+  }
+
   v
 }
 
 parse = #'%str {
   :doc "Reads a value from text in the forms `format` writes: an instant (a date-time with `Z` or a `+HH:MM`/`-HH:MM` offset, converted to UTC), a date, a date-time, a time (seconds optional), a duration or a period (unit notation: ns, us, ms, s, m, h for durations; d, w, mo, y for periods). A `T`, `t` or space separates date from time. Answers nil carrying :error Expected[offset, message] for malformed text or a date or time that doesn't exist."
   parse_from [$0, 0]
+}
+
+// --- zoned text: RFC 9557 ---
+
+// A zoned value's text, before its zone is known: the civil date-time, what its offset says
+// (`Z` for an exact instant, a numeric offset to check against the zone, or none), and the
+// bracketed zone name.
+'offset_note = Exact | Offset['int] | Floating
+'zoned_parts = [at: 'datetime, note: 'offset_note, note_at: 'int, name: '%str]
+
+zoned_parts_at = #['bin, 'int] {
+  =[data, start]
+  date_at [data, start] ~> =[d, p]
+  { | char_at [data, p] ~> =("T" | "t" | " ") => iadd [p, 1] | fail [p, "'T'"] } ~> =('int & p1)
+  time_at [data, p1] ~> =[t, q]
+
+  {
+    | char_at [data, q] ~> =("Z" | "z") => [Exact, iadd [q, 1]]
+    | char_at [data, q] ~> =("+" | "-") => offset_at [data, q] ~> =[o, e]; [Offset[o], e]
+    | [Floating, q]
+  }
+  ~> =[note, r]
+
+  expect [data, r, "["] ~> =('int & open)
+  // A `!` marks the annotation critical, which it always is here.
+  from = { | char_at [data, open] ~> ="!" => iadd [open, 1] | open }
+  { find [data, "]", from] | fail [from, "a closing ']'"] } ~> =('int & close)
+  { icmp [close, from] ~> =1 | fail [from, "a zone name"] }
+  [[at: at [d, t], note: note, note_at: q, name: Str[%bin.slice [data, from, close]]], iadd [close, 1]]
+}
+
+// The zone a name gives without the host's database: UTC, or a fixed offset; nil for an
+// IANA name.
+pure_zone = #'%str {
+  =Str[data]
+  {
+    | $ ~> ="UTC" => Utc
+    | char_at [data, 0] ~> =("+" | "-") => {
+      offset_at [data, 0] ~> =[o, e]
+      len = %bin.length data
+      e ~> =^len
+      Fixed[o]
+    }
+  }
+}
+
+// A zoned value from its text's parts, once its zone is known. An offset must be the one
+// the zone has at that time.
+settle = #['zoned_parts, 'zone] {
+  =[parts, z]
+  parts.note ~> {
+    | =Exact => Zoned[from_utc parts.at, z]
+    | =Offset[o] => {
+      i = epoch_nanos parts.at ~> isub [~, imul [o, ns_s]]
+      { ltt_at [z, fdiv [i, ns_s]] ~> .offset ~> =^o | fail [parts.note_at, "an offset the zone has then"] }
+      Zoned[Instant[i], z]
+    }
+    | Zoned[pick [candidates [z, epoch_nanos parts.at], Compatible], z]
+  }
+}
+
+parse_zoned = #'%str {
+  :doc "Reads a zoned value from RFC 9557 text, as `format` writes it: a date-time, an optional offset (`Z` for an exact instant, or `+HH:MM`, which must be the zone's offset then), and a zone in brackets — \"UTC\", a fixed offset, or an IANA name, looked up with `zone`. Without an offset, a skipped or repeated time resolves as Compatible. Answers nil carrying :error Expected[offset, message] or UnknownZone[name]."
+  =Str[data]
+  zoned_parts_at [data, 0] ~> =[parts, e]
+  { icmp [e, %bin.length data] ~> =0 | fail [e, "end of input"] }
+  {
+    | pure_zone parts.name ~> =((Utc | Fixed['int]) & z) => z
+    | =_ => zone parts.name
+  }
+  ~> =('zone & z)
+  settle [parts, z]
 }
 
 month_number = #'%str {
@@ -826,23 +1511,120 @@ month_number = #'%str {
   | ="Dec" => 12
 }
 
-parse_http_date = #'%str {
-  :doc "Reads an HTTP date (IMF-fixdate, RFC 9110: \"Sun, 06 Nov 1994 08:49:37 GMT\") as an instant; nil carrying :error Expected[offset, message] when malformed."
-  =Str[data]
-  { %bin.length data ~> =29 | fail [0, "an IMF-fixdate"] }
-  { Str[%bin.slice [data, 0, 3]] ~> =("Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat" | "Sun") | fail [0, "a day name"] }
-  expect [data, 3, 44, "','"] ~> =('int & p1)
-  expect [data, p1, 32, "' '"] ~> =('int & p2)
+day_named = #'%str {
+  | =("Mon" | "Monday") => Mon
+  | =("Tue" | "Tuesday") => Tue
+  | =("Wed" | "Wednesday") => Wed
+  | =("Thu" | "Thursday") => Thu
+  | =("Fri" | "Friday") => Fri
+  | =("Sat" | "Saturday") => Sat
+  | =("Sun" | "Sunday") => Sun
+}
+
+day_name_at = #['bin, 'int, 'int] {
+  =[data, start, end]
+  {
+    text_at [data, start, isub [end, start]] ~> =('%str & name)
+    day_named name
+    | fail [start, "a day name"]
+  }
+}
+
+month_at = #['bin, 'int] {
+  =[data, start]
+  {
+    | text_at [data, start, 3] ~> =('%str & name); month_number name ~> =('int & m) =>
+      [m, iadd [start, 3]]
+    | fail [start, "a month name"]
+  }
+}
+
+// A time of day as HTTP writes it: exactly `HH:MM:SS`.
+clock_at = #['bin, 'int] {
+  =[data, start]
+  time_at [data, start] ~> =[t, e]
+  { isub [e, start] ~> =8 | fail [start, "HH:MM:SS"] }
+  [t, e]
+}
+
+gmt_at = #['bin, 'int] {
+  =[data, start]
+  { text_at [data, start, 4] ~> =" GMT"; iadd [start, 4] | fail [start, "' GMT'"] }
+}
+
+'http_parts = [weekday: 'weekday, year: 'int, month: 'int, day: 'int, time: 'time, end: 'int]
+
+// `Sun, 06 Nov 1994 08:49:37 GMT`
+imf_at = #'bin {
+  =data
+  day_name_at [data, 0, 3] ~> =('weekday & wd)
+  expect [data, 3, ","] ~> =('int & p1)
+  expect [data, p1, " "] ~> =('int & p2)
   fixed [data, p2, 2, "a two-digit day"] ~> =[day, p3]
-  expect [data, p3, 32, "' '"]
-  { month_number Str[%bin.slice [data, 8, 11]] | fail [8, "a month name"] } ~> =('int & month)
-  expect [data, 11, 32, "' '"]
-  fixed [data, 12, 4, "a four-digit year"] ~> =[year, p4]
-  expect [data, p4, 32, "' '"] ~> =('int & p5)
-  time_at [data, p5] ~> =[t, p6]
-  { Str[%bin.slice [data, p6, 29]] ~> =" GMT" | fail [p6, "' GMT'"] }
-  { date [year, month, day] | fail [p2, "a valid date"] } ~> =('date & d)
-  at [d, t] ~> from_utc
+  expect [data, p3, " "] ~> =('int & p4)
+  month_at [data, p4] ~> =[month, p5]
+  expect [data, p5, " "] ~> =('int & p6)
+  fixed [data, p6, 4, "a four-digit year"] ~> =[year, p7]
+  expect [data, p7, " "] ~> =('int & p8)
+  clock_at [data, p8] ~> =[t, p9]
+  gmt_at [data, p9] ~> =('int & end)
+  [weekday: wd, year: year, month: month, day: day, time: t, end: end]
+}
+
+// `Sunday, 06-Nov-94 08:49:37 GMT` (RFC 850). A two-digit year is read as 1970 to 2069.
+rfc850_at = #'bin {
+  =data
+  { find [data, ",", 0] | fail [0, "a day name and ','"] } ~> =('int & comma)
+  day_name_at [data, 0, comma] ~> =('weekday & wd)
+  expect [data, iadd [comma, 1], " "] ~> =('int & p1)
+  fixed [data, p1, 2, "a two-digit day"] ~> =[day, p2]
+  expect [data, p2, "-"] ~> =('int & p3)
+  month_at [data, p3] ~> =[month, p4]
+  expect [data, p4, "-"] ~> =('int & p5)
+  fixed [data, p5, 2, "a two-digit year"] ~> =[yy, p6]
+  expect [data, p6, " "] ~> =('int & p7)
+  clock_at [data, p7] ~> =[t, p8]
+  gmt_at [data, p8] ~> =('int & end)
+  year = { | icmp [yy, 70] ~> =-1 => iadd [2000, yy] | iadd [1900, yy] }
+  [weekday: wd, year: year, month: month, day: day, time: t, end: end]
+}
+
+// `Sun Nov  6 08:49:37 1994` (C's asctime), the day padded with a space.
+asctime_at = #'bin {
+  =data
+  day_name_at [data, 0, 3] ~> =('weekday & wd)
+  expect [data, 3, " "] ~> =('int & p1)
+  month_at [data, p1] ~> =[month, p2]
+  expect [data, p2, " "] ~> =('int & p3)
+
+  {
+    | char_at [data, p3] ~> =" " => fixed [data, iadd [p3, 1], 1, "a day"]
+    | fixed [data, p3, 2, "a two-digit day"]
+  }
+  ~> =[day, p4]
+
+  expect [data, p4, " "] ~> =('int & p5)
+  clock_at [data, p5] ~> =[t, p6]
+  expect [data, p6, " "] ~> =('int & p7)
+  fixed [data, p7, 4, "a four-digit year"] ~> =[year, end]
+  [weekday: wd, year: year, month: month, day: day, time: t, end: end]
+}
+
+parse_http_date = #'%str {
+  :doc "Reads an HTTP date as an instant, in any of the three forms RFC 9110 has recipients accept: IMF-fixdate (\"Sun, 06 Nov 1994 08:49:37 GMT\"), the obsolete RFC 850 form (\"Sunday, 06-Nov-94 08:49:37 GMT\", its two-digit year read as 1970 to 2069), and asctime (\"Sun Nov  6 08:49:37 1994\"). The day of the week must be the date's. Nil carrying :error Expected[offset, message] otherwise."
+  =Str[data]
+
+  {
+    | char_at [data, 3] ~> ="," => imf_at data
+    | char_at [data, 3] ~> =" " => asctime_at data
+    | =_ => rfc850_at data
+  }
+  ~> =('http_parts & h)
+
+  { icmp [h.end, %bin.length data] ~> =0 | fail [h.end, "end of input"] }
+  { date [h.year, h.month, h.day] | fail [0, "a valid date"] } ~> =('date & d)
+  { weekday d ~> =^h.weekday | fail [0, "the date's day of the week"] }
+  at [d, h.time] ~> from_utc
 }
 
 // --- the `%time{ … }` dialect ----------------------------------------------------------
@@ -851,60 +1633,84 @@ parse_http_date = #'%str {
 // as the constant it denotes; anything `parse` rejects is a compile error at its position.
 
 skip_space = #['bin, 'int] {
-  | peek $ ~> =(32 | 9 | 10 | 13) => ^ [$0, iadd [$1, 1]]
+  | char_at $ ~> =(" " | "\t" | "\n" | "\r") => ^ [$0, iadd [$1, 1]]
   | $1
 }
 
 // The end of the content with trailing whitespace dropped.
 trim_end = #['bin, 'int] {
-  | icmp [$1, 0] ~> =1; peek [$0, isub [$1, 1]] ~> =(32 | 9 | 10 | 13) => ^ [$0, isub [$1, 1]]
+  | icmp [$1, 0] ~> =1; char_at [$0, isub [$1, 1]] ~> =(" " | "\t" | "\n" | "\r") =>
+    ^ [$0, isub [$1, 1]]
   | $1
 }
 
 label = #['%str, 'int] { Labeled[label: $0, value: $1] }
 
 literal = #'parsed {
-  | =Instant[n] => Tuple[name: "Instant", fields: Cons[n, Nil]]
-  | =Duration[n] => Tuple[name: "Duration", fields: Cons[n, Nil]]
+  | =Instant[n] => Tuple[name: "Instant", fields: %list{ n }]
+  | =Duration[n] => Tuple[name: "Duration", fields: %list{ n }]
   | =Period[months: m, days: d] =>
-    Tuple[name: "Period", fields: Cons[label ["months", m], Cons[label ["days", d], Nil]]]
+    Tuple[name: "Period", fields: %list{ label ["months", m], label ["days", d] }]
   | =('date & d) =>
     Tuple[
       name: "Date",
-      fields: Cons[label ["year", d.year], Cons[label ["month", d.month], Cons[label ["day", d.day], Nil]]],
+      fields: %list{ label ["year", d.year], label ["month", d.month], label ["day", d.day] },
     ]
   | =('time & t) =>
     Tuple[
       name: "Time",
-      fields: Cons[
+      fields: %list{
         label ["hour", t.hour],
-        Cons[label ["minute", t.minute], Cons[label ["second", t.second], Cons[label ["nano", t.nano], Nil]]],
-      ],
+        label ["minute", t.minute],
+        label ["second", t.second],
+        label ["nano", t.nano],
+      },
     ]
   | =('datetime & t) =>
     Tuple[
       name: "DateTime",
-      fields: Cons[
+      fields: %list{
         label ["year", t.year],
-        Cons[
-          label ["month", t.month],
-          Cons[
-            label ["day", t.day],
-            Cons[
-              label ["hour", t.hour],
-              Cons[label ["minute", t.minute], Cons[label ["second", t.second], Cons[label ["nano", t.nano], Nil]]],
-            ],
-          ],
-        ],
-      ],
+        label ["month", t.month],
+        label ["day", t.day],
+        label ["hour", t.hour],
+        label ["minute", t.minute],
+        label ["second", t.second],
+        label ["nano", t.nano],
+      },
     ]
 }
 
+zone_expr = #(Utc | Fixed['int]) {
+  | =Utc => Tuple[name: "Utc", fields: Nil]
+  | =Fixed[o] => Tuple[name: "Fixed", fields: %list{ o }]
+}
+
+// A zoned literal: a constant when its zone is UTC or an offset, and otherwise a call that
+// looks the zone up when it runs — the host's database can't be read at compile time.
+zoned_literal = #['bin, 'int] {
+  =[data, start]
+  zoned_parts_at [data, start] ~> =[parts, e]
+  { icmp [e, %bin.length data] ~> =0 | fail [e, "end of input"] }
+  {
+    | pure_zone parts.name ~> =((Utc | Fixed['int]) & z) => {
+      settle [parts, z] ~> =Zoned[Instant[n], _]
+      Tuple[name: "Zoned", fields: %list{ Tuple[name: "Instant", fields: %list{ n }], zone_expr z }]
+    }
+    | =_ => Call[member: "parse_zoned!", arg: Str[%bin.slice [data, start, e]]]
+  }
+}
+
+literal_at = #['bin, 'int] { parse_from $ ~> =('parsed & v); literal v }
+
 time_dialect = #(content: '%str) {
   $content ~> =Str[data]
-  end = trim_end [data, %bin.length data]
-  parse_from [%bin.slice [data, 0, end], skip_space [data, 0]] ~> =('parsed & v)
-  literal v
+  body = trim_end [data, %bin.length data] ~> %bin.slice [data, 0, ~]
+  start = skip_space [data, 0]
+  {
+    | find [body, "[", start] ~> ='int => zoned_literal [body, start]
+    | =_ => literal_at [body, start]
+  }
 }
 
 [
@@ -986,6 +1792,10 @@ time_dialect = #(content: '%str) {
     :doc "The duration in nanoseconds."
     $0
   },
+  to_micros: #'duration {
+    :doc "The duration in whole microseconds, truncated toward zero."
+    idiv [$0, ns_us]
+  },
   to_ms: #'duration {
     :doc "The duration in whole milliseconds, truncated toward zero."
     idiv [$0, ns_ms]
@@ -993,6 +1803,14 @@ time_dialect = #(content: '%str) {
   to_seconds: #'duration {
     :doc "The duration in whole seconds, truncated toward zero."
     idiv [$0, ns_s]
+  },
+  to_minutes: #'duration {
+    :doc "The duration in whole minutes, truncated toward zero."
+    idiv [$0, ns_m]
+  },
+  to_hours: #'duration {
+    :doc "The duration in whole hours, truncated toward zero."
+    idiv [$0, ns_h]
   },
   neg: neg,
   abs: abs,
@@ -1018,5 +1836,41 @@ time_dialect = #(content: '%str) {
   parse: parse,
   http_date: http_date,
   parse_http_date: parse_http_date,
+  zone: zone,
+  local_zone: local_zone,
+  fixed: fixed_zone,
+  from_tzif: from_tzif,
+  zone_name: zone_name,
+  zoned: zoned,
+  to_instant: #'zoned {
+    :doc "The zoned value's instant."
+    $0
+  },
+  to_datetime: #'zoned {
+    :doc "The zoned value's civil date and time, as its zone's clocks read it."
+    zoned_civil $
+  },
+  zone_of: #'zoned {
+    :doc "The zoned value's zone."
+    $1
+  },
+  offset: #'zoned {
+    :doc "The zoned value's offset from UTC, as a duration: its zone's offset at its instant."
+    zoned_ltt $ ~> .offset ~> imul [~, ns_s] ~> Duration[~]
+  },
+  abbreviation: #'zoned {
+    :doc "The abbreviation the zone uses at the zoned value's instant, such as \"BST\"."
+    zoned_ltt $ ~> .abbr
+  },
+  dst?: #'zoned {
+    :doc "Whether the zone observes daylight saving time at the zoned value's instant."
+    zoned_ltt $ ~> .dst?
+  },
+  parse_zoned: parse_zoned,
+  parse_zoned!: #'%str {
+    :doc "`parse_zoned`, for text known to be good: a failure panics. The `%time\{ … }` dialect places a literal naming an IANA zone with it, so a literal whose zone the host lacks, or whose offset the zone doesn't have, fails fast when it runs."
+    | parse_zoned $ ~> =('zoned & z) => z
+    | __panic__ "%time: can't place {$}: no such zone here, or an offset it doesn't have"
+  },
 ]
 ~> { :dialect time_dialect }

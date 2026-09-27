@@ -1,5 +1,5 @@
-//! The web host's builtin implementations: `fetch` plus the system builtins (entropy and
-//! clocks). The registry carries the *universal* signature contract — compilation is
+//! The web host's builtin implementations: `fetch` plus the system builtins (entropy,
+//! clocks and time zones). The registry carries the *universal* signature contract — compilation is
 //! host-independent, so a program naming `__tcp_connect__` compiles here too — and what a
 //! browser can actually run is decided by what this file attaches: it has no filesystem
 //! or sockets, so the file/network/tls signatures stay unattached and a call to one
@@ -94,12 +94,54 @@ pub fn builtin_time_monotonic(
     Ok(Completion::Value(Value::int((ms * 1_000_000.0) as i64)))
 }
 
-/// Attach the browser implementations of the system builtins (entropy + clocks).
+/// time_zone(name) -> bin | nil: the named zone's TZif data from the embedded database. The
+/// name must match exactly, as a lookup in a native zoneinfo directory would.
+pub fn builtin_time_zone(
+    arg: &Value,
+    ctx: &mut BuiltinContext<WebEffect>,
+) -> Result<Completion<WebEffect>, Error> {
+    let Value::Binary(binary) = arg else {
+        return Err(Error::TypeMismatch {
+            expected: "binary".to_string(),
+            found: arg.type_name().to_string(),
+        });
+    };
+    let name = ctx.executor.get_binary_data(binary)?.to_vec();
+    let data = std::str::from_utf8(&name)
+        .ok()
+        .and_then(jiff_tzdb::get)
+        .filter(|(canonical, _)| canonical.as_bytes() == name.as_slice())
+        .map(|(_, data)| data.to_vec());
+    Ok(Completion::Value(match data {
+        Some(bytes) => Value::Binary(ctx.executor.allocate_binary(bytes)?),
+        None => Value::nil(),
+    }))
+}
+
+/// time_zone_local([]) -> bin | nil: the browser's zone, as `Intl` resolves it.
+pub fn builtin_time_zone_local(
+    _arg: &Value,
+    ctx: &mut BuiltinContext<WebEffect>,
+) -> Result<Completion<WebEffect>, Error> {
+    let options = js_sys::Intl::DateTimeFormat::new(&js_sys::Array::new(), &js_sys::Object::new())
+        .resolved_options();
+    let name = js_sys::Reflect::get(&options, &JsValue::from_str("timeZone"))
+        .ok()
+        .and_then(|zone| zone.as_string());
+    Ok(Completion::Value(match name {
+        Some(name) => Value::Binary(ctx.executor.allocate_binary(name.into_bytes())?),
+        None => Value::nil(),
+    }))
+}
+
+/// Attach the browser implementations of the system builtins (entropy, clocks, zones).
 fn attach_system_builtins(registry: &mut BuiltinRegistry<WebEffect>) {
-    let implementations: [(&str, BuiltinFn<WebEffect>); 3] = [
+    let implementations: [(&str, BuiltinFn<WebEffect>); 5] = [
         ("random_bytes", builtin_random_bytes),
         ("time_now", builtin_time_now),
         ("time_monotonic", builtin_time_monotonic),
+        ("time_zone", builtin_time_zone),
+        ("time_zone_local", builtin_time_zone_local),
     ];
     for (name, impl_fn) in implementations {
         registry.attach_implementation(name, impl_fn);

@@ -303,12 +303,26 @@ fn system_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     let nil = TypeSpec::Tuple(None, vec![]);
     vec![
         // random_bytes(n) -> bin: n cryptographically secure random bytes
-        ("random_bytes", int.clone(), bin),
+        ("random_bytes", int.clone(), bin.clone()),
         // time_now([]) -> int: nanoseconds since the Unix epoch (UTC)
         ("time_now", nil.clone(), int.clone()),
         // time_monotonic([]) -> int: monotonic nanoseconds from an arbitrary origin —
         // for measuring durations; unrelated to (and steadier than) the wall clock
-        ("time_monotonic", nil, int),
+        ("time_monotonic", nil.clone(), int),
+        // time_zone(name) -> bin | nil: the named IANA zone's TZif data, from the host's
+        // time zone database; nil when the host has no such zone
+        (
+            "time_zone",
+            bin.clone(),
+            TypeSpec::Union(vec![bin.clone(), nil.clone()]),
+        ),
+        // time_zone_local([]) -> bin | nil: the IANA name of the host's own zone; nil when
+        // the host can't tell
+        (
+            "time_zone_local",
+            nil.clone(),
+            TypeSpec::Union(vec![bin, nil]),
+        ),
     ]
 }
 

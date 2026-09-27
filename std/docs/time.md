@@ -22,6 +22,8 @@ Every value has exactly one representation, so equality and pins mean "the same 
 | `'%time.time` | `Time[hour:, minute:, second:, nano:]` | a civil time of day |
 | `'%time.datetime` | `DateTime[year:, …, nano:]` | a civil date and time, with no zone |
 | `'%time.mono` | `Mono[ns]` | a monotonic clock reading, for measuring elapsed time |
+| `'%time.zone` | `Utc`, `Fixed[seconds]`, `Tz[name:, rules:]` | a zone: UTC, a fixed offset, or a named zone with its rules |
+| `'%time.zoned` | `Zoned[instant, zone]` | an instant in a zone, which gives it a civil date and time |
 
 `'%time` is `'%time.instant`. A year is twelve months and a week seven days, so a period is
 canonical in months and days:
@@ -146,6 +148,15 @@ date-time:
 %time.from_unix_ms -1 ~> %time.to_unix           //= -1
 ```
 
+Rounding down is what places an instant: a millisecond before the epoch lies in the second
+before it. A duration's `to_` conversions (`to_micros` up to `to_hours`) measure a length
+instead, so they truncate toward zero:
+
+```quiver
+%time.ms -1 ~> %time.to_seconds                  //= 0
+%time.minutes 150 ~> %time.to_hours              //= 2
+```
+
 ## Arithmetic
 
 `add` and `sub` take a value and a span. A duration moves an instant, a monotonic reading, a
@@ -183,11 +194,24 @@ month it is clamped to the month's last day; `overflow: Reject` answers nil inst
 %time.days_between [%time{ 2024-01-01 }, %time{ 2025-01-01 }]   //= 366
 ```
 
-`between` answers a period that `add` takes back to where it started:
+`between` answers a period that `add` takes back to where it started — going forwards.
+Backwards, it is the forward period negated, which adding can't always undo, since month
+lengths differ:
 
 ```quiver
 from = %time{ 2023-11-30 }
 %time.between [from, %time{ 2024-02-10 }] ~> %time.add [from, ~]   //= Date[year: 2024, month: 2, day: 10]
+back = %time.between [%time{ 2023-03-31 }, %time{ 2023-02-28 }]
+back                                                                //= Period[months: -1, days: -3]
+%time.add [%time{ 2023-03-31 }, back]                               //= Date[year: 2023, month: 2, day: 25]
+```
+
+The civil types are plain tuples, so decoding checks only their shape: text can name a date
+that doesn't exist. Read untrusted text with `parse`, which checks the calendar:
+
+```quiver
+%data.decode<'%time.date> "Date[year: 2023, month: 2, day: 31]"   //= Date[year: 2023, month: 2, day: 31]
+%time.parse "2023-02-31" ~> :error<'%time.error>                  //= Expected[offset: 0, message: "a valid date"]
 ```
 
 `neg`, `abs` and `mul` work on durations (and `neg` and `mul` on periods):
@@ -245,6 +269,145 @@ truncate on the UTC day, and durations toward zero.
 %time.truncate [%time{ -1h30m }, Hour]                //= Duration[-3600000000000]
 ```
 
+## Zones
+
+A zone maps the UTC timeline to the clocks of a place. `zone` looks one up by its IANA name
+in the host's time zone database — the system's on a native host, an embedded copy in the
+browser — so, like `now`, it reads host state and a module can't call it at compile time.
+`fixed` makes a zone at a constant offset, and `local_zone` is the host's own.
+
+```quiver
+%time.zone "Europe/London" ~> ='%time.zone ~> %time.zone_name   //= "Europe/London"
+%time.zone "UTC"                                                //= Utc
+%time.fixed %time{ 5h30m }                                      //= Fixed[19800]
+%time.zone "Mars/Olympus" ~> :error<'%time.error>               //= UnknownZone["Mars/Olympus"]
+```
+
+`zoned` places an instant in a zone, giving a **zoned value**: `Zoned[instant, zone]`. Its
+civil date and time are the zone's clocks at that instant, and `offset`, `abbreviation` and
+`dst?` describe the zone there.
+
+```quiver
+london = %time.zone "Europe/London" ~> ='%time.zone
+summer = %time.zoned [%time{ 2024-07-01T12:00Z }, london]
+summer ~> %time.to_datetime              //= DateTime[year: 2024, month: 7, day: 1, hour: 13, minute: 0, second: 0, nano: 0]
+summer ~> %time.abbreviation             //= "BST"
+summer ~> %time.offset ~> %time.format   //= "1h"
+summer ~> %time.dst?                     //= Ok
+summer ~> %time.to_instant               //= Instant[1719835200000000000]
+```
+
+A zone's rules reach back through its history and forward indefinitely:
+
+```quiver
+london = %time.zone "Europe/London" ~> ='%time.zone
+%time.zoned [%time{ 1800-01-01T12:00Z }, london] ~> %time.format   //= "1800-01-01T11:58:45-00:01:15[Europe/London]"
+%time.zoned [%time{ 2090-07-01T12:00Z }, london] ~> %time.abbreviation   //= "BST"
+sydney = %time.zone "Australia/Sydney" ~> ='%time.zone
+%time.zoned [%time{ 2024-01-01T12:00Z }, sydney] ~> %time.abbreviation   //= "AEDT"
+```
+
+### Placing a civil time
+
+`zoned` also places a civil date-time in a zone. Usually that names one instant, but where
+clocks change some local times happen twice (when they go back) and some never (when they go
+forward). `disambiguation` decides: `Earlier` or `Later` picks a side, `Compatible` — the
+default — takes the earlier of a repeated time and moves a skipped one forward by the gap,
+and `Reject` answers nil carrying `:error Repeated` or `Skipped`.
+
+```quiver
+london = %time.zone "Europe/London" ~> ='%time.zone
+gap = %time{ 2024-03-31T01:30 }   // clocks go from 01:00 straight to 02:00
+%time.zoned [gap, london] ~> %time.format                             //= "2024-03-31T02:30:00+01:00[Europe/London]"
+%time.zoned [gap, london, disambiguation: Earlier] ~> %time.format    //= "2024-03-31T00:30:00+00:00[Europe/London]"
+%time.zoned [gap, london, disambiguation: Reject] ~> :error<'%time.error>   //= Skipped
+fold = %time{ 2024-10-27T01:30 }  // 01:00 to 02:00 happens twice
+%time.zoned [fold, london] ~> %time.format                            //= "2024-10-27T01:30:00+01:00[Europe/London]"
+%time.zoned [fold, london, disambiguation: Later] ~> %time.format     //= "2024-10-27T01:30:00+00:00[Europe/London]"
+```
+
+A time in the future is best kept as the civil date-time and the zone's name, and placed
+when it's needed: governments change their zones' rules, and an instant computed today would
+drift from the wall-clock time that was meant.
+
+### Arithmetic on zoned values
+
+A duration moves a zoned value along the timeline, and a period moves it on the zone's
+calendar, keeping the wall-clock time across a change of offset:
+
+```quiver
+london = %time.zone "Europe/London" ~> ='%time.zone
+eve = %time.zoned [%time{ 2024-03-30T12:00 }, london]
+%time.add [eve, %time.days 1] ~> %time.format     //= "2024-03-31T12:00:00+01:00[Europe/London]"
+%time.add [eve, %time.hours 24] ~> %time.format   //= "2024-03-31T13:00:00+01:00[Europe/London]"
+%time.truncate [%time.add [eve, %time.days 1], Day] ~> %time.format   //= "2024-03-31T00:00:00+00:00[Europe/London]"
+```
+
+Where a period or a truncation lands on a repeated local time, the value keeps the offset
+it had, so it stays on its own side of the change:
+
+```quiver
+london = %time.zone "Europe/London" ~> ='%time.zone
+late = %time.zoned [%time{ 2024-10-27T01:30 }, london, disambiguation: Later]
+%time.add [late, %time.days 0] ~> %time.format        //= "2024-10-27T01:30:00+00:00[Europe/London]"
+%time.truncate [late, Hour] ~> %time.format           //= "2024-10-27T01:00:00+00:00[Europe/London]"
+```
+
+`diff` and the comparisons read zoned values by their instants, whatever their zones:
+
+```quiver
+london = %time.zone "Europe/London" ~> ='%time.zone
+a = %time.zoned [%time{ 2024-07-01T12:00Z }, london]
+b = %time.zoned [%time{ 2024-07-01T12:00Z }, Utc]
+%time.compare [a, b]                     //= 0
+%time.diff [a, b]                        //= Duration[0]
+```
+
+### Zoned text
+
+`format` writes a zoned value in the RFC 9557 form: the local date-time, its offset, and
+the zone in brackets. `parse_zoned` reads it back, looking the zone up as `zone` does. An
+offset in the text must be the zone's offset then; `Z` gives the exact instant, and no offset
+at all places the civil time as `Compatible` does.
+
+```quiver
+%time.parse_zoned "2024-07-10T09:30:00+01:00[Europe/London]" ~> ='%time.zoned ~> %time.to_instant ~> %time.format   //= "2024-07-10T08:30:00Z"
+%time.parse_zoned "2024-07-10T09:30Z[Europe/London]" ~> ='%time.zoned ~> %time.format   //= "2024-07-10T10:30:00+01:00[Europe/London]"
+%time.parse_zoned "2024-07-10T09:30:00+00:00[Europe/London]" ~> :error<'%time.error>   //= Expected[offset: 19, message: "an offset the zone has then"]
+```
+
+`parse` reads no zones, and says so:
+
+```quiver
+%time.parse "2024-07-10T09:30[Europe/London]" ~> :error<'%time.error>   //= Expected[offset: 16, message: "no zone annotation: parse_zoned reads one"]
+```
+
+A `%time{ … }` literal may name a zone. One in UTC or at a fixed offset is a constant. One
+naming an IANA zone has only its syntax checked when compiled — the zone database can't be
+read then — and is placed when it runs, failing fast if the host has no such zone or the
+zone doesn't have the literal's offset.
+
+```quiver
+%time{ 2024-07-10T09:30+05:30[+05:30] }   //= Zoned[Instant[1720584000000000000], Fixed[19800]]
+%time{ 2024-07-10T09:30[Europe/London] } ~> %time.format   //= "2024-07-10T09:30:00+01:00[Europe/London]"
+```
+
+`from_tzif` makes a zone from TZif data (RFC 8536) held anywhere, rather than the host's
+database — checking it first:
+
+```quiver
+%time.from_tzif ["Nowhere", <00>] ~> :error<'%time.error>   //= Expected[offset: 0, message: "a TZif header"]
+```
+
+A named zone holds its rules as a function, which only `zone` and `from_tzif` make — so no
+text decodes into one, and zoned values have no data notation. `format` and `parse_zoned`
+are how a zoned value is written down and read back:
+
+```quiver
+%data.decode<'%time.zone> "Utc"                         //= Utc
+%data.decode<'%time.zone> "Tz[name: \"x\", rules: 1]"   //= []
+```
+
 ## Text
 
 `format` writes ISO 8601 for instants (always in UTC), dates, times and date-times, and unit
@@ -262,7 +425,7 @@ the fewest that are exact.
 ```
 
 Durations take the units `ns`, `us`, `ms`, `s`, `m` and `h`, and periods `d`, `w`, `mo` and
-`y`. A leading sign applies to the whole span, and a later component may carry its own —
+`y`, largest first and each at most once. A leading sign applies to the whole span, and a later component may carry its own —
 which only a period, whose months and days can differ in sign, needs:
 
 ```quiver
@@ -270,6 +433,7 @@ which only a period, whose months and days can differ in sign, needs:
 %time.add [%time.months 1, %time.days -3] ~> %time.format   //= "1mo-3d"
 %time.add [%time.months -1, %time.days 3] ~> %time.format   //= "-1mo+3d"
 %time{ -1mo+3d }                               //= Period[months: -1, days: 3]
+%time.parse "30s1h" ~> :error<'%time.error>    //= Expected[offset: 4, message: "units largest first, each at most once"]
 ```
 
 `parse` reads any of those forms back — the result is whichever kind the text denotes, told
@@ -284,10 +448,15 @@ seconds are optional; nil carries `:error Expected[offset, message]` for malform
 %time.parse "12:3" ~> :error<'%time.error>                //= Expected[offset: 3, message: "two-digit minutes"]
 ```
 
-`http_date` and `parse_http_date` convert the HTTP date format (IMF-fixdate):
+`http_date` writes the HTTP date format (IMF-fixdate). `parse_http_date` reads it, and the
+two obsolete forms RFC 9110 still has recipients accept — RFC 850's, whose two-digit year
+it reads as 1970 to 2069, and C's asctime — checking the day of the week against the date:
 
 ```quiver
 %time.from_unix 784111777 ~> %time.http_date   //= "Sun, 06 Nov 1994 08:49:37 GMT"
 %time.parse_http_date "Sun, 06 Nov 1994 08:49:37 GMT" ~> ='%time.instant ~> %time.to_unix   //= 784111777
+%time.parse_http_date "Sunday, 06-Nov-94 08:49:37 GMT" ~> ='%time.instant ~> %time.to_unix   //= 784111777
+%time.parse_http_date "Sun Nov  6 08:49:37 1994" ~> ='%time.instant ~> %time.to_unix   //= 784111777
+%time.parse_http_date "Mon, 06 Nov 1994 08:49:37 GMT" ~> :error<'%time.error>   //= Expected[offset: 0, message: "the date's day of the week"]
 %time.parse_http_date "Sun, 06 Nov 1994 08:49:37 UTC"   //= []
 ```
