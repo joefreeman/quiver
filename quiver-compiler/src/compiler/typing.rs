@@ -5,7 +5,7 @@ use crate::resolver::{ModuleResolver, PackageId};
 use quiver_core::{
     binders::{BinderStack, has_free_cycles, is_binder, rewrite_free_cycles},
     program::Program,
-    types::{Type, TypeLookup},
+    types::{Type, TypeLookup, is_subsumed_by},
 };
 
 use super::modules::{self, ModuleCache};
@@ -105,24 +105,71 @@ fn refold(members: &[usize], program: &mut Program) -> Option<usize> {
     })
 }
 
-/// Deduplicate union members, in order.
+/// The members that are not subsumed by another, in order.
 ///
-/// Members that differ only by an annotation row fold: when both `T` and `Annotated { base:
-/// T }` are present (e.g. an alias-typed `Nil` alongside a freshly built literal `Nil` carrying
-/// an exact-empty row), keep the open `T` — retrieval on a union is already governed by its
-/// weakest member, so dropping the rowed twin loses nothing, while keeping it bloats unions and
-/// displays as duplicates (`Nil | Nil`).
+/// A member whose every value belongs to another member adds nothing to the union, so it is
+/// dropped (`is_subsumed_by`). That folds members differing only by annotation rows, at any
+/// depth — a freshly built `Nil` with its exact-empty row inside the open one — and members
+/// structurally inside another, like `[Nil, 't]` beside `[Nil | Cons[…], 't]`. Retrieval on
+/// a union is already governed by its weakest member, so a row dropped with its member loses
+/// nothing. Of two members subsuming each other, the earlier is kept; a member subsuming
+/// earlier ones takes the place of the first of them.
 fn distinct_members(program: &Program, members: impl IntoIterator<Item = usize>) -> Vec<usize> {
-    let mut seen = std::collections::HashSet::new();
-    let unique: Vec<usize> = members.into_iter().filter(|id| seen.insert(*id)).collect();
-    unique
-        .iter()
-        .copied()
-        .filter(|id| match program.lookup_type(*id) {
-            Some(Type::Annotated { base, .. }) => !unique.contains(base),
-            _ => true,
-        })
-        .collect()
+    let subsumed_by = |member: usize, by: usize| {
+        may_relate(program, member, by) && is_subsumed_by(member, by, program)
+    };
+    let mut kept: Vec<usize> = Vec::new();
+    for member in members {
+        if kept.iter().any(|&k| k == member || subsumed_by(member, k)) {
+            continue;
+        }
+        let mut retained = 0;
+        let mut slot = None;
+        kept.retain(|&k| {
+            let drop = subsumed_by(k, member);
+            if drop {
+                slot.get_or_insert(retained);
+            } else {
+                retained += 1;
+            }
+            !drop
+        });
+        kept.insert(slot.unwrap_or(kept.len()), member);
+    }
+    kept
+}
+
+/// A cheap pre-check for `is_subsumed_by` between two distinct members: whether their shapes
+/// could relate at all. Only carriers can — identical primitives, variables and resources
+/// share an id — and then only a tuple with a tuple of its name and labels or a partial it
+/// may satisfy, or two partials, callables or processes.
+fn may_relate(program: &Program, member: usize, by: usize) -> bool {
+    match (program.lookup_base(member), program.lookup_base(by)) {
+        (Some(Type::Tuple(t1)), Some(Type::Tuple(t2))) => {
+            match (program.lookup_tuple(*t1), program.lookup_tuple(*t2)) {
+                (Some(i1), Some(i2)) => {
+                    i1.name == i2.name
+                        && i1.fields.len() == i2.fields.len()
+                        && i1
+                            .fields
+                            .iter()
+                            .zip(&i2.fields)
+                            .all(|((l1, _), (l2, _))| l1 == l2)
+                }
+                _ => false,
+            }
+        }
+        (Some(Type::Tuple(t)), Some(Type::Partial { name, .. })) => {
+            name.is_none()
+                || program
+                    .lookup_tuple(*t)
+                    .is_some_and(|info| info.name == *name)
+        }
+        (Some(Type::Partial { .. }), Some(Type::Partial { .. }))
+        | (Some(Type::Callable { .. }), Some(Type::Callable { .. }))
+        | (Some(Type::Process { .. }), Some(Type::Process { .. })) => true,
+        _ => false,
+    }
 }
 
 /// Type alias definition - a pre-resolved type ID with type parameters.

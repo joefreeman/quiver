@@ -1053,6 +1053,7 @@ fn analyze_match_tuple_pattern(
     // `declared_shape_witness`), and the member itself otherwise.
     let needs_tuple_check = is_union(value_type_id, program)
         || is_top(value_type_id, program)
+        || has_partial_sources(program, value_type_id)
         || matching_types.len() > 1;
     let mut witnesses = Vec::new();
     for (tuple_id, _) in &matching_types {
@@ -1277,31 +1278,67 @@ fn find_matching_match_tuples(
     tuple: &ast::MatchTuple,
     value_type_id: usize,
 ) -> Result<TupleMatchResult, Error> {
-    // A `_` value may be any tuple at all, so the pattern's own shape — every field `_` — is
-    // the one member it is tested for.
+    // A `_` value may be any tuple at all: it is the partial `()` for this purpose.
     if is_top(value_type_id, program) {
-        let top = program.register_type(Type::Top);
-        let fields = tuple
-            .fields
-            .iter()
-            .map(|field| (field.name.clone(), top))
-            .collect();
-        let tuple_id = program.register_tuple(tuple.name.clone(), fields);
-        let field_mappings = (0..tuple.fields.len()).map(|i| (i, i)).collect();
-        return Ok(vec![(tuple_id, field_mappings)]);
+        return Ok(partial_as_match_tuple(program, tuple, &None, &[])
+            .into_iter()
+            .collect());
     }
 
     let mut matching_types = Vec::new();
 
-    let tuple_ids = extract_tuple_ids(program, value_type_id);
-
-    for tuple_id in tuple_ids {
-        if let Some(field_mappings) = check_match_tuple_match(program, tuple, tuple_id)? {
-            matching_types.push((tuple_id, field_mappings));
-        }
+    for source in extract_field_sources(program, value_type_id) {
+        let candidate = match source {
+            FieldSource::Tuple(tuple_id) => check_match_tuple_match(program, tuple, tuple_id)?
+                .map(|field_mappings| (tuple_id, field_mappings)),
+            FieldSource::Partial { name, fields } => {
+                partial_as_match_tuple(program, tuple, &name, &fields)
+            }
+        };
+        matching_types.extend(candidate);
     }
 
     Ok(matching_types)
+}
+
+/// The member a tuple pattern is tested for in a partial-typed value: the pattern's own shape,
+/// each field typed as the partial constrains it or `_` where it says nothing. `None` when the
+/// partial rules the shape out — a name other than the pattern's (an unnamed pattern requiring
+/// an unnamed value), or a constrained field the pattern does not have.
+fn partial_as_match_tuple(
+    program: &mut Program,
+    tuple: &ast::MatchTuple,
+    name: &Option<String>,
+    fields: &[(String, usize)],
+) -> Option<(usize, Vec<(usize, usize)>)> {
+    if name.is_some() && *name != tuple.name {
+        return None;
+    }
+    let labelled = |label: &str| {
+        tuple
+            .fields
+            .iter()
+            .any(|field| field.name.as_deref() == Some(label))
+    };
+    if !fields.iter().all(|(label, _)| labelled(label)) {
+        return None;
+    }
+    let top = program.register_type(Type::Top);
+    let tuple_fields = tuple
+        .fields
+        .iter()
+        .map(|field| {
+            let constraint = field.name.as_ref().and_then(|label| {
+                fields
+                    .iter()
+                    .find(|(constrained, _)| constrained == label)
+                    .map(|(_, type_id)| *type_id)
+            });
+            (field.name.clone(), constraint.unwrap_or(top))
+        })
+        .collect();
+    let tuple_id = program.register_tuple(tuple.name.clone(), tuple_fields);
+    Some((tuple_id, (0..tuple.fields.len()).map(|i| (i, i)).collect()))
 }
 
 fn check_match_tuple_match(
@@ -1509,12 +1546,14 @@ fn analyze_partial_pattern(
                 name,
                 fields,
                 field_indices,
+                widened,
             } => {
                 // A partial source is a structural constraint, not a concrete type — but
                 // when the value could also be *other* members (e.g. the nil of a
-                // `shape | []` union), the constraint itself is the runtime test;
-                // without it the field fetch below would run unguarded against them.
-                if needs_type_check {
+                // `shape | []` union), or the pattern asks for more than the source
+                // guarantees, the constraint itself is the runtime test; without it the
+                // field fetch below would run unguarded.
+                if needs_type_check || *widened {
                     let partial_type_id = program.register_type(Type::Partial {
                         name: name.clone(),
                         fields: fields.clone(),
@@ -1839,6 +1878,9 @@ enum FieldMatch {
         name: Option<String>,
         fields: Vec<(String, usize)>, // (field_name, type_id)
         field_indices: Vec<usize>,
+        /// Whether the pattern asks for more than the source partial guarantees — a name or
+        /// fields it says nothing about — so its constraint must be tested at runtime.
+        widened: bool,
     },
 }
 
@@ -1856,6 +1898,7 @@ fn find_types_with_fields_and_name(
             name: type_name.cloned(),
             fields: field_names.iter().map(|name| (name.clone(), top)).collect(),
             field_indices: (0..field_names.len()).collect(),
+            widened: true,
         }]);
     }
 
@@ -1884,27 +1927,39 @@ fn find_types_with_fields_and_name(
                     });
                 }
             }
-            FieldSource::Partial { name, fields } => {
-                // Check if partial name matches (if specified)
-                if let Some(expected_name) = type_name
-                    && name.as_ref() != Some(expected_name)
+            FieldSource::Partial { name, mut fields } => {
+                // A partial says nothing about a name it does not state or fields it does not
+                // list, so the pattern may ask for them — tested at runtime, with the fields
+                // typed `_`. Only a different stated name rules the partial out.
+                if let (Some(expected_name), Some(stated)) = (type_name, &name)
+                    && stated != expected_name
                 {
-                    continue; // Skip this partial if name doesn't match
+                    continue;
                 }
-
-                // Convert partial fields to (Option<String>, usize) format for find_field_indices
-                let converted_fields: Vec<(Option<String>, usize)> = fields
+                let mut widened = name.is_none() && type_name.is_some();
+                let name = name.or_else(|| type_name.cloned());
+                for field_name in field_names {
+                    if !fields.iter().any(|(label, _)| label == field_name) {
+                        let top = program.register_type(Type::Top);
+                        fields.push((field_name.clone(), top));
+                        widened = true;
+                    }
+                }
+                let field_indices = field_names
                     .iter()
-                    .map(|(name, type_id)| (Some(name.clone()), *type_id))
+                    .map(|field_name| {
+                        fields
+                            .iter()
+                            .position(|(label, _)| label == field_name)
+                            .expect("every pattern field was added above")
+                    })
                     .collect();
-
-                if let Some(indices) = find_field_indices(field_names, &converted_fields) {
-                    matches.push(FieldMatch::Partial {
-                        name,
-                        fields,
-                        field_indices: indices,
-                    });
-                }
+                matches.push(FieldMatch::Partial {
+                    name,
+                    fields,
+                    field_indices,
+                    widened,
+                });
             }
         }
     }
@@ -1983,29 +2038,12 @@ fn extract_field_sources(program: &Program, type_id: usize) -> Vec<FieldSource> 
     }
 }
 
-/// Extract tuple IDs from a type (only concrete tuples, not partials)
-fn extract_tuple_ids(program: &Program, type_id: usize) -> Vec<usize> {
-    let Some(ty) = program.lookup_type(type_id) else {
-        return vec![];
-    };
-    match ty {
-        Type::Annotated { base, .. } => extract_tuple_ids(program, *base),
-        Type::Tuple(id) => vec![*id],
-        Type::Union(type_ids) => type_ids
-            .iter()
-            .filter_map(|&tid| {
-                program.lookup_type(tid).and_then(|t| match t {
-                    Type::Tuple(id) => Some(*id),
-                    Type::Annotated { base, .. } => match program.lookup_type(*base) {
-                        Some(Type::Tuple(id)) => Some(*id),
-                        _ => None,
-                    },
-                    _ => None,
-                })
-            })
-            .collect(),
-        _ => vec![],
-    }
+/// Whether the type has a partial member, which a tuple pattern can only match by a runtime
+/// test: a partial is never a concrete tuple.
+fn has_partial_sources(program: &Program, type_id: usize) -> bool {
+    extract_field_sources(program, type_id)
+        .iter()
+        .any(|source| matches!(source, FieldSource::Partial { .. }))
 }
 
 /// Check if a type is a union

@@ -1942,3 +1942,74 @@ fn test_cycle_ref_as_its_own_union_member_is_an_error() {
         )
         .expect("Node[left: Leaf, right: []]");
 }
+
+// A union member whose every value belongs to another member is dropped.
+
+#[test]
+fn test_union_folds_members_differing_only_by_a_nested_annotation_row() {
+    // The spread builds a fresh tuple (an exact-empty row); `$` is plain (an open row).
+    quiver()
+        .evaluate("#[a: 'int] { | $a ~> =0 => [$, 1] | [$[..., a: 1], 1] }")
+        .expect_type("#[a: 'int] -> [[a: 'int], 'int]");
+}
+
+#[test]
+fn test_union_drops_a_member_structurally_inside_another() {
+    quiver()
+        .evaluate("#['%list<'int>, 'int] { | $1 ~> =0 => [Nil, 1] | [$0, 1] }")
+        .expect_type("#[(Cons['int, μ1] | Nil), 'int] -> [(Cons['int, μ1] | Nil), 'int]");
+    // A named partial is inside the unnamed one, whichever comes first.
+    quiver()
+        .evaluate("#[a: (x: 'int), b: Point(x: 'int), n: 'int] { | $n ~> =0 => $b | $a }")
+        .expect_type("#[a: (x: 'int), b: Point(x: 'int), n: 'int] -> (x: 'int)");
+}
+
+#[test]
+fn test_union_keeps_members_not_known_to_be_inside_another() {
+    // A named partial holds only tuples of its name.
+    quiver()
+        .evaluate("#[b: Point(x: 'int), n: 'int] { | $n ~> =0 => $b | Other[x: 1] }")
+        .expect_type("#[b: Point(x: 'int), n: 'int] -> (Other[x: 'int] | Point(x: 'int))");
+    // A type variable is rigid: `'t` is not known to hold, or be held by, `'int`.
+    quiver()
+        .evaluate("#<'t>'t { | =0 => $ | 5 }")
+        .expect_type("#'t -> ('int | 't)");
+}
+
+#[test]
+fn test_union_folds_nil_into_the_empty_partial() {
+    // `()` holds every tuple, nil included, so it is fallible itself.
+    quiver()
+        .evaluate("#[p: (), n: 'int] { | $n ~> =0 => $p | [] }")
+        .expect_type("#[p: (), n: 'int] -> ()");
+    quiver()
+        .evaluate("#[p: (), n: 'int] { | $n ~> =0 => [$p] | [[]] }")
+        .expect_type("#[p: (), n: 'int] -> [()]");
+    // A checked retrieval's result is `()`, so a missing annotation still fails the condition.
+    quiver()
+        .evaluate("[] ~> { | ~:error<()> => Failed | Absent }")
+        .expect("Absent");
+}
+
+#[test]
+fn test_union_of_functions_keeps_the_narrower_calling_convention() {
+    // The unmarked function is kept whichever comes first, so the union lets no caller omit
+    // a label one of its members requires — and, being one function type, it can be called.
+    quiver()
+        .evaluate(
+            "a = #[(x): 'int] { $x }; b = #[x: 'int] { $x }
+             pick = #'int { | =0 => a | b }
+             [pick 0 ~> ~ [x: 1], pick 1 ~> ~ [x: 2]]",
+        )
+        .expect("[1, 2]");
+    quiver()
+        .evaluate("a = #[(x): 'int] { $x }; b = #[x: 'int] { $x }; #'int { | =0 => b | a }")
+        .expect_type("#'int -> (#[x: 'int] -> 'int)");
+    quiver()
+        .evaluate(
+            "a = #[(x): 'int] { $x }; b = #[x: 'int] { $x }
+             pick = #'int { | =0 => a | b }
+             pick 0 ~> ~ [1]",
+        )
+        .expect_type_mismatch();
+}

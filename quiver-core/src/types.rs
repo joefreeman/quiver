@@ -506,24 +506,33 @@ impl Type {
 
     /// Check if this type contains NIL (either is NIL or contains NIL in union).
     /// Sees through annotation rows: annotated nil is nil for control flow. The top type
-    /// holds every value, nil included.
+    /// holds every value, nil included, as `()` holds every tuple.
     pub fn contains_nil<T: TypeLookup>(&self, lookup: &T) -> bool {
         match self {
-            Type::Tuple(id) if *id == NIL => true,
+            Type::Union(type_ids) => type_ids
+                .iter()
+                .any(|&id| lookup.lookup_type(id).is_some_and(|t| t.holds_nil(lookup))),
+            _ => self.holds_nil(lookup),
+        }
+    }
+
+    /// Whether this non-union type has nil among its values: nil itself, the top type, or
+    /// the unnamed partial with no fields, `()` — the only partial nil satisfies, having
+    /// neither a name nor fields. Sees through annotation rows.
+    fn holds_nil<T: TypeLookup>(&self, lookup: &T) -> bool {
+        match self {
+            Type::Tuple(id) => *id == NIL,
             Type::Top => true,
-            Type::Annotated { .. } => self.is_nil_deep(lookup),
-            Type::Union(type_ids) => type_ids.iter().any(|&id| {
-                lookup
-                    .lookup_type(id)
-                    .map(|t| matches!(t, Type::Top) || t.is_nil_deep(lookup))
-                    .unwrap_or(false)
-            }),
+            Type::Partial { name, fields } => name.is_none() && fields.is_empty(),
+            Type::Annotated { base, .. } => lookup
+                .lookup_type(*base)
+                .is_some_and(|base_type| base_type.holds_nil(lookup)),
             _ => false,
         }
     }
 
-    /// Return a type without NIL variants (annotated nils count as nil). The top type has no
-    /// spelling for "everything but nil", so it stays whole.
+    /// Return a type without NIL variants (annotated nils count as nil). The top type and
+    /// `()` have no spelling for "everything but nil", so they stay whole.
     pub fn without_nil<T: TypeLookup>(&self, lookup: &T) -> Type {
         match self {
             Type::Tuple(id) if *id == NIL => Type::never(),
@@ -578,6 +587,12 @@ enum UnionMode {
     /// Any variant could match (for pattern matching).
     /// Used by `types_overlap`: "Could a value of type A match pattern B?"
     Any,
+    /// `All`, holding only where assignability is proven rather than presumed: a type
+    /// variable relates only to itself, a reference the walk cannot resolve relates to
+    /// nothing, an ungranted process capability does not satisfy a granted one, and a
+    /// function type does not satisfy one that lets its callers omit more labels.
+    /// Used by `is_subsumed_by`: "Does every value of type A belong to type B?"
+    Subsumption,
 }
 
 /// Check if type `self_id` is compatible with (assignable to) type `pattern_id`.
@@ -594,6 +609,23 @@ pub fn is_compatible<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &
         pattern_id,
         lookup,
         UnionMode::All,
+        &mut assumptions,
+        &mut stacks,
+    )
+}
+
+/// Whether every value of `self_id` belongs to `pattern_id`, so a union holding both
+/// needs only `pattern_id`. Stricter than [`is_compatible`], which gives the benefit of the
+/// doubt to type variables, unresolved references and ungranted capabilities — a verdict
+/// that only admits a value, where this one deletes a type.
+pub fn is_subsumed_by<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &T) -> bool {
+    let mut assumptions = HashSet::new();
+    let mut stacks = BinderPair::default();
+    check_type_relation(
+        self_id,
+        pattern_id,
+        lookup,
+        UnionMode::Subsumption,
         &mut assumptions,
         &mut stacks,
     )
@@ -688,8 +720,8 @@ fn check_type_relation<T: TypeLookup>(
         // Empty union (never type) handling depends on mode
         (Type::Union(variants), _) if variants.is_empty() => {
             match mode {
-                UnionMode::All => true,  // Bottom type is subtype of everything
-                UnionMode::Any => false, // Empty type can't match anything
+                UnionMode::All | UnionMode::Subsumption => true, // Bottom type is subtype of everything
+                UnionMode::Any => false,                         // Empty type can't match anything
             }
         }
 
@@ -705,11 +737,17 @@ fn check_type_relation<T: TypeLookup>(
         // Resource types must have matching identifiers
         (Type::Resource(r1), Type::Resource(r2)) => r1 == r2,
 
-        // Type variables match anything
-        (Type::Variable(_), _) | (_, Type::Variable(_)) => true,
+        // Type variables match anything, except when proving subsumption, where a variable
+        // is rigid: it stands for one unknown type, so only it is known to hold its values.
+        (Type::Variable(v1), Type::Variable(v2)) if mode == UnionMode::Subsumption => v1 == v2,
+        (Type::Variable(_), _) | (_, Type::Variable(_)) => mode != UnionMode::Subsumption,
 
-        // When both are cycles with same depth, they refer to the same recursive type
-        (Type::Cycle(d1), Type::Cycle(d2)) if d1 == d2 => true,
+        // When both are cycles with same depth, they refer to the same recursive type —
+        // presumed, unless proving subsumption, where both must resolve within the walk.
+        (Type::Cycle(d1), Type::Cycle(d2)) if d1 == d2 => {
+            mode != UnionMode::Subsumption
+                || (stacks.left.resolve(*d1).is_some() && stacks.right.resolve(*d2).is_some())
+        }
 
         // Handle cycles by looking up the type in the stack. Following a `^` *re-enters* the
         // binder it names, so the traversal returns to that binder's own depth rather than
@@ -726,7 +764,9 @@ fn check_type_relation<T: TypeLookup>(
         // whenever that union had been entered first.)
         (Type::Cycle(depth), _) => {
             let Some((binder, cut)) = stacks.left.follow(*depth) else {
-                return true; // Coinductive reasoning
+                // A reference reaching past the walk's roots: presumed to relate, except
+                // when proving subsumption.
+                return mode != UnionMode::Subsumption;
             };
             let result = check_type_relation(binder, pattern_id, lookup, mode, assumptions, stacks);
             stacks.left.restore(cut);
@@ -735,7 +775,7 @@ fn check_type_relation<T: TypeLookup>(
 
         (_, Type::Cycle(depth)) => {
             let Some((binder, cut)) = stacks.right.follow(*depth) else {
-                return true;
+                return mode != UnionMode::Subsumption;
             };
             let result = check_type_relation(self_id, binder, lookup, mode, assumptions, stacks);
             stacks.right.restore(cut);
@@ -787,7 +827,7 @@ fn check_type_relation<T: TypeLookup>(
                 UnionMode::Any => {
                     check_type_relation(self_id, *base, lookup, mode, assumptions, stacks)
                 }
-                UnionMode::All => false,
+                UnionMode::All | UnionMode::Subsumption => false,
             }
         }
 
@@ -800,7 +840,7 @@ fn check_type_relation<T: TypeLookup>(
             // union-on-right arm for why the push is unconditional).
             stacks.left.enter(self_id);
             let result = match mode {
-                UnionMode::All => variants.iter().all(|&variant_id| {
+                UnionMode::All | UnionMode::Subsumption => variants.iter().all(|&variant_id| {
                     check_type_relation(variant_id, pattern_id, lookup, mode, assumptions, stacks)
                 }),
                 UnionMode::Any => variants.iter().any(|&variant_id| {
@@ -922,17 +962,82 @@ fn check_type_relation<T: TypeLookup>(
                 fields: fields2,
             },
         ) => {
-            // Names must match if both have names
+            // Names must match if both have names. Proving subsumption, a named pattern also
+            // needs the name on the left: an unnamed partial holds tuples of any name.
             if name1.is_some() && name2.is_some() && name1 != name2 {
                 return false;
             }
+            if mode == UnionMode::Subsumption && name2.is_some() && name1.is_none() {
+                return false;
+            }
 
-            // All fields in pattern must exist in self with compatible types
-            fields2.iter().all(|(fname2, ftype2)| {
-                fields1.iter().any(|(fname1, ftype1)| {
-                    fname1 == fname2
-                        && check_type_relation(*ftype1, *ftype2, lookup, mode, assumptions, stacks)
-                })
+            match mode {
+                // Assignability: every field the pattern constrains must be constrained by
+                // self, compatibly.
+                UnionMode::All | UnionMode::Subsumption => {
+                    fields2.iter().all(|(fname2, ftype2)| {
+                        fields1.iter().any(|(fname1, ftype1)| {
+                            fname1 == fname2
+                                && check_type_relation(
+                                    *ftype1,
+                                    *ftype2,
+                                    lookup,
+                                    mode,
+                                    assumptions,
+                                    stacks,
+                                )
+                        })
+                    })
+                }
+                // Overlap: a field only one side constrains is free on the other, so only the
+                // fields both constrain must overlap.
+                UnionMode::Any => fields2.iter().all(|(fname2, ftype2)| {
+                    fields1
+                        .iter()
+                        .filter(|(fname1, _)| fname1 == fname2)
+                        .all(|(_, ftype1)| {
+                            check_type_relation(*ftype1, *ftype2, lookup, mode, assumptions, stacks)
+                        })
+                }),
+            }
+        }
+
+        // Partial vs concrete tuple. A partial holds tuples with fields it says nothing about,
+        // so it is never assignable to a concrete tuple; it overlaps one whose name it allows
+        // and which has every field it constrains, overlapping.
+        (
+            Type::Partial {
+                name: partial_name,
+                fields: partial_fields,
+            },
+            Type::Tuple(concrete_id),
+        ) => {
+            if mode != UnionMode::Any {
+                return false;
+            }
+            let Some(concrete_info) = lookup.lookup_tuple(*concrete_id) else {
+                return false;
+            };
+            if let Some(pname) = partial_name
+                && concrete_info.name.as_ref() != Some(pname)
+            {
+                return false;
+            }
+            partial_fields.iter().all(|(partial_fname, partial_ftype)| {
+                concrete_info
+                    .fields
+                    .iter()
+                    .any(|(concrete_fname, concrete_ftype)| {
+                        concrete_fname.as_ref() == Some(partial_fname)
+                            && check_type_relation(
+                                *partial_ftype,
+                                *concrete_ftype,
+                                lookup,
+                                mode,
+                                assumptions,
+                                stacks,
+                            )
+                    })
             })
         }
 
@@ -958,14 +1063,19 @@ fn check_type_relation<T: TypeLookup>(
             // an inference artifact when `&.` is taken before the enclosing
             // function's receive has been widened by its calls (the receive
             // pre-pass only sees syntactic selects).
+            //
+            // Proving subsumption, neither leniency applies: an empty send is taken at its
+            // word, and an ungranted send or await does not satisfy a granted one.
+            let strict = mode == UnionMode::Subsumption;
             let send_ok = match (send1, send2) {
                 (Some(s1), Some(s2)) => {
-                    lookup.lookup_type(*s1).is_some_and(|t| t.is_never())
+                    (!strict && lookup.lookup_type(*s1).is_some_and(|t| t.is_never()))
                         || stacks.swapped(|stacks| {
                             check_type_relation(*s2, *s1, lookup, mode, assumptions, stacks)
                         })
                 }
-                (None, _) | (_, None) => true,
+                (None, Some(_)) => !strict,
+                (_, None) => true,
             };
 
             // Receive is the AWAIT RESULT (`-> 'r`), covariant like any result.
@@ -973,7 +1083,8 @@ fn check_type_relation<T: TypeLookup>(
                 (Some(r1), Some(r2)) => {
                     check_type_relation(*r1, *r2, lookup, mode, assumptions, stacks)
                 }
-                (None, _) | (_, None) => true,
+                (None, Some(_)) => !strict,
+                (_, None) => true,
             };
 
             // State is covariant and strict against a stated expectation: `?p` has no
@@ -994,22 +1105,30 @@ fn check_type_relation<T: TypeLookup>(
         // calling convention, so a marked and an unmarked function of the same shape are
         // interchangeable as values — what the marks govern is how a *call written
         // against this type* may spell its argument, which the declared type decides.
+        // Proving subsumption is the exception, as the type kept then governs calls on
+        // values of both: it may not let callers omit a label the other did not.
         (
             Type::Callable {
                 parameter: param1,
                 result: result1,
                 receive: receive1,
                 states: states1,
-                ..
+                omittable: omittable1,
             },
             Type::Callable {
                 parameter: param2,
                 result: result2,
                 receive: receive2,
                 states: states2,
-                ..
+                omittable: omittable2,
             },
         ) => {
+            if mode == UnionMode::Subsumption
+                && !omittable2.iter().all(|index| omittable1.contains(index))
+            {
+                return false;
+            }
+
             // A function type is a binder too, on each side's own stack.
             stacks.left.enter(self_id);
             stacks.right.enter(pattern_id);

@@ -949,3 +949,50 @@ fn test_destructure_testing_a_member_stays_fallible() {
         .evaluate("'l = Nil | Cons['int, ^]; f = #'l { $ ~> =Cons[x, Cons[y, z]] }; f")
         .expect_type("#(Cons['int, μ1] | Nil) -> (Cons['int, (Cons['int, μ1] | Nil)] | [])");
 }
+
+// A partial-typed value is tested against a pattern for whatever the partial leaves open.
+
+#[test]
+fn test_tuple_pattern_matches_a_partial_typed_value() {
+    quiver()
+        .evaluate("f = #() { $ ~> { =[x: a] => a | No } }; [f [x: 1], f [y: 1]]")
+        .expect("[1, No]");
+    quiver()
+        .evaluate("f = #(x: 'int) { $ ~> { =Point[x: a, y: _] => a | No } }; [f Point[x: 1, y: 2], f Other[x: 1, y: 2]]")
+        .expect("[1, No]");
+    // A field the partial constrains must be in the pattern, which fixes the tuple's fields.
+    quiver()
+        .evaluate("f = #(x: 'int) { $ ~> { =[y: a] => a | No } }; f [y: 1, x: 2]")
+        .expect("No");
+}
+
+#[test]
+fn test_partial_pattern_asks_for_what_a_partial_typed_value_leaves_open() {
+    quiver()
+        .evaluate("f = #(x: 'int) { $ ~> { =(y: b) => b | No } }; [f [x: 1, y: 2], f [x: 1]]")
+        .expect("[2, No]");
+    quiver()
+        .evaluate("f = #(x: 'int) { $ ~> { =Point(y: b) => b | No } }; [f Point[x: 1, y: 2], f Other[x: 1, y: 2]]")
+        .expect("[2, No]");
+    // A name the partial states still rules out any other.
+    quiver()
+        .evaluate("f = #Point(x: 'int) { $ ~> { =Other(x: b) => b | No } }; f Point[x: 1]")
+        .expect("No");
+}
+
+#[test]
+fn test_empty_partial_typed_value_may_be_nil() {
+    quiver()
+        .evaluate("f = #() { $ ~> { =[] => Nil | No } }; [f [], f [x: 1]]")
+        .expect("[Nil, No]");
+    quiver()
+        .evaluate("f = #() { $ ~> { =(\\[] & t) => t | No } }; [f [], f [x: 1]]")
+        .expect("[No, [x: 1]]");
+    // A `()` result is fallible, so a nil one ends the sequence.
+    quiver()
+        .evaluate("f = #() { $ }; { f []; Reached }")
+        .expect("[]");
+    quiver()
+        .evaluate("f = #() { { $; Reached } }; f []")
+        .expect("[]");
+}
