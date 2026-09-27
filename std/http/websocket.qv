@@ -57,12 +57,14 @@ frame_head = #[(opcode): 'int, (n): 'int, (mask_bit): 'int] {
         __integer_add__ [$mask_bit, $n],
         1,
       ]
-    | __integer_compare__ [$n, 65536] ~> =-1 => __binary_append__ [
+    | __integer_compare__ [$n, 65536] ~> =-1 => {
+      __binary_append__ [
         b0,
         __integer_add__ [$mask_bit, 126],
         1,
       ]
       ~> __binary_append__ [~, $n, 2]
+    }
     | __binary_append__ [b0, __integer_add__ [$mask_bit, 127], 1] ~> __binary_append__ [~, $n, 8]
   }
 }
@@ -199,12 +201,14 @@ recv = #' {
         | =Part[opcode: o, data: d] => {
           joined = %bin.concat [d, p]
           {
-            | __integer_compare__ [%bin.length joined, max_payload] ~> =1 => $[
+            | __integer_compare__ [%bin.length joined, max_payload] ~> =1 => {
+              $[
                 ...,
                 buf: <>,
                 part: Nil,
               ]
               ~> fail [~, 1009, "message too big"]
+            }
             | fin ~> =0 => ^ $[..., buf: rest, part: Part[opcode: o, data: joined]]
             | [wrap_message [o, joined], $[..., buf: rest, part: Nil]]
           }

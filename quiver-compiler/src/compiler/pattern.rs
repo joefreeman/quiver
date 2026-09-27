@@ -524,6 +524,7 @@ fn analyze_match_pattern(
                     pattern: ast::Match::Literal(ast::Literal::Binary(
                         ast::BinaryLiteral::ungrouped(bytes.clone()),
                     )),
+                    span: ast::Spanned::default(),
                 }],
             };
             analyze_match_tuple_pattern(

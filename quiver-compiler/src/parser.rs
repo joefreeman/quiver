@@ -822,10 +822,12 @@ fn rational_match(numer: BigInt, denom: BigInt) -> Match {
             MatchField {
                 name: None,
                 pattern: Match::Literal(Literal::Integer(n)),
+                span: Spanned::default(),
             },
             MatchField {
                 name: None,
                 pattern: Match::Literal(Literal::Integer(d)),
+                span: Spanned::default(),
             },
         ],
     })
@@ -1257,6 +1259,13 @@ fn star_pattern(input: Span) -> IResult<Span, Match> {
 
 /// Parse a single partial pattern field: either `name` or `name: pattern`
 fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
+    let start = input;
+    let (rest, mut field) = partial_pattern_field_inner(input)?;
+    field.span = Spanned(Some(span_between(start, rest)));
+    Ok((rest, field))
+}
+
+fn partial_pattern_field_inner(input: Span) -> IResult<Span, PartialPatternField> {
     // Forward reference for nested patterns within partial pattern fields
     // We use a limited pattern parser here to avoid left recursion
     fn nested_pattern(input: Span) -> IResult<Span, Match> {
@@ -1300,6 +1309,7 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
                 name,
                 name_span: Spanned(Some(span)),
                 pattern: Some(pattern),
+                span: Spanned::default(),
             },
         ),
         // Simple field name binding
@@ -1307,6 +1317,7 @@ fn partial_pattern_field(input: Span) -> IResult<Span, PartialPatternField> {
             name,
             name_span: Spanned(Some(span)),
             pattern: None,
+            span: Spanned::default(),
         }),
     ))(input)
 }
@@ -2778,6 +2789,13 @@ fn bind_match(input: Span) -> IResult<Span, Term> {
 }
 
 fn match_field(input: Span) -> IResult<Span, MatchField> {
+    let start = input;
+    let (rest, mut field) = match_field_inner(input)?;
+    field.span = Spanned(Some(span_between(start, rest)));
+    Ok((rest, field))
+}
+
+fn match_field_inner(input: Span) -> IResult<Span, MatchField> {
     alt((
         // Named field: name: pattern
         map(
@@ -2785,12 +2803,14 @@ fn match_field(input: Span) -> IResult<Span, MatchField> {
             |(name, pattern)| MatchField {
                 name: Some(name),
                 pattern,
+                span: Spanned::default(),
             },
         ),
         // Unnamed pattern
         map(match_pattern, |pattern| MatchField {
             name: None,
             pattern,
+            span: Spanned::default(),
         }),
     ))(input)
 }

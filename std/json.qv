@@ -305,12 +305,14 @@ strip_zeros = #'bin {
   len = %bin.length b
   {
     | len ~> =0 => b
-    | %bin.get_byte [b, __integer_subtract__ [len, 1]] ~> =48 => %bin.slice [
+    | %bin.get_byte [b, __integer_subtract__ [len, 1]] ~> =48 => {
+      %bin.slice [
         b,
         0,
         __integer_subtract__ [len, 1],
       ]
       ~> ^
+    }
     | b
   }
 }

@@ -1080,7 +1080,13 @@ key = #('instant | 'mono | 'duration | 'datetime | 'date | 'time | 'zoned) {
   | =('time & t) => nanos_of t
 }
 
-diff = #(['instant, 'instant] | ['mono, 'mono] | ['datetime, 'datetime] | ['time, 'time] | ['zoned, 'zoned]) {
+diff = #(
+  | ['instant, 'instant]
+  | ['mono, 'mono]
+  | ['datetime, 'datetime]
+  | ['time, 'time]
+  | ['zoned, 'zoned]
+) {
   :doc "The exact duration from the second value to the first (first minus second): between instants, monotonic readings, zoned values, civil date-times (as if both were UTC), or times of day."
   Duration[isub [key $0, key $1]]
 }
@@ -1168,7 +1174,14 @@ start_of = #['civil, 'date_unit] {
   | =[c, _] => days_of c ~> isub [~, isub [iso_day ~, 1]] ~> civil
 }
 
-truncate = #(['instant, 'day_unit] | ['duration, 'clock_unit] | ['time, 'clock_unit] | ['datetime, ('date_unit | 'day_unit)] | ['date, 'date_unit] | ['zoned, ('date_unit | 'day_unit)]) {
+truncate = #(
+  | ['instant, 'day_unit]
+  | ['duration, 'clock_unit]
+  | ['time, 'clock_unit]
+  | ['datetime, ('date_unit | 'day_unit)]
+  | ['date, 'date_unit]
+  | ['zoned, ('date_unit | 'day_unit)]
+) {
   :doc "The value truncated to a unit: the start of its day, hour, minute, second, millisecond or microsecond, or — for dates and date-times — of its week (Monday), month or year. Instants truncate on the UTC day; durations truncate toward zero."
   | =[Instant[n], ('day_unit & u)] => Instant[isub [n, fmod [n, unit_nanos u]]]
   | =[Duration[n], ('clock_unit & u)] => Duration[isub [n, imod [n, unit_nanos u]]]
@@ -1596,7 +1609,10 @@ date_directive = #['date, ('%str | []), '%str] {
     | ="G" => iso_week d ~> .year ~> year_field [~, flag]
     | ="F" => date_text d
     | ="D" => {
-      m = pad [d.month, 2]; day = pad [d.day, 2]; y = pad [fmod [d.year, 100], 2]; "{m}/{day}/{y}"
+      m = pad [d.month, 2]
+      day = pad [d.day, 2]
+      y = pad [fmod [d.year, 100], 2]
+      "{m}/{day}/{y}"
     }
   }
 }
@@ -1674,7 +1690,16 @@ format_loop = #['shown, 'bin, 'int, 'bin] {
   }
 }
 
-format = #('instant | 'date | 'time | 'datetime | 'duration | 'period | 'zoned | [('instant | 'date | 'time | 'datetime | 'zoned), pattern: '%str]) {
+format = #(
+  | 'instant
+  | 'date
+  | 'time
+  | 'datetime
+  | 'duration
+  | 'period
+  | 'zoned
+  | [('instant | 'date | 'time | 'datetime | 'zoned), pattern: '%str]
+) {
   :doc "The value as text, in the form `parse` (`parse_zoned`, for a zoned value) and `%time\{ … }` read back: ISO 8601 for instants (RFC 3339, in UTC: \"2024-03-10T09:30:00Z\"), dates (\"2024-03-10\"), times (\"09:30:00.5\" gives \"09:30:00.500\") and date-times (\"2024-03-10T09:30:00\"); unit notation for durations (\"1h30m\", \"-250ms\") and periods (\"1y2mo\", \"3d\", \"1mo-3d\"); RFC 9557 for zoned values (\"2024-03-10T09:30:00+00:00[Europe/London]\"). Fractional seconds print as three, six or nine digits, the fewest that are exact. With a `pattern:`, writes the value as the pattern's `%` directives say — dates: %Y %y %m %d %e %j %a %A %b %B %u %w %V %G %F %D; times: %H %k %I %l %p %M %S %f %.f %3f %6f %9f %T %R; instants and zoned values: %z %:z %Z %Q %s; and %% %n %t. A flag after the `%` sets the padding: `-` none, `_` spaces, `0` zeros. A directive the value doesn't have answers nil carrying :error InvalidPattern[offset, message]."
   | =Instant[n] => civil_of_nanos n ~> "{date_text ~}T{clock_text ~}Z"
   | =('datetime & t) => "{date_text t}T{clock_text t}"

@@ -591,6 +591,8 @@ pub struct PartialPatternField {
     pub name: String,
     pub name_span: Spanned,
     pub pattern: Option<Match>,
+    /// The whole entry, for the formatter to read the source around it (a trailing comma).
+    pub span: Spanned,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -703,6 +705,9 @@ pub struct MatchTuple {
 pub struct MatchField {
     pub name: Option<String>,
     pub pattern: Match,
+    /// The whole entry, for the formatter to read the source around it (a trailing comma).
+    /// `None` for fields the compiler synthesises.
+    pub span: Spanned,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -5,6 +5,10 @@
 //! reparse-safe separator — chains continue with `~>`, blocks lead each branch with `|`, tuples
 //! and multi-chain sequences put one item per line.
 //!
+//! Two layout choices are the author's rather than the width's, read back from the source text:
+//! steps written on separate lines stay on separate lines (only `;`-joined steps are joined), and a
+//! bracketed list written with a trailing comma stays one item per line.
+//!
 //! The formatter changes only whitespace and rendering choices that re-parse to the identical AST
 //! (`$0` sugar, parenthesised unions, string literals), plus block *normalization*: it drops
 //! redundant blocks (like redundant parentheses, via [`crate::simplify`]) and adds grouping braces
@@ -13,8 +17,9 @@
 //! compiler treats as a runtime no-op (it strips/lifts them), so formatting never changes compiled
 //! output — it is bytecode-preserving (`compile(parse(format(src))) == compile(parse(src))`).
 //!
-//! Atomic constructs that never break — types, patterns, accesses, literals — are rendered to
-//! plain strings and wrapped as [`pretty::text`]; only the breakable layers build structured docs.
+//! Atomic constructs that never break — accesses, literals, most patterns — are rendered to plain
+//! strings and wrapped as [`pretty::text`]; only the breakable layers (including types, and
+//! tuple patterns) build structured docs.
 
 use crate::ast::*;
 use crate::pretty::{self, Doc};
@@ -148,8 +153,8 @@ fn render_type_parameters(params: &[String]) -> String {
     )
 }
 
-/// A sequence of `,`-separated chains, one per line when broken, each preceded by any leading
-/// comments and blank lines it carries.
+/// A sequence of steps, each preceded by any leading comments and blank lines it carries. Steps
+/// keep the lines the author gave them; see [`sequence_parts`].
 ///
 /// `skip_first_leading` drops the leading trivia of the first chain — used when a caller (a
 /// multi-branch block) has already emitted it elsewhere (before the branch's `|`).
@@ -190,14 +195,23 @@ fn sequence_parts(
     continuation_nest: usize,
     set_off_tall: bool,
 ) -> Doc {
-    // Semicolon and newline are synonymous step separators, so a broken sequence uses a bare
-    // newline (the lighter form) and only the inline form needs the semicolon.
-    let separator = pretty::concat(vec![
-        pretty::if_break(pretty::nil(), pretty::text(";")),
-        pretty::line(),
-    ]);
-    let mut first = pretty::nil();
-    let mut rest = Vec::new();
+    // The author decides where steps break. Steps written on one line, `;`-joined, form a *run*
+    // that stays joined while it fits and otherwise breaks one step per line — a run is all or
+    // nothing, so a step that breaks across lines never leaves `; next` dangling after it. Steps
+    // written on separate lines stay on separate lines. Semicolon and newline are synonymous
+    // step separators, so a broken separator is a bare newline (the lighter form) and only the
+    // inline form needs the semicolon.
+    let joined = || {
+        pretty::concat(vec![
+            pretty::if_break(pretty::nil(), pretty::text(";")),
+            pretty::line(),
+        ])
+    };
+    // Between runs: a line break forced by `break_parent` rather than a hard line, so a
+    // flattened rendering (an interpolation hole) still reads back as `; `.
+    let fresh_line = || pretty::concat(vec![joined(), pretty::break_parent()]);
+    let mut runs: Vec<Vec<Doc>> = Vec::new();
+    let mut gaps: Vec<Doc> = Vec::new();
     let mut prev_tall = false;
     for (index, step) in sequence.steps.iter().enumerate() {
         let span = step.span();
@@ -261,24 +275,35 @@ fn sequence_parts(
         };
         let item = pretty::concat(vec![leading, body]);
         if index == 0 {
-            first = item;
-        } else {
+            runs.push(vec![item]);
+        } else if prev_tall || tall {
             // Set a tall step off from its neighbours with a blank line (two newlines). `collapse_
             // blanks` caps a run at one, so this composes with any blank the author already left.
-            if prev_tall || tall {
-                rest.push(pretty::hardline());
-                rest.push(pretty::hardline());
-            } else {
-                rest.push(separator.clone());
-            }
-            rest.push(item);
+            gaps.push(pretty::concat(vec![pretty::hardline(), pretty::hardline()]));
+            runs.push(vec![item]);
+        } else if trivia.starts_line(span) {
+            gaps.push(fresh_line());
+            runs.push(vec![item]);
+        } else {
+            let run = runs.last_mut().expect("the first step opens a run");
+            run.push(joined());
+            run.push(item);
         }
         prev_tall = tall;
     }
-    pretty::nest(
-        continuation_nest,
-        pretty::concat(vec![first, pretty::concat(rest)]),
-    )
+    // A lone run is left to the caller's group, which may compose its own break decision with it
+    // (a branch condition's soft width). Several runs are each their own group, fitting or
+    // breaking independently of the lines around them.
+    let single = runs.len() == 1;
+    let mut parts = Vec::new();
+    for (index, run) in runs.into_iter().enumerate() {
+        if index > 0 {
+            parts.push(gaps[index - 1].clone());
+        }
+        let run = pretty::concat(run);
+        parts.push(if single { run } else { pretty::group(run) });
+    }
+    pretty::nest(continuation_nest, pretty::concat(parts))
 }
 
 /// A braced expression `{ … }`. A single branch lays its body out directly; multiple branches each
@@ -561,12 +586,12 @@ fn chain_doc(trivia: &Trivia, chain: &Chain) -> Doc {
     // pipeline: the container opens on the `=` line and delimits itself.
     if breaks_into_pipeline(trivia, chain) {
         return pretty::group(pretty::concat(vec![
-            match_doc(pattern),
+            match_doc(trivia, pattern),
             pretty::text(" ="),
             pretty::nest(2, pretty::concat(vec![pretty::line(), value])),
         ]));
     }
-    pretty::concat(vec![match_doc(pattern), pretty::text(" = "), value])
+    pretty::concat(vec![match_doc(trivia, pattern), pretty::text(" = "), value])
 }
 
 /// Lay out the first `count` terms of a chain, joined by an explicit `~>` between every pair of
@@ -705,7 +730,7 @@ fn term_doc(trivia: &Trivia, term: &Term) -> Doc {
         Term::Spawn(inner, argument, _) => spawn_doc(trivia, inner, argument.as_deref()),
         Term::Select(sources, _) => select_doc(trivia, sources),
         Term::Dialect(dialect) => dialect_doc(dialect),
-        Term::Match(pattern) => pretty::concat(vec![pretty::text("="), match_doc(pattern)]),
+        Term::Match(pattern) => pretty::concat(vec![pretty::text("="), match_doc(trivia, pattern)]),
         // A juxtaposed application `head arg`: the head is always atomic (an access), the
         // argument may be a container.
         Term::Apply(access, argument) => pretty::concat(vec![
@@ -838,6 +863,10 @@ fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
     // A punned tuple renders back to the spelling it was written as — `(a, p.x)` rather than the
     // `[a: a, x: p.x]` the parser desugared it to. Entries carry their own trivia, so comments
     // and blank lines inside the parens survive as they do in any field list.
+    let sticky = tuple
+        .fields
+        .last()
+        .is_some_and(|field| trivia.trailing_comma(field.span));
     if tuple.punned {
         return bracketed(
             format!("{}(", name),
@@ -848,6 +877,7 @@ fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
                 .map(|field| pun_doc(trivia, field))
                 .collect(),
             true,
+            sticky,
         );
     }
     // Tuple field lists accept a trailing comma, so add one when broken.
@@ -867,6 +897,7 @@ fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
             })
             .collect(),
         true,
+        sticky,
     )
 }
 
@@ -986,10 +1017,19 @@ fn field_doc(trivia: &Trivia, field: &TupleField) -> Doc {
 /// A comma-separated, bracket-delimited list (a tuple literal or a select source list): inline when
 /// it fits, otherwise one item per line. A trailing comma is added on break only when `trailing` is
 /// set — tuple field lists allow one, but select source lists do not.
-fn bracketed(open: String, close: &str, items: Vec<Doc>, trailing: bool) -> Doc {
+///
+/// `sticky` holds the list one item per line whatever the width: set when the author wrote a
+/// trailing comma ([`Trivia::trailing_comma`]). The broken layout prints one, so a list that once
+/// breaks stays broken — the author removes the comma to let it join again.
+fn bracketed(open: String, close: &str, items: Vec<Doc>, trailing: bool, sticky: bool) -> Doc {
     let separator = pretty::concat(vec![pretty::text(","), pretty::line()]);
     let trailing = if trailing {
         pretty::if_break(pretty::text(","), pretty::nil())
+    } else {
+        pretty::nil()
+    };
+    let sticky = if sticky {
+        pretty::break_parent()
     } else {
         pretty::nil()
     };
@@ -1005,6 +1045,7 @@ fn bracketed(open: String, close: &str, items: Vec<Doc>, trailing: bool) -> Doc 
         ),
         pretty::softline(),
         pretty::text(close.to_string()),
+        sticky,
     ]))
 }
 
@@ -1032,18 +1073,6 @@ fn function_doc(trivia: &Trivia, function: &Function) -> Doc {
             pretty::concat(vec![signature, block_doc(trivia, body)])
         }
         Some(body) => pretty::concat(vec![signature, pretty::text(" "), block_doc(trivia, body)]),
-    }
-}
-
-/// [`type_doc`]'s counterpart to [`render_type_atom`]: the same parenthesising, over a type that
-/// may break. Only a tuple type does, and a tuple never needs the parentheses, so the wrapped
-/// cases stay text.
-fn type_atom_doc(trivia: &Trivia, type_def: &Type) -> Doc {
-    match type_def {
-        Type::Tuple(tuple_type) if !tuple_type.fields.is_empty() => {
-            tuple_type_doc(trivia, tuple_type)
-        }
-        _ => pretty::text(render_type_atom(type_def)),
     }
 }
 
@@ -1146,6 +1175,7 @@ fn select_doc(trivia: &Trivia, sources: &Option<Vec<Chain>>) -> Doc {
             .map(|chain| chain_doc(trivia, chain))
             .collect(),
         false,
+        false,
     )
 }
 
@@ -1162,7 +1192,10 @@ fn render_select_head(parameter_type: &Type) -> String {
     });
     match bare {
         Some(sugar) => format!("!{}", sugar),
-        None => format!("!#{}", render_type_atom(parameter_type)),
+        None => format!(
+            "!#{}",
+            pretty::flatten(&type_atom_doc(&Trivia::default(), parameter_type))
+        ),
     }
 }
 
@@ -1239,11 +1272,17 @@ struct Anchor {
 /// Comments and blank lines recovered from the source. `leading` and `trailing` are keyed by the
 /// start offset of the AST node (type-alias step, chain, or tuple field) they attach to;
 /// `dangling` holds anything after the last node.
+///
+/// `source` is kept for the layout decisions the author makes in the text itself: where steps
+/// start a new line ([`Trivia::starts_line`]) and which bracketed lists end in a trailing comma
+/// ([`Trivia::trailing_comma`]). An empty source (the `Default`) answers no to both, which is
+/// what a flat rendering wants.
 #[derive(Default)]
 struct Trivia {
     leading: HashMap<usize, Vec<TriviaItem>>,
     trailing: HashMap<usize, Vec<String>>,
     dangling: Vec<TriviaItem>,
+    source: String,
 }
 
 impl Trivia {
@@ -1307,6 +1346,43 @@ impl Trivia {
             leading,
             trailing,
             dangling,
+            source: source.to_string(),
+        }
+    }
+
+    /// Whether the step starting at `span` was written on a line of its own, rather than after a
+    /// `;` on the line of the step before it. Reads back from the step's start over the separator
+    /// run between the two — spaces and `;`s — to the newline that ends the previous line, or to
+    /// the previous step's last character. (A comment in the run is always followed by the
+    /// newline that ends it, which is met first.) A span without a source position — a step the
+    /// parser or [`crate::simplify`] synthesised — reads as joined.
+    fn starts_line(&self, span: Spanned) -> bool {
+        let Some(before) = span.get().and_then(|span| self.source.get(..span.offset)) else {
+            return false;
+        };
+        before
+            .chars()
+            .rev()
+            .find(|c| !matches!(c, ' ' | '\t' | ';'))
+            .is_some_and(|c| matches!(c, '\n' | '\r'))
+    }
+
+    /// Whether the bracketed list whose last entry is at `last` was written with a comma after
+    /// that entry — the author's request to keep the list one entry per line. Skips whitespace
+    /// and comments between the entry and the comma.
+    fn trailing_comma(&self, last: Spanned) -> bool {
+        let Some(mut rest) = last
+            .get()
+            .and_then(|span| self.source.get(span.offset + span.length..))
+        else {
+            return false;
+        };
+        loop {
+            rest = rest.trim_start();
+            if !rest.starts_with("//") {
+                return rest.starts_with(',');
+            }
+            rest = rest.find('\n').map_or("", |index| &rest[index..]);
         }
     }
 
@@ -1524,10 +1600,10 @@ fn visit_alias_type(type_def: &Type, out: &mut Collected) {
     }
 }
 
-/// Anchor a tuple type's field entries — and only a tuple type's, mirroring the one case
-/// [`type_doc`] and its variants render as a document. A type reached anywhere else is rendered
-/// flat, onto a line that has no room for a comment, so its fields are deliberately left
-/// unanchored: an item inside one keeps attaching outward, to the nearest node that *can* emit it.
+/// Anchor a tuple type's field entries — only those of the outermost tuple type of a signature or
+/// alias. A nested type may be reached where it is rendered flat (a spawn or select head), onto a
+/// line that has no room for a comment, so its fields are deliberately left unanchored: an item
+/// inside one keeps attaching outward, to the nearest node that *can* emit it.
 fn visit_type_fields(type_def: &Type, out: &mut Collected) {
     if let Type::Tuple(tuple_type) = type_def {
         for field in &tuple_type.fields {
@@ -1756,16 +1832,17 @@ fn render_access(access: &Access) -> String {
 /// assertion's comment text, a nested pattern inside one. Patterns carry no trivia, so they never
 /// force a break and this is always legal.
 pub(crate) fn render_match(pattern: &Match) -> String {
-    pretty::flatten(&match_doc(pattern))
+    pretty::flatten(&match_doc(&Trivia::default(), pattern))
 }
 
-/// A pattern as a document. As with [`type_doc`], only a tuple's field list breaks — a
-/// destructuring wide enough to matter is a wide field list — and everything else is text.
-fn match_doc(pattern: &Match) -> Doc {
+/// A pattern as a document. Only a tuple's field list breaks — a destructuring wide enough to
+/// matter is a wide field list — along with any type a pattern tests, and everything else is text.
+fn match_doc(trivia: &Trivia, pattern: &Match) -> Doc {
     match pattern {
-        Match::Tuple(tuple) if !tuple.fields.is_empty() => match_tuple_doc(tuple),
-        Match::Partial(partial) if !partial.fields.is_empty() => partial_pattern_doc(partial),
-        Match::Not(inner) => pretty::concat(vec![pretty::text("\\"), match_doc(inner)]),
+        Match::Tuple(tuple) => match_tuple_doc(trivia, tuple),
+        Match::Partial(partial) => partial_pattern_doc(trivia, partial),
+        Match::Not(inner) => pretty::concat(vec![pretty::text("\\"), match_doc(trivia, inner)]),
+        Match::Type(type_def) => match_type_doc(trivia, type_def),
         other => pretty::text(render_match_flat(other)),
     }
 }
@@ -1781,13 +1858,13 @@ fn render_match_flat(pattern: &Match) -> String {
             let text = std::str::from_utf8(bytes).expect("string pattern text is UTF-8");
             format!("\"{}\"", escape_single_line_text(text))
         }
-        Match::Tuple(tuple) => render_match_tuple(tuple),
-        Match::Partial(partial) => render_partial_pattern(partial),
+        Match::Tuple(_) | Match::Partial(_) | Match::Type(_) | Match::Not(_) => {
+            unreachable!("rendered as a document by match_doc")
+        }
         Match::Star(None) => "*".to_string(),
         Match::Star(Some(name)) => format!("{}*", name),
         Match::Placeholder => "_".to_string(),
         Match::Ripple => "~".to_string(),
-        Match::Not(inner) => format!("\\{}", render_match(inner)),
         Match::Pin(target) => {
             let mut out = String::from("^");
             // As in `render_access`, a first accessor on `$` is written dotless (`^$x`, `^$0`).
@@ -1810,7 +1887,6 @@ fn render_match_flat(pattern: &Match) -> String {
             }
             out
         }
-        Match::Type(type_def) => render_match_type(type_def),
         Match::Or(alternatives) => format!(
             "({})",
             alternatives
@@ -1838,13 +1914,10 @@ fn render_match_flat(pattern: &Match) -> String {
     }
 }
 
-fn render_match_tuple(tuple: &MatchTuple) -> String {
-    pretty::flatten(&match_tuple_doc(tuple))
-}
-
-/// A tuple pattern, breaking one field per line when the list does not fit. Pattern field lists
-/// take a trailing comma, as tuple values and tuple types do.
-fn match_tuple_doc(tuple: &MatchTuple) -> Doc {
+/// A tuple pattern, breaking one field per line when the list does not fit, or when the author
+/// ended it with a comma. Pattern field lists take a trailing comma, as tuple values and tuple
+/// types do.
+fn match_tuple_doc(trivia: &Trivia, tuple: &MatchTuple) -> Doc {
     let name = tuple.name.clone().unwrap_or_default();
     if tuple.fields.is_empty() {
         return pretty::text(if tuple.name.is_some() {
@@ -1853,29 +1926,33 @@ fn match_tuple_doc(tuple: &MatchTuple) -> Doc {
             "[]".to_string()
         });
     }
+    let sticky = tuple
+        .fields
+        .last()
+        .is_some_and(|field| trivia.trailing_comma(field.span));
     let fields = tuple
         .fields
         .iter()
         .map(|field| match &field.name {
             Some(label) => pretty::concat(vec![
                 pretty::text(format!("{}: ", label)),
-                match_doc(&field.pattern),
+                match_doc(trivia, &field.pattern),
             ]),
-            None => match_doc(&field.pattern),
+            None => match_doc(trivia, &field.pattern),
         })
         .collect();
-    bracketed(format!("{}[", name), "]", fields, true)
+    bracketed(format!("{}[", name), "]", fields, true, sticky)
 }
 
-fn render_partial_pattern(partial: &PartialPattern) -> String {
-    pretty::flatten(&partial_pattern_doc(partial))
-}
-
-fn partial_pattern_doc(partial: &PartialPattern) -> Doc {
+fn partial_pattern_doc(trivia: &Trivia, partial: &PartialPattern) -> Doc {
     let name = partial.name.clone().unwrap_or_default();
     if partial.fields.is_empty() {
         return pretty::text(format!("{}()", name));
     }
+    let sticky = partial
+        .fields
+        .last()
+        .is_some_and(|field| trivia.trailing_comma(field.span));
     let fields = partial
         .fields
         .iter()
@@ -1883,11 +1960,11 @@ fn partial_pattern_doc(partial: &PartialPattern) -> Doc {
             None => pretty::text(field.name.clone()),
             Some(pattern) => pretty::concat(vec![
                 pretty::text(format!("{}: ", field.name)),
-                match_doc(pattern),
+                match_doc(trivia, pattern),
             ]),
         })
         .collect();
-    bracketed(format!("{}(", name), ")", fields, true)
+    bracketed(format!("{}(", name), ")", fields, true, sticky)
 }
 
 /// Whether a type conjunct of a conjunction pattern renders without parentheses: a resource, or a
@@ -1900,25 +1977,25 @@ fn is_bare_conjunct_type(type_def: &Type) -> bool {
     }
 }
 
-/// Render a type used as a pattern. A pattern's type position only accepts the bare forms recognised
-/// by `inline_type_expression` (a type name/module/self-default reference or a partial type);
+/// A type used as a pattern. A pattern's type position only accepts the bare forms recognised by
+/// `inline_type_expression` (a type name/module/self-default reference or a partial type);
 /// anything else (unions, intersections, functions, non-partial tuples, cycles, …) must be wrapped
 /// in parentheses so it re-parses as a `Match::Type` rather than, say, a structural tuple pattern.
-fn render_match_type(type_def: &Type) -> String {
+fn match_type_doc(trivia: &Trivia, type_def: &Type) -> Doc {
     let bare = match type_def {
         Type::Primitive(_)
         | Type::Identifier { .. }
         | Type::ModuleType { .. }
         | Type::SelfDefault { .. } => true,
         Type::Tuple(tuple_type) => tuple_type.is_partial,
-        // `render_type` already parenthesises a union, so it needs no extra wrapping here.
+        // A union renders its own parentheses, so it needs no extra wrapping here.
         Type::Union(_) => true,
         _ => false,
     };
     if bare {
-        render_type(type_def)
+        type_doc(trivia, type_def)
     } else {
-        format!("({})", render_type(type_def))
+        parenthesised(type_doc(trivia, type_def))
     }
 }
 
@@ -1927,150 +2004,156 @@ fn render_match_type(type_def: &Type) -> String {
 // ---------------------------------------------------------------------------
 
 /// The flat, single-line rendering of a type, for a position with no vertical form to fall back on
-/// — inside an assertion's comment text, a select or spawn sugar head, a field's default value.
-/// Types carry no trivia, so they never force a break and this is always legal.
+/// — a select or spawn sugar head, an access's type arguments, a pattern inside an assertion.
+/// Types carry no trivia there, so they never force a break and this is always legal.
 fn render_type(type_def: &Type) -> String {
     pretty::flatten(&type_doc(&Trivia::default(), type_def))
 }
 
-/// A type as a document. Only a tuple type's field list breaks — one field per line, closing
-/// delimiter on its own — which is where the width goes in practice: a function's parameter list,
-/// an alias's right-hand side. Everything else renders to text, since a type has no interior the
-/// reader gains from seeing spread over lines.
-fn type_doc(trivia: &Trivia, type_def: &Type) -> Doc {
-    if let Type::Tuple(tuple_type) = type_def
-        && !tuple_type.fields.is_empty()
-    {
-        return tuple_type_doc(trivia, tuple_type);
-    }
-    pretty::text(render_type_flat(type_def))
+/// `(inner)`, for a type in a position that needs it delimited.
+fn parenthesised(inner: Doc) -> Doc {
+    pretty::concat(vec![pretty::text("("), inner, pretty::text(")")])
 }
 
-fn render_type_flat(type_def: &Type) -> String {
+/// A type as a document. Unions and tuple field lists break where they would overflow — a union
+/// one member per line behind a leading `|`, a tuple one field per line with a trailing comma —
+/// and every other type is laid out around the types inside it, so a function type or a type
+/// application wraps by way of its parts.
+fn type_doc(trivia: &Trivia, type_def: &Type) -> Doc {
     match type_def {
-        Type::Primitive(PrimitiveType::Int) => "'int".to_string(),
-        Type::Primitive(PrimitiveType::Bin) => "'bin".to_string(),
-        Type::Primitive(PrimitiveType::Ref) => "'ref".to_string(),
-        Type::Identifier { name, arguments } => {
-            format!("'{}{}", name, render_type_arguments(arguments))
-        }
-        Type::Tuple(tuple_type) => render_tuple_type(tuple_type),
+        Type::Primitive(PrimitiveType::Int) => pretty::text("'int"),
+        Type::Primitive(PrimitiveType::Bin) => pretty::text("'bin"),
+        Type::Primitive(PrimitiveType::Ref) => pretty::text("'ref"),
+        Type::Identifier { name, arguments } => pretty::concat(vec![
+            pretty::text(format!("'{}", name)),
+            type_arguments_doc(trivia, arguments),
+        ]),
+        Type::Tuple(tuple_type) => tuple_type_doc(trivia, tuple_type),
         Type::Function(function_type) => {
-            let mut out = format!(
-                "#{} -> {}",
-                render_type_atom(&function_type.input),
-                render_type_atom(&function_type.output)
-            );
+            let mut parts = vec![
+                pretty::text("#"),
+                type_atom_doc(trivia, &function_type.input),
+                pretty::text(" -> "),
+                type_atom_doc(trivia, &function_type.output),
+            ];
             if let Some(receive) = &function_type.receive {
-                out.push_str(" !");
-                out.push_str(&render_type_atom(receive));
+                parts.push(pretty::text(" !"));
+                parts.push(type_atom_doc(trivia, receive));
             }
             if let Some(states) = &function_type.states {
-                out.push_str(" ?");
-                out.push_str(&render_type_atom(states));
+                parts.push(pretty::text(" ?"));
+                parts.push(type_atom_doc(trivia, states));
             }
-            out
+            pretty::concat(parts)
         }
         // A union is parenthesised everywhere it is rendered inline; only a top-level type-alias
         // right-hand side (handled by `union_alias_doc`) is left bare.
-        Type::Union(union_type) => format!(
-            "({})",
-            union_type
-                .types
+        Type::Union(union_type) => union_doc(trivia, union_type),
+        Type::Intersection(types) => pretty::join(
+            pretty::text(" & "),
+            types
                 .iter()
-                .map(render_union_member)
-                .collect::<Vec<_>>()
-                .join(" | ")
+                .map(|member| type_atom_doc(trivia, member))
+                .collect(),
         ),
-        Type::Intersection(types) => types
-            .iter()
-            .map(render_type_atom)
-            .collect::<Vec<_>>()
-            .join(" & "),
-        Type::Cycle(None) => "^".to_string(),
-        Type::Cycle(Some(level)) => format!("^{}", level),
-        Type::Process(process_type) => render_process_type(process_type),
-        Type::Resource(name) => format!("+{}", name),
-        Type::Top => "_".to_string(),
+        Type::Cycle(None) => pretty::text("^"),
+        Type::Cycle(Some(level)) => pretty::text(format!("^{}", level)),
+        Type::Process(process_type) => process_type_doc(trivia, process_type),
+        Type::Resource(name) => pretty::text(format!("+{}", name)),
+        Type::Top => pretty::text("_"),
         Type::ModuleType {
             module,
             member,
             arguments,
         } => {
-            let mut out = format!("'%{}", module.join("/"));
+            let mut head = format!("'%{}", module.join("/"));
             if let Some(member) = member {
-                out.push('.');
-                out.push_str(member);
+                head.push('.');
+                head.push_str(member);
             }
-            out.push_str(&render_type_arguments(arguments));
-            out
+            pretty::concat(vec![
+                pretty::text(head),
+                type_arguments_doc(trivia, arguments),
+            ])
         }
-        Type::SelfDefault { arguments } => format!("'{}", render_type_arguments(arguments)),
+        Type::SelfDefault { arguments } => pretty::concat(vec![
+            pretty::text("'"),
+            type_arguments_doc(trivia, arguments),
+        ]),
     }
 }
 
-/// Render a type where the grammar expects a `base_type`/atom (intersection members, process
-/// heads and clauses, function input/output): wrap an intersection or function in parentheses,
-/// and a clause-bearing process type — nested, its clauses would bind to the wrong head (and a
-/// function output's trailing clauses are the function's). A union is already parenthesised by
-/// `render_type`.
-fn render_type_atom(type_def: &Type) -> String {
-    match type_def {
-        Type::Intersection(_) | Type::Function(_) => {
-            format!("({})", render_type(type_def))
+/// An inline union, `(A | B)` flat, or broken one member per line, each led by `|` and indented
+/// inside the parentheses — the shape an alias's union takes, with the parentheses as its frame.
+fn union_doc(trivia: &Trivia, union_type: &UnionType) -> Doc {
+    let mut parts = vec![pretty::softline()];
+    for (index, member) in union_type.types.iter().enumerate() {
+        if index > 0 {
+            parts.push(pretty::line());
         }
+        parts.push(leading_bar(index == 0));
+        // As in `union_alias_doc`, a member that breaks lays its fields out under its own name.
+        parts.push(pretty::nest(2, union_member_doc(trivia, member)));
+    }
+    pretty::group(pretty::concat(vec![
+        pretty::text("("),
+        pretty::nest(2, pretty::concat(parts)),
+        pretty::softline(),
+        pretty::text(")"),
+    ]))
+}
+
+/// A type where the grammar expects a `base_type`/atom (intersection members, process heads and
+/// clauses, function input/output): wrap an intersection or function in parentheses, and a
+/// clause-bearing process type — nested, its clauses would bind to the wrong head (and a function
+/// output's trailing clauses are the function's). A union already carries its parentheses.
+fn type_atom_doc(trivia: &Trivia, type_def: &Type) -> Doc {
+    match type_def {
+        Type::Intersection(_) | Type::Function(_) => parenthesised(type_doc(trivia, type_def)),
         Type::Process(process_type)
             if process_type.return_type.is_some() || process_type.state_type.is_some() =>
         {
-            format!("({})", render_type(type_def))
+            parenthesised(type_doc(trivia, type_def))
         }
-        _ => render_type(type_def),
-    }
-}
-
-/// [`render_union_member`]'s document form, so that a member wide enough to overflow — a tuple type
-/// with a long field list — breaks its fields rather than the line. A function member keeps its
-/// parentheses and stays text.
-fn union_member_doc(trivia: &Trivia, type_def: &Type) -> Doc {
-    match type_def {
-        Type::Tuple(tuple_type) if !tuple_type.fields.is_empty() => {
-            tuple_type_doc(trivia, tuple_type)
-        }
-        _ => pretty::text(render_union_member(type_def)),
+        _ => type_doc(trivia, type_def),
     }
 }
 
 /// A union member is an intersection-level type, so it never needs wrapping except for a function
 /// type (which only appears as a member when originally parenthesised).
-fn render_union_member(type_def: &Type) -> String {
+fn union_member_doc(trivia: &Trivia, type_def: &Type) -> Doc {
     match type_def {
-        Type::Function(_) => format!("({})", render_type(type_def)),
-        _ => render_type(type_def),
+        Type::Function(_) => parenthesised(type_doc(trivia, type_def)),
+        _ => type_doc(trivia, type_def),
     }
+}
+
+/// `<'a, 'b>` for a non-empty argument list, otherwise nothing. The grammar allows no whitespace
+/// against the angle brackets, so the list itself never breaks; an argument may, inside itself.
+fn type_arguments_doc(trivia: &Trivia, arguments: &[Type]) -> Doc {
+    if arguments.is_empty() {
+        return pretty::nil();
+    }
+    pretty::concat(vec![
+        pretty::text("<"),
+        pretty::join(
+            pretty::text(", "),
+            arguments
+                .iter()
+                .map(|argument| type_doc(trivia, argument))
+                .collect(),
+        ),
+        pretty::text(">"),
+    ])
 }
 
 fn render_type_arguments(arguments: &[Type]) -> String {
-    if arguments.is_empty() {
-        return String::new();
-    }
-    format!(
-        "<{}>",
-        arguments
-            .iter()
-            .map(render_type)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
+    pretty::flatten(&type_arguments_doc(&Trivia::default(), arguments))
 }
 
-/// The flat rendering of a tuple type. Reached for a tuple nested inside a type that renders as
-/// text (a function's input, a process head), where there is no line to break onto anyway.
-fn render_tuple_type(tuple_type: &TupleType) -> String {
-    pretty::flatten(&tuple_type_doc(&Trivia::default(), tuple_type))
-}
-
-/// A tuple type, breaking one field per line when the list does not fit. Field lists take a
-/// trailing comma, so the broken form gets one, exactly as a value tuple's does.
+/// A tuple type, breaking one field per line when the list does not fit, or when the author ended
+/// it with a comma. Field lists take a trailing comma, so the broken form gets one, exactly as a
+/// value tuple's does.
 fn tuple_type_doc(trivia: &Trivia, tuple_type: &TupleType) -> Doc {
     // A lowercase name is the alias-applied spread form (`'v1[..., id: 'bin]`): the parser
     // stores the alias as the name and rewrites its bare spreads to `...v1`. Render it back
@@ -2093,6 +2176,10 @@ fn tuple_type_doc(trivia: &Trivia, tuple_type: &TupleType) -> Doc {
             "[]".to_string()
         });
     }
+    let sticky = tuple_type
+        .fields
+        .last()
+        .is_some_and(|field| trivia.trailing_comma(field_type_span(field)));
     let fields = tuple_type
         .fields
         .iter()
@@ -2105,12 +2192,12 @@ fn tuple_type_doc(trivia: &Trivia, tuple_type: &TupleType) -> Doc {
                         type_arguments,
                         ..
                     },
-                ) if identifier == alias && type_arguments.is_empty() => "...".to_string(),
-                _ => render_field_type(field),
+                ) if identifier == alias && type_arguments.is_empty() => pretty::text("..."),
+                _ => field_type_doc(trivia, field),
             };
             pretty::concat(vec![
                 trivia.leading_doc(field_type_span(field)),
-                pretty::text(rendered),
+                rendered,
                 trivia.trailing_doc(field_type_span(field)),
             ])
         })
@@ -2120,7 +2207,7 @@ fn tuple_type_doc(trivia: &Trivia, tuple_type: &TupleType) -> Doc {
     } else {
         ("[", "]")
     };
-    bracketed(format!("{}{}", name, open), close, fields, true)
+    bracketed(format!("{}{}", name, open), close, fields, true, sticky)
 }
 
 /// Where a type's field entry starts, for trivia attachment.
@@ -2130,8 +2217,7 @@ fn field_type_span(field: &FieldType) -> Spanned {
     }
 }
 
-/// A field's ` = <value>` default. Types render flat, and a default is a short value
-/// chain, so it flattens with them.
+/// A field's ` = <value>` default. A default is a short value chain, so it renders flat.
 fn render_field_default(default: &Option<Box<Chain>>) -> String {
     match default {
         Some(chain) => format!(
@@ -2142,7 +2228,7 @@ fn render_field_default(default: &Option<Box<Chain>>) -> String {
     }
 }
 
-fn render_field_type(field_type: &FieldType) -> String {
+fn field_type_doc(trivia: &Trivia, field_type: &FieldType) -> Doc {
     match field_type {
         FieldType::Field {
             name,
@@ -2159,48 +2245,57 @@ fn render_field_type(field_type: &FieldType) -> String {
             // A decorator states no type — it names a field the spread already brought in
             // and adjusts only its label and default — so it renders as the label alone.
             let body = match (type_def, name) {
-                (Some(type_def), Some(_)) => format!(": {}", render_type(type_def)),
-                (Some(type_def), None) => render_type(type_def),
-                (None, _) => String::new(),
+                (Some(type_def), Some(_)) => {
+                    pretty::concat(vec![pretty::text(": "), type_doc(trivia, type_def)])
+                }
+                (Some(type_def), None) => type_doc(trivia, type_def),
+                (None, _) => pretty::nil(),
             };
-            format!("{}{}{}", label, body, render_field_default(default))
+            pretty::concat(vec![
+                pretty::text(label),
+                body,
+                pretty::text(render_field_default(default)),
+            ])
         }
         FieldType::Spread {
             identifier: None, ..
-        } => "...".to_string(),
+        } => pretty::text("..."),
         FieldType::Spread {
             identifier: Some(identifier),
             type_arguments,
             ..
-        } => format!(
-            "...'{}{}",
-            identifier,
-            render_type_arguments(type_arguments)
-        ),
+        } => pretty::concat(vec![
+            pretty::text(format!("...'{}", identifier)),
+            type_arguments_doc(trivia, type_arguments),
+        ]),
     }
 }
 
-fn render_process_type(process_type: &ProcessType) -> String {
-    let mut body = "@".to_string();
+fn process_type_doc(trivia: &Trivia, process_type: &ProcessType) -> Doc {
+    let mut parts = vec![pretty::text("@")];
     if let Some(receive) = &process_type.receive_type {
-        body.push_str(&render_type_atom(receive));
+        parts.push(type_atom_doc(trivia, receive));
     }
     // Clause sigils glue to a bare `@` and take a space after a head or earlier clause.
     if let Some(ret) = &process_type.return_type {
-        if process_type.receive_type.is_some() {
-            body.push(' ');
-        }
-        body.push('!');
-        body.push_str(&render_type_atom(ret));
+        parts.push(pretty::text(if process_type.receive_type.is_some() {
+            " !"
+        } else {
+            "!"
+        }));
+        parts.push(type_atom_doc(trivia, ret));
     }
     if let Some(state) = &process_type.state_type {
-        if process_type.receive_type.is_some() || process_type.return_type.is_some() {
-            body.push(' ');
-        }
-        body.push('?');
-        body.push_str(&render_type_atom(state));
+        parts.push(pretty::text(
+            if process_type.receive_type.is_some() || process_type.return_type.is_some() {
+                " ?"
+            } else {
+                "?"
+            },
+        ));
+        parts.push(type_atom_doc(trivia, state));
     }
-    body
+    pretty::concat(parts)
 }
 
 #[cfg(test)]
@@ -2355,7 +2450,7 @@ mod tests {
         // A comment dangling inside the container a step ends with keeps its place, and is not
         // captured by the assertion that follows the container.
         assert_formats(
-            "f [\n  1,\n  // why\n] //= 2\ng\n",
+            "f [\n  1\n  // why\n] //= 2\ng\n",
             "f [1] //= 2\n// why\ng\n",
         );
         // Note spacing normalizes to a single space, as any trailing comment does.
@@ -2498,6 +2593,121 @@ mod tests {
     }
 
     #[test]
+    fn steps_on_separate_lines_stay_separate() {
+        // Short enough to join, but written a line apiece, so kept that way.
+        let source = "f = #'int {\n  a = 1\n  b = 2\n  [a, b]\n}\n";
+        assert_formats(source, source);
+        assert_idempotent(source, "separate steps");
+        assert_formats("x = 1\ny = 2\n", "x = 1\ny = 2\n");
+        // A guard's steps follow the same rule.
+        let source = "f = #[] {\n  | =A\n    g => 1\n  | 2\n}\n";
+        assert_formats(source, source);
+    }
+
+    #[test]
+    fn steps_joined_on_one_line_stay_joined() {
+        assert_formats(
+            "g = #'int { a = 1; b = 2; [a, b] }\n",
+            "g = #'int { a = 1; b = 2; [a, b] }\n",
+        );
+        assert_formats(
+            "h = %list.filter [bs, #{ $label ~> =\"CERTIFICATE\"; $ }]\n",
+            "h = %list.filter [bs, #{ $label ~> =\"CERTIFICATE\"; $ }]\n",
+        );
+        // Runs are independent: a joined pair keeps its line among separate ones.
+        let source = "m = #[] {\n  x = 1; y = 2\n  [x, y]\n}\n";
+        assert_formats(source, source);
+        assert_idempotent(source, "mixed runs");
+    }
+
+    #[test]
+    fn a_joined_run_breaks_whole() {
+        // Too wide for the line, the run breaks one step per line.
+        assert_formats(
+            "k = #[] { alpha_value = compute_something [1, 2, 3]; beta_value = compute_other_thing [alpha_value, 4, 5]; gamma }\n",
+            "k = #[] {\n  alpha_value = compute_something [1, 2, 3]\n  beta_value = compute_other_thing [alpha_value, 4, 5]\n  gamma\n}\n",
+        );
+        // A step that breaks across lines takes the run with it, rather than leaving `; y`
+        // dangling after its last line.
+        assert_formats("#{ x = [1,]; y }\n", "#{\n  x = [\n    1,\n  ]\n  y\n}\n");
+        // A run broken by width reads back as separate lines, so the layout is stable.
+        assert_idempotent(
+            "k = #[] { alpha_value = compute_something [1, 2, 3]; beta_value = compute_other_thing [alpha_value, 4, 5]; gamma }\n",
+            "broken run",
+        );
+    }
+
+    #[test]
+    fn steps_in_an_interpolation_hole_stay_on_its_line() {
+        // A hole has no lines to give: steps written apart in one rejoin with `;`.
+        assert_formats(
+            "s = \"\"\"\n  pick {a = 1\n  a} done\n  \"\"\"\n",
+            "s = \"\"\"\npick {a = 1; a} done\n\"\"\"\n",
+        );
+    }
+
+    #[test]
+    fn a_trailing_comma_holds_a_list_open() {
+        // Values, puns, patterns, partial patterns and types alike.
+        assert_formats("x = [1, 2,]\n", "x = [\n  1,\n  2,\n]\n");
+        assert_formats("x = (a, b,)\n", "x = (\n  a,\n  b,\n)\n");
+        assert_formats("[a, b,] = x\n", "[\n  a,\n  b,\n] = x\n");
+        assert_formats("(a, b,) = x\n", "(\n  a,\n  b,\n) = x\n");
+        // A pattern is not a container a chain opens onto, so the chain breaks at its gap first.
+        assert_formats("x ~> =P[a, b,]\n", "x\n~> =P[\n  a,\n  b,\n]\n");
+        assert_formats(
+            "f = #[a: 'int, b: 'int,] { $a }\n",
+            "f = #[\n  a: 'int,\n  b: 'int,\n] { $a }\n",
+        );
+        assert_formats("'p = P[x: 'int,]\n", "'p = P[\n  x: 'int,\n]\n");
+        // A comment between the last entry and the comma does not hide it.
+        assert_formats("x = [1 // one\n,]\n", "x = [\n  1, // one\n]\n");
+        // Without one, the list lays out by width: a list broken in the source may rejoin.
+        assert_formats("x = [1, 2]\n", "x = [1, 2]\n");
+        assert_formats("x = [\n  1,\n  2\n]\n", "x = [1, 2]\n");
+        assert_formats("f = #[\n  a: 'int\n] { $a }\n", "f = #[a: 'int] { $a }\n");
+        // The broken layout writes the comma, so it sticks.
+        assert_idempotent("x = [1, 2,]\n", "sticky tuple");
+        assert_idempotent("[a, b,] = x\n", "sticky pattern");
+    }
+
+    #[test]
+    fn a_wide_union_head_wraps() {
+        let source = "truncate = #(['instant, 'day_unit] | ['duration, 'clock_unit] | ['time, 'clock_unit] | ['datetime, ('date_unit | 'day_unit)] | ['date, 'date_unit] | ['zoned, ('date_unit | 'day_unit)]) {\n  a = 1\n  a\n}\n";
+        assert_formats(
+            source,
+            "truncate = #(\n  | ['instant, 'day_unit]\n  | ['duration, 'clock_unit]\n  | ['time, 'clock_unit]\n  | ['datetime, ('date_unit | 'day_unit)]\n  | ['date, 'date_unit]\n  | ['zoned, ('date_unit | 'day_unit)]\n) {\n  a = 1\n  a\n}\n",
+        );
+        assert_idempotent(source, "wrapped union head");
+        // A union that fits stays inline.
+        assert_formats("f = #('int | 'bin) { $ }\n", "f = #('int | 'bin) { $ }\n");
+        // A union nested in a field wraps inside the field once the list has broken.
+        let source = "f = #[mode: (Alpha_mode_value | Beta_mode_value | Gamma_mode_value | Delta_mode_value | Epsilon_mode_value), n: 'int] { $n }\n";
+        assert_formats(
+            source,
+            "f = #[\n  mode: (\n    | Alpha_mode_value\n    | Beta_mode_value\n    | Gamma_mode_value\n    | Delta_mode_value\n    | Epsilon_mode_value\n  ),\n  n: 'int,\n] { $n }\n",
+        );
+        assert_idempotent(source, "wrapped union field");
+        // A result type wraps too.
+        let source = "f = #'int -> (Alpha_result_value | Beta_result_value | Gamma_result_value | Delta_result_value | Epsilon) { A }\n";
+        assert_formats(
+            source,
+            "f = #'int -> (\n  | Alpha_result_value\n  | Beta_result_value\n  | Gamma_result_value\n  | Delta_result_value\n  | Epsilon\n) { A }\n",
+        );
+        assert_idempotent(source, "wrapped result union");
+    }
+
+    #[test]
+    fn a_union_alias_keeps_its_layout() {
+        let source = "'zoning = ['instant, 'zone] | ['datetime, 'zone] | ['datetime_long_name_here, 'zone] | ['other_thing, 'zone_x]\n";
+        assert_formats(
+            source,
+            "'zoning =\n  | ['instant, 'zone]\n  | ['datetime, 'zone]\n  | ['datetime_long_name_here, 'zone]\n  | ['other_thing, 'zone_x]\n",
+        );
+        assert_formats("'bool = True | False\n", "'bool = True | False\n");
+    }
+
+    #[test]
     fn a_chain_ending_in_a_container_breaks_at_its_gaps_before_opening_it() {
         // The trailing container absorbs the overflow while the head still fits on the line it
         // opens on — the head is measured against that line, not against the container's full width.
@@ -2591,7 +2801,7 @@ mod tests {
         // A type reached in a flat-rendered position has no line to carry a comment, so an item
         // there still attaches outward — to the next entry of the list that *is* laid out.
         assert_formats(
-            "'wrap = [outer: #[\n  // inner note\n  a: 'int,\n] -> 'int, other: 'bin]",
+            "'wrap = [outer: #[\n  // inner note\n  a: 'int\n] -> 'int, other: 'bin]",
             "'wrap = [\n  outer: #[a: 'int] -> 'int,\n  // inner note\n  other: 'bin,\n]\n",
         );
     }
