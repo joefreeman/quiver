@@ -1150,16 +1150,16 @@ d_number = #'%parse {
     | k ~> =0 => %parse.fail_in [st, "a number"]
     | __integer_compare__ [end, st.len] ~> =-1
       %bin.get_byte [st.data, end] ~> =46 => {
-      start = __integer_add__ [end, 1]
-      d_digits [st.data, start, st.len, n, 0] ~> =[m, j, end2]
-      {
-        | j ~> =0 => %parse.fail_in [st[..., pos: start], "a digit"]
-        | reduce Rational[m, ipow [10, j, 1]] ~> =Rational[p, q] => [
-            Tuple[name: "Rational", fields: Cons[p, Cons[q, Nil]]],
-            st[..., pos: end2],
-          ]
+        start = __integer_add__ [end, 1]
+        d_digits [st.data, start, st.len, n, 0] ~> =[m, j, end2]
+        {
+          | j ~> =0 => %parse.fail_in [st[..., pos: start], "a digit"]
+          | reduce Rational[m, ipow [10, j, 1]] ~> =Rational[p, q] => [
+              Tuple[name: "Rational", fields: Cons[p, Cons[q, Nil]]],
+              st[..., pos: end2],
+            ]
+        }
       }
-    }
     | [n, st[..., pos: end]]
   }
 }
@@ -1167,7 +1167,10 @@ d_number = #'%parse {
 // A generator's monomial `g¹`, as the literal `Tx[g, Cons[[1, 1], Nil]]`.
 d_tx = #'dexpr {
   one = Tuple[name: Nil, fields: Cons[1, Cons[1, Nil]]]
-  Tuple[name: "Tx", fields: Cons[$, Cons[Tuple[name: "Cons", fields: Cons[one, Cons[Nil, Nil]]], Nil]]]
+  Tuple[
+    name: "Tx",
+    fields: Cons[$, Cons[Tuple[name: "Cons", fields: Cons[one, Cons[Nil, Nil]]], Nil]],
+  ]
 }
 
 // The constants, as literals: `pi` or `π`, and `e`. A longer name, such as `pie` or `e2`, is
@@ -1213,11 +1216,7 @@ d_expr_of = #'%parse.p<'dexpr> {
 // exponent is itself a factor, which makes `^` right-associative and admits `2 ^ -1`.
 // Alternative order matters: the dialect's own parens, literals and constants first, the
 // host term last.
-d_factor_step = #[
-  (self): ^,
-  (term): '%parse.p<'dexpr>,
-  (st): '%parse,
-] -> (['dexpr, '%parse] | []) {
+d_factor_step = #[(self): ^, (term): '%parse.p<'dexpr>, (st): '%parse] -> (['dexpr, '%parse] | []) {
   // The nested factor literal closes over `self` and `term` (an inner `$` would be its
   // own parameter), so bind the fields locally — by reference, as callables.
   self = $self
@@ -1239,10 +1238,13 @@ d_factor_step = #[
 
   exponent = %parse.right [d_pow_op, factor] ~> %parse.opt ~
 
-  power = %parse.then [atom, exponent] ~> %parse.map [~, #{
-    | =[base, Some[x]] => %meta.call2 ["pow", base, x]
-    | $0
-  }]
+  power = %parse.then [atom, exponent] ~> %parse.map [
+    ~,
+    #{
+      | =[base, Some[x]] => %meta.call2 ["pow", base, x]
+      | $0
+    },
+  ]
 
   core = %parse.alt2 [neg, power]
 
@@ -1402,13 +1404,7 @@ neg = #'opt {
 abs = #'opt {
   :doc "The absolute value of a number, preserving its kind; nil for a nil operand."
   // The result is never negative (nil passes through).
-  :post #{
-    $ ~> =(out: o)
-    o ~> {
-      | =[] => Ok
-      | sign ~ ~> =\-1; Ok
-    }
-  }
+  :post #{ $ ~> =(out: o); o ~> { =[] => Ok | sign ~ ~> =\-1; Ok } }
   | =Surd[a, b, n] => {
     ar = to_rational a
     br = to_rational b
@@ -1514,7 +1510,10 @@ cpow_nat = #['coeff, 'int] {
 
 // cⁿ for a coefficient and any integer n; nil for zero to a negative power.
 cpow = #['coeff, 'int] {
-  | =[c, n]; __integer_compare__ [n, 0] ~> =-1 => rdiv [1, cpow_nat [c, __integer_multiply__ [n, -1]]]
+  | =[c, n]; __integer_compare__ [n, 0] ~> =-1 => rdiv [
+      1,
+      cpow_nat [c, __integer_multiply__ [n, -1]],
+    ]
   | cpow_nat $
 }
 
@@ -1543,7 +1542,8 @@ qpow = #[', 'int, 'int] {
     kp = __integer_multiply__ [k, p]
     __integer_modulo__ [kp, q] ~> =0
     cqpow [c, p, q] ~> ='coeff => tx_build [Pi, Cons[[__integer_divide__ [kp, q], ~], Nil]]
-  | =[Tx[E[d], Cons[[k, c], Nil]], p, q]; cqpow [c, p, q] ~> ='coeff => tx_build [
+  | =[Tx[E[d], Cons[[k, c], Nil]], p, q]
+    cqpow [c, p, q] ~> ='coeff => tx_build [
       E[__integer_multiply__ [d, q]],
       Cons[[__integer_multiply__ [k, p], ~], Nil],
     ]
@@ -1561,13 +1561,19 @@ pow = #['opt, 'opt] {
     | npow [x, n, 1]
   }
   // A zero base with a non-integer power, which is never zero itself.
-  | sign $0 ~> =0 => { sign $1 ~> =1 => 0 | [] ~> { :error DivisionByZero } }
+  | sign $0 ~> =0 => {
+    | sign $1 ~> =1 => 0
+    | [] ~> { :error DivisionByZero }
+  }
   | =[x, Rational[p, q]] => {
     | sign x ~> =1 => qpow [x, p, q]
     | __integer_modulo__ [q, 2] ~> =0 => [] ~> { :error OutOfDomain }
     // An odd root of a negative number is the negated root of its magnitude.
     | r = qpow [neg x, p, q]
-      { __integer_modulo__ [p, 2] ~> =0 => r | neg r }
+      {
+        | __integer_modulo__ [p, 2] ~> =0 => r
+        | neg r
+      }
   }
   // An irrational power: of a negative number there is no real one, and of anything but 1 or
   // a power of e there is no exact one.
@@ -1756,10 +1762,10 @@ atan2 = #[(y): 'opt, (x): 'opt] {
     }
     | div [y, x] ~> abs ~ ~> =(('coeff | 'slow) & q)
       inverse [q, atan_table] ~> =('rational & t) => {
-      | sx ~> =1 => { sy ~> =-1 => rneg t | t }
-      | sy ~> =-1 => rsub [t, Rational[1, 1]]
-      | rsub [Rational[1, 1], t]
-    }
+        | sx ~> =1 => { sy ~> =-1 => rneg t | t }
+        | sy ~> =-1 => rsub [t, Rational[1, 1]]
+        | rsub [Rational[1, 1], t]
+      }
     | [] ~> { :error Unrepresentable }
   }
   ~> =('rational & r)

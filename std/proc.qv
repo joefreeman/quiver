@@ -14,6 +14,74 @@
 // message type: `!('event | '%proc.changed)`.
 'changed = Changed
 
+kill = #[(pid): @, reason: _ = []] {
+  :doc "Kills the process — always effective (there is no trapping). Its awaiters observe the Killed[reason] crash kind, with the given reason (nil when none is given, as for a link or teardown kill); its owned subtree is torn down, and its link peers are killed. The reason must be data: a pid, ref, function or resource in it is a runtime error. A no-op on an already-terminated process."
+  __process_kill__ [$pid, $reason]
+}
+
+// A timeout's nil would end the sequence, so the block recovers it: a sleep succeeds.
+sleep = #'int {
+  :doc "Suspends the calling process for the given number of milliseconds, answering Ok. Its mailbox is untouched: messages arriving meanwhile stay queued."
+  { !$ | Ok }
+}
+
+// The timer is an ordinary process, so ownership gives its semantics: it is torn down
+// with the sender, killing it cancels the send, and a resource in the message moves
+// into it (closed if it never fires).
+send_after = #<'m>[(to): @'m, (message): 'm, (after): 'int] -> (@!Ok) {
+  :doc "Sends a message to a process after a delay, answering the timer: a process owned by the caller, which ends once it has sent. Kill it to cancel the send; it is also cancelled if the caller terminates first. The message is checked against the target's send grant now, and a resource in it moves to the timer at once."
+  to = $to
+  message = $message
+  after = $after
+  @[] { sleep after; __process_send__ [to, message] } []
+}
+
+// A watchdog races the process's completion against the deadline, so it ends as soon as
+// the process does rather than outliving it.
+expire = #[(pid): @!_, (after): 'int] -> (@!Ok) {
+  :doc "Gives a process a deadline: if it has not terminated within the given milliseconds, it is killed with reason Timeout[ms], which its awaiters observe as Killed[reason: Timeout[ms]]. Answers the watchdog, a process owned by the caller; kill it to lift the deadline. The deadline is lifted too if the caller terminates first, so a detached process outliving its spawner outlives the deadline as well."
+  pid = $pid
+  after = $after
+  @[] {
+    r = ![pid, after]
+    {
+      | r:timeout<'int> => kill [pid, reason: Timeout[after]]
+      | Ok
+    }
+  } []
+}
+
+// The race runs inside a scope process that owns everything it spawns, so ending the
+// scope (once the collector answers) tears down every losing racer. Each racer awaits its
+// thunk in a process of its own, so a crash reaches the collector as a failure rather
+// than as silence. The collector is spawned before the racers because they are handed its
+// pid, which a spawn types from the collector's receive.
+race = #<'r>[(racers): '%list<#[] -> 'r>, timeout: ('int | []) = []] {
+  :doc "Runs each thunk in its own process and answers the first non-nil result; nil and crashed results count as failures, and the race answers nil once every racer has failed (at once, for no racers). The losers are killed as soon as it is decided. With a timeout, a race still undecided after that many milliseconds is abandoned, answering nil carrying :crash Killed[reason: Timeout[ms]]."
+  racers = $racers
+  count = %list.count racers
+  collect = #'int {
+    | =0 => []
+    | !Done[('r | [])] ~> {
+      | =Done[(\[] & v)] => v
+      | __integer_subtract__ [$, 1] ~> ^ ~
+    }
+  }
+  scope = @[] {
+    c = count ~> @collect ~
+    %list.map [
+      racers,
+      #{ f = $; @[] { p = f ~> @~ []; r = !p; __process_send__ [c, Done[r]] } [] },
+    ]
+    !c
+  } []
+  {
+    | $timeout ~> ='int ~> expire [scope, ~]
+    | Ok
+  }
+  !scope
+}
+
 [
   send: __process_send__ ~> {
     :doc "Sends a message to a process. Asynchronous and fire-and-forget: the caller does not wait for delivery, and a send to a process that has already terminated is discarded. The message is checked against the target's send grant, so a pid a boundary handed out at a narrower type accepts only what that type spells."
@@ -21,14 +89,15 @@
   detach: __process_detach__ ~> {
     :doc "Detaches an owned child from the calling process, so it survives the caller's termination. Parent-only: errors unless the argument is a process the caller currently owns."
   },
-  kill: #[(pid): @, reason: _ = []] {
-    :doc "Kills the process — always effective (there is no trapping). Its awaiters observe the Killed[reason] crash kind, with the given reason (nil when none is given, as for a link or teardown kill); its owned subtree is torn down, and its link peers are killed. The reason must be data: a pid, ref, function or resource in it is a runtime error. A no-op on an already-terminated process."
-    __process_kill__ [$pid, $reason]
-  },
+  kill: kill,
   link: __process_link__ ~> {
     :doc "Links the calling process and the target for symmetric fate-sharing: if either terminates abnormally (crash or kill), the other is killed. Normal completion never propagates; linking an already-crashed process kills the caller immediately. Idempotent; self-link is a no-op."
   },
   track: __track__ ~> {
     :doc "Runs a nilary thunk with reactive dependency tracking, returning its result. Each process the thunk samples with `?` becomes a dependency: when any of them next changes state, the calling process is sent a `'%proc.changed` wakeup. Subscriptions are reconciled on each call, so a dependency no longer sampled is dropped. The thunk must be pure (no spawns, sends, effects, or selects)."
   },
+  sleep: sleep,
+  send_after: send_after,
+  expire: expire,
+  race: race,
 ]

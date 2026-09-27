@@ -65,7 +65,10 @@ lcm_denoms = #[(acc): 'int, (nums): '%list<'%num>] {
   | $nums ~> =Nil => $acc
   | $nums ~> =Cons[n, rest] => {
     %num.denom n ~> =('int & dx)
-    ^ [__integer_divide__ [__integer_multiply__ [$acc, dx], __integer_gcd__ [$acc, dx]], rest]
+    ^ [
+      __integer_divide__ [__integer_multiply__ [$acc, dx], __integer_gcd__ [$acc, dx]],
+      rest,
+    ]
   }
 }
 

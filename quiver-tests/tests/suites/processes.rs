@@ -465,6 +465,137 @@ fn test_kill_reason_must_be_data() {
 }
 
 #[test]
+fn test_sleep_leaves_the_mailbox_untouched() {
+    quiver()
+        .evaluate(
+            r#"
+            %proc.send [@, 7];
+            %proc.sleep 10;
+            !'int
+            "#,
+        )
+        .expect("7");
+}
+
+#[test]
+fn test_send_after_delivers_unless_cancelled() {
+    // The later message arrives; the earlier one's timer is killed before it fires.
+    quiver()
+        .evaluate(
+            r#"
+            %proc.send_after [@, 1, after: 20];
+            t = %proc.send_after [@, 2, after: 10];
+            %proc.kill [t];
+            a = !'int;
+            b = { ![#'int, 50] };
+            [a, b]
+            "#,
+        )
+        .expect("[1, []]");
+}
+
+#[test]
+fn test_send_after_is_cancelled_with_its_sender() {
+    // The timer is owned by the process that set it, so it dies with it.
+    quiver()
+        .evaluate(
+            r#"
+            me = @;
+            s = @[] { %proc.send_after [me, 1, after: 20]; Ok } [];
+            !s;
+            { ![#'int, 60] }
+            "#,
+        )
+        .expect("[]");
+}
+
+#[test]
+fn test_expire_kills_with_a_timeout_reason() {
+    quiver()
+        .evaluate(
+            r#"
+            p = @[] { !'int } [];
+            %proc.expire [p, 10];
+            r = !p;
+            r:crash<'%proc.crash>
+            "#,
+        )
+        .expect("Killed[reason: Timeout[10]]");
+}
+
+#[test]
+fn test_expire_watchdog_ends_with_its_process() {
+    // A process that finishes first is untouched, and the watchdog does not linger until
+    // the deadline.
+    quiver()
+        .evaluate(
+            r#"
+            p = @[] { 5 } [];
+            w = %proc.expire [p, 100000];
+            [!p, ![w, 1000]]
+            "#,
+        )
+        .expect("[5, Ok]");
+}
+
+#[test]
+fn test_race_answers_the_first_success() {
+    // Nil and crashed racers count as failures, not wins.
+    quiver()
+        .evaluate(
+            r#"
+            %proc.race [%list{
+              #[] { [] },
+              #[] { __panic__ "x" },
+              #[] { %proc.sleep 20; 2 },
+              #[] { %proc.sleep 500; 3 },
+            }]
+            "#,
+        )
+        .expect("2");
+}
+
+#[test]
+fn test_race_fails_when_every_racer_fails() {
+    quiver()
+        .evaluate(
+            r#"
+            [
+              { %proc.race [%list{ #[] { [] }, #[] { __panic__ "x" } }] },
+              { %proc.race [Nil] },
+            ]
+            "#,
+        )
+        .expect("[[], []]");
+}
+
+#[test]
+fn test_race_kills_the_losers() {
+    // The loser would send after the race is decided; it is torn down first.
+    quiver()
+        .evaluate(
+            r#"
+            me = @;
+            w = %proc.race [%list{ #[] { 1 }, #[] { %proc.sleep 20; %proc.send [me, 9]; 2 } }];
+            [w, { ![#'int, 60] }]
+            "#,
+        )
+        .expect("[1, []]");
+}
+
+#[test]
+fn test_race_timeout_abandons_an_undecided_race() {
+    quiver()
+        .evaluate(
+            r#"
+            r = %proc.race [%list{ #[] { %proc.sleep 1000; 1 } }, timeout: 10];
+            r:crash<'%proc.crash>
+            "#,
+        )
+        .expect("Killed[reason: Timeout[10]]");
+}
+
+#[test]
 fn test_kill_of_completed_process_is_noop() {
     quiver()
         .evaluate(

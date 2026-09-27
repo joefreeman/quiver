@@ -1264,6 +1264,42 @@ The shorthands each select on one source:
 | `!#['int, 'int]` | an unnamed tuple type needs the `#` |
 | `![]` | a no-op, returning nil |
 
+A select that loses to anything, a timeout included, leaves its other sources as they
+were: a message stays in the mailbox, and an awaited process keeps running. Because a
+timeout's nil ends a sequence, waiting for its own sake is `%proc.sleep`, not a bare
+`![ms]`.
+
+### Timers and deadlines
+
+`%proc` builds timers from processes, so ownership gives them their semantics: a timer
+belongs to whoever set it, dies with them, and is cancelled by killing it.
+
+```quiver
+tick = #[] {
+  %proc.send_after [@, Tick, after: 10]    // answers the timer, a process
+  %proc.sleep 20                           //= Ok
+  !Tick
+}
+tick []                                    //= Tick
+```
+
+`%proc.expire` gives a process a deadline. A process still running when it passes is
+killed with a `Timeout` reason, and a watchdog whose process finishes first simply ends.
+
+```quiver
+p = @[] { %proc.sleep 1000; Done } []
+%proc.expire [p, 10]
+r = !p
+r:crash<'%proc.crash>                      //= Killed[reason: Timeout[10]]
+```
+
+`%proc.race` runs thunks in processes of their own and answers the first non-nil result,
+killing the others. It answers nil once every racer has failed.
+
+```quiver
+%proc.race [%list{ #[] { %proc.sleep 500; Slow }, #[] { Fast } }]   //= Fast
+```
+
 ### Filters and handlers
 
 A block written **directly after** a select is a *filter*: it inspects each candidate
@@ -1584,7 +1620,7 @@ __integer_add__ [3, 4]                       //= 7
 | `%json` | JSON parsing, rendering, querying and editing, typed `decode<'t>`/`encode<'t>`, plus `%json{ … }` |
 | `%parse` | parser combinators over binary input |
 | `%meta` | the expression IR a dialect returns |
-| `%proc` | process management: `send`, `detach`, `kill`, `link`, `track` |
+| `%proc` | process management: `send`, `detach`, `kill`, `link`, `track`, and timers: `sleep`, `send_after`, `expire`, `race` |
 | `%registry` | the per-environment name registry: `register`, `unregister`, `lookup` |
 | `%sup` | supervision: restart strategies over `%proc` |
 | `%io` | the failure vocabulary every I/O operation shares |

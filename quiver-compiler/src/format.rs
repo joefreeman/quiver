@@ -1132,7 +1132,19 @@ fn select_shorthand(chains: &[Chain]) -> Option<String> {
         return None;
     };
     match term {
-        // `!f`, `!p`, `!%mod.recv` — a named source.
+        // `!f`, `!p`, `!$stream`, `!%mod.recv` — a named source.
+        Term::Access(access)
+            if matches!(
+                access.source,
+                Some(
+                    AccessSource::Identifier(_)
+                        | AccessSource::Parameter { .. }
+                        | AccessSource::Import(_)
+                )
+            ) =>
+        {
+            Some(format!("!{}", render_access(access)))
+        }
         // `!'int`, `!#Reply[...]` — a body-less identity receive.
         Term::Function(function)
             if function.type_parameters.is_empty()
@@ -2197,6 +2209,15 @@ mod tests {
         assert_formats("x ~> =(+File & fd)\n", "x ~> =(+File & fd)\n");
         assert_formats("x ~> =(@'int & p)\n", "x ~> =(@'int & p)\n");
         assert_formats("x ~> =((@'int !'bin) & p)\n", "x ~> =((@'int !'bin) & p)\n");
+    }
+
+    #[test]
+    fn single_named_select_sources_keep_the_shorthand() {
+        assert_formats("![p]\n", "!p\n");
+        assert_formats("![$stream]\n", "!$stream\n");
+        assert_formats("![%proc.changed]\n", "!%proc.changed\n");
+        assert_formats("![p, 1000]\n", "![p, 1000]\n");
+        assert_formats("x ~> ![~]\n", "x ~> ![~]\n");
     }
 
     #[test]

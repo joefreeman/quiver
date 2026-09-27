@@ -71,7 +71,7 @@ conn_loop = #[(sock): +TcpSocket, (handler): 'handler, (buf): 'bin] {
       // Run the handler in its own process: a crash surfaces here as a stamped nil,
       // degrading to the 500 below exactly like a plain failed handler.
       hp = req ~> @$handler ~
-      r = ![hp]
+      r = !hp
       {
         | r ~> =Upgrade[handler: wh] => {
           // "Switch this connection": answer the WebSocket handshake and hand the
