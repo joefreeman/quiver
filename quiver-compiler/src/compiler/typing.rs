@@ -2178,14 +2178,21 @@ fn unify_bounded(
         // suffices. Known types are tried before variables, which (unbound, from an enclosing
         // generic) fit only a variable; the first that fits is replayed for real.
         (_, Type::Intersection(members)) => {
-            let (variables, known): (Vec<usize>, Vec<usize>) = members
-                .iter()
-                .partition(|&&member| matches!(program.lookup_type(member), Some(Type::Variable(_))));
+            let (variables, known): (Vec<usize>, Vec<usize>) =
+                members.iter().partition(|&&member| {
+                    matches!(program.lookup_type(member), Some(Type::Variable(_)))
+                });
             let mut first_error = None;
             for member in known.into_iter().chain(variables) {
                 let mut trial = bindings.clone();
-                match unify_bounded(&mut trial, &mut ctx.fresh(), contra, pattern_id, member, program)
-                {
+                match unify_bounded(
+                    &mut trial,
+                    &mut ctx.fresh(),
+                    contra,
+                    pattern_id,
+                    member,
+                    program,
+                ) {
                     Ok(()) => {
                         return unify_bounded(bindings, ctx, contra, pattern_id, member, program);
                     }

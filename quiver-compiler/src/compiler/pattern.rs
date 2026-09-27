@@ -1303,9 +1303,8 @@ fn find_matching_match_tuples(
                 partial_as_match_tuple(program, tuple, &name, &fields)
             }
         };
-        matching_types.extend(
-            candidate.map(|(tuple_id, field_mappings)| (tuple_id, field_mappings, within)),
-        );
+        matching_types
+            .extend(candidate.map(|(tuple_id, field_mappings)| (tuple_id, field_mappings, within)));
     }
 
     Ok(matching_types)

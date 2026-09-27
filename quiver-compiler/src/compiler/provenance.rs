@@ -18,8 +18,10 @@ pub enum Provenance {
     /// The usize is the field index.
     Field(Box<Provenance>, usize),
 
-    /// Value is the block or function parameter.
-    Parameter,
+    /// Value is the parameter of the scope at this level of the scope stack: a function's
+    /// (`$`), or a block's (its input). Naming the scope rather than meaning "the current
+    /// one" lets a narrowing made in an inner scope reach an enclosing scope's parameter.
+    Parameter(usize),
 
     /// Value is a tuple where each field has its own provenance.
     Tuple(Vec<Provenance>),
@@ -52,8 +54,10 @@ pub struct Narrowings {
     /// Narrowed types for variables, keyed by variable name (values are type IDs).
     pub variables: HashMap<String, usize>,
 
-    /// Narrowed type for the block/function parameter (if any) - type ID.
-    pub parameter: Option<usize>,
+    /// Narrowed types for the parameters of this scope and those enclosing it, keyed by the
+    /// owning scope's level. Recorded here, in the scope whose control flow established them,
+    /// so they end with it.
+    pub parameters: HashMap<usize, usize>,
 
     /// Field narrowings for any provenance, stored as (parent_provenance, field_index, narrowed_type_id).
     /// Used for tuple pattern complement narrowing where a specific field

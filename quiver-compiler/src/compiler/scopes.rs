@@ -175,45 +175,60 @@ pub fn lookup_type_alias(scopes: &[Scope], name: &str) -> Option<TypeAliasDef> {
         .find_map(|s| s.bindings.type_aliases.get(name).cloned())
 }
 
+/// The (possibly narrowed) type of the parameter of the scope at `level`: the innermost
+/// narrowing of it in effect, or its declared type. `None` when that scope has no parameter.
+pub fn parameter_type(scopes: &[Scope], level: usize) -> Option<usize> {
+    let declared = scopes.get(level)?.parameter.as_ref()?.ty;
+    Some(
+        scopes[level..]
+            .iter()
+            .rev()
+            .find_map(|scope| scope.narrowings.parameters.get(&level).copied())
+            .unwrap_or(declared),
+    )
+}
+
+/// The level of the current (innermost) scope, whose parameter is the block's input.
+pub fn current_level(scopes: &[Scope]) -> usize {
+    scopes.len() - 1
+}
+
+/// The level of the nearest enclosing function scope, whose parameter `$` names.
+pub fn function_level(scopes: &[Scope]) -> Option<usize> {
+    scopes
+        .iter()
+        .rposition(|scope| scope.kind == ScopeKind::Function && scope.parameter.is_some())
+}
+
 /// Get the parameter from the current (innermost) scope.
 ///
 /// Returns the (possibly narrowed) parameter type ID and its stack index.
-/// If a narrowing exists for the parameter in the current scope, returns the narrowed type ID.
 pub fn get_parameter(scopes: &[Scope]) -> Result<(usize, usize), Error> {
-    let scope = scopes.last().ok_or_else(|| Error::InternalError {
-        message: "No scope available".to_string(),
-    })?;
-
-    let param = scope
+    let level = current_level(scopes);
+    let param = scopes[level]
         .parameter
         .as_ref()
         .ok_or_else(|| Error::InternalError {
             message: "No parameter in current scope".to_string(),
         })?;
-
-    // Check for parameter narrowing in current scope
-    let ty = scope.narrowings.parameter.unwrap_or(param.ty);
-
+    let ty = parameter_type(scopes, level).expect("the scope has a parameter");
     Ok((ty, param.index))
 }
 
 /// Get the function parameter (for $ operator).
 ///
-/// Walks up scopes to find the nearest Function scope's parameter.
+/// Finds the nearest Function scope's parameter.
 /// Returns the (possibly narrowed) parameter type ID and its stack index.
 pub fn get_function_parameter(scopes: &[Scope]) -> Result<(usize, usize), Error> {
-    for scope in scopes.iter().rev() {
-        if scope.kind == ScopeKind::Function
-            && let Some(param) = &scope.parameter
-        {
-            // Check for parameter narrowing
-            let ty = scope.narrowings.parameter.unwrap_or(param.ty);
-            return Ok((ty, param.index));
-        }
-    }
-    Err(Error::InternalError {
+    let level = function_level(scopes).ok_or_else(|| Error::InternalError {
         message: "No function parameter available ($ used outside function)".to_string(),
-    })
+    })?;
+    let param = scopes[level]
+        .parameter
+        .as_ref()
+        .expect("found by its parameter");
+    let ty = parameter_type(scopes, level).expect("the scope has a parameter");
+    Ok((ty, param.index))
 }
 
 /// Get the enclosing function's *declared* parameter type, ignoring any narrowing

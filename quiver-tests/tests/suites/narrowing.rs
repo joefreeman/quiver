@@ -1493,3 +1493,33 @@ fn test_repeated_binder_blocks_field_complement() {
         .evaluate("{ [1, [2]] ~> =[~, [~]] } ~> { =[] => Missed | Matched }")
         .expect("Missed");
 }
+
+// A narrowing names the scope whose parameter it narrows, so it reaches an enclosing one.
+
+#[test]
+fn test_matching_a_piped_parameter_narrows_it() {
+    quiver()
+        .evaluate("#('int | [x: 'int]) { $ ~> { =[x: a] => $ | No } }")
+        .expect_type("#('int | [x: 'int]) -> (No | [x: 'int])");
+    quiver()
+        .evaluate("#<'t>'t { $ ~> { =[x: a] => $ | No } }")
+        .expect_type("#'t -> (('t & [x: _]) | No)");
+    // Only within the block whose match established it.
+    quiver()
+        .evaluate("#('int | 'bin) { $ ~> { ='int => 1 | 2 }; $ }")
+        .expect_type("#('bin | 'int) -> ('bin | 'int)");
+}
+
+#[test]
+fn test_narrowing_the_parameter_inside_a_block_leaves_the_block_input_alone() {
+    // `$` is the function's parameter, not the block's input (`5`).
+    quiver()
+        .evaluate("f = #('int | 'bin) { 5 ~> { $ ~> ='bin; ~ } }; [f <01>, f 3]")
+        .expect("[5, []]");
+    quiver()
+        .evaluate("#('int | 'bin) { 5 ~> { $ ~> ='bin; ~ } }")
+        .expect_type("#('bin | 'int) -> ('int | [])");
+    quiver()
+        .evaluate("#('int | [x: 'int]) { 7 ~> { $ ~> =[x: _]; $ } }")
+        .expect_type("#('int | [x: 'int]) -> ([] | [x: 'int])");
+}

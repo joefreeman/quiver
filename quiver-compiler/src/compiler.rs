@@ -1145,10 +1145,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 .codegen
                 .add_instruction(Instruction::store(param_local));
 
+            // The program's parameter comes from outside: nothing to narrow at its source.
             Some(scopes::Parameter {
                 ty: parameter_type_id,
                 index: param_local,
-                provenance: Provenance::Parameter,
+                provenance: Provenance::Unknown,
             })
         } else {
             None
@@ -3083,12 +3084,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let saved_tail_calls = self.self_tail_calls;
         let body_type = match function.body {
             Some(body) => {
-                // Function parameters have Provenance::Parameter since they come from callers
+                // A function's parameter comes from its callers: nothing to narrow at its source.
                 self.function_depth += 1;
                 let body_type = self.compile_scoped_block(
                     body,
                     body_parameter_type,
-                    Provenance::Parameter,
+                    Provenance::Unknown,
                     None,
                     ScopeKind::Function,
                     true,
@@ -3124,7 +3125,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         .program
                         .register_tuple(Some(format!("'{variable}")), Vec::new());
                     let opaque = self.program.register_type(Type::Tuple(opaque));
-                    (variable, typing::union_type_ids(self.program, vec![opaque, nil]))
+                    (
+                        variable,
+                        typing::union_type_ids(self.program, vec![opaque, nil]),
+                    )
                 })
                 .collect();
             let types_match = body_type == expected_return_type || {
@@ -3881,14 +3885,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.compile_sequence(consequence.clone(), None, None, false)?
                         .ty
                 } else {
-                    // Otherwise the consequence gets a scope whose parameter it is. A
-                    // provenance rooted at a parameter names this block's scope, so it
-                    // cannot follow the value into the new one.
-                    let provenance = if narrowing::rooted_at_parameter(&condition.provenance) {
-                        Provenance::Unknown
-                    } else {
-                        condition.provenance.clone()
-                    };
+                    // Otherwise the consequence gets a scope whose parameter it is.
+                    let provenance = condition.provenance.clone();
                     self.compile_scoped_block(
                         ast::Block {
                             annotations: Vec::new(),
@@ -4770,7 +4768,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // Load the parameter from scope (implicit continuation)
             let (parameter_type, param_local) = scopes::get_parameter(&self.scopes)?;
             self.codegen.add_instruction(Instruction::load(param_local));
-            (Some(parameter_type), Provenance::Parameter)
+            (
+                Some(parameter_type),
+                Provenance::Parameter(scopes::current_level(&self.scopes)),
+            )
         } else {
             // No initial input (tuple field chains use ripple_context for ~)
             (None, Provenance::Unknown)
@@ -5236,7 +5237,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Some(scopes::Parameter {
                 ty: nil_type_id,
                 index: param_local,
-                provenance: Provenance::Parameter,
+                provenance: Provenance::Unknown,
             })
         } else {
             None
@@ -6424,6 +6425,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Some(ast::AccessSource::Parameter { .. }) => {
                 // $ accesses the function parameter.
                 let (param_type, param_local) = scopes::get_function_parameter(&self.scopes)?;
+                let level = scopes::function_level(&self.scopes).expect("found its parameter");
 
                 // Peek at the accessed type to determine if applicable (without emitting code).
                 let peeked_type = self.peek_accessor_type(param_type, &access.accessors, "$");
@@ -6438,7 +6440,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     param_type,
                     access.accessors,
                     "$",
-                    Provenance::Parameter,
+                    Provenance::Parameter(level),
                 )?;
                 let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
                 self.check_applied(applied, accessed_type)?;
@@ -7300,12 +7302,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     }
 
     /// Materialize the current narrowed type of the block parameter, merging any per-field
-    /// narrowings (recorded against `Provenance::Parameter`) onto a single-tuple base. Used to
+    /// narrowings (recorded against its `Provenance::Parameter`) onto a single-tuple base. Used to
     /// capture a branch's guard type — the parameter values that reach it — for the dispatch
     /// table. Falls back to the whole-parameter narrowing when the base is not a single tuple.
     fn current_parameter_guard(&mut self) -> usize {
-        let base =
-            narrowing::get_type_for_provenance(&self.scopes, &Provenance::Parameter, self.program);
+        let parameter = Provenance::Parameter(scopes::current_level(&self.scopes));
+        let base = narrowing::get_type_for_provenance(&self.scopes, &parameter, self.program);
 
         let field_narrowings: Vec<(usize, usize)> = self
             .scopes
@@ -7314,7 +7316,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 s.narrowings
                     .fields
                     .iter()
-                    .filter(|(prov, _, _)| matches!(prov, Provenance::Parameter))
+                    .filter(|(prov, _, _)| *prov == parameter)
                     .map(|(_, idx, ty)| (*idx, *ty))
                     .collect()
             })

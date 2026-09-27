@@ -111,18 +111,6 @@ impl Default for Narrowing {
 /// When a type check succeeds on a value with known provenance, this function
 /// records the narrowed type in the current scope so subsequent lookups return
 /// the narrowed type.
-/// Whether a provenance chain is rooted at `Provenance::Parameter`. Such a chain is
-/// scope-relative — created where `Parameter` named the then-current scope's parameter —
-/// so it cannot be resolved through `scopes` from a different (inner) scope, which would
-/// read that scope's own parameter instead. See `apply_narrowing`'s Parameter arm.
-pub fn rooted_at_parameter(provenance: &Provenance) -> bool {
-    match provenance {
-        Provenance::Parameter => true,
-        Provenance::Field(parent, _) => rooted_at_parameter(parent),
-        _ => false,
-    }
-}
-
 pub fn apply_narrowing(
     scopes: &mut [Scope],
     provenance: &Provenance,
@@ -172,38 +160,32 @@ pub fn apply_narrowing(
             apply_narrowing(scopes, parent, filtered, program);
         }
 
-        Provenance::Parameter => {
-            // Get the necessary data from the scope first
-            let narrowing_info = scopes.last_mut().and_then(|scope| {
-                let param = scope.parameter.as_ref()?;
-                let current = scope.narrowings.parameter.unwrap_or(param.ty);
-                let intersected = intersect_types(current, narrowed_to_id, program);
-                scope.narrowings.parameter = Some(intersected);
-                let source_prov = param.provenance.clone();
-                Some((source_prov, current, intersected))
-            });
+        Provenance::Parameter(level) => {
+            let Some(current) = super::scopes::parameter_type(scopes, *level) else {
+                return;
+            };
+            let source = scopes[*level]
+                .parameter
+                .as_ref()
+                .expect("a parameter has a type only if it exists")
+                .provenance
+                .clone();
+            let intersected = intersect_types(current, narrowed_to_id, program);
+            // Recorded in the innermost scope, whose control flow established it, so it ends
+            // with that scope even when the parameter is an enclosing one's.
+            scopes
+                .last_mut()
+                .expect("a parameter's scope is on the stack")
+                .narrowings
+                .parameters
+                .insert(*level, intersected);
 
-            // Now recurse with the borrow released. Only propagate the narrowing up the parameter's
-            // source provenance when it actually changed the type: once it reaches a fixpoint there
-            // is nothing left to tighten, and continuing would not terminate.
-            //
-            // A `Parameter`-ROOTED source provenance is never propagated: provenance is
-            // scope-relative, and such a chain was minted where `Parameter` meant the
-            // *enclosing* scope's parameter. Resolving it here reads the current block's
-            // parameter instead (e.g. `$xs ~> { =Nil => … | =Cons[[k, v], t] => … }`:
-            // the block parameter's source is `Field(Parameter, 0)`, whose root names
-            // the function parameter — resolved against the block scope it denotes the
-            // union being matched, and filtering *its* variants by field annihilates
-            // them, narrowing the scrutinee to never or corrupting its reconstructed
-            // type). Skipping the hop costs only precision on the outer field, never
-            // soundness. Variable-rooted chains resolve by name across the scope stack,
-            // which is unambiguous, so they still propagate.
-            if let Some((source_prov, current, intersected)) = narrowing_info
-                && intersected != current
-                && !matches!(source_prov, Provenance::Unknown)
-                && !rooted_at_parameter(&source_prov)
-            {
-                apply_narrowing(scopes, &source_prov, intersected, program);
+            // The parameter is its source's value, so the narrowing holds there too (a block's
+            // input piped from `$` narrows `$`). Only propagated when it changed the type: once
+            // it reaches a fixpoint there is nothing left to tighten. A source lies in an
+            // enclosing scope, so the propagation ends.
+            if intersected != current && !matches!(source, Provenance::Unknown) {
+                apply_narrowing(scopes, &source, intersected, program);
             }
         }
 
@@ -260,14 +242,9 @@ pub fn get_type_for_provenance(
             let parent_type_id = get_type_for_provenance(scopes, parent, program);
             get_field_type(parent_type_id, *idx, program).unwrap_or(never_id)
         }
-        Provenance::Parameter => scopes
-            .last()
-            .and_then(|s| {
-                s.parameter
-                    .as_ref()
-                    .map(|p| s.narrowings.parameter.unwrap_or(p.ty))
-            })
-            .unwrap_or(never_id),
+        Provenance::Parameter(level) => {
+            super::scopes::parameter_type(scopes, *level).unwrap_or(never_id)
+        }
         Provenance::Tuple(_) | Provenance::Unknown => never_id,
     }
 }
@@ -288,8 +265,8 @@ pub fn get_declared_type_for_provenance(
             let parent_id = get_declared_type_for_provenance(scopes, parent, program)?;
             get_field_type(parent_id, *idx, program)
         }
-        Provenance::Parameter => scopes
-            .last()
+        Provenance::Parameter(level) => scopes
+            .get(*level)
             .and_then(|s| s.parameter.as_ref())
             .map(|p| p.ty),
         Provenance::Tuple(_) | Provenance::Unknown => None,
