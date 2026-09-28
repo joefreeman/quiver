@@ -506,7 +506,8 @@ module.exports = grammar({
 
     // `@f`/`@~` (spawn a function value), and the spawn shorthands
     // `@'int { ... }` (module types too: `@'%mod.event { ... }`), `@(type) { ... }`,
-    // `@[...] { ... }`, `@Name { ... }`. The spawn sugar keeps its body. The operand is
+    // `@[...] { ... }`, `@Name { ... }`, each optionally generic (`@<'t>'t { ... }`). The
+    // spawn sugar keeps its body. The operand is
     // restricted (no value tuples/literals) so a `[`/`Name` after `@` is unambiguously a
     // type parameter rather than a value. It is also mandatory and glued to the `@`,
     // which is what leaves a bare `@` to mean the current process; there is no
@@ -514,7 +515,11 @@ module.exports = grammar({
     spawn: $ => prec.right(seq(
       '@',
       choice(
-        seq(field('parameter', choice($.module_type, $.type_identifier, $.tuple_type, $._paren_type)), $.block),
+        seq(
+          optional($.type_parameters),
+          field('parameter', choice($.module_type, $.type_identifier, $.tuple_type, $._paren_type)),
+          $.block,
+        ),
         $.function,
         $.access,
       ),

@@ -192,6 +192,13 @@ fn test_spawn_sugar_parameterless() {
 }
 
 #[test]
+fn test_spawn_sugar_generic() {
+    quiver()
+        .evaluate("p = @<'t>['t, 't] { $0 } [42, 7]; !p")
+        .expect("42");
+}
+
+#[test]
 fn test_spawn_sugar_primitive_type() {
     quiver()
         .evaluate("p = 42 ~> @'int { $ } ~; !p")

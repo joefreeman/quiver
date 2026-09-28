@@ -1103,9 +1103,10 @@ The init is written like a call's argument, and for the same reason: a nilary ro
 function is entered with nil, and that nil is spelled out as `@f []`.
 
 The spawned function is always glued to the `@`. `@'int { … }` is shorthand for spawning a
-function literal, `@[] { … }` for a nilary one, and `@~` spawns a function that is itself
-the flowing value (`f ~> @~ []`). A root function's parameter is the process's state, so
-it is written rather than inferred, and there is no `@{ … }`.
+function literal, `@[] { … }` for a nilary one, `@<'t>'t { … }` for a generic one, and
+`@~` spawns a function that is itself the flowing value (`f ~> @~ []`). A root function's
+parameter is the process's state, so it is written rather than inferred, and there is no
+`@{ … }`.
 
 A bare `@`, with nothing glued to it, is the **current process** — what `$` is to the
 parameter and `~` to the flowing value.
@@ -1117,7 +1118,7 @@ Receive with `!`, whose parameter type names the message type. Await a process's
 with `!` on the pid.
 
 ```quiver
-p = @#[] { 42 } []
+p = @[] { 42 } []
 !p                            //= 42
 ```
 
@@ -1137,7 +1138,7 @@ Awaiting is never lethal, so its result is fallible: `'r | []` for a process ret
 the error, so an ordinary branch recovers from it.
 
 ```quiver
-crashed = @#[] { __panic__ "boom" } []
+crashed = @[] { __panic__ "boom" } []
 r = !crashed
 r ~> {
   | =('int & v) => v                                       // completed
@@ -1210,7 +1211,7 @@ not, its owned children are torn down with it, cascading down the subtree. Teard
 travels upward, so a child's death is only ever observed by its parent.
 
 ```quiver
-p = @#[] { !'int } []
+p = @[] { !'int } []
 %proc.link p       //= Ok // fate-sharing: either dying abnormally kills the other
 %proc.detach p     //= Ok // relinquish ownership; p outlives this process
 %proc.kill [p]     //= Ok // terminate p and its subtree
@@ -1220,7 +1221,7 @@ A kill may give a reason, which its awaiters read from the `Killed` payload. The
 must be data (no pids, refs, functions or resources), as it outlives the killer.
 
 ```quiver
-p = @#[] { !'int } []
+p = @[] { !'int } []
 %proc.kill [p, reason: Expired]
 r = !p
 r:crash<'%proc.crash>   //= Killed[reason: Expired]
@@ -1241,7 +1242,7 @@ variance rules, so what a name grants is exactly what the lookup spells. An unbo
 a failed check answers nil, like any failed match.
 
 ```quiver
-p = @#[] { !'int ~> %num.mul [~, 2] } []
+p = @[] { !'int ~> %num.mul [~, 2] } []
 %registry.register [Doubler, p]              //= Ok
 %registry.register [Doubler, p]              //= [] // the name is taken
 %registry.lookup<@'bin> Doubler              //= [] // wrong message type
@@ -1325,13 +1326,13 @@ A block joined with `~>` is an ordinary chain step — a *handler* applied to th
 already received.
 
 ```quiver
-filter = @#[] { !'int { =42 => Ok | [] } } []      // waits specifically for 42
+filter = @[] { !'int { =42 => Ok | [] } } []      // waits specifically for 42
 filter 1; filter 42
 !filter                       //= 42 // the 1 is still in the mailbox
 ```
 
 ```quiver
-handler = @#[] { !'int ~> { =42 => Ok | [] } } []  // takes any int, then tests it
+handler = @[] { !'int ~> { =42 => Ok | [] } } []  // takes any int, then tests it
 handler 1
 !handler                      //= []
 ```

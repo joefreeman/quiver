@@ -2607,17 +2607,23 @@ fn block(input: Span) -> IResult<Span, Block> {
     )(input)
 }
 
+/// A function literal's type parameter list, glued to the `#` (or to the `@` of a spawn
+/// shorthand): `<'t, 'u>`.
+fn function_type_parameters(input: Span) -> IResult<Span, Vec<String>> {
+    delimited(
+        char('<'),
+        separated_list1(tuple((ws0, char(','), ws0)), type_name),
+        char('>'),
+    )(input)
+}
+
 fn function(input: Span) -> IResult<Span, Function> {
     let start = input;
     let (rest, mut func) = map(
         preceded(
             char('#'),
             tuple((
-                opt(delimited(
-                    char('<'),
-                    separated_list1(tuple((ws0, char(','), ws0)), type_name),
-                    char('>'),
-                )),
+                opt(function_type_parameters),
                 opt(preceded(not(peek(char('{'))), function_input_type)),
                 opt(preceded(tuple((ws1, tag("->"), ws1)), function_output_type)),
                 opt(alt((preceded(ws1, block), block))),
@@ -2712,11 +2718,12 @@ fn builtin_name(input: Span) -> IResult<Span, String> {
 }
 
 // Build a spawn of an inline function (the `#`-elided `@'type { … }` / `@[…] { … }` /
-// `@(type) { … }` forms). The init argument, if any, comes from the chained value.
-fn spawn_of_function(parameter_type: Type, body: Block) -> Term {
+// `@(type) { … }` forms, each optionally generic: `@<'t>'t { … }`). The init argument, if
+// any, comes from the chained value.
+fn spawn_of_function(type_parameters: Vec<String>, parameter_type: Type, body: Block) -> Term {
     Term::Spawn(
         Box::new(Term::Function(Function {
-            type_parameters: vec![],
+            type_parameters,
             parameter_type: Some(parameter_type),
             return_type: None,
             body: Some(body),
@@ -2739,30 +2746,30 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
         )));
     }
     let (rest, term) = alt((
-        // @(type) { ... } - Spawn with parenthesized type (sugar for @#(type) { ... })
+        // The `#`-elided shorthands, sugar for `@#<'t>(type) { ... }` etc: a parenthesized
+        // type `@(type) { ... }`, a named type `@'type { ... }` (module types first, so
+        // `@'%mod.event { ... }` isn't rejected as an identifier), or a tuple type
+        // `@[...] { ... }`. A `<` after the `@` can only open type parameters, as a binary
+        // literal's digits are never quoted.
         map(
             tuple((
                 preceded(
                     char('@'),
-                    delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
+                    pair(
+                        opt(function_type_parameters),
+                        alt((
+                            delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
+                            module_type,
+                            type_identifier,
+                            tuple_type,
+                        )),
+                    ),
                 ),
                 preceded(opt(ws1), block),
             )),
-            |(param_type, body)| spawn_of_function(param_type, body),
-        ),
-        // @'type { ... } - Spawn with named type (sugar for @#'type { ... }); module types
-        // first, so `@'%mod.event { ... }` isn't rejected as an identifier.
-        map(
-            tuple((
-                preceded(char('@'), alt((module_type, type_identifier))),
-                preceded(opt(ws1), block),
-            )),
-            |(param_type, body)| spawn_of_function(param_type, body),
-        ),
-        // @[...] { ... } - Spawn with tuple type (sugar for @#[...] { ... })
-        map(
-            tuple((preceded(char('@'), tuple_type), preceded(opt(ws1), block))),
-            |(tuple_ty, body)| spawn_of_function(tuple_ty, body),
+            |((type_parameters, param_type), body)| {
+                spawn_of_function(type_parameters.unwrap_or_default(), param_type, body)
+            },
         ),
         // @<primary> - the spawned function, glued to the `@`: `@f`, `@$handler`, `@~`,
         // `@#'t { … }`. The glue is what leaves a bare `@` to mean the current process,

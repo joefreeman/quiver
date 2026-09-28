@@ -377,6 +377,32 @@ p = 5 ~> @'%mod.event { $ }
                   source: (parameter))))))))))
 
 ==================
+spawn generic
+==================
+
+p = @<'t>'t { $ } 5
+
+---
+
+(source_file
+  (sequence
+    (chain
+      binding: (identifier)
+      (application
+        function: (spawn
+          (type_parameters
+            (type_name))
+          parameter: (type_identifier
+            name: (type_name))
+          (block
+            (branch
+              (sequence
+                (chain
+                  (access
+                    source: (parameter)))))))
+        argument: (integer)))))
+
+==================
 receive on a named tuple type
 ==================
 

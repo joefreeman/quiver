@@ -2649,7 +2649,7 @@
       }
     },
     "children": {
-      "multiple": false,
+      "multiple": true,
       "required": true,
       "types": [
         {
@@ -2662,6 +2662,10 @@
         },
         {
           "type": "function",
+          "named": true
+        },
+        {
+          "type": "type_parameters",
           "named": true
         }
       ]

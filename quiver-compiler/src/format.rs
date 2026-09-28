@@ -1104,35 +1104,43 @@ fn sugar_type(type_def: &Type) -> Option<String> {
     }
 }
 
-/// Render a spawn (`@f`, `@~`, `@[] { … }`, `@'int { … }`). An inline spawned function is
-/// normalised onto the `@`-sugar forms: the tight `@'type { body }` where the type allows it,
-/// or `@(type) { body }` (the parenthesised arm accepts any type).
+/// Render a spawn (`@f`, `@~`, `@[] { … }`, `@'int { … }`, `@<'t>'t { … }`). An inline
+/// spawned function is normalised onto the `@`-sugar forms: the tight `@'type { body }` where
+/// the type allows it, or `@(type) { body }` (the parenthesised arm accepts any type). The
+/// sugar has no return type and requires a parameter type and a body, so a literal lacking
+/// any of those keeps its `#`.
 fn spawn_doc(trivia: &Trivia, func: &Term, argument: Option<&Term>) -> Doc {
     let head = match func {
-        Term::Function(function) => {
-            let head = match &function.parameter_type {
-                None => "@".to_string(),
-                Some(parameter_type) => {
-                    // The spawn grammar also takes the unnamed tuple form (`@['int, 'int] { … }`
-                    // — there is no `@[sources]` to collide with). A partial has NO bare spawn
-                    // form: its parens read as the grouping arm, whose content must be a full
-                    // type, so it double-wraps (`@((x: 'int)) { … }`).
-                    let bare = sugar_type(parameter_type).or_else(|| match parameter_type {
-                        Type::Tuple(tuple_type) if bare_tuple(tuple_type) => {
-                            Some(render_type(parameter_type))
-                        }
-                        _ => None,
-                    });
-                    match bare {
-                        Some(sugar) => format!("@{} ", sugar),
-                        None => format!("@({}) ", render_type(parameter_type)),
+        Term::Function(Function {
+            type_parameters,
+            parameter_type: Some(parameter_type),
+            return_type: None,
+            body: Some(body),
+            ..
+        }) => {
+            // The spawn grammar also takes the unnamed tuple form (`@['int, 'int] { … }`
+            // — there is no `@[sources]` to collide with). A partial has NO bare spawn
+            // form: its parens read as the grouping arm, whose content must be a full
+            // type, so it double-wraps (`@((x: 'int)) { … }`).
+            let sugar = sugar_type(parameter_type)
+                .or_else(|| match parameter_type {
+                    Type::Tuple(tuple_type) if bare_tuple(tuple_type) => {
+                        Some(render_type(parameter_type))
                     }
-                }
-            };
-            match &function.body {
-                None => pretty::text(head),
-                Some(body) => pretty::concat(vec![pretty::text(head), block_doc(trivia, body)]),
-            }
+                    _ => None,
+                })
+                .unwrap_or_else(|| format!("({})", render_type(parameter_type)));
+            pretty::concat(vec![
+                pretty::text(format!(
+                    "@{}{} ",
+                    render_type_parameters(type_parameters),
+                    sugar
+                )),
+                block_doc(trivia, body),
+            ])
+        }
+        Term::Function(function) => {
+            pretty::concat(vec![pretty::text("@"), function_doc(trivia, function)])
         }
         other => pretty::text(format!("@{}", render_term_atom(other))),
     };
@@ -2346,6 +2354,20 @@ mod tests {
     }
 
     #[test]
+    fn spawned_function_literal_takes_the_shorthand_only_when_it_can() {
+        // Type parameters move onto the `@`; a return type or a missing body has no
+        // shorthand, so the `#` stays.
+        assert_formats("@#'int { $ } 1\n", "@'int { $ } 1\n");
+        assert_formats("@#<'t>'t { $ } 1\n", "@<'t>'t { $ } 1\n");
+        assert_formats("@#<'t>('t | []) { $ } 1\n", "@<'t>('t | []) { $ } 1\n");
+        assert_formats(
+            "@#'int -> ('int | 'bin) { $ } 1\n",
+            "@#'int -> ('int | 'bin) { $ } 1\n",
+        );
+        assert_formats("@#'int 1\n", "@#'int 1\n");
+    }
+
+    #[test]
     fn conjunction_type_conjuncts_render_bare() {
         // The intersection grammar admits a resource or clause-free process type bare as a
         // conjunct; a clause would read the conjunction's `&` into its type, so it keeps parens.
@@ -3252,6 +3274,10 @@ mod tests {
             "@['int, 'int] { $ }",
             "@[] { $ }",
             "@((x: 'int)) { $ }",
+            "@<'t>'t { $ }",
+            "@<'a, 'b>['a, 'b] { $ }",
+            "@#'int -> ('int | 'bin) { $ }",
+            "@#'int 1",
             "![p, 1000]",
             "!p",
             "![]",
