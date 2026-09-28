@@ -725,6 +725,10 @@ impl<E: Effect> Environment<E> {
             self.handle_event(event)?;
         }
 
+        // Whatever this round closed — by an effect, a completion, or a process's cleanup —
+        // is no longer anyone's.
+        self.forget_released_resources();
+
         // Auto-trigger a reclamation round once enough processes — or enough freshly
         // registered code — have accumulated. The round's pause barrier supplies its
         // own quiescence, so this can fire at any time.
@@ -2334,10 +2338,24 @@ impl<E: Effect> Environment<E> {
         Ok(())
     }
 
-    /// Transfer ownership of every resource in a transferred value to its new owner.
+    /// Transfer ownership of every resource in a transferred value to its new owner. A handle
+    /// with no owner has been closed, and stays unowned: moving it must not resurrect it.
     fn transfer_wire_resource_ownership(&mut self, value: &WireValue, new_owner: ProcessId) {
         for resource_id in wire_resources(value) {
-            self.resource_ownership.insert(resource_id, new_owner);
+            if let Some(owner) = self.resource_ownership.get_mut(&resource_id) {
+                *owner = new_owner;
+            }
+        }
+    }
+
+    /// Forget the ownership of every resource the backend has dropped since the last call —
+    /// closed explicitly, or dropped by the backend itself. Run after new resources from the
+    /// same round are registered, so one created and dropped together is not left owned.
+    fn forget_released_resources(&mut self) {
+        if let Some(backend) = self.effect_backend.as_mut() {
+            for resource_id in backend.take_released() {
+                self.resource_ownership.remove(&resource_id);
+            }
         }
     }
 
@@ -3002,6 +3020,20 @@ impl<E: Effect> Environment<E> {
         process_id: ProcessId,
         result: Result<WireValue, quiver_core::effects::EffectError>,
     ) -> Result<(), EnvironmentError> {
+        // The process may have been killed and reclaimed while the operation ran (a blocking
+        // call on the pool is not cancellable). Nobody can take delivery, so whatever the
+        // completion carries is closed here rather than registered to a process that is gone.
+        let Some(&worker_id) = self.process_router.get(&process_id) else {
+            if let (Ok(value), Some(backend)) = (&result, self.effect_backend.as_mut()) {
+                let mut found = Vec::new();
+                collect_resources(value, &mut found);
+                for rid in found {
+                    backend.close_resource(rid);
+                }
+            }
+            return Ok(());
+        };
+
         // Register ownership of every resource the completion carries — not just a bare one.
         // An effect may answer a *composite* (fetch's `[status, headers, body]` carries the
         // body stream), and an unregistered resource is worse than it looks: the ownership
@@ -3019,13 +3051,7 @@ impl<E: Effect> Environment<E> {
         // argument-domain ones stay faults.
         let result = result.map_err(quiver_core::effects::EffectFailure::from_effect_error);
 
-        // Send completion to the worker
-        let worker_id = self
-            .process_router
-            .get(&process_id)
-            .ok_or(EnvironmentError::ProcessNotFound(process_id))?;
-
-        self.workers[*worker_id]
+        self.workers[worker_id]
             .send(Command::EffectCompletion { process_id, result })
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
 

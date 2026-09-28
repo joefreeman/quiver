@@ -1,5 +1,5 @@
 use crate::effects::NativeEffect;
-use crate::util::{binary_bytes, expect_resource};
+use crate::util::{binary_bytes, expect_resource, expect_tuple};
 use quiver_core::builtins::{BuiltinContext, BuiltinFn, BuiltinRegistry, Completion, value_to_i64};
 use quiver_core::error::Error;
 use quiver_core::value::Value;
@@ -183,15 +183,146 @@ pub fn builtin_directory_read(
     Ok(Completion::Effect(NativeEffect::ReadDirOpen { path }))
 }
 
-/// filesystem_stat(path: bin) -> [kind, size, modified, mode] | Nil
-/// Look up metadata for a path (following symlinks). Yields nil if the path does not exist.
+/// filesystem_stat([path: bin, follow: Ok | nil]) -> [kind, size, modified, perm] | Nil
+/// Look up metadata for a path, following a final symlink only when `follow` is `Ok`. Yields
+/// nil if the path does not exist.
 pub fn builtin_filesystem_stat(
+    value: &Value,
+    ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    let fields = expect_tuple(value, 2)?;
+    let path = binary_bytes(&fields[0], ctx)?;
+    let follow = !fields[1].is_nil();
+
+    Ok(Completion::Effect(NativeEffect::Stat { path, follow }))
+}
+
+/// filesystem_create_dir([path: bin, all: Ok | nil]) -> Ok
+/// Create a directory; with `all`, its missing parents too, accepting one that already exists.
+pub fn builtin_filesystem_create_dir(
+    value: &Value,
+    ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    let fields = expect_tuple(value, 2)?;
+    let path = binary_bytes(&fields[0], ctx)?;
+    let all = !fields[1].is_nil();
+
+    Ok(Completion::Effect(NativeEffect::CreateDir { path, all }))
+}
+
+/// filesystem_remove([path: bin, recursive: Ok | nil]) -> Ok
+/// Remove a file, symlink or empty directory; with `recursive`, a directory and its contents.
+pub fn builtin_filesystem_remove(
+    value: &Value,
+    ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    let fields = expect_tuple(value, 2)?;
+    let path = binary_bytes(&fields[0], ctx)?;
+    let recursive = !fields[1].is_nil();
+
+    Ok(Completion::Effect(NativeEffect::Remove { path, recursive }))
+}
+
+/// filesystem_rename([from: bin, to: bin]) -> Ok
+/// Atomically rename a path, replacing an existing destination.
+pub fn builtin_filesystem_rename(
+    value: &Value,
+    ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    let fields = expect_tuple(value, 2)?;
+    let from = binary_bytes(&fields[0], ctx)?;
+    let to = binary_bytes(&fields[1], ctx)?;
+
+    Ok(Completion::Effect(NativeEffect::Rename { from, to }))
+}
+
+/// filesystem_copy([from: bin, to: bin, replace: Ok | nil]) -> Ok
+/// Copy a regular file's contents and permissions, overwriting the destination only with
+/// `replace`.
+pub fn builtin_filesystem_copy(
+    value: &Value,
+    ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    let fields = expect_tuple(value, 3)?;
+    let from = binary_bytes(&fields[0], ctx)?;
+    let to = binary_bytes(&fields[1], ctx)?;
+    let replace = !fields[2].is_nil();
+
+    Ok(Completion::Effect(NativeEffect::Copy { from, to, replace }))
+}
+
+/// filesystem_symlink([link: bin, target: bin]) -> Ok
+/// Create a symlink at `link` pointing to `target`.
+pub fn builtin_filesystem_symlink(
+    value: &Value,
+    ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    let fields = expect_tuple(value, 2)?;
+    let link = binary_bytes(&fields[0], ctx)?;
+    let target = binary_bytes(&fields[1], ctx)?;
+
+    Ok(Completion::Effect(NativeEffect::Symlink { link, target }))
+}
+
+/// filesystem_read_link(path: bin) -> bin
+/// The target a symlink points to, as written.
+pub fn builtin_filesystem_read_link(
     value: &Value,
     ctx: &mut BuiltinContext<NativeEffect>,
 ) -> Result<Completion<NativeEffect>, Error> {
     let path = binary_bytes(value, ctx)?;
 
-    Ok(Completion::Effect(NativeEffect::Stat { path }))
+    Ok(Completion::Effect(NativeEffect::ReadLink { path }))
+}
+
+/// filesystem_set_perm([path: bin, perm: int]) -> Ok
+/// Set a path's permission bits. Anything beyond the mode's low 12 bits is a fault.
+pub fn builtin_filesystem_set_perm(
+    value: &Value,
+    ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    let fields = expect_tuple(value, 2)?;
+    let path = binary_bytes(&fields[0], ctx)?;
+    let perm = value_to_i64(&fields[1])?;
+    if !(0..=0o7777).contains(&perm) {
+        return Err(Error::InvalidArgument(format!(
+            "permission bits must be within 0o7777, got {perm:#o}"
+        )));
+    }
+
+    Ok(Completion::Effect(NativeEffect::SetPerm {
+        path,
+        perm: perm as u32,
+    }))
+}
+
+/// filesystem_canonical(path: bin) -> bin
+/// The absolute path with every symlink resolved (`realpath`).
+pub fn builtin_filesystem_canonical(
+    value: &Value,
+    ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    let path = binary_bytes(value, ctx)?;
+
+    Ok(Completion::Effect(NativeEffect::Canonical { path }))
+}
+
+/// filesystem_cwd([]) -> bin
+/// The host's current working directory.
+pub fn builtin_filesystem_cwd(
+    _value: &Value,
+    _ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    Ok(Completion::Effect(NativeEffect::Cwd))
+}
+
+/// filesystem_temp([]) -> bin
+/// Create a fresh, empty directory under the host's temp dir. The caller removes it.
+pub fn builtin_filesystem_temp(
+    _value: &Value,
+    _ctx: &mut BuiltinContext<NativeEffect>,
+) -> Result<Completion<NativeEffect>, Error> {
+    Ok(Completion::Effect(NativeEffect::Temp))
 }
 
 /// directory_next(dir: Dir) -> bin | Nil
@@ -224,7 +355,7 @@ pub fn builtin_directory_close(
 /// of the universal contract (registered everywhere via `core_modules`); this backs them with a
 /// real runtime for an executing host.
 pub fn attach_file_builtins(registry: &mut BuiltinRegistry<NativeEffect>) {
-    let implementations: [(&str, BuiltinFn<NativeEffect>); 9] = [
+    let implementations: [(&str, BuiltinFn<NativeEffect>); 19] = [
         ("file_open", builtin_file_open),
         ("file_read", builtin_file_read),
         ("file_write", builtin_file_write),
@@ -234,6 +365,16 @@ pub fn attach_file_builtins(registry: &mut BuiltinRegistry<NativeEffect>) {
         ("directory_next", builtin_directory_next),
         ("directory_close", builtin_directory_close),
         ("filesystem_stat", builtin_filesystem_stat),
+        ("filesystem_create_dir", builtin_filesystem_create_dir),
+        ("filesystem_remove", builtin_filesystem_remove),
+        ("filesystem_rename", builtin_filesystem_rename),
+        ("filesystem_copy", builtin_filesystem_copy),
+        ("filesystem_symlink", builtin_filesystem_symlink),
+        ("filesystem_read_link", builtin_filesystem_read_link),
+        ("filesystem_set_perm", builtin_filesystem_set_perm),
+        ("filesystem_canonical", builtin_filesystem_canonical),
+        ("filesystem_cwd", builtin_filesystem_cwd),
+        ("filesystem_temp", builtin_filesystem_temp),
     ];
     for (name, impl_fn) in implementations {
         registry.attach_implementation(name, impl_fn);

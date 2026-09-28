@@ -54,6 +54,8 @@ pub struct MockBackend {
     dns_type_id: usize,
     byte_stream_type_id: usize,
     http_result: Option<quiver_core::effects::ResultTupleInfo>,
+    /// Resources closed since the last `take_released`.
+    released: Vec<ResourceId>,
 }
 
 impl MockBackend {
@@ -68,6 +70,7 @@ impl MockBackend {
             dns_type_id: 0,
             byte_stream_type_id: 0,
             http_result: None,
+            released: Vec::new(),
         }
     }
 
@@ -153,7 +156,11 @@ impl EffectBackend for MockBackend {
                     None => Ok(WireValue::nil()),
                 }
             }
-            NativeEffect::DnsClose { .. } => Ok(WireValue::ok()),
+            NativeEffect::DnsClose { resource_id } => {
+                self.cursors.remove(&resource_id);
+                self.released.push(resource_id);
+                Ok(WireValue::ok())
+            }
 
             NativeEffect::TcpConnect { ip, .. } => match self.behaviour {
                 MockIo::Refuses => Err(EffectError::ConnectionRefused(
@@ -182,6 +189,7 @@ impl EffectBackend for MockBackend {
             },
             NativeEffect::TcpSocketClose { resource_id } => {
                 self.cursors.remove(&resource_id);
+                self.released.push(resource_id);
                 Ok(WireValue::ok())
             }
 
@@ -216,6 +224,11 @@ impl EffectBackend for MockBackend {
     fn close_resource(&mut self, resource_id: ResourceId) {
         self.cursors.remove(&resource_id);
         self.bodies.remove(&resource_id);
+        self.released.push(resource_id);
+    }
+
+    fn take_released(&mut self) -> Vec<ResourceId> {
+        std::mem::take(&mut self.released)
     }
 
     fn arm_stream(&mut self, resource_id: ResourceId) -> Result<(), Error> {

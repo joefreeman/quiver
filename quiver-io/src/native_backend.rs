@@ -1,3 +1,4 @@
+use crate::blocking::{BlockingPool, Notify};
 use crate::effects::NativeEffect;
 use io_uring::{IoUring as IoUringRing, opcode, types};
 use quiver_core::ProcessId;
@@ -12,10 +13,9 @@ use std::fs::File;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::fd::FromRawFd;
-use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Classify an OS error as an effect outcome. The distinction matters now that outcomes are
 /// values: an `EffectError` returned *in* a completion resumes the process with a
@@ -31,6 +31,10 @@ fn effect_error(context: &str, error: &std::io::Error) -> EffectError {
         ErrorKind::ConnectionRefused => EffectError::ConnectionRefused(message),
         ErrorKind::WouldBlock => EffectError::WouldBlock,
         ErrorKind::Interrupted => EffectError::Interrupted,
+        ErrorKind::NotADirectory => EffectError::NotADirectory(message),
+        ErrorKind::IsADirectory => EffectError::IsADirectory(message),
+        ErrorKind::DirectoryNotEmpty => EffectError::DirectoryNotEmpty(message),
+        ErrorKind::CrossesDevices => EffectError::CrossesDevices(message),
         _ => EffectError::IO(message),
     }
 }
@@ -39,6 +43,26 @@ fn effect_error(context: &str, error: &std::io::Error) -> EffectError {
 /// the completion-side twin of [`effect_error`], for the armed (select-serving) paths.
 fn completion_error(context: &str, result_code: i32) -> EffectError {
     effect_error(context, &std::io::Error::from_raw_os_error(-result_code))
+}
+
+/// Classify a failed read, write or flush completion, on a file or a socket. A bad descriptor
+/// or argument is the program's fault rather than the world's; a reset connection reads as a
+/// refused one, the nearest kind `%io` has; anything else is as its errno says.
+fn data_error(context: &str, result_code: i32) -> EffectError {
+    match -result_code {
+        9 => EffectError::InvalidArgument("Bad file descriptor".to_string()),
+        22 => EffectError::InvalidArgument("Invalid argument".to_string()),
+        104 => EffectError::ConnectionRefused("Connection reset by peer".to_string()),
+        _ => completion_error(context, result_code),
+    }
+}
+
+mod fs;
+
+/// A path as the OS takes it: the bytes as they are. A `Str` is bytes rather than validated
+/// UTF-8, and a name read back from a directory may not be UTF-8 either.
+fn os_path(bytes: &[u8]) -> &std::path::Path {
+    std::path::Path::new(std::ffi::OsStr::from_bytes(bytes))
 }
 
 /// Unwrap an OS result, or return early with an effect *outcome* (a value the caller can
@@ -70,11 +94,11 @@ pub enum Resource {
     },
     File {
         file: File,
-        path: String,
     },
     Dir {
-        /// Lazy iterator over the directory's entries.
-        entries: std::fs::ReadDir,
+        /// Lazy iterator over the directory's entries, shared with a pool thread while a
+        /// read of the next entry is in flight.
+        entries: Arc<Mutex<std::fs::ReadDir>>,
     },
     DnsResolver {
         /// Resolved IP addresses (4 bytes for IPv4, 16 bytes for IPv6)
@@ -179,11 +203,21 @@ pub struct NativeEffectBackend {
     armed_resources: std::collections::HashSet<ResourceId>,
     /// Completed armed reads awaiting `take_stream_events`.
     stream_events: Vec<(ResourceId, usize, StreamEvent, Vec<u8>)>,
+    /// Resources dropped from `resources` since the last `take_released`.
+    released: Vec<ResourceId>,
     /// In-flight `http_request` exchanges, up to the point their response head completes
     /// and the parked process is answered.
     http_exchanges: HashMap<u64, HttpExchange>,
     next_http_id: u64,
+    /// Blocking calls in flight on `blocking`, keyed by completion id (drawn from the same
+    /// counter as `pending`), with the process parked on each.
+    blocking: BlockingPool<Finish>,
+    blocking_pending: HashMap<u64, ProcessId>,
 }
+
+/// What a blocking call hands back to the backend thread: the rest of the effect, which
+/// needs the backend itself (to register a resource, or stamp type ids on a result).
+type Finish = Box<dyn FnOnce(&mut NativeEffectBackend) -> Result<EffectResult, Error> + Send>;
 
 /// A select-armed stream read in flight: the next-event read of a socket or listener.
 #[derive(Debug)]
@@ -291,9 +325,40 @@ impl NativeEffectBackend {
             armed: HashMap::new(),
             armed_resources: std::collections::HashSet::new(),
             stream_events: Vec::new(),
+            released: Vec::new(),
             http_exchanges: HashMap::new(),
             next_http_id: 1,
+            blocking: BlockingPool::new(),
+            blocking_pending: HashMap::new(),
         })
+    }
+
+    /// Wake the driver when a blocking call completes, so it need not wait for its next
+    /// poll to notice. Without one the completion is still found, on that poll.
+    pub fn set_notify(&self, notify: Notify) {
+        self.blocking.set_notify(notify);
+    }
+
+    /// Run `work` on the blocking pool, parking `process_id` until its `Finish` has run on
+    /// this thread.
+    fn run_blocking(
+        &mut self,
+        process_id: ProcessId,
+        work: impl FnOnce() -> Finish + Send + 'static,
+    ) -> Result<Option<EffectResult>, Error> {
+        let completion_id = self.next_completion_id;
+        self.next_completion_id += 1;
+        self.blocking.submit(completion_id, work);
+        self.blocking_pending.insert(completion_id, process_id);
+        Ok(None)
+    }
+
+    /// Register a new resource, answering its handle.
+    fn register_resource(&mut self, resource: Resource, type_name: &str) -> WireValue {
+        let resource_id = self.next_resource_id;
+        self.next_resource_id += 1;
+        self.resources.insert(resource_id, resource);
+        WireValue::Resource(resource_id, self.get_resource_type_id(type_name))
     }
 
     /// Get the type ID for a resource type name. Falls back to 0 only if the tables haven't been
@@ -492,6 +557,16 @@ impl NativeEffectBackend {
         }
     }
 
+    /// Drop a resource from the registry, which closes it (its `Drop` closes the descriptor),
+    /// and record it for `take_released`. Every real removal goes through here; the HTTP body
+    /// pump's take-and-put-back is the one removal that is not a release.
+    fn release(&mut self, resource_id: ResourceId) -> Option<Resource> {
+        let removed = self.resources.remove(&resource_id)?;
+        self.armed_resources.remove(&resource_id);
+        self.released.push(resource_id);
+        Some(removed)
+    }
+
     /// The type ids to stamp on the composite result of the named builtin. Errors if they weren't
     /// pushed (a wiring bug — the environment pushes these for every loaded program).
     fn result_info(&self, builtin: &str) -> Result<&ResultTupleInfo, Error> {
@@ -524,7 +599,7 @@ impl EffectBackend for NativeEffectBackend {
         match effect {
             // File operations
             NativeEffect::FileOpen { path, flags, mode } => {
-                self.execute_file_open(path, flags, mode)
+                self.execute_file_open(process_id, path, flags, mode)
             }
             NativeEffect::FileRead {
                 resource_id,
@@ -542,15 +617,33 @@ impl EffectBackend for NativeEffectBackend {
             NativeEffect::FileClose { resource_id } => self.execute_file_close(resource_id),
 
             // Filesystem metadata
-            NativeEffect::Stat { path } => self.execute_stat(path),
+            NativeEffect::Stat { path, follow } => self.execute_stat(process_id, path, follow),
+            NativeEffect::CreateDir { path, all } => self.execute_create_dir(process_id, path, all),
+            NativeEffect::Remove { path, recursive } => {
+                self.execute_remove(process_id, path, recursive)
+            }
+            NativeEffect::Rename { from, to } => self.execute_rename(process_id, from, to),
+            NativeEffect::Copy { from, to, replace } => {
+                self.execute_copy(process_id, from, to, replace)
+            }
+            NativeEffect::Symlink { link, target } => {
+                self.execute_symlink(process_id, link, target)
+            }
+            NativeEffect::ReadLink { path } => self.execute_read_link(process_id, path),
+            NativeEffect::SetPerm { path, perm } => self.execute_set_perm(process_id, path, perm),
+            NativeEffect::Canonical { path } => self.execute_canonical(process_id, path),
+            NativeEffect::Cwd => self.execute_cwd(process_id),
+            NativeEffect::Temp => self.execute_temp(process_id),
 
             // Directory operations
-            NativeEffect::ReadDirOpen { path } => self.execute_read_dir_open(path),
-            NativeEffect::ReadDirNext { resource_id } => self.execute_read_dir_next(resource_id),
+            NativeEffect::ReadDirOpen { path } => self.execute_read_dir_open(process_id, path),
+            NativeEffect::ReadDirNext { resource_id } => {
+                self.execute_read_dir_next(process_id, resource_id)
+            }
             NativeEffect::ReadDirClose { resource_id } => self.execute_read_dir_close(resource_id),
 
             // DNS operations
-            NativeEffect::DnsResolve { hostname } => self.execute_dns_resolve(hostname),
+            NativeEffect::DnsResolve { hostname } => self.execute_dns_resolve(process_id, hostname),
             NativeEffect::DnsNext { resource_id } => self.execute_dns_next(resource_id),
             NativeEffect::DnsClose { resource_id } => self.execute_dns_close(resource_id),
 
@@ -597,11 +690,23 @@ impl EffectBackend for NativeEffectBackend {
     /// `process_completions`/`take_stream_events` drain — so the driver must keep looking while
     /// either is non-empty.
     fn has_operations_in_flight(&self) -> bool {
-        !self.pending.is_empty() || !self.armed.is_empty()
+        !self.pending.is_empty() || !self.armed.is_empty() || !self.blocking_pending.is_empty()
     }
 
     fn process_completions(&mut self) -> Vec<(ProcessId, EffectResult)> {
         let mut completions = Vec::new();
+
+        for (completion_id, finish) in self.blocking.take_results() {
+            let process_id = self
+                .blocking_pending
+                .remove(&completion_id)
+                .expect("a blocking result answers a submitted call");
+            // As for a driver error below: a finish that fails is a backend defect, so it
+            // classifies as a fault rather than an outcome.
+            let result = finish(self)
+                .unwrap_or_else(|e| Err(EffectError::InvalidArgument(format!("{e:?}"))));
+            completions.push((process_id, result));
+        }
 
         // Collect all completed operations from the io_uring completion queue
         let mut completion_results = Vec::new();
@@ -768,8 +873,7 @@ impl EffectBackend for NativeEffectBackend {
         // closes the fd, but only the cancel releases the kernel object an operation
         // still references.
         self.cancel_inflight(resource_id);
-        let removed = self.resources.remove(&resource_id);
-        self.armed_resources.remove(&resource_id);
+        let removed = self.release(resource_id);
         // A response body owns its exchange's socket, which no process ever saw — closing
         // the body is the only thing that can close it.
         if let Some(Resource::HttpBody {
@@ -779,6 +883,10 @@ impl EffectBackend for NativeEffectBackend {
         {
             self.close_resource(socket);
         }
+    }
+
+    fn take_released(&mut self) -> Vec<ResourceId> {
+        std::mem::take(&mut self.released)
     }
 
     fn set_type_ids(&mut self, resources: &[String], results: &[(String, ResultTupleInfo)]) {
@@ -794,255 +902,43 @@ impl EffectBackend for NativeEffectBackend {
 }
 
 impl NativeEffectBackend {
-    fn execute_file_open(
+    fn execute_dns_resolve(
         &mut self,
-        path: Vec<u8>,
-        flags: i32,
-        mode: u32,
+        process_id: ProcessId,
+        hostname: Vec<u8>,
     ) -> Result<Option<EffectResult>, Error> {
-        // Convert path bytes to string
-        let path_str = String::from_utf8(path)
-            .map_err(|_| Error::InvalidArgument("Path contains invalid UTF-8".to_string()))?;
-
-        // Parse flags and build OpenOptions
-        let mut options = std::fs::OpenOptions::new();
-
-        // Access mode (O_RDONLY=0, O_WRONLY=1, O_RDWR=2)
-        let access_mode = flags & 0x3;
-        match access_mode {
-            0 => {
-                options.read(true);
-            } // O_RDONLY
-            1 => {
-                options.write(true);
-            } // O_WRONLY
-            2 => {
-                options.read(true).write(true);
-            } // O_RDWR
-            _ => {}
-        }
-
-        // O_CREAT = 64
-        if flags & 0o100 != 0 {
-            options.create(true);
-        }
-
-        // O_TRUNC = 512
-        if flags & 0o1000 != 0 {
-            options.truncate(true);
-        }
-
-        // O_APPEND = 1024
-        if flags & 0o2000 != 0 {
-            options.append(true);
-        }
-
-        options.mode(mode);
-
-        let file = match options.open(&path_str) {
-            Ok(file) => file,
-            Err(e) => {
-                return Ok(Some(Err(effect_error(
-                    &format!("cannot open '{path_str}'"),
-                    &e,
-                ))));
-            }
-        };
-
-        // Allocate a new resource ID for this file
-        let resource_id = self.next_resource_id;
-        self.next_resource_id += 1;
-
-        // Register the file resource
-        let metadata = Resource::File {
-            file,
-            path: path_str,
-        };
-        self.resources.insert(resource_id, metadata);
-
-        // Return immediate completion with the resource
-        let type_id = self.get_resource_type_id("File");
-        Ok(Some(Ok(WireValue::Resource(resource_id, type_id))))
-    }
-
-    fn execute_stat(&mut self, path: Vec<u8>) -> Result<Option<EffectResult>, Error> {
-        let path_str = String::from_utf8(path)
-            .map_err(|_| Error::InvalidArgument("Invalid UTF-8 in path".to_string()))?;
-
-        // Follows symlinks (like the conventional `stat`). A path that is not there answers
-        // nil — the ordinary "found nothing"; a *failed* lookup also answers nil, but carrying
-        // an `:error` payload, so a caller that cares can tell them apart.
-        let metadata = match std::fs::metadata(&path_str) {
-            Ok(md) => md,
-            Err(e) if e.kind() == ErrorKind::NotFound => {
-                return Ok(Some(Ok(WireValue::nil())));
-            }
-            Err(e) => {
-                return Ok(Some(Err(effect_error(
-                    &format!("cannot stat '{path_str}'"),
-                    &e,
-                ))));
-            }
-        };
-
-        let info = self.result_info("filesystem_stat")?;
-        // The `kind` tag. `metadata` follows symlinks, so the symlink case never actually arises.
-        let kind_name = if metadata.is_dir() {
-            "Dir"
-        } else if metadata.is_symlink() {
-            "Symlink"
-        } else if metadata.is_file() {
-            "File"
-        } else {
-            "Other"
-        };
-        let kind = kind_tag(info, kind_name)?;
-        let size: u64 = metadata.len();
-        // mtime as nanoseconds since the Unix epoch (0 if the platform cannot report it).
-        let modified_nanos: u128 = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let mode: u32 = metadata.permissions().mode() & 0o7777;
-
-        // `[kind, size, modified, mode]` tuple, stamped with `filesystem_stat`'s real result type
-        // ids (pushed by the environment — the backend has no type registry of its own).
-        Ok(Some(Ok(WireValue::tuple(
-            info.tuple_id,
-            vec![
-                kind,
-                WireValue::Int(size as i64),
-                WireValue::Int(modified_nanos as i64),
-                WireValue::Int(mode as i64),
-            ],
-        ))))
-    }
-
-    fn execute_read_dir_open(&mut self, path: Vec<u8>) -> Result<Option<EffectResult>, Error> {
-        let path_str = String::from_utf8(path)
-            .map_err(|_| Error::InvalidArgument("Invalid UTF-8 in path".to_string()))?;
-
-        let entries = match std::fs::read_dir(&path_str) {
-            Ok(entries) => entries,
-            Err(e) => {
-                return Ok(Some(Err(effect_error(
-                    &format!("cannot read directory '{path_str}'"),
-                    &e,
-                ))));
-            }
-        };
-
-        // Allocate a new resource ID for this directory iterator.
-        let resource_id = self.next_resource_id;
-        self.next_resource_id += 1;
-        self.resources
-            .insert(resource_id, Resource::Dir { entries });
-
-        let type_id = self.get_resource_type_id("Dir");
-        Ok(Some(Ok(WireValue::Resource(resource_id, type_id))))
-    }
-
-    fn execute_read_dir_next(
-        &mut self,
-        resource_id: ResourceId,
-    ) -> Result<Option<EffectResult>, Error> {
-        // Fetch the result type ids up front (cloned), before the mutable borrow of
-        // `self.resources` below.
-        let info = self.result_info("directory_next")?.clone();
-        let resource = self
-            .resources
-            .get_mut(&resource_id)
-            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
-
-        let Resource::Dir { entries } = resource else {
-            return Err(Error::InvalidArgument("Resource is not a Dir".to_string()));
-        };
-
-        match entries.next() {
-            Some(Ok(entry)) => {
-                let name_bytes = entry.file_name().into_vec();
-                // The entry's own type, without following symlinks. `d_type` from `getdents` is
-                // essentially free; `file_type()` only falls back to an `lstat` on the rare
-                // filesystems that report `DT_UNKNOWN`. `Other` covers socket/fifo/device/unknown.
-                let kind_name = match entry.file_type() {
-                    Ok(ft) if ft.is_dir() => "Dir",
-                    Ok(ft) if ft.is_symlink() => "Symlink",
-                    Ok(ft) if ft.is_file() => "File",
-                    _ => "Other",
-                };
-                let kind = kind_tag(&info, kind_name)?;
-                // `[name, kind]` pair, stamped with `directory_next`'s real result type ids (pushed
-                // by the environment). The name bytes travel via the heap side-channel (`Heap(0)`).
-                // The name bytes ride in the value itself now, rather than in a
-                // side-channel slot the value pointed at by index.
-                Ok(Some(Ok(WireValue::tuple(
-                    info.tuple_id,
-                    vec![WireValue::Binary(name_bytes.into()), kind],
-                ))))
-            }
-            Some(Err(e)) => Ok(Some(Err(effect_error("cannot read directory entry", &e)))),
-            // Iterator exhausted - return Nil.
-            None => Ok(Some(Ok(WireValue::nil()))),
-        }
-    }
-
-    fn execute_read_dir_close(
-        &mut self,
-        resource_id: ResourceId,
-    ) -> Result<Option<EffectResult>, Error> {
-        self.resources
-            .remove(&resource_id)
-            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
-
-        Ok(Some(Ok(WireValue::ok())))
-    }
-
-    fn execute_dns_resolve(&mut self, hostname: Vec<u8>) -> Result<Option<EffectResult>, Error> {
-        // Convert hostname bytes to string
-        let hostname_str = String::from_utf8(hostname)
+        let hostname = String::from_utf8(hostname)
             .map_err(|_| Error::InvalidArgument("Invalid UTF-8 in hostname".to_string()))?;
 
-        // Resolve address using DNS (blocking)
-        let addr_str = format!("{}:0", hostname_str);
-        let addresses: Vec<Vec<u8>> = match addr_str.to_socket_addrs() {
-            Ok(addrs) => addrs
-                .map(|addr| match addr.ip() {
-                    std::net::IpAddr::V4(ipv4) => ipv4.octets().to_vec(),
-                    std::net::IpAddr::V6(ipv6) => ipv6.octets().to_vec(),
-                })
-                .collect(),
-            Err(e) => {
-                // A host with no addresses is an empty resolver, not a failure; anything else
-                // is an outcome the caller can act on (retry, fall back).
-                match e.kind() {
-                    ErrorKind::NotFound | ErrorKind::InvalidInput => vec![],
-                    _ => {
-                        return Ok(Some(Err(effect_error(
-                            &format!("cannot resolve '{hostname_str}'"),
-                            &e,
-                        ))));
+        self.run_blocking(process_id, move || {
+            let resolved = format!("{hostname}:0").to_socket_addrs();
+            Box::new(move |backend: &mut NativeEffectBackend| {
+                let addresses: Vec<Vec<u8>> = match resolved {
+                    Ok(addrs) => addrs
+                        .map(|addr| match addr.ip() {
+                            std::net::IpAddr::V4(ipv4) => ipv4.octets().to_vec(),
+                            std::net::IpAddr::V6(ipv6) => ipv6.octets().to_vec(),
+                        })
+                        .collect(),
+                    // A host with no addresses is an empty resolver, not a failure; anything
+                    // else is an outcome the caller can act on (retry, fall back).
+                    Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::InvalidInput) => {
+                        vec![]
                     }
-                }
-            }
-        };
-
-        // Allocate a new resource ID for this resolver
-        let resource_id = self.next_resource_id;
-        self.next_resource_id += 1;
-
-        // Register the DNS resolver resource
-        self.resources.insert(
-            resource_id,
-            Resource::DnsResolver {
-                addresses,
-                position: 0,
-            },
-        );
-
-        let type_id = self.get_resource_type_id("DnsResolver");
-        Ok(Some(Ok(WireValue::Resource(resource_id, type_id))))
+                    Err(e) => {
+                        return Ok(Err(effect_error(
+                            &format!("cannot resolve '{hostname}'"),
+                            &e,
+                        )));
+                    }
+                };
+                let resolver = Resource::DnsResolver {
+                    addresses,
+                    position: 0,
+                };
+                Ok(Ok(backend.register_resource(resolver, "DnsResolver")))
+            })
+        })
     }
 
     fn execute_dns_next(&mut self, resource_id: ResourceId) -> Result<Option<EffectResult>, Error> {
@@ -1075,8 +971,7 @@ impl NativeEffectBackend {
         &mut self,
         resource_id: ResourceId,
     ) -> Result<Option<EffectResult>, Error> {
-        self.resources
-            .remove(&resource_id)
+        self.release(resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
 
         Ok(Some(Ok(WireValue::ok())))
@@ -1453,8 +1348,7 @@ impl NativeEffectBackend {
         resource_id: ResourceId,
     ) -> Result<Option<EffectResult>, Error> {
         // Remove the resource - File will be dropped and closed automatically
-        self.resources
-            .remove(&resource_id)
+        self.release(resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
 
         // Return immediate completion
@@ -1521,8 +1415,7 @@ impl NativeEffectBackend {
         // Cancel any armed read (a select's timeout leaves one in flight), then remove
         // the resource - Socket will be dropped and closed automatically
         self.cancel_inflight(resource_id);
-        self.resources
-            .remove(&resource_id)
+        self.release(resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
 
         // Return immediate completion
@@ -1536,8 +1429,7 @@ impl NativeEffectBackend {
         // Cancel any armed accept (a select source's), then remove the resource — the
         // Drop impl closes the fd, the cancel releases the kernel socket it pins.
         self.cancel_inflight(resource_id);
-        self.resources
-            .remove(&resource_id)
+        self.release(resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
 
         // Return immediate completion
@@ -1546,16 +1438,7 @@ impl NativeEffectBackend {
 
     fn handle_read_completion(&self, result_code: i32, mut buffer: Vec<u8>) -> EffectResult {
         if result_code < 0 {
-            // Map common errno values to structured errors
-            return Err(match -result_code {
-                2 => EffectError::NotFound("File not found".to_string()),
-                9 => EffectError::InvalidArgument("Bad file descriptor".to_string()),
-                11 => EffectError::WouldBlock,
-                13 => EffectError::PermissionDenied("Permission denied".to_string()),
-                22 => EffectError::InvalidArgument("Invalid argument".to_string()),
-                104 => EffectError::ConnectionRefused("Connection reset by peer".to_string()),
-                _ => EffectError::IO(format!("Read error: {}", -result_code)),
-            });
+            return Err(data_error("read failed", result_code));
         }
 
         // Truncate buffer to actual bytes read
@@ -1567,15 +1450,7 @@ impl NativeEffectBackend {
 
     fn handle_write_completion(&self, result_code: i32, _buffer_len: usize) -> EffectResult {
         if result_code < 0 {
-            // Map common errno values to structured errors
-            return Err(match -result_code {
-                9 => EffectError::InvalidArgument("Bad file descriptor".to_string()),
-                11 => EffectError::WouldBlock,
-                22 => EffectError::InvalidArgument("Invalid argument".to_string()),
-                32 => EffectError::IO("Broken pipe".to_string()),
-                104 => EffectError::ConnectionRefused("Connection reset by peer".to_string()),
-                _ => EffectError::IO(format!("Write error: {}", -result_code)),
-            });
+            return Err(data_error("write failed", result_code));
         }
 
         // Return bytes actually written (may be less than requested)
@@ -1585,11 +1460,7 @@ impl NativeEffectBackend {
 
     fn handle_flush_completion(&self, result_code: i32) -> EffectResult {
         if result_code < 0 {
-            Err(match -result_code {
-                9 => EffectError::InvalidArgument("Bad file descriptor".to_string()),
-                22 => EffectError::InvalidArgument("Invalid argument".to_string()),
-                _ => EffectError::IO(format!("Flush error: {}", -result_code)),
-            })
+            Err(data_error("flush failed", result_code))
         } else {
             Ok(WireValue::ok())
         }
@@ -2001,7 +1872,7 @@ impl NativeEffectBackend {
             TlsGoal::Read { .. } | TlsGoal::Write { .. } => false,
         };
         if defunct {
-            self.resources.remove(&resource_id);
+            self.release(resource_id);
         }
         result
     }

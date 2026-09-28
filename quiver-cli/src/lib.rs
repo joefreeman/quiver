@@ -19,12 +19,15 @@ pub fn build_builtin_registry() -> quiver_core::builtins::BuiltinRegistry<quiver
     registry
 }
 
-/// Create an effect backend for the new effects system
-pub fn create_effect_backend()
--> Option<Box<dyn quiver_core::effects::EffectBackend<E = quiver_io::NativeEffect>>> {
+/// Create the native effect backend. `waker` is the driver loop's: the backend pokes it when a
+/// blocking call completes, so the loop notices at once rather than on its next io poll.
+pub fn create_effect_backend(
+    waker: native_transport::Waker,
+) -> Option<Box<dyn quiver_core::effects::EffectBackend<E = quiver_io::NativeEffect>>> {
     quiver_io::NativeEffectBackend::new(256)
         .ok()
         .map(|backend| {
+            backend.set_notify(Box::new(move || waker.wake()));
             Box::new(backend)
                 as Box<dyn quiver_core::effects::EffectBackend<E = quiver_io::NativeEffect>>
         })

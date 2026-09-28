@@ -1646,7 +1646,7 @@ __integer_add__ [3, 4]                       //= 7
 | `%sup` | supervision: restart strategies over `%proc` |
 | `%io` | the failure vocabulary every I/O operation shares |
 | `%file` | files, via an owning process |
-| `%fs` | the file system: stat, list, create, remove |
+| `%fs` | the file system: whole-file read and write, stat, list, create, copy, rename, remove, symlinks, permissions, temp dirs |
 | `%path` | path values and manipulation |
 | `%tcp` | TCP sockets and listeners, and their stream events |
 | `%tls` | TLS as an in-place upgrade of a connected socket |

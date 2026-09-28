@@ -1,20 +1,35 @@
 // A path's type, as reported by the OS. `list` describes the entry itself (symlinks are not
-// followed); `stat` follows symlinks, so it never reports `Symlink`. `Other` covers sockets,
-// FIFOs, devices, and the rare case of an unknown type.
+// followed); `stat` follows symlinks unless told not to, so only an unfollowed `stat` reports
+// `Symlink`. `Other` covers sockets, FIFOs, devices, and the rare case of an unknown type.
 'kind = File | Dir | Symlink | Other
 
-// A single directory entry: its name and its kind.
-'entry = Entry[name: '%str, kind: 'kind]
+// A single directory entry: its name, its full path (the listed directory joined with the
+// name), and its kind.
+'entry = Entry[name: '%str, path: '%path, kind: 'kind]
 
-// The walk's state: the open handle, or the nil an *open* failure produced — passed straight
-// through, so an unopenable directory yields an iterator that terminates with the failure
-// rather than one that is merely empty.
-'walk = +Dir | []
+// Metadata about a path. `size` is in bytes, `modified` is the mtime, and `perm` is the
+// permission bits (e.g. 0o644 == 420).
+'stat = Stat[kind: 'kind, size: 'int, modified: '%time.instant, perm: 'int]
 
-walk_step = #'walk {
-  | =(+Dir & dir) => __directory_next__ dir ~> {
-    | =[name, kind] => [Entry[name: Str[name], kind: kind], dir]
-    // Any terminator ends the walk — exhaustion, or a failure carrying `:error`. Passing it
+// The bytes the OS is handed for a path: its normalised rendering.
+os_path = #'%path { %path.to_string ~ ~> .0 }
+
+// A path the OS handed back, as raw bytes. A failed builtin's nil passes through with its
+// `:error` intact.
+from_os = #('bin | []) { =('bin & b) => %path.parse Str[b] }
+
+// The listing's state: the open handle and the directory's path, or the nil an *open*
+// failure produced — passed straight through, so an unopenable directory yields an iterator
+// that terminates with the failure rather than one that is merely empty.
+'listing = [+Dir, '%path] | []
+
+list_step = #'listing {
+  | =[dir, parent] => __directory_next__ dir ~> {
+    | =[name, kind] => [
+        Entry[name: Str[name], path: Path[Str[name], parent], kind: kind],
+        [dir, parent],
+      ]
+    // Any terminator ends the listing — exhaustion, or a failure carrying `:error`. Passing it
     // through unchanged is what lets `%list.try_collect` tell the two apart; `%list.collect`
     // cannot, and answers a short list.
     | =e => { __directory_close__ dir; e }
@@ -22,46 +37,217 @@ walk_step = #'walk {
   | =e => e
 }
 
-// Metadata about a path. `size` is in bytes, `modified` is the mtime in nanoseconds since the Unix
-// epoch, and `mode` is the permission bits (e.g. 0o644 == 420).
-'stat = Stat[kind: 'kind, size: 'int, modified: 'int, mode: 'int]
+// Read the rest of an open file from `offset` onto `acc`, closing it at the end. A failed read
+// closes the file too, and answers the read's own nil, keeping its `:error`.
+read_rest = #[+File, 'int, 'bin] {
+  =[fd, offset, acc]
+  __file_read__ [fd, offset, 65536] ~> {
+    | =('bin & chunk) => %bin.length chunk ~> {
+      | =0 => { __file_close__ fd; acc }
+      | =n => ^ [fd, %num.add [offset, n], %bin.concat [acc, chunk]]
+    }
+    | =e => { __file_close__ fd; e }
+  }
+}
 
-// Look up metadata for a path, following symlinks. A path that is not there answers nil, like
-// any other lookup that finds nothing; a *failed* lookup answers nil too, carrying an
-// `:error`. The builtin returns a transient `[kind, size, modified, mode]` tuple read by
-// index, with `kind` already a `'kind` tag; both nils fall through the match below, the
-// failure keeping its payload on the way out.
-stat = #'%str {
-  .0 ~> __filesystem_stat__ ~> =[k, size, modified, mode]
+// Write all of `data` to an open file from `offset`, as a write may take only part of it, then
+// close it. The close's answer is the result, since a deferred write error can surface there.
+write_rest = #[+File, 'int, 'bin] {
+  =[fd, offset, data]
+  %bin.length data ~> {
+    | =0 => __file_close__ fd
+    | =len => __file_write__ [fd, offset, data] ~> {
+      | =('int & n) => ^ [fd, %num.add [offset, n], %bin.slice [data, n, len]]
+      | =e => { __file_close__ fd; e }
+    }
+  }
+}
 
-  Stat[kind: k, size: size, modified: modified, mode: mode]
+// Look up metadata for a path. A path that is not there answers nil, like any other lookup
+// that finds nothing; a *failed* lookup answers nil too, carrying an `:error`. The builtin
+// returns a transient `[kind, size, modified, perm]` tuple read by index, with `kind` already
+// a `'kind` tag; both nils fall through the match below, the failure keeping its payload on
+// the way out.
+stat = #[(path): '%path, (follow?): (Ok | [])] {
+  __filesystem_stat__ [os_path $path, $follow?]
+  ~> =[k, size, modified, perm]
+
+  Stat[kind: k, size: size, modified: Instant[modified], perm: perm]
+}
+
+// The kernel's resolution of a path: absolute, with every symlink followed.
+canonical = #'%path { os_path $ ~> __filesystem_canonical__ ~> from_os }
+
+// A directory a walk is inside: its open listing, its path, and — when following symlinks —
+// its canonical path, which is how a link back to one of its ancestors is spotted.
+'frame = Frame[dir: +Dir, path: '%path, real: ('%path | [])]
+
+// A directory to enter next, with its canonical path when following symlinks.
+'enter = [path: '%path, real: ('%path | [])]
+
+// A walk's state: the directories it is inside, innermost first — which are exactly the
+// ancestors of the entries it is reading — a directory to enter before reading on, and
+// whether it follows symlinks. A directory is entered on the step *after* its own entry is
+// yielded, so a walk abandoned there never opens it.
+'walk = Walk[frames: '%list<'frame>, enter: ('enter | []), follow?: (Ok | [])]
+
+// Close every listing a walk still holds, when it ends on a failure.
+close_frames = #'%list<'frame> {
+  | =Cons[Frame(dir), rest] => { __directory_close__ dir; ^ rest }
+  | Ok
+}
+
+// Where a walk goes after yielding an entry, or nil to stay put: into a directory, or — when
+// following — into a symlink to one, unless it leads back to an ancestor. Following is only
+// ever through a link that resolves, so a dangling one is yielded and not entered.
+descend = #[(entry): 'entry, (top): 'frame, (frames): '%list<'frame>, (follow?): (Ok | [])] {
+  | $entry ~> =(kind: Dir) => [
+      path: $entry.path,
+      real: $top.real ~> { =('%path & r) => Path[$entry.name, r] },
+    ]
+  | $follow? ~> =Ok; $entry ~> =(kind: Symlink) => {
+    stat [$entry.path, Ok] ~> =(kind: Dir)
+    real = canonical $entry.path ~> =\[]
+    %list.any? [$frames, #'frame { $real ~> =^real }] ~> =[]
+    [path: $entry.path, real: real]
+  }
+}
+
+walk_step = #'walk {
+  =Walk[frames: frames, enter: enter, follow?: follow]
+  enter ~> {
+    | =[path: p, real: r] => os_path p ~> __directory_read__ ~> {
+      | =(+Dir & dir) => ^ Walk[
+          frames: Cons[Frame[dir: dir, path: p, real: r], frames],
+          enter: [],
+          follow?: follow,
+        ]
+      | =e => { close_frames frames; e }
+    }
+    | frames ~> {
+      =Cons[(Frame(dir, path) & top), rest] => __directory_next__ dir ~> {
+        | =[name, kind] => {
+          entry = Entry[name: Str[name], path: Path[Str[name], path], kind: kind]
+          [
+            entry,
+            Walk[frames: frames, enter: descend [entry, top, frames, follow], follow?: follow],
+          ]
+        }
+        // The listing is finished: exhausted, or failed. A failure ends the walk, carrying
+        // its `:error`; exhaustion returns to the directory above.
+        | =e => {
+          __directory_close__ dir
+          e ~> {
+            | ~:error<'%io> => { close_frames rest; e }
+            | ^ Walk[frames: rest, enter: [], follow?: follow]
+          }
+        }
+      }
+    }
+  }
 }
 
 [
   // Entries come in the order the filesystem returns them (unsorted, excluding `.` and `..`).
   // The underlying directory handle is closed automatically once the iterator is exhausted.
-  list: #'%str {
-    :doc "Lazily iterates the entries of a directory, yielding an Entry (name and kind) each. A failure ends the iteration carrying its :error — collect with %list.try_collect to see it rather than a short list."
-    .0 ~> __directory_read__ ~> %iter.unfold [~, walk_step]
+  list: #[(path): '%path] {
+    :doc "Lazily iterates the entries of a directory, yielding an Entry (name, path and kind) each. A failure ends the iteration carrying its :error — collect with %list.try_collect to see it rather than a short list."
+    state = os_path $path ~> __directory_read__ ~> { =(+Dir & dir) => [dir, $path] | =e => e }
+    %iter.unfold [state, list_step]
   },
 
-  stat: #'%str {
-    :doc "Metadata for a path, following symlinks, or nil when it does not exist — or when the lookup failed, which the nil's :error payload distinguishes."
+  walk: #[(path): '%path, follow?: (Ok | []) = []] {
+    :doc "Lazily iterates every entry under a directory, depth-first, each directory's entry coming before its contents. Symlinks are yielded but not entered unless follow? is set, when one leading back to an ancestor is still not entered. A failure anywhere ends the iteration carrying its :error — collect with %list.try_collect to see it."
+    real = $follow? ~> { =Ok => canonical $path }
+    %iter.unfold [Walk[frames: Nil, enter: [path: $path, real: real], follow?: $follow?], walk_step]
+  },
+
+  stat: #[(path): '%path, follow?: (Ok | []) = Ok] {
+    :doc "Metadata for a path, or nil when it does not exist — or when the lookup failed, which the nil's :error payload distinguishes. A final symlink is followed unless follow? is nil, when the link itself is described."
     stat ~
   },
 
-  exists?: #'%str {
-    :doc "Whether a path exists. Nil both when it does not and when the lookup failed; probe the :error payload to tell them apart."
+  exists?: #[(path): '%path, follow?: (Ok | []) = Ok] {
+    :doc "Whether a path exists; with follow? nil, a dangling symlink counts. Nil both when it does not and when the lookup failed; probe the :error payload to tell them apart."
     stat ~ => Ok
   },
 
-  dir?: #'%str {
+  dir?: #[(path): '%path, follow?: (Ok | []) = Ok] {
     :doc "Whether a path exists and is a directory."
     stat ~ ~> =(kind: Dir) => Ok
   },
 
-  file?: #'%str {
+  file?: #[(path): '%path, follow?: (Ok | []) = Ok] {
     :doc "Whether a path exists and is a regular file."
     stat ~ ~> =(kind: File) => Ok
+  },
+
+  link?: #[(path): '%path] {
+    :doc "Whether a path exists and is a symlink (dangling or not)."
+    stat [$path, []] ~> =(kind: Symlink) => Ok
+  },
+
+  read_link: #[(path): '%path] {
+    :doc "The target a symlink points to, as it was written — possibly relative to the link's directory."
+    os_path $path ~> __filesystem_read_link__ ~> from_os
+  },
+
+  canonical: #[(path): '%path] {
+    :doc "The absolute path the kernel resolves a path to, with every symlink followed (realpath). The path must exist."
+    canonical $path
+  },
+
+  cwd: #[] {
+    :doc "The host's current working directory."
+    __filesystem_cwd__ [] ~> from_os
+  },
+
+  read: #[(path): '%path] {
+    :doc "Reads a whole file's contents. For a file read piecemeal or shared between processes, see %file."
+    __file_open__ [os_path $path, 0, 0] ~> =(+File & fd)
+    read_rest [fd, 0, <>]
+  },
+
+  write: #[(path): '%path, (data): 'bin, mode: (W | A | New) = W] {
+    :doc "Writes a whole file: W replaces its contents, creating it if needed; A appends, creating it; New creates it, failing with AlreadyExists if it is there."
+    // The open(2) flags, as %file.open's: O_WRONLY|O_CREAT with O_TRUNC, O_APPEND or O_EXCL.
+    flags = $mode ~> { =W => 577 | =A => 1089 | =New => 193 }
+    __file_open__ [os_path $path, flags, 420] ~> =(+File & fd)
+    write_rest [fd, 0, $data]
+  },
+
+  create_dir: #[(path): '%path, all?: (Ok | []) = []] {
+    :doc "Creates a directory. With all?, missing parents are created too and an existing directory is fine (mkdir -p)."
+    __filesystem_create_dir__ [os_path $path, $all?]
+  },
+
+  remove: #[(path): '%path, recursive?: (Ok | []) = []] {
+    :doc "Removes a file, symlink or empty directory; with recursive?, a directory and everything under it. A symlink is removed, never followed. Wrap in a block (\{ %fs.remove [p] }) to ignore a missing path."
+    __filesystem_remove__ [os_path $path, $recursive?]
+  },
+
+  rename: #[(from): '%path, (to): '%path] {
+    :doc "Atomically renames a path, replacing a destination file. Fails with CrossesDevices across filesystems, where copy and remove is the fallback."
+    __filesystem_rename__ [os_path $from, os_path $to]
+  },
+
+  copy: #[(from): '%path, (to): '%path, replace?: (Ok | []) = []] {
+    :doc "Copies a regular file's contents and permissions. An existing destination fails with AlreadyExists unless replace? is set."
+    __filesystem_copy__ [os_path $from, os_path $to, $replace?]
+  },
+
+  symlink: #[link: '%path, target: '%path] {
+    :doc "Creates a symlink at link pointing to target. A relative target is resolved from the link's directory when followed."
+    __filesystem_symlink__ [os_path $link, os_path $target]
+  },
+
+  set_perm: #[(path): '%path, (perm): 'int] {
+    :doc "Sets a path's permission bits (e.g. 0o644 == 420), following a symlink."
+    __filesystem_set_perm__ [os_path $path, $perm]
+  },
+
+  temp: #[] {
+    :doc "Creates a fresh, empty directory under the host's temp dir, readable only by its owner, and answers its path. The caller removes it."
+    __filesystem_temp__ [] ~> from_os
   },
 ]

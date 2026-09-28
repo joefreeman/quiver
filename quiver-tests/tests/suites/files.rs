@@ -665,11 +665,14 @@ fn test_read_dir_single_entry() {
         .with_io()
         .evaluate(&format!(
             r#"
-            "{}" ~> %fs.list ~ ~> %list.collect ~
+            d = %path.parse "{}"
+            %fs.list [d] ~> %list.collect ~
+            ~> =Cons[Entry[name: "only.txt", path: Path["only.txt", ^d], kind: File], Nil]
+            Ok
         "#,
             dir_str
         ))
-        .expect("Cons[Entry[name: \"only.txt\", kind: File], Nil]");
+        .expect("Ok");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -685,10 +688,10 @@ fn test_read_dir_reports_kind() {
     quiver()
         .with_io()
         .evaluate(&format!(
-            r#""{}" ~> %fs.list ~ ~> %list.collect ~"#,
+            r#"%fs.list [%path.parse "{}"] ~> %iter.map [~, #'%fs.entry {{ .kind }}] ~> %list.collect ~"#,
             dir_str
         ))
-        .expect("Cons[Entry[name: \"d\", kind: Dir], Nil]");
+        .expect("Cons[Dir, Nil]");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -707,7 +710,7 @@ fn test_read_dir_kind_match_narrows() {
         .with_io()
         .evaluate(&format!(
             r#"
-            "{}" ~> %fs.list ~ ~> [~, #'%fs.entry {{ .kind ~> {{ =Dir => IsDir | NotDir }} }}] ~> %iter.map ~ ~> %list.collect ~
+            %fs.list [%path.parse "{}"] ~> [~, #'%fs.entry {{ .kind ~> {{ =Dir => IsDir | NotDir }} }}] ~> %iter.map ~ ~> %list.collect ~
         "#,
             dir_str
         ))
@@ -731,7 +734,7 @@ fn test_read_dir_filter_by_kind() {
         .with_io()
         .evaluate(&format!(
             r#"
-            "{}" ~> %fs.list ~ ~> [~, #'%fs.entry {{ =(kind: Dir) }}] ~> %iter.filter ~ ~> [~, #'%fs.entry {{ .name }}] ~> %iter.map ~ ~> %list.collect ~
+            %fs.list [%path.parse "{}"] ~> [~, #'%fs.entry {{ =(kind: Dir) }}] ~> %iter.filter ~ ~> [~, #'%fs.entry {{ .name }}] ~> %iter.map ~ ~> %list.collect ~
         "#,
             dir_str
         ))
@@ -750,7 +753,7 @@ fn test_read_dir_empty() {
         .with_io()
         .evaluate(&format!(
             r#"
-            "{}" ~> %fs.list ~ ~> %list.collect ~
+            %fs.list [%path.parse "{}"] ~> %list.collect ~
         "#,
             dir_str
         ))
@@ -774,7 +777,7 @@ fn test_read_dir_count() {
         .with_io()
         .evaluate(&format!(
             r#"
-            "{}" ~> %fs.list ~ ~> %iter.count ~
+            %fs.list [%path.parse "{}"] ~> %iter.count ~
         "#,
             dir_str
         ))
@@ -798,10 +801,13 @@ fn test_repl_cached_dispatch_module_then_fresh_consumer() {
 
     quiver()
         .with_io()
-        .evaluate(&format!(r#""{}" ~> %fs.list ~ ~> %list.collect ~"#, dir_str))
-        .expect("Cons[Entry[name: \"only\", kind: File], Nil]")
+        .evaluate(&format!(
+            r#"%fs.list [%path.parse "{}"] ~> %list.collect ~ ~> %list.count ~"#,
+            dir_str
+        ))
+        .expect("1")
         .then_evaluate(&format!(
-            r#""{}" ~> %fs.list ~ ~> [~, #'%fs.entry {{ .name }}] ~> %iter.map ~ ~> [~, " | "] ~> %str.join ~"#,
+            r#"%fs.list [%path.parse "{}"] ~> [~, #'%fs.entry {{ .name }}] ~> %iter.map ~ ~> [~, " | "] ~> %str.join ~"#,
             dir_str
         ))
         .expect("\"only\"");
@@ -822,7 +828,7 @@ fn test_stat_file_kind_and_size() {
     quiver()
         .with_io()
         .evaluate(&format!(
-            r#""{}" ~> %fs.stat ~ ~> {{ =(kind: File, size: 5) => Good | Bad }}"#,
+            r#"%fs.stat [%path.parse "{}"] ~> {{ =(kind: File, size: 5) => Good | Bad }}"#,
             path
         ))
         .expect("Good");
@@ -841,20 +847,20 @@ fn test_stat_absent_and_failed_are_both_nil_told_apart_by_the_payload() {
     quiver()
         .with_io()
         .evaluate(&format!(
-            r#""{}" ~> %fs.stat ~ ~> {{ | =Stat() => Present | ~:error<()> => Failed | Absent }}"#,
+            r#"%fs.stat [%path.parse "{}"] ~> {{ | =Stat() => Present | ~:error<()> => Failed | Absent }}"#,
             path
         ))
         .expect("Absent");
 
     quiver()
         .with_io()
-        .evaluate(&format!(r#""{}" ~> %fs.exists? ~"#, path))
+        .evaluate(&format!(r#"%fs.exists? [%path.parse "{}"]"#, path))
         .expect("[]");
 
     // A path that exists still answers its metadata.
     quiver()
         .with_io()
-        .evaluate(r#""/etc/hostname" ~> %fs.stat ~ ~> =Stat(kind: k); k"#)
+        .evaluate(r#"%fs.stat [%path.parse "/etc/hostname"] ~> =Stat(kind: k); k"#)
         .expect("File");
 }
 
@@ -871,7 +877,7 @@ fn test_stat_result_has_its_real_declared_type() {
         .evaluate(&format!(
             r#"
             p = "{path}" ~> .0;
-            s = p ~> __filesystem_stat__ ~;
+            s = __filesystem_stat__ [p, Ok];
             [
               s ~> {{ | =[File, 'int, 'int, 'int] => Yes | No }},
               s ~> {{ | =['int, 'int, 'int, 'int] => Yes | No }}
@@ -925,11 +931,11 @@ fn test_fs_predicates() {
         .evaluate(&format!(
             r#"
             [
-              "{d}/f.txt" ~> %fs.exists? ~ ~> {{ =[] => No | Yes }},
-              "{d}/nope" ~> %fs.exists? ~ ~> {{ =[] => No | Yes }},
-              "{d}/sub" ~> %fs.dir? ~ ~> {{ =[] => No | Yes }},
-              "{d}/f.txt" ~> %fs.dir? ~ ~> {{ =[] => No | Yes }},
-              "{d}/f.txt" ~> %fs.file? ~ ~> {{ =[] => No | Yes }}
+              %fs.exists? [%path.parse "{d}/f.txt"] ~> {{ =[] => No | Yes }},
+              %fs.exists? [%path.parse "{d}/nope"] ~> {{ =[] => No | Yes }},
+              %fs.dir? [%path.parse "{d}/sub"] ~> {{ =[] => No | Yes }},
+              %fs.dir? [%path.parse "{d}/f.txt"] ~> {{ =[] => No | Yes }},
+              %fs.file? [%path.parse "{d}/f.txt"] ~> {{ =[] => No | Yes }}
             ]
             "#
         ))
@@ -953,7 +959,7 @@ fn test_read_dir_lazy_take() {
         .with_io()
         .evaluate(&format!(
             r#"
-            "{}" ~> %fs.list ~ ~> [~, 1] ~> %iter.take ~ ~> %iter.count ~
+            %fs.list [%path.parse "{}"] ~> [~, 1] ~> %iter.take ~ ~> %iter.count ~
         "#,
             dir_str
         ))
@@ -970,18 +976,18 @@ fn test_failed_walk_is_distinguishable_from_a_finished_one() {
     // it propagates the failure instead of quietly returning what it managed to read.
     quiver()
         .with_io()
-        .evaluate(r#""/nonexistent-quiver-dir" ~> %fs.list ~ ~> %list.collect ~ ~> %list.count ~"#)
+        .evaluate(r#"%fs.list [%path.parse "/nonexistent-quiver-dir"] ~> %list.collect ~ ~> %list.count ~"#)
         .expect("0");
 
     quiver()
         .with_io()
-        .evaluate(r#""/nonexistent-quiver-dir" ~> %fs.list ~ ~> %list.try_collect ~"#)
+        .evaluate(r#"%fs.list [%path.parse "/nonexistent-quiver-dir"] ~> %list.try_collect ~"#)
         .expect("[]");
 
     quiver()
         .with_io()
         .evaluate(
-            r#""/nonexistent-quiver-dir" ~> %fs.list ~ ~> %list.try_collect ~
+            r#"%fs.list [%path.parse "/nonexistent-quiver-dir"] ~> %list.try_collect ~
                ~> :error<'%io> ~> =IoError(kind: NotFound); Ok"#,
         )
         .expect("Ok");
@@ -992,7 +998,7 @@ fn test_failed_walk_is_distinguishable_from_a_finished_one() {
     quiver()
         .with_io()
         .evaluate(&format!(
-            r#""{}" ~> %fs.list ~ ~> %list.try_collect ~ ~> =('%list<'%fs.entry> & xs); %list.count xs"#,
+            r#"%fs.list [%path.parse "{}"] ~> %list.try_collect ~ ~> =('%list<'%fs.entry> & xs); %list.count xs"#,
             dir.to_str().unwrap()
         ))
         .expect("0");
@@ -1028,4 +1034,224 @@ fn test_io_failure_is_recoverable_without_a_process() {
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
             "random_bytes requires a non-negative count".to_string(),
         ));
+}
+
+#[test]
+fn test_stat_follow_and_links() {
+    let dir = std::env::temp_dir().join(format!("quiver_links_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    std::fs::write(dir.join("f.txt"), b"hello").expect("Failed to create file");
+    std::os::unix::fs::symlink("f.txt", dir.join("link")).expect("Failed to create symlink");
+    std::os::unix::fs::symlink("nope", dir.join("dangling")).expect("Failed to create symlink");
+    let d = dir.to_str().unwrap();
+
+    // `stat` follows a final symlink by default and describes the link itself with
+    // `follow?: []`; a dangling link exists only when not followed.
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            [
+              %fs.stat [%path.parse "{d}/link"] ~> =Stat(kind: ~),
+              %fs.stat [%path.parse "{d}/link", follow?: []] ~> =Stat(kind: ~),
+              {{ %fs.exists? [%path.parse "{d}/dangling"] }},
+              %fs.exists? [%path.parse "{d}/dangling", follow?: []],
+              %fs.link? [%path.parse "{d}/link"],
+              {{ %fs.link? [%path.parse "{d}/f.txt"] }},
+              %fs.file? [%path.parse "{d}/link"],
+              {{ %fs.file? [%path.parse "{d}/link", follow?: []] }}
+            ]
+            "#
+        ))
+        .expect("[File, Symlink, [], Ok, Ok, [], Ok, []]");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_stat_modified_is_an_instant() {
+    let dir = std::env::temp_dir().join(format!("quiver_mtime_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    let path = dir.join("f.txt");
+    std::fs::write(&path, b"x").expect("Failed to create file");
+    let mtime = std::fs::metadata(&path)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"%fs.stat [%path.parse "{}"] ~> =Stat(modified: ('%time.instant & ~))"#,
+            path.to_str().unwrap()
+        ))
+        .expect(&format!("Instant[{mtime}]"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_non_utf8_names_round_trip() {
+    use std::os::unix::ffi::OsStrExt;
+    // A name the OS hands back need not be UTF-8. It must be usable as a path again rather
+    // than faulting the process that listed it.
+    let dir = std::env::temp_dir().join(format!("quiver_non_utf8_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    std::fs::write(dir.join(std::ffi::OsStr::from_bytes(b"\xff\xfe")), b"abc")
+        .expect("Failed to create file");
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            %fs.list [%path.parse "{}"]
+            ~> %iter.map [~, #'%fs.entry {{ %fs.stat [$path] ~> =Stat(size: ~) }}]
+            ~> %list.collect ~
+            "#,
+            dir.to_str().unwrap()
+        ))
+        .expect("Cons[3, Nil]");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_listing_a_file_fails_as_not_a_directory() {
+    let dir = std::env::temp_dir().join(format!("quiver_notdir_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    let path = dir.join("f.txt");
+    std::fs::write(&path, b"x").expect("Failed to create file");
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            {{ %fs.list [%path.parse "{}"] ~> %list.try_collect ~ }}
+            ~> :error<'%io> ~> =IoError(kind: NotADirectory); Ok
+            "#,
+            path.to_str().unwrap()
+        ))
+        .expect("Ok");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_copy_onto_itself_fails_without_truncating() {
+    let dir = std::env::temp_dir().join(format!("quiver_copy_self_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Failed to create test directory");
+    let path = dir.join("f.txt");
+    std::fs::write(&path, b"keep").expect("Failed to create file");
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            f = %path.parse "{}"
+            [{{ %fs.copy [f, f, replace?: Ok] }} ~> :error<'%io> ~> =IoError(kind: ~), %fs.stat [f] ~> =Stat(size: ~)]
+            "#,
+            path.to_str().unwrap()
+        ))
+        .expect("[Other, 4]");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_set_perm_beyond_the_mode_bits_is_a_fault() {
+    quiver()
+        .with_io()
+        .evaluate(r#"%fs.set_perm [%path.parse "/nonexistent-quiver-path", 65536]"#)
+        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
+            "permission bits must be within 0o7777, got 0o200000".to_string(),
+        ));
+}
+
+#[test]
+fn test_walk_ends_on_an_unreadable_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    // `a/b` is unreadable, so entering it fails while the listings of the root and `a` are
+    // both open. The failure must end the walk, rather than skip the directory, and close
+    // both listings as it does.
+    let dir = std::env::temp_dir().join(format!("quiver_walk_fail_{}", std::process::id()));
+    let locked = dir.join("a/b");
+    std::fs::create_dir_all(&locked).expect("Failed to create test directory");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads through permission bits, so there is no failure to observe.
+    if std::fs::read_dir(&locked).is_ok() {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"
+            {{ %fs.walk [%path.parse "{}"] ~> %list.try_collect ~ }}
+            ~> :error<'%io> ~> =IoError(kind: ~)
+            "#,
+            dir.to_str().unwrap()
+        ))
+        .expect("PermissionDenied")
+        .expect_open_resources(0);
+
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_walk_counts_every_entry() {
+    let dir = std::env::temp_dir().join(format!("quiver_walk_done_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("a/b/c")).expect("Failed to create test directory");
+    std::fs::write(dir.join("a/b/f"), b"x").expect("Failed to create file");
+
+    quiver()
+        .with_io()
+        .evaluate(&format!(
+            r#"%fs.walk [%path.parse "{}"] ~> %iter.count ~"#,
+            dir.to_str().unwrap()
+        ))
+        .expect("4")
+        .expect_open_resources(0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_an_explicit_close_releases_ownership_in_a_live_process() {
+    // Ownership is otherwise only dropped when the owner ends; the root process here does
+    // not, so this sees whether the close itself released the handle.
+    quiver()
+        .with_io()
+        .evaluate(
+            r#"
+            ["/proc/self/stat" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & f)
+            __file_close__ f
+            "#,
+        )
+        .expect("Ok")
+        .expect_open_resources(0);
+}
+
+#[test]
+fn test_a_listing_releases_its_handle_when_exhausted() {
+    quiver()
+        .with_io()
+        .evaluate(r#"%fs.list [%path.parse "/proc/self"] ~> %iter.count ~ ~> ='int; Ok"#)
+        .expect("Ok")
+        .expect_open_resources(0);
+}
+
+#[test]
+fn test_an_open_file_stays_owned() {
+    // The counterpart: a handle nobody closed is still recorded against its owner.
+    quiver()
+        .with_io()
+        .evaluate(r#"["/proc/self/stat" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & f); Ok"#)
+        .expect("Ok")
+        .expect_open_resources(1);
 }

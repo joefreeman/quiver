@@ -16,7 +16,7 @@ fn test_repeated_tls_sessions_hold_no_descriptors() {
         .with_timeout(Duration::from_secs(30))
         .evaluate(&server.program(
             r#"
-            count_fds = #[] { %fs.list "/proc/self/fd" ~> %iter.count ~ }
+            count_fds = #[] { %fs.list [%path.parse "/proc/self/fd"] ~> %iter.count ~ }
 
             cycle = #[] {
               %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)

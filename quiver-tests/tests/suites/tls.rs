@@ -166,7 +166,9 @@ fn test_an_unknown_issuer_is_refused() {
         %str.contains? [m, "UnknownIssuer"]
         "#,
     )
-    .expect("Ok");
+    .expect("Ok")
+    // The refused upgrade consumed the socket inside the backend, and ownership follows.
+    .expect_open_resources(0);
 }
 
 #[test]

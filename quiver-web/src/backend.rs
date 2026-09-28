@@ -46,6 +46,8 @@ pub struct WebEffectBackend {
     body_type_id: Rc<RefCell<usize>>,
     fetch_result: Rc<RefCell<Option<ResultTupleInfo>>>,
     in_flight: Rc<RefCell<usize>>,
+    /// Bodies dropped since the last `take_released`.
+    released: Vec<ResourceId>,
 }
 
 // The browser is single-threaded and this never leaves the main thread; the `Send` bound on
@@ -64,6 +66,7 @@ impl WebEffectBackend {
             body_type_id: Rc::new(RefCell::new(0)),
             fetch_result: Rc::new(RefCell::new(None)),
             in_flight: Rc::new(RefCell::new(0)),
+            released: Vec::new(),
         }
     }
 }
@@ -180,7 +183,12 @@ impl EffectBackend for WebEffectBackend {
         // and the browser would keep streaming a body nobody will read.
         if let Some(body) = self.bodies.borrow_mut().remove(&resource_id) {
             body.controller.abort();
+            self.released.push(resource_id);
         }
+    }
+
+    fn take_released(&mut self) -> Vec<ResourceId> {
+        std::mem::take(&mut self.released)
     }
 
     fn set_type_ids(&mut self, resources: &[String], results: &[(String, ResultTupleInfo)]) {

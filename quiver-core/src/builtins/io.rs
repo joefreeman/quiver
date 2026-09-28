@@ -25,6 +25,10 @@ fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
         TypeSpec::Tuple(Some("Symlink"), vec![]),
         TypeSpec::Tuple(Some("Other"), vec![]),
     ]);
+    // An option flag: `Ok` or nil.
+    let flag = TypeSpec::Union(vec![ok.clone(), nil.clone()]);
+    let path_and_flag = TypeSpec::Tuple(None, vec![(None, bin.clone()), (None, flag.clone())]);
+    let two_paths = TypeSpec::Tuple(None, vec![(None, bin.clone()), (None, bin.clone())]);
     vec![
         // file_open([path, flags, mode]) -> File
         (
@@ -81,23 +85,55 @@ fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
             ]),
         ),
         // directory_close(Dir) -> Ok
-        ("directory_close", dir, ok),
-        // filesystem_stat(path) -> [kind, size, modified, mode] | nil
-        // A path that is not there answers nil, like any other lookup that finds nothing;
-        // `fallible` folds a *failed* lookup onto the same nil, told apart by its `:error`.
+        ("directory_close", dir, ok.clone()),
+        // filesystem_stat([path, follow]) -> [kind, size, modified, perm] | nil
+        // `follow` (`Ok` or nil) chooses stat or lstat. A path that is not there answers nil,
+        // like any other lookup that finds nothing; `fallible` folds a *failed* lookup onto
+        // the same nil, told apart by its `:error`.
         (
             "filesystem_stat",
-            bin,
+            TypeSpec::Tuple(None, vec![(None, bin.clone()), (None, flag.clone())]),
             TypeSpec::Tuple(
                 None,
                 vec![
                     (None, kind),
                     (None, int.clone()),
                     (None, int.clone()),
-                    (None, int),
+                    (None, int.clone()),
                 ],
             ),
         ),
+        // filesystem_create_dir([path, all]) -> Ok — `all` is `mkdir -p`
+        ("filesystem_create_dir", path_and_flag.clone(), ok.clone()),
+        // filesystem_remove([path, recursive]) -> Ok — a file, symlink or (empty) directory
+        ("filesystem_remove", path_and_flag, ok.clone()),
+        // filesystem_rename([from, to]) -> Ok
+        ("filesystem_rename", two_paths.clone(), ok.clone()),
+        // filesystem_copy([from, to, replace]) -> Ok — a regular file's contents and perms
+        (
+            "filesystem_copy",
+            TypeSpec::Tuple(
+                None,
+                vec![(None, bin.clone()), (None, bin.clone()), (None, flag)],
+            ),
+            ok.clone(),
+        ),
+        // filesystem_symlink([link, target]) -> Ok
+        ("filesystem_symlink", two_paths, ok.clone()),
+        // filesystem_read_link(path) -> path
+        ("filesystem_read_link", bin.clone(), bin.clone()),
+        // filesystem_set_perm([path, perm]) -> Ok — `perm` is the mode's low 12 bits
+        (
+            "filesystem_set_perm",
+            TypeSpec::Tuple(None, vec![(None, bin.clone()), (None, int)]),
+            ok,
+        ),
+        // filesystem_canonical(path) -> path — absolute, with every symlink resolved
+        ("filesystem_canonical", bin.clone(), bin.clone()),
+        // filesystem_cwd([]) -> path
+        ("filesystem_cwd", nil.clone(), bin.clone()),
+        // filesystem_temp([]) -> path — a fresh, empty directory under the host's temp dir
+        ("filesystem_temp", nil, bin),
     ]
 }
 

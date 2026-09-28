@@ -31,7 +31,48 @@ pub enum NativeEffect {
     // Filesystem metadata
     Stat {
         path: Vec<u8>,
+        /// `stat` when set, `lstat` (describe a symlink itself) otherwise.
+        follow: bool,
     },
+
+    // Filesystem queries and mutation. Each runs on the blocking pool; path arguments are
+    // the raw bytes the OS is handed.
+    CreateDir {
+        path: Vec<u8>,
+        /// Create missing parents too, and accept an existing directory (`mkdir -p`).
+        all: bool,
+    },
+    Remove {
+        path: Vec<u8>,
+        /// Remove a directory's contents first. Never follows symlinks.
+        recursive: bool,
+    },
+    Rename {
+        from: Vec<u8>,
+        to: Vec<u8>,
+    },
+    Copy {
+        from: Vec<u8>,
+        to: Vec<u8>,
+        /// Overwrite an existing destination rather than failing with `AlreadyExists`.
+        replace: bool,
+    },
+    Symlink {
+        link: Vec<u8>,
+        target: Vec<u8>,
+    },
+    ReadLink {
+        path: Vec<u8>,
+    },
+    SetPerm {
+        path: Vec<u8>,
+        perm: u32,
+    },
+    Canonical {
+        path: Vec<u8>,
+    },
+    Cwd,
+    Temp,
 
     // Directory operations
     ReadDirOpen {
@@ -112,6 +153,16 @@ impl Effect for NativeEffect {
             // Resource-creating effects
             NativeEffect::FileOpen { .. }
             | NativeEffect::Stat { .. }
+            | NativeEffect::CreateDir { .. }
+            | NativeEffect::Remove { .. }
+            | NativeEffect::Rename { .. }
+            | NativeEffect::Copy { .. }
+            | NativeEffect::Symlink { .. }
+            | NativeEffect::ReadLink { .. }
+            | NativeEffect::SetPerm { .. }
+            | NativeEffect::Canonical { .. }
+            | NativeEffect::Cwd
+            | NativeEffect::Temp
             | NativeEffect::ReadDirOpen { .. }
             | NativeEffect::DnsResolve { .. }
             | NativeEffect::TcpConnect { .. }

@@ -1,3 +1,4 @@
+mod blocking;
 pub mod effects;
 pub mod file;
 pub mod http;
@@ -6,6 +7,7 @@ pub mod network;
 pub mod system;
 mod util;
 
+pub use blocking::Notify;
 pub use effects::NativeEffect;
 pub use file::attach_file_builtins;
 pub use http::attach_http_builtins;

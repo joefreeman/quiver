@@ -224,7 +224,7 @@ fn test_system_only_host_still_rejects_file_and_network() {
         ));
     quiver()
         .scoped_system_only()
-        .evaluate(r#"%fs.stat "/tmp""#)
+        .evaluate(r#"%fs.stat [%path.parse "/tmp"]"#)
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
             "builtin __filesystem_stat__ is not available on this host".to_string(),
         ));

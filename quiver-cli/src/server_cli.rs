@@ -142,7 +142,7 @@ pub fn server_command(
     }
     let mut environment = Environment::<NativeEffect>::new(workers);
     environment.set_runtime_declarations(builtins.runtime_declarations().clone());
-    if let Some(backend) = quiver_cli::create_effect_backend() {
+    if let Some(backend) = quiver_cli::create_effect_backend(waker.clone()) {
         environment.set_effect_backend(backend);
     }
     if let Some(threshold) = code_collection_threshold {

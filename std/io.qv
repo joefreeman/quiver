@@ -23,6 +23,10 @@
   | ConnectionRefused
   | WouldBlock
   | Interrupted
+  | NotADirectory
+  | IsADirectory
+  | DirectoryNotEmpty
+  | CrossesDevices
   | Other
 
 ' = IoError[kind: 'kind, message: '%str]
@@ -38,6 +42,10 @@
       | =ConnectionRefused => "ConnectionRefused"
       | =WouldBlock => "WouldBlock"
       | =Interrupted => "Interrupted"
+      | =NotADirectory => "NotADirectory"
+      | =IsADirectory => "IsADirectory"
+      | =DirectoryNotEmpty => "DirectoryNotEmpty"
+      | =CrossesDevices => "CrossesDevices"
       | "Other"
     }
     "{name}: {m}"

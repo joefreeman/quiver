@@ -20,6 +20,14 @@ pub enum EffectError {
     WouldBlock,
     /// Operation interrupted (EINTR)
     Interrupted,
+    /// A path component that must be a directory is not one (ENOTDIR)
+    NotADirectory(String),
+    /// A directory where a non-directory was required (EISDIR)
+    IsADirectory(String),
+    /// Removing a directory that still has entries (ENOTEMPTY)
+    DirectoryNotEmpty(String),
+    /// A rename or link across filesystems (EXDEV)
+    CrossesDevices(String),
     /// Invalid argument provided
     InvalidArgument(String),
     /// I/O error with description
@@ -37,6 +45,10 @@ impl std::fmt::Display for EffectError {
             EffectError::ConnectionRefused(msg) => write!(f, "Connection refused: {}", msg),
             EffectError::WouldBlock => write!(f, "Operation would block"),
             EffectError::Interrupted => write!(f, "Operation interrupted"),
+            EffectError::NotADirectory(msg) => write!(f, "Not a directory: {}", msg),
+            EffectError::IsADirectory(msg) => write!(f, "Is a directory: {}", msg),
+            EffectError::DirectoryNotEmpty(msg) => write!(f, "Directory not empty: {}", msg),
+            EffectError::CrossesDevices(msg) => write!(f, "Crosses devices: {}", msg),
             EffectError::InvalidArgument(msg) => write!(f, "Invalid argument: {}", msg),
             EffectError::IO(msg) => write!(f, "I/O error: {}", msg),
             EffectError::Other(msg) => write!(f, "{}", msg),
@@ -50,13 +62,17 @@ impl EffectError {
     /// The kind tags a failure's `:error` payload can carry, in table order. `InvalidArgument`
     /// is absent deliberately: it is an argument-domain failure, so it stays a fault rather
     /// than becoming a value (see [`EffectFailure`]).
-    pub const KINDS: [&'static str; 7] = [
+    pub const KINDS: [&'static str; 11] = [
         "NotFound",
         "PermissionDenied",
         "AlreadyExists",
         "ConnectionRefused",
         "WouldBlock",
         "Interrupted",
+        "NotADirectory",
+        "IsADirectory",
+        "DirectoryNotEmpty",
+        "CrossesDevices",
         "Other",
     ];
 
@@ -71,7 +87,11 @@ impl EffectError {
             EffectError::ConnectionRefused(_) => 3,
             EffectError::WouldBlock => 4,
             EffectError::Interrupted => 5,
-            EffectError::InvalidArgument(_) | EffectError::IO(_) | EffectError::Other(_) => 6,
+            EffectError::NotADirectory(_) => 6,
+            EffectError::IsADirectory(_) => 7,
+            EffectError::DirectoryNotEmpty(_) => 8,
+            EffectError::CrossesDevices(_) => 9,
+            EffectError::InvalidArgument(_) | EffectError::IO(_) | EffectError::Other(_) => 10,
         }
     }
 
@@ -83,6 +103,10 @@ impl EffectError {
             | EffectError::PermissionDenied(msg)
             | EffectError::AlreadyExists(msg)
             | EffectError::ConnectionRefused(msg)
+            | EffectError::NotADirectory(msg)
+            | EffectError::IsADirectory(msg)
+            | EffectError::DirectoryNotEmpty(msg)
+            | EffectError::CrossesDevices(msg)
             | EffectError::InvalidArgument(msg)
             | EffectError::IO(msg)
             | EffectError::Other(msg) => msg.clone(),
@@ -214,6 +238,14 @@ pub trait EffectBackend: Send {
     /// The backend should close the resource and remove it from its registry.
     /// If the resource doesn't exist, this should be a no-op.
     fn close_resource(&mut self, resource_id: ResourceId);
+
+    /// Drain the ids of every resource the backend has dropped from its registry since the
+    /// last call, whatever dropped it: an explicit close effect, a [`close_resource`], or the
+    /// backend itself (a failed TLS handshake consuming its socket, say). The environment
+    /// forgets their ownership, which otherwise it would only do when the owner ends.
+    ///
+    /// [`close_resource`]: Self::close_resource
+    fn take_released(&mut self) -> Vec<ResourceId>;
 
     /// Supply the type ids the backend needs to stamp real values onto effect results.
     ///
