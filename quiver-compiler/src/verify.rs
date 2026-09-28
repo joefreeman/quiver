@@ -13,9 +13,9 @@ use quiver_core::types::TypeLookup;
 
 /// The table facts an instruction's stack effect depends on.
 pub trait CodeTables {
-    /// How many fields a tuple has, which `Tuple` pops.
+    /// How many fields a tuple has, which `Build` pops.
     fn tuple_arity(&self, tuple: usize) -> Option<usize>;
-    /// How many captures a function closes over, which `Function` pops.
+    /// How many captures a function closes over, which `Enclose` pops.
     fn function_captures(&self, function: usize) -> Option<usize>;
 }
 
@@ -35,34 +35,31 @@ impl CodeTables for Program {
 pub fn stack_effect(instruction: Instruction, tables: &impl CodeTables) -> Option<(usize, usize)> {
     let operand = instruction.operand() as usize;
     Some(match instruction.opcode() {
-        Opcode::Constant | Opcode::Pick | Opcode::Load => (0, 1),
+        Opcode::Push | Opcode::Pick | Opcode::Load => (0, 1),
         Opcode::Pop | Opcode::Store | Opcode::JumpIf | Opcode::JumpUnless | Opcode::Recurse => {
             (1, 0)
         }
-        Opcode::Reset | Opcode::Jump | Opcode::Reclaimed => (0, 0),
+        Opcode::Reset | Opcode::Jump | Opcode::Trap => (0, 0),
         Opcode::Rotate => (operand, operand),
         Opcode::Drop => (operand + 1, 1),
         Opcode::GetPositional
         | Opcode::GetNamed
-        | Opcode::IsType
+        | Opcode::TestType
         | Opcode::GetAnnotation
         | Opcode::Stamp
         | Opcode::Select
-        | Opcode::Process => (1, 1),
-        Opcode::Equal | Opcode::Annotate | Opcode::Call => (2, 1),
+        | Opcode::Refer => (1, 1),
+        Opcode::TestEqual | Opcode::Annotate | Opcode::Call => (2, 1),
         Opcode::TailCall => (2, 0),
-        Opcode::Tuple => (tables.tuple_arity(operand)?, 1),
-        Opcode::Function => (tables.function_captures(operand)?, 1),
+        Opcode::Build => (tables.tuple_arity(operand)?, 1),
+        Opcode::Enclose => (tables.function_captures(operand)?, 1),
     })
 }
 
 /// Whether control never continues past an instruction: a tail call or self-recursion
-/// replaces the frame, and a reclaimed trap aborts.
+/// replaces the frame, and a trap aborts.
 pub fn ends_flow(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::TailCall | Opcode::Recurse | Opcode::Reclaimed
-    )
+    matches!(opcode, Opcode::TailCall | Opcode::Recurse | Opcode::Trap)
 }
 
 /// Which locals a body may read without writing them first.
@@ -201,7 +198,7 @@ pub fn function(
                 work.push((at + 1, next));
             }
             Opcode::TailCall | Opcode::Recurse => leaves(next.depth)?,
-            Opcode::Reclaimed => {}
+            Opcode::Trap => {}
             _ => work.push((at + 1, next)),
         }
     }
@@ -240,9 +237,9 @@ mod tests {
             Instruction::jump_unless(4),
             Instruction::load(0),
             Instruction::load(0),
-            Instruction::tuple(2),
+            Instruction::build(2),
             Instruction::jump(1),
-            Instruction::tuple(NIL),
+            Instruction::build(NIL),
         ];
         assert_eq!(verify(&body, Locals::Filled(0)), Ok(()));
     }
@@ -252,7 +249,7 @@ mod tests {
         let body = [
             Instruction::pick(0),
             Instruction::jump_if(1),
-            Instruction::tuple(NIL),
+            Instruction::build(NIL),
             Instruction::pop(),
         ];
         assert!(verify(&body, Locals::Filled(0)).is_err());

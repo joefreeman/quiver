@@ -526,7 +526,7 @@ fn linked_html_live_encodes_frames() {
     // Regression lock: a linked tuple that is constructed but never referenced as a
     // type must still be runtime-testable. The linker now registers a `Type::Tuple`
     // wrapper entry for every tuple it interns — without one, the compatibility
-    // tables can't represent the tuple, every `IsType` rejects it, and %json's
+    // tables can't represent the tuple, every `TestType` rejects it, and %json's
     // encoder (called by %html/live.encode on the wire value) fell through its
     // Array branch into the Object branch, failing with `TypeMismatch { expected:
     // tuple, found: integer }`.

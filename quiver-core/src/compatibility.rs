@@ -101,7 +101,7 @@ pub struct CompatibilityInput<'a> {
     pub types: &'a [Type],
     /// Full tuple type information
     pub tuples: &'a [TupleTypeInfo],
-    /// Functions (to scan for IsType instructions and derive function types)
+    /// Functions (to scan for `TestType` instructions and derive function types)
     pub functions: &'a [Function],
     /// Builtin information
     pub builtins: &'a [BuiltinInfo],
@@ -141,12 +141,12 @@ pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<ConcreteTyp
     let lookup = TypeLookupImpl::new(input.types, input.tuples, input.functions);
     let index = TypeIndex::build(input, &lookup);
 
-    // Collect all pattern type IDs (types used in IsType instructions)
+    // Collect all pattern type IDs (types used in `TestType` instructions)
     let mut pattern_type_ids = HashSet::new();
 
     for function in input.functions {
         for instruction in &function.instructions {
-            if instruction.opcode() == Opcode::IsType {
+            if instruction.opcode() == Opcode::TestType {
                 let type_id = instruction.operand();
                 // Widen here, at the edge of the instruction stream; everything
                 // downstream indexes tables and stays `usize`.
@@ -157,7 +157,7 @@ pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<ConcreteTyp
 
     // A type-consuming builtin's type argument is a runtime test too
     // (`%registry.lookup<'p>` tests a stored pid against it), so it seeds a pattern
-    // row exactly as an `IsType` operand does.
+    // row exactly as an `TestType` operand does.
     for info in input.builtins {
         if let Some(type_id) = info.type_argument {
             pattern_type_ids.insert(type_id);
@@ -317,7 +317,7 @@ pub struct CompatibilityTables {
     functions_len: usize,
     builtins_len: usize,
     resources_len: usize,
-    /// Pattern type ids (`IsType` / checked `GetAnnotation` targets) already computed.
+    /// Pattern type ids (`TestType` / checked `GetAnnotation` targets) already computed.
     pattern_ids: HashSet<usize>,
     /// Per-type compatibility, as `compute_type_compatibility` returns.
     pub type_compatibility: Vec<ConcreteTypes>,
@@ -556,7 +556,7 @@ impl CompatibilityTables {
         for function in &input.functions[self.functions_len..] {
             for instruction in &function.instructions {
                 let type_id = instruction.operand() as usize;
-                if instruction.opcode() == Opcode::IsType
+                if instruction.opcode() == Opcode::TestType
                     && type_id < input.types.len()
                     && self.pattern_ids.insert(type_id)
                 {
@@ -571,7 +571,7 @@ impl CompatibilityTables {
         }
 
         // A new builtin instantiation's type argument is a runtime test — a new pattern
-        // row, exactly like a fresh `IsType` operand.
+        // row, exactly like a fresh `TestType` operand.
         for info in &input.builtins[self.builtins_len..] {
             if let Some(type_id) = info.type_argument
                 && type_id < input.types.len()
@@ -627,7 +627,7 @@ impl CompatibilityTables {
     /// is a bug in `update`.
     ///
     /// `reclaimed` says the program has had code stubbed. `type_compatibility` is keyed
-    /// by the pattern types `IsType` instructions name, and reclamation empties the
+    /// by the pattern types `TestType` instructions name, and reclamation empties the
     /// instructions while leaving the types in place — so the incremental table keeps
     /// entries a recompute over the stubbed program no longer derives. That is not drift
     /// but the point: reviving stubbed code must not have to rebuild them. The check

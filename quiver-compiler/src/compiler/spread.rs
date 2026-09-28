@@ -526,7 +526,7 @@ fn emit_single_variant_tuple<E: quiver_core::effects::Effect>(
         .register_tuple(tuple_name, variant.fields.clone());
     compiler
         .codegen
-        .add_instruction(Instruction::tuple(tuple_id));
+        .add_instruction(Instruction::build(tuple_id));
 
     emit_stack_cleanup_code(compiler, stack_size);
 
@@ -567,11 +567,11 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
                 // Pick the spread value and check its type
                 let depth = stack_size - 1 - spread_stack_idx;
                 compiler.codegen.add_instruction(Instruction::pick(depth));
-                // Register the tuple type as a check type (bare: IsType is row-transparent)
+                // Register the tuple type as a check type (bare: `TestType` is row-transparent)
                 let type_id = compiler.program.register_type(Type::Tuple(spread_tuple_id));
                 compiler
                     .codegen
-                    .add_instruction(Instruction::is_type(type_id));
+                    .add_instruction(Instruction::test_type(type_id));
 
                 let fail_jump = compiler.codegen.emit_jump_unless_placeholder();
                 fail_jumps.push(fail_jump);
@@ -585,7 +585,7 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
                 .register_tuple(tuple_name.clone(), variant.fields.clone());
             compiler
                 .codegen
-                .add_instruction(Instruction::tuple(tuple_id));
+                .add_instruction(Instruction::build(tuple_id));
             {
                 let type_id = compiler.program.register_type(Type::Tuple(tuple_id));
                 let type_id = super::annotations::exact_empty(compiler.program, type_id);
@@ -607,7 +607,7 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
                 .register_tuple(tuple_name.clone(), variant.fields.clone());
             compiler
                 .codegen
-                .add_instruction(Instruction::tuple(tuple_id));
+                .add_instruction(Instruction::build(tuple_id));
             {
                 let type_id = compiler.program.register_type(Type::Tuple(tuple_id));
                 let type_id = super::annotations::exact_empty(compiler.program, type_id);

@@ -410,7 +410,7 @@ fn drain_payloads(payload: &mut Payload, stack: &mut Vec<Rc<Payload>>) {
 thread_local! {
     /// Work-list for [`Payload`]'s drop, reused across drops. A fresh `Vec` per drop measured
     /// as ~9 extra allocations per unit of work on cons-heavy code — enough to undo what
-    /// `handle_tuple`'s `with_capacity` had just saved. Depth-first popping keeps this shallow
+    /// `handle_build`'s `with_capacity` had just saved. Depth-first popping keeps this shallow
     /// (a cons chain never exceeds one entry), so retaining it costs almost nothing.
     static DROP_STACK: std::cell::RefCell<Vec<Rc<Payload>>> =
         const { std::cell::RefCell::new(Vec::new()) };
@@ -463,7 +463,7 @@ thread_local! {
     /// The one payload behind every value that carries nothing. A tuple's identity is its
     /// `tuple_id`, which lives in the `Value` rather than the payload, so `[]`, `Ok`, `Nil`,
     /// `Done` and every other field-less tuple can share a single immutable payload. That is
-    /// the majority of tuple construction — and, since `IsType` and `Equal` answer with
+    /// the majority of tuple construction — and, since `TestType` and `TestEqual` answer with
     /// `Ok`/`[]`, every pattern test allocated one before this existed.
     ///
     /// Sharing is sound because payloads are immutable: annotations attach copy-on-write (see

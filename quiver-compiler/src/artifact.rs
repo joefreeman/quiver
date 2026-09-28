@@ -1475,7 +1475,7 @@ fn shake_types(unit: &mut CompiledUnit) {
     }
 
     // Tuples keep their rows and their order — a tuple id is a runtime value tag carried by
-    // `Opcode::Tuple` and `ConcreteType`, so merging them is a different question — but their
+    // `Opcode::Build` and `ConcreteType`, so merging them is a different question — but their
     // field types move with everything else.
     unit.tuples = unit
         .tuples
@@ -1833,10 +1833,10 @@ fn collect_payload(
 fn collect_instruction(instruction: &Instruction, closure: &mut Closure, queue: &mut Vec<Item>) {
     let id = instruction.operand() as usize;
     match instruction.opcode() {
-        Opcode::Constant => add_constant(id, closure, queue),
-        Opcode::Function => add_function(id, closure, queue),
-        Opcode::Tuple => add_tuple(id, closure, queue),
-        Opcode::IsType => add_type(id, closure, queue),
+        Opcode::Push => add_constant(id, closure, queue),
+        Opcode::Enclose => add_function(id, closure, queue),
+        Opcode::Build => add_tuple(id, closure, queue),
+        Opcode::TestType => add_type(id, closure, queue),
         Opcode::GetNamed => {
             closure.field_names.insert(id);
         }
@@ -2128,8 +2128,8 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
         for instruction in &function.instructions {
             let id = instruction.operand() as usize;
             match instruction.opcode() {
-                Opcode::Constant => check("constant", id, unit.constants.len())?,
-                Opcode::Function => {
+                Opcode::Push => check("constant", id, unit.constants.len())?,
+                Opcode::Enclose => {
                     check("function", id, function_space)?;
                     // The linked program's function table must reference strictly
                     // backward (the environment merge rewrites single-pass): an own
@@ -2141,8 +2141,8 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
                         ));
                     }
                 }
-                Opcode::Tuple => check("tuple", id, unit.tuples.len())?,
-                Opcode::IsType => check("type", id, unit.types.len())?,
+                Opcode::Build => check("tuple", id, unit.tuples.len())?,
+                Opcode::TestType => check("type", id, unit.types.len())?,
                 Opcode::GetNamed => check("field name", id, unit.field_names.len())?,
                 Opcode::Annotate | Opcode::GetAnnotation => {
                     check("annotation key", id, unit.annotation_keys.len())?
@@ -2209,7 +2209,7 @@ pub fn link_unit<E: Effect>(
     intern_types_and_tuples(unit, program, &mut remaps);
     // Every linked tuple must also have its `Type::Tuple` wrapper entry: the runtime
     // compatibility tables represent a concrete tuple by that entry, so a tuple
-    // without one is invisible to every `IsType` test. A from-source compile
+    // without one is invisible to every `TestType` test. A from-source compile
     // registers the wrapper while typing the construction, but the artifact closure
     // only carries types the module's code references by type id — a tuple that is
     // constructed yet never referenced as a type would otherwise arrive untestable.
@@ -2291,7 +2291,7 @@ pub fn link_unit<E: Effect>(
             LinkItem::Function(local) => {
                 let function = &unit.functions[local];
                 for instruction in &function.instructions {
-                    if instruction.opcode() == Opcode::Function {
+                    if instruction.opcode() == Opcode::Enclose {
                         let target = instruction.operand() as usize;
                         assert!(
                             remaps.functions.contains_key(&target),
@@ -2386,7 +2386,7 @@ fn link_order(unit: &CompiledUnit, label: &str) -> Result<Vec<LinkItem>, Error> 
                 }
                 LinkItem::Function(index) => {
                     for instruction in &unit.functions[index].instructions {
-                        if instruction.opcode() == Opcode::Constant {
+                        if instruction.opcode() == Opcode::Push {
                             let constant = instruction.operand() as usize;
                             stack.push((LinkItem::Constant(constant), false));
                         }

@@ -418,25 +418,25 @@ fn emit_requirement(
             for &access in other_path {
                 emit_access(codegen, access);
             }
-            codegen.add_instruction(Instruction::equal());
+            codegen.add_instruction(Instruction::test_equal());
         }
         RuntimeCheck::TypeId(type_id) => {
             generate_value_access(codegen, &requirement.path);
-            codegen.add_instruction(Instruction::is_type(*type_id));
+            codegen.add_instruction(Instruction::test_type(*type_id));
         }
         RuntimeCheck::Literal(literal) => {
             generate_value_access(codegen, &requirement.path);
             match literal {
                 ast::Literal::Integer(val) => {
                     let idx = program.register_constant(Constant::Integer(val.clone()));
-                    codegen.add_instruction(Instruction::constant(idx));
+                    codegen.add_instruction(Instruction::push(idx));
                 }
                 ast::Literal::Binary(binary) => {
                     let idx = program.register_constant(Constant::Binary(binary.bytes().to_vec()));
-                    codegen.add_instruction(Instruction::constant(idx));
+                    codegen.add_instruction(Instruction::push(idx));
                 }
             }
-            codegen.add_instruction(Instruction::equal());
+            codegen.add_instruction(Instruction::test_equal());
         }
         RuntimeCheck::Pin { load, steps } => {
             generate_value_access(codegen, &requirement.path);
@@ -454,7 +454,7 @@ fn emit_requirement(
             for &step in steps {
                 emit_access(codegen, step);
             }
-            codegen.add_instruction(Instruction::equal());
+            codegen.add_instruction(Instruction::test_equal());
         }
         RuntimeCheck::Not { sets, .. } => {
             // `Ok` exactly when no inner set's requirements all hold: an inner set that
@@ -466,13 +466,13 @@ fn emit_requirement(
                     emit_requirement(codegen, program, scopes, requirement)?;
                     next_set_jumps.push(codegen.emit_jump_unless_placeholder());
                 }
-                codegen.add_instruction(Instruction::tuple(NIL));
+                codegen.add_instruction(Instruction::build(NIL));
                 end_jumps.push(codegen.emit_jump_placeholder());
                 for jump in next_set_jumps {
                     codegen.patch_jump_to_here(jump);
                 }
             }
-            codegen.add_instruction(Instruction::tuple(OK));
+            codegen.add_instruction(Instruction::build(OK));
             for jump in end_jumps {
                 codegen.patch_jump_to_here(jump);
             }
@@ -699,9 +699,9 @@ fn analyze_match_pattern(
 }
 
 /// Compute the runtime type-check requirements and narrowed type for a `Type` match — including a
-/// `&`-intersection. Each intersection member is checked separately (an exact `IsType` per
+/// `&`-intersection. Each intersection member is checked separately (an exact `TestType` per
 /// member), so partial-type constraints compose soundly: `intersect_types` widens for partials, so
-/// a single folded `IsType` would be unsound. The narrowed type folds every member in. A member
+/// a single folded `TestType` would be unsound. The narrowed type folds every member in. A member
 /// already implied by the (accumulated) value type adds no runtime check.
 fn type_check_requirements(
     env: &mut super::typing::TypeEnv,
@@ -724,7 +724,7 @@ fn type_check_requirements(
         // ids always do, and otherwise `is_compatible` can vouch only for cycle-free
         // operands — it traverses a `Cycle` optimistically, so trusting it on a
         // recursive scrutinee elided load-bearing checks (an `=(I['int] & s)` ascription
-        // on a `(^ | Lb['int])`-typed binding matched an `Lb`). The emitted `IsType`'s
+        // on a `(^ | Lb['int])`-typed binding matched an `Lb`). The emitted `TestType`'s
         // runtime set is computed with the full cycle-aware machinery, so keeping the
         // check is exact, merely occasionally redundant. A type variable vouches for nothing
         // either: it stands for any type, and compatibility (and intersection) treat it as

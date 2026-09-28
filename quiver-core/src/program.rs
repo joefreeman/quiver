@@ -402,7 +402,7 @@ impl Program {
 
     /// Reclaim dead code: keep identity, drop weight. A stubbed function keeps its
     /// `type_id` (live pids carry root-function indices used for process type tests)
-    /// while its body becomes a single `Reclaimed` trap — executing one is a liveness
+    /// while its body becomes a single `Trap` — executing one is a liveness
     /// bug and aborts the process loudly. A stubbed constant keeps its slot with the
     /// cheapest same-variant payload. The digest-index entries survive, so an identical
     /// re-registration revives the slot in place. Callers guarantee the dead sets are
@@ -417,7 +417,7 @@ impl Program {
                 continue;
             }
             let function = &mut self.functions[index];
-            function.instructions = vec![Instruction::reclaimed()];
+            function.instructions = vec![Instruction::trap()];
             function.captures = 0;
         }
         for &index in dead_constants {
@@ -571,7 +571,7 @@ impl Program {
         tuple_id
     }
 
-    /// Register a type for use with IsType instruction
+    /// Register a type for use with `TestType` instructions
     pub fn register_type(&mut self, typ: Type) -> usize {
         if self.type_index.is_empty() && !self.types.is_empty() {
             for (index, existing) in self.types.iter().enumerate() {

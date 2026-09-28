@@ -50,7 +50,7 @@ impl<T: Clone> TableUpdate<T> {
     }
 }
 
-/// How an update carries the derived compatibility tables (`IsType` sets, parameter
+/// How an update carries the derived compatibility tables (`TestType` sets, parameter
 /// sets, canonical tuple shapes, field offsets), shaped to the transport exactly as
 /// [`TableUpdate`] shapes the registries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,7 +92,7 @@ pub struct ProgramUpdate {
     /// *type-consuming* builtins alone (`%data.decode<'t>`, `%json.decode`/`encode<'t>`),
     /// the only things that walk a type at runtime.
     ///
-    /// Not, despite appearances, for `IsType`: pattern matching reads the precomputed
+    /// Not, despite appearances, for `TestType`: pattern matching reads the precomputed
     /// compatibility sets below, which the environment builds and ships already resolved. A
     /// worker therefore uses a vanishingly small part of this table — 7 rows of 6,419 in
     /// `examples/todo.qv` — but pruning it to the reachable closure has been measured and
@@ -219,7 +219,7 @@ pub struct Executor<E: Effect> {
     /// For each tuple_id, a canonical value-shape id (same name + field labels) — used by `==`
     /// so structurally-identical tuples built via different paths compare equal.
     canonical_tuples: Arc<Vec<usize>>,
-    /// For each type_id, the set of concrete types compatible with it (for IsType checks)
+    /// For each type_id, the set of concrete types compatible with it (for `TestType` checks)
     type_compatibility: Arc<Vec<ConcreteTypes>>,
     /// For each function_id, the set of concrete types compatible with its parameter
     function_param_compatibility: Arc<Vec<ConcreteTypes>>,
@@ -272,7 +272,7 @@ impl<E: Effect> Executor<E> {
     /// A `Binary::Constant` names the constants table rather than owning bytes, and reaches
     /// here by more than one route: a failure-provenance stamp's module name, and any such
     /// binary that then crossed the wire, which travels as its index rather than as a byte
-    /// copy and is rebuilt naming it. It is resolved through the same memo the `Constant`
+    /// copy and is rebuilt naming it. It is resolved through the same memo the `Push`
     /// opcode uses, so a constant is built once per worker however it is reached, and every
     /// use shares the one node.
     ///
@@ -1727,7 +1727,7 @@ impl<E: Effect> Executor<E> {
     /// Whether an instruction is a "cold" control/concurrency op handled via the process map
     /// (rather than the hot, process-as-local fast path).
     fn is_cold(instruction: Instruction) -> bool {
-        matches!(instruction.opcode(), Opcode::Select | Opcode::Process)
+        matches!(instruction.opcode(), Opcode::Select | Opcode::Refer)
     }
 
     /// The instruction at the current frame's counter, without a process-map lookup.
@@ -1763,38 +1763,38 @@ impl<E: Effect> Executor<E> {
         // keep it dense (see `bytecode::Id`), but every consumer indexes a table or a stack.
         let operand = instruction.operand() as usize;
         match instruction.opcode() {
-            Opcode::Constant => self.handle_constant(proc, operand),
+            Opcode::Push => self.handle_push(proc, operand),
             Opcode::Pop => self.handle_pop(proc),
             Opcode::Pick => self.handle_pick(proc, operand),
             Opcode::Rotate => self.handle_rotate(proc, operand),
             Opcode::Drop => self.handle_drop(proc, operand),
             Opcode::Load => self.handle_load(proc, operand),
             Opcode::Store => self.handle_store(proc, operand),
-            Opcode::Tuple => self.handle_tuple(proc, operand),
+            Opcode::Build => self.handle_build(proc, operand),
             Opcode::GetPositional => self.handle_get_positional(proc, operand),
             Opcode::GetNamed => self.handle_get_named(proc, operand),
-            Opcode::IsType => self.handle_is_type(proc, operand),
+            Opcode::TestType => self.handle_test_type(proc, operand),
             Opcode::Jump => self.handle_jump(proc, instruction.offset() as isize),
             Opcode::JumpIf => self.handle_jump_if(proc, instruction.offset() as isize, true),
             Opcode::JumpUnless => self.handle_jump_if(proc, instruction.offset() as isize, false),
             Opcode::Call => self.handle_call(proc, pid),
             Opcode::TailCall => self.handle_tail_call(proc),
             Opcode::Recurse => self.handle_recurse(proc),
-            Opcode::Function => self.handle_function(proc, operand),
+            Opcode::Enclose => self.handle_enclose(proc, operand),
             Opcode::Reset => self.handle_reset(proc, operand),
-            Opcode::Equal => self.handle_equal(proc),
+            Opcode::TestEqual => self.handle_test_equal(proc),
             Opcode::Annotate => self.handle_annotate(proc, operand),
             Opcode::GetAnnotation => self.handle_get_annotation(proc, operand),
             Opcode::Stamp => self.handle_stamp(proc, operand),
             // Nothing should reach this: reclaimed code (a code-collection liveness bug), the
             // point after a call that never returns, or an irrefutable pattern's failure path.
             // Abort the process loudly rather than return garbage.
-            Opcode::Reclaimed => Err(Error::Panic(
+            Opcode::Trap => Err(Error::Panic(
                 "unreachable code executed (reclaimed code, past a call that never returns, or \
                  a pattern its types said could not fail)"
                     .to_string(),
             )),
-            Opcode::Select | Opcode::Process => {
+            Opcode::Select | Opcode::Refer => {
                 unreachable!("cold instruction routed to execute_hot")
             }
         }
@@ -1810,7 +1810,7 @@ impl<E: Effect> Executor<E> {
     ) -> Result<Option<Action<E>>, Error> {
         match instruction.opcode() {
             Opcode::Select => self.handle_select(pid, current_time_ms),
-            Opcode::Process => self.handle_process_ref(pid, instruction.operand() as usize),
+            Opcode::Refer => self.handle_refer(pid, instruction.operand() as usize),
             _ => unreachable!("hot instruction routed to execute_cold"),
         }
     }
@@ -1903,7 +1903,7 @@ impl<E: Effect> Executor<E> {
         })
     }
 
-    fn handle_constant(
+    fn handle_push(
         &mut self,
         proc: &mut Process,
         index: usize,
@@ -2018,7 +2018,7 @@ impl<E: Effect> Executor<E> {
         }
     }
 
-    fn handle_tuple(
+    fn handle_build(
         &mut self,
         proc: &mut Process,
         type_id: usize,
@@ -2145,7 +2145,7 @@ impl<E: Effect> Executor<E> {
 
         // Total: a value that cannot carry annotations (or doesn't carry this key) yields
         // nil, so retrieval composes with union carriers like `'int | []`. The checked
-        // form's shape gate is a separate `IsType` the compiler emits after this.
+        // form's shape gate is a separate `TestType` the compiler emits after this.
         let annotation = carrier
             .get_annotation(key)
             .cloned()
@@ -2189,7 +2189,7 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_is_type(
+    fn handle_test_type(
         &mut self,
         proc: &mut Process,
         pattern_type_id: usize,
@@ -2590,7 +2590,7 @@ impl<E: Effect> Executor<E> {
         }
     }
 
-    fn handle_function(
+    fn handle_enclose(
         &mut self,
         proc: &mut Process,
         function_index: usize,
@@ -2624,7 +2624,7 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    fn handle_equal(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
+    fn handle_test_equal(&mut self, proc: &mut Process) -> Result<Option<Action<E>>, Error> {
         let right = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
         let left = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
@@ -2645,7 +2645,7 @@ impl<E: Effect> Executor<E> {
 
     /// Push a named process value (`@1` in the REPL): the target's id is on the stack as
     /// an integer, the root function index is the operand.
-    fn handle_process_ref(
+    fn handle_refer(
         &mut self,
         pid: ProcessId,
         function_index: usize,
@@ -3331,7 +3331,7 @@ impl<E: Effect> Executor<E> {
         }
     }
 
-    /// Structural equality, as the `Equal` instruction sees it.
+    /// Structural equality, as the `TestEqual` instruction sees it.
     ///
     /// **Iterative**: a pair work-list rather than recursion, because a value nests once per
     /// list element and comparing two long lists (`xs ~> =&ys`) would otherwise abort. Order of
@@ -3339,7 +3339,7 @@ impl<E: Effect> Executor<E> {
     fn values_equal(&self, a: &Value, b: &Value) -> bool {
         // `Vec::new`, and the first pair handled without it: a `Vec` does not allocate until
         // something is pushed, so comparing two scalars — much the commonest case, and on the
-        // `Equal` instruction's hot path — costs nothing beyond the comparison.
+        // `TestEqual` instruction's hot path — costs nothing beyond the comparison.
         let mut pending: Vec<(&Value, &Value)> = Vec::new();
         let mut next = Some((a, b));
         while let Some((a, b)) = next.take().or_else(|| pending.pop()) {

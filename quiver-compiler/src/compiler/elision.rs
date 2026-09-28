@@ -110,7 +110,7 @@ pub fn analyze(program: &Program, function_index: usize) -> Option<Forwarder> {
                 locals.push(Sym::Param);
             }
             Opcode::Load => stack.push(locals.get(operand)?.clone()),
-            Opcode::Constant => stack.push(match program.get_constant(operand)? {
+            Opcode::Push => stack.push(match program.get_constant(operand)? {
                 Constant::Builtin { id } => Sym::BuiltinRef(*id),
                 _ => Sym::Const(operand),
             }),
@@ -137,7 +137,7 @@ pub fn analyze(program: &Program, function_index: usize) -> Option<Forwarder> {
                 }
                 stack.push(Sym::ParamField(operand));
             }
-            Opcode::Tuple => {
+            Opcode::Build => {
                 let arity = program.lookup_tuple(operand)?.fields.len();
                 let index = stack.len().checked_sub(arity)?;
                 let fields = stack.split_off(index);

@@ -21,12 +21,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Clone)]
 pub enum Constant {
     // One form for all integers: the small/big split is a runtime-representation
-    // concern, applied where a constant becomes a `Value` (`handle_constant`).
+    // concern, applied where a constant becomes a `Value` (`handle_push`).
     #[serde(rename = "int", with = "decimal_bigint")]
     Integer(BigInt),
     #[serde(rename = "bin", with = "base64_bytes")]
     Binary(Vec<u8>),
-    /// `id` is the tuple id an `Opcode::Tuple` operand would carry — the same table, the
+    /// `id` is the tuple id an `Opcode::Build` operand would carry — the same table, the
     /// same remap. A field-less tuple needs no constant (`Payload::shared` interns the
     /// empty payload, so building one is already a refcount bump).
     #[serde(rename = "tuple")]
@@ -194,17 +194,17 @@ impl Function {
                 // Fixed-width packing is what lets this be an operand rewrite: the opcode
                 // is untouched and nothing downstream shifts.
                 let (table, label) = match instruction.opcode() {
-                    Opcode::Constant => (&remaps.constants, "constant"),
-                    Opcode::Function => (&remaps.functions, "function"),
-                    Opcode::Tuple => (&remaps.tuples, "tuple"),
-                    Opcode::IsType => (&remaps.types, "type"),
+                    Opcode::Push => (&remaps.constants, "constant"),
+                    Opcode::Enclose => (&remaps.functions, "function"),
+                    Opcode::Build => (&remaps.tuples, "tuple"),
+                    Opcode::TestType => (&remaps.types, "type"),
                     Opcode::GetNamed => (&remaps.field_names, "field name"),
                     Opcode::Annotate | Opcode::GetAnnotation => {
                         (&remaps.annotation_keys, "annotation key")
                     }
                     Opcode::Stamp => (&remaps.sites, "site"),
                     // Stack slots, jump offsets, positions and arities are not table ids;
-                    // `Process` names a function whose index is already session-space.
+                    // `Refer` names a function whose index is already session-space.
                     _ => return instruction,
                 };
                 instruction.with_operand(IdRemaps::map(
@@ -225,7 +225,7 @@ impl Function {
     /// Collect the code this function's instructions reference statically: function and
     /// constant table indices. The code-reclamation sweep closes over these; everything
     /// else an instruction carries (types, tuples, builtins, field names, sites) belongs
-    /// to tables that are never reclaimed. `Process` operands are deliberately not
+    /// to tables that are never reclaimed. `Refer` operands are deliberately not
     /// collected — a pid's root-function index is identity, and a reclaimed stub keeps
     /// what identity tests read.
     pub fn collect_code_refs(
@@ -235,10 +235,10 @@ impl Function {
     ) {
         for instruction in &self.instructions {
             match instruction.opcode() {
-                Opcode::Constant => {
+                Opcode::Push => {
                     constants.insert(instruction.operand() as usize);
                 }
-                Opcode::Function => {
+                Opcode::Enclose => {
                     functions.insert(instruction.operand() as usize);
                 }
                 _ => {}
@@ -444,8 +444,8 @@ mod tests {
             Instruction::load(Instruction::OPERAND_MAX).operand() as usize,
             Instruction::OPERAND_MAX
         );
-        assert_eq!(Instruction::constant(1234).opcode(), Opcode::Constant);
-        assert_eq!(Instruction::constant(1234).operand(), 1234);
+        assert_eq!(Instruction::push(1234).opcode(), Opcode::Push);
+        assert_eq!(Instruction::push(1234).operand(), 1234);
     }
 
     /// Jump offsets are signed and sign-extend out of the same 24 bits.
@@ -471,7 +471,7 @@ mod tests {
             })
             .collect();
         for id in [1usize, 127, 128, 4095, Instruction::OPERAND_MAX] {
-            instructions.push(Instruction::constant(id));
+            instructions.push(Instruction::push(id));
             instructions.push(Instruction::load(id));
         }
         for offset in [1, -1, 63, -64, 930, -833, (1 << 23) - 1, -(1 << 23)] {
@@ -605,7 +605,7 @@ mod tests {
         assert!(case("!!!not base64!!!").is_err());
         // Opcode 200 does not exist.
         assert!(case(&stream(&[200u8])).is_err());
-        // `Constant` (opcode 0) with its operand missing.
+        // `Push` (opcode 0) with its operand missing.
         assert!(case(&stream(&[0u8])).is_err());
         // An operand past the 24-bit field.
         assert!(case(&stream(&[0u8, 0x80, 0x80, 0x80, 0x80, 0x01])).is_err());
@@ -672,7 +672,7 @@ pub type Offset = i32;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Opcode {
-    Constant,
+    Push,
     Pop,
     Pick,
     Rotate,
@@ -680,24 +680,24 @@ pub enum Opcode {
     Reset,
     Load,
     Store,
-    Tuple,
+    Build,
     GetPositional,
     GetNamed,
-    IsType,
+    TestType,
     Jump,
     JumpIf,
     JumpUnless,
     Call,
     TailCall,
     Recurse,
-    Function,
-    Equal,
+    Enclose,
+    TestEqual,
     Annotate,
     GetAnnotation,
     Stamp,
     Select,
-    Process,
-    Reclaimed,
+    Refer,
+    Trap,
 }
 
 /// What an opcode's operand field means — the one place that knows, so the disassembler
@@ -721,9 +721,9 @@ impl Opcode {
             | Opcode::Call
             | Opcode::TailCall
             | Opcode::Recurse
-            | Opcode::Equal
+            | Opcode::TestEqual
             | Opcode::Select
-            | Opcode::Reclaimed => OperandKind::None,
+            | Opcode::Trap => OperandKind::None,
             _ => OperandKind::Id,
         }
     }
@@ -731,7 +731,7 @@ impl Opcode {
     /// Every opcode, in discriminant order — `ALL[op as usize] == op` (asserted in tests),
     /// which is what makes the decode below a single indexed load.
     pub const ALL: [Opcode; 26] = [
-        Opcode::Constant,
+        Opcode::Push,
         Opcode::Pop,
         Opcode::Pick,
         Opcode::Rotate,
@@ -739,24 +739,24 @@ impl Opcode {
         Opcode::Reset,
         Opcode::Load,
         Opcode::Store,
-        Opcode::Tuple,
+        Opcode::Build,
         Opcode::GetPositional,
         Opcode::GetNamed,
-        Opcode::IsType,
+        Opcode::TestType,
         Opcode::Jump,
         Opcode::JumpIf,
         Opcode::JumpUnless,
         Opcode::Call,
         Opcode::TailCall,
         Opcode::Recurse,
-        Opcode::Function,
-        Opcode::Equal,
+        Opcode::Enclose,
+        Opcode::TestEqual,
         Opcode::Annotate,
         Opcode::GetAnnotation,
         Opcode::Stamp,
         Opcode::Select,
-        Opcode::Process,
-        Opcode::Reclaimed,
+        Opcode::Refer,
+        Opcode::Trap,
     ];
 }
 
@@ -839,8 +839,8 @@ impl Instruction {
     }
 
     /// Push the constant at this index.
-    pub fn constant(constant_id: usize) -> Instruction {
-        Instruction::with_id(Opcode::Constant, constant_id)
+    pub fn push(constant_id: usize) -> Instruction {
+        Instruction::with_id(Opcode::Push, constant_id)
     }
 
     /// Discard the top of the stack.
@@ -881,9 +881,9 @@ impl Instruction {
 
     /// Pop this tuple type's arity worth of fields (the topmost is its last field) and
     /// push the tuple. Nil and `Ok` are tuples 0 and 1 ([`crate::types::NIL`] and
-    /// [`crate::types::OK`]) in every program, so `Tuple(0)` builds nil.
-    pub fn tuple(tuple_id: usize) -> Instruction {
-        Instruction::with_id(Opcode::Tuple, tuple_id)
+    /// [`crate::types::OK`]) in every program, so `Build(0)` builds nil.
+    pub fn build(tuple_id: usize) -> Instruction {
+        Instruction::with_id(Opcode::Build, tuple_id)
     }
 
     /// Pop a tuple; push the field at this position. Emitted where the static type pins
@@ -900,8 +900,8 @@ impl Instruction {
     }
 
     /// Pop a value; push `Ok` if it inhabits this type, nil otherwise.
-    pub fn is_type(type_id: usize) -> Instruction {
-        Instruction::with_id(Opcode::IsType, type_id)
+    pub fn test_type(type_id: usize) -> Instruction {
+        Instruction::with_id(Opcode::TestType, type_id)
     }
 
     /// Jump unconditionally.
@@ -939,15 +939,15 @@ impl Instruction {
     }
 
     /// Pop this function's captures; push the closure.
-    pub fn function(function_id: usize) -> Instruction {
-        Instruction::with_id(Opcode::Function, function_id)
+    pub fn enclose(function_id: usize) -> Instruction {
+        Instruction::with_id(Opcode::Enclose, function_id)
     }
 
     /// Pop two values; push `Ok` if they are structurally equal, nil otherwise. The
     /// result is a truth flag rather than the compared value, so equal nils stay
     /// distinguishable from a failed comparison.
-    pub fn equal() -> Instruction {
-        Instruction::bare(Opcode::Equal)
+    pub fn test_equal() -> Instruction {
+        Instruction::bare(Opcode::TestEqual)
     }
 
     /// Pop an annotation value, then a tuple/function carrier; push the carrier with the
@@ -979,8 +979,8 @@ impl Instruction {
     /// function index. REPL-only: it is how a session names a pid it has already seen
     /// (`@1`). The id arrives as an ordinary constant rather than a second operand, so it
     /// rides the constants table that linking already remaps.
-    pub fn process(function_id: usize) -> Instruction {
-        Instruction::with_id(Opcode::Process, function_id)
+    pub fn refer(function_id: usize) -> Instruction {
+        Instruction::with_id(Opcode::Refer, function_id)
     }
 
     /// A point execution never reaches, which aborts the process loudly if it does rather than
@@ -988,8 +988,8 @@ impl Instruction {
     /// could call it; written into stubbed slots by `Program::reclaim_code`), the point after
     /// a call that never returns (`__panic__`), which marks the flow as ending there, or the
     /// failure path of a pattern whose types say it cannot fail.
-    pub fn reclaimed() -> Instruction {
-        Instruction::bare(Opcode::Reclaimed)
+    pub fn trap() -> Instruction {
+        Instruction::bare(Opcode::Trap)
     }
 
     /// Keep the top of the stack and drop the `count` values beneath it — unlike

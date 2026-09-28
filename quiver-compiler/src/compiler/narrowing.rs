@@ -1279,7 +1279,7 @@ pub fn get_field_narrowing(
 ///
 /// A branch's complement refines a wrapped union member's *field types* (`Ev['w]`
 /// minus `Ev[A]` is `Ev[B | C]`), but a runtime value's tuple id still carries the
-/// declared field type (`Ev['w]`), and the id-level `IsType` test computed from the
+/// declared field type (`Ev['w]`), and the id-level `TestType` test computed from the
 /// narrowed member would wrongly reject it — a later sibling pattern then misses
 /// values it must match (the field sub-checks, which do the real member
 /// discrimination, never run). The discriminator's job is only to separate this

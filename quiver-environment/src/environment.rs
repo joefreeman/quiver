@@ -2141,7 +2141,7 @@ impl<E: Effect> Environment<E> {
                 self.answer_registry(caller, verdict)
             }
             RegistryRequest::Lookup { key, expected_type } => {
-                // The type test is the same set-membership check `IsType` performs on
+                // The type test is the same set-membership check `TestType` performs on
                 // a worker: the builtin's type argument seeded a compatibility row,
                 // and the pid's root function is its concrete discriminator. The
                 // variance rules (send contravariant, result covariant, state

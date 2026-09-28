@@ -101,7 +101,7 @@ pub fn compile_entry(
         entry_instructions.push(Instruction::pick(0));
         entry_instructions.push(Instruction::jump_unless(3));
     }
-    entry_instructions.push(Instruction::tuple(quiver_core::types::NIL));
+    entry_instructions.push(Instruction::build(quiver_core::types::NIL));
     entry_instructions.push(Instruction::rotate(2));
     entry_instructions.push(Instruction::call());
 

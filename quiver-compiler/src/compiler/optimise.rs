@@ -198,7 +198,7 @@ fn remove_unreachable(ops: &mut Vec<Op>) -> bool {
             Opcode::JumpIf | Opcode::JumpUnless => {
                 work.extend([index + 1].into_iter().chain(op.target))
             }
-            Opcode::TailCall | Opcode::Recurse | Opcode::Reclaimed => {}
+            Opcode::TailCall | Opcode::Recurse | Opcode::Trap => {}
             _ => work.push(index + 1),
         }
     }
@@ -380,7 +380,7 @@ fn trace_dead_value(
         // The instruction produced the value.
         dead.producers.push(index);
         // A field-less tuple (nil, `Ok`, a bare name) is built from nothing.
-        if pushes_purely(opcode) || (opcode == Opcode::Tuple && pops == 0) {
+        if pushes_purely(opcode) || (opcode == Opcode::Build && pops == 0) {
             return Some(dead);
         }
         if !transforms_purely(opcode) {
@@ -392,14 +392,14 @@ fn trace_dead_value(
 
 /// Opcodes that push one value, read nothing beneath it, and have no other effect.
 fn pushes_purely(opcode: Opcode) -> bool {
-    matches!(opcode, Opcode::Constant | Opcode::Load | Opcode::Pick)
+    matches!(opcode, Opcode::Push | Opcode::Load | Opcode::Pick)
 }
 
 /// Opcodes that replace the top value with one computed from it, with no other effect.
 fn transforms_purely(opcode: Opcode) -> bool {
     matches!(
         opcode,
-        Opcode::GetPositional | Opcode::GetNamed | Opcode::IsType | Opcode::GetAnnotation
+        Opcode::GetPositional | Opcode::GetNamed | Opcode::TestType | Opcode::GetAnnotation
     )
 }
 
@@ -430,12 +430,12 @@ mod tests {
     fn cascades_through_transforms() {
         assert_eq!(
             run(vec![
-                Instruction::tuple(NIL),
+                Instruction::build(NIL),
                 Instruction::load(0),
                 Instruction::get_positional(1),
                 Instruction::pop(),
             ]),
-            vec![Instruction::tuple(NIL)]
+            vec![Instruction::build(NIL)]
         );
     }
 
@@ -469,15 +469,15 @@ mod tests {
                 Instruction::load(1),
                 Instruction::load(0),
                 Instruction::pick(1),
-                Instruction::constant(0),
-                Instruction::equal(),
+                Instruction::push(0),
+                Instruction::test_equal(),
                 Instruction::drop(1),
             ]),
             vec![
                 Instruction::load(1),
                 Instruction::pick(0),
-                Instruction::constant(0),
-                Instruction::equal(),
+                Instruction::push(0),
+                Instruction::test_equal(),
             ]
         );
     }
@@ -509,16 +509,16 @@ mod tests {
             run(vec![
                 Instruction::load(0),
                 Instruction::jump_if(2), // → 4, itself a jump → 6
-                Instruction::tuple(NIL),
+                Instruction::build(NIL),
                 Instruction::jump(2),    // → 6
                 Instruction::jump(1),    // → 6, unreachable once the first is threaded
-                Instruction::tuple(NIL), // unreachable
+                Instruction::build(NIL), // unreachable
                 Instruction::load(1),
             ]),
             vec![
                 Instruction::load(0),
                 Instruction::jump_if(1),
-                Instruction::tuple(NIL),
+                Instruction::build(NIL),
                 Instruction::load(1),
             ]
         );

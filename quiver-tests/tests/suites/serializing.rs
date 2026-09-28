@@ -5,7 +5,7 @@
 //! What this holds still is the *delta* path for program updates: a serializing worker
 //! is sent `TableUpdate::Appended` registries and `CompatibilityUpdate::Delta` derived
 //! tables, and must arrive at the same state a shared-memory worker gets by handle.
-//! The scenario leans on each derived table: `IsType` on late-defined patterns
+//! The scenario leans on each derived table: `TestType` on late-defined patterns
 //! (type_compatibility), field access on late-defined tuples (field_offsets), structural
 //! equality across separately built tuples (canonical_tuples), and messages into
 //! closures (parameter tables).
@@ -127,7 +127,7 @@ fn a_serializing_worker_reaches_the_same_state_as_a_shared_one() {
         // rows past the seeded state.
         ("p = Point[x: 3, y: 4]", None),
         ("p.y", Some("Int(4)")),
-        // IsType on a pattern first named here: a type_compatibility row written
+        // `TestType` on a pattern first named here: a type_compatibility row written
         // below the table's tail.
         (
             "p ~> { =Point[x: a, y: b] => %num.add [a, b] | -1 }",

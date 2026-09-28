@@ -115,7 +115,7 @@ impl InstructionBuilder {
 }
 
 /// How an instruction changes the operand stack's depth, or `None` for one that ends the
-/// function's flow here (a tail call, a self-recursion, a reclaimed trap).
+/// function's flow here (a tail call, a self-recursion, a trap).
 fn stack_effect(instruction: Instruction, program: &Program) -> Result<Option<isize>, String> {
     if crate::verify::ends_flow(instruction.opcode()) {
         return Ok(None);

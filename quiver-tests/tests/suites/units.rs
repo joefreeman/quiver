@@ -589,7 +589,7 @@ fn a_constant_literal_folds_to_one_constant() {
     let compiled = compile("[1, 2]", false);
     let opcodes = opcodes(&compiled);
     assert!(
-        !opcodes.contains(&quiver_core::bytecode::Opcode::Tuple),
+        !opcodes.contains(&quiver_core::bytecode::Opcode::Build),
         "a constant literal must not build a tuple: {opcodes:?}"
     );
 }
@@ -601,7 +601,7 @@ fn folding_is_bottom_up_through_a_dynamic_parent() {
     // its static parts. The inner `[1, 2]` is in the table; the outer is not.
     let compiled = compile("x = 5; [[1, 2], x]", false);
     assert!(
-        opcodes(&compiled).contains(&quiver_core::bytecode::Opcode::Tuple),
+        opcodes(&compiled).contains(&quiver_core::bytecode::Opcode::Build),
         "the outer literal reads a binding, so it is built"
     );
     let inner_arity = compiled
@@ -622,7 +622,7 @@ fn a_literal_reading_the_flowing_value_does_not_fold() {
     // refuses, which is the case that makes folding by instruction *shape* unsound.
     let compiled = compile("0 ~> [~, 1]", false);
     assert!(
-        opcodes(&compiled).contains(&quiver_core::bytecode::Opcode::Tuple),
+        opcodes(&compiled).contains(&quiver_core::bytecode::Opcode::Build),
         "a literal over the flowing value must still be built"
     );
 }

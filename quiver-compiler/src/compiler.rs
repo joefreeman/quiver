@@ -1731,7 +1731,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             };
             // The annotation value is a chain with nil input (it may draw on lexical scope,
             // but there is no meaningful flowing value at attach time).
-            self.codegen.add_instruction(Instruction::tuple(NIL));
+            self.codegen.add_instruction(Instruction::build(NIL));
             let closed_nil = annotations::closed_nil(self.program);
             let value_type = self
                 .compile_chain_with_input(
@@ -1919,14 +1919,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         match literal {
             ast::Literal::Integer(integer) => {
                 let index = self.program.register_constant(Constant::Integer(integer));
-                self.codegen.add_instruction(Instruction::constant(index));
+                self.codegen.add_instruction(Instruction::push(index));
                 Ok(self.program.register_type(Type::Integer))
             }
             ast::Literal::Binary(binary) => {
                 let index = self
                     .program
                     .register_constant(Constant::Binary(binary.bytes().to_vec()));
-                self.codegen.add_instruction(Instruction::constant(index));
+                self.codegen.add_instruction(Instruction::push(index));
                 Ok(self.program.register_type(Type::Binary))
             }
         }
@@ -2175,7 +2175,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         // Register the tuple type and emit instruction
         let tuple_id = self.program.register_tuple(tuple_name, field_types);
-        self.codegen.add_instruction(Instruction::tuple(tuple_id));
+        self.codegen.add_instruction(Instruction::build(tuple_id));
 
         // A literal that turns out to be data folds into the single constant that names it,
         // so evaluating it costs a refcount bump rather than a payload allocation per field.
@@ -2189,8 +2189,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let range = &self.codegen.instructions[build_start..];
             if let Some(constant) = folding::constant_of_range(self.program, range) {
                 self.codegen.instructions.truncate(build_start);
-                self.codegen
-                    .add_instruction(Instruction::constant(constant));
+                self.codegen.add_instruction(Instruction::push(constant));
             }
         }
 
@@ -3041,7 +3040,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // A function body's annotation prefix attaches to the *closure*, not the body's
         // result: extract it before capture collection (the annotation chains evaluate in
         // the enclosing scope at literal-evaluation time, so they contribute no captures)
-        // and compile it after the Function instruction below.
+        // and compile it after the `Enclose` instruction below.
         let function_annotations = match &mut function.body {
             Some(body) => std::mem::take(&mut body.annotations),
             None => vec![],
@@ -3561,7 +3560,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.current_omittable = saved_omittable;
 
         // Emit instructions to push capture values onto the stack
-        // These will be popped by the Function instruction
+        // These will be popped by the `Enclose` instruction
         for capture in &unique_captures {
             match &capture.source {
                 variables::CaptureSource::OuterParameter(levels) => {
@@ -3625,7 +3624,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
 
         self.codegen
-            .add_instruction(Instruction::function(function_index));
+            .add_instruction(Instruction::enclose(function_index));
 
         // Attach the literal's annotations to the freshly built closure. Evaluated here —
         // in the enclosing scope, once per literal evaluation — so `pre`/`post` contract
@@ -3673,7 +3672,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .is_some()
             .then(|| self.codegen.emit_duplicate_jump_if_nil());
         self.codegen.add_instruction(Instruction::pop());
-        self.codegen.add_instruction(Instruction::tuple(NIL));
+        self.codegen.add_instruction(Instruction::build(NIL));
         if let Some(addr) = carry_jump {
             self.codegen.patch_jump_to_here(addr);
         }
@@ -3943,7 +3942,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             if irrefutable {
                 // The types say some binding set matches, so the failure path is unreachable.
                 // Trap there rather than carry on as if a set had matched and bound its names.
-                self.codegen.add_instruction(Instruction::reclaimed());
+                self.codegen.add_instruction(Instruction::trap());
             } else {
                 let carried_nil = self.emit_match_failure(value_type);
                 self.emit_unwind(gating);
@@ -4529,7 +4528,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.codegen.add_instruction(Instruction::pick(2)); // arg_c
             self.codegen.add_instruction(Instruction::pick(1)); // result
             self.codegen
-                .add_instruction(Instruction::tuple(in_out_tuple));
+                .add_instruction(Instruction::build(in_out_tuple));
             self.codegen.add_instruction(Instruction::pick(2)); // post_fn
             self.codegen.add_instruction(Instruction::call());
             self.emit_contract_verdict("Postcondition")?;
@@ -4559,16 +4558,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let index = self
             .program
             .register_constant(Constant::Binary(message.as_bytes().to_vec()));
-        self.codegen.add_instruction(Instruction::constant(index));
+        self.codegen.add_instruction(Instruction::push(index));
         let binary_type = self.program.register_type(Type::Binary);
         let str_tuple = self
             .program
             .register_tuple(Some("Str".to_string()), vec![(None, binary_type)]);
-        self.codegen.add_instruction(Instruction::tuple(str_tuple));
+        self.codegen.add_instruction(Instruction::build(str_tuple));
         self.compile_builtin("panic", &[], true)?;
         self.codegen.add_instruction(Instruction::call());
         // The call never returns: say so, so that the flow visibly ends here.
-        self.codegen.add_instruction(Instruction::reclaimed());
+        self.codegen.add_instruction(Instruction::trap());
         Ok(())
     }
 
@@ -4661,7 +4660,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let index = self
                 .program
                 .register_constant(Constant::Binary(site.as_bytes().to_vec()));
-            self.codegen.add_instruction(Instruction::constant(index));
+            self.codegen.add_instruction(Instruction::push(index));
             self.compile_builtin("assertion_passed", &[], true)?;
             self.codegen.add_instruction(Instruction::call());
             self.codegen.add_instruction(Instruction::pop());
@@ -4726,7 +4725,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     type_definition.clone(),
                 )?;
             }
-            self.codegen.add_instruction(Instruction::tuple(NIL));
+            self.codegen.add_instruction(Instruction::build(NIL));
             return Ok(SequenceResult {
                 ty: self.program.register_type(Type::nil()),
                 provenance: Provenance::Unknown,
@@ -4964,12 +4963,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let mut constants: Vec<usize> = Vec::new();
         for instruction in instructions {
             match instruction.opcode() {
-                Opcode::Tuple => {
+                Opcode::Build => {
                     if let Some(error) = open_tuple(instruction.operand() as usize) {
                         return Err(error);
                     }
                 }
-                Opcode::Constant => constants.push(instruction.operand() as usize),
+                Opcode::Push => constants.push(instruction.operand() as usize),
                 _ => {}
             }
         }
@@ -5947,13 +5946,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Constant::Builtin { id: chain_builtin },
         ]);
         let mut instructions = vec![
-            Instruction::constant(constant),
-            Instruction::tuple(str_tuple),
-            Instruction::constant(constant + 1),
-            Instruction::constant(constant + 2),
-            Instruction::tuple(context_tuple),
+            Instruction::push(constant),
+            Instruction::build(str_tuple),
+            Instruction::push(constant + 1),
+            Instruction::push(constant + 2),
+            Instruction::build(context_tuple),
         ];
-        instructions.push(Instruction::constant(function_constant));
+        instructions.push(Instruction::push(function_constant));
         instructions.push(Instruction::call());
         bytecode.functions.push(quiver_core::bytecode::Function {
             instructions,
@@ -6177,7 +6176,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// once per worker, so the runtime graph keeps whatever sharing the value had.
     fn emit_value(&mut self, value: &Value) -> Result<usize, Error> {
         let index = self.intern_value(value)?;
-        self.codegen.add_instruction(Instruction::constant(index));
+        self.codegen.add_instruction(Instruction::push(index));
         self.value_type(value)
     }
 
@@ -6456,7 +6455,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let pair = self
             .program
             .register_tuple(None, vec![(None, fn_type_id), (None, arg_type)]);
-        self.codegen.add_instruction(Instruction::tuple(pair));
+        self.codegen.add_instruction(Instruction::build(pair));
         self.emit_builtin_call("process_spawn");
 
         Ok(self.program.register_type(Type::Process {
@@ -6999,7 +6998,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 if !applied {
                     self.drop_flowing_value(value_type);
                 }
-                self.codegen.add_instruction(Instruction::tuple(NIL));
+                self.codegen.add_instruction(Instruction::build(NIL));
                 self.emit_builtin_call("process_self");
                 // The send grant is the current function's receive type. There is no await
                 // grant, since a process can't know its own result, and no state grant either:
@@ -7058,7 +7057,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 if value_type.is_some() {
                     self.codegen.add_instruction(Instruction::pop());
                 }
-                self.codegen.add_instruction(Instruction::tuple(NIL));
+                self.codegen.add_instruction(Instruction::build(NIL));
                 return Ok(self.program.register_type(Type::nil()));
             }
             Some(sources) => sources,
@@ -7077,7 +7076,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let fields: Vec<(Option<String>, usize)> =
                 source_types.iter().map(|&t| (None, t)).collect();
             let tuple_id = self.program.register_tuple(None, fields);
-            self.codegen.add_instruction(Instruction::tuple(tuple_id));
+            self.codegen.add_instruction(Instruction::build(tuple_id));
         }
 
         // Emit Select instruction (handles both single value and tuple)
@@ -7228,7 +7227,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 id: str_tuple,
                 fields: vec![binary],
             });
-            self.codegen.add_instruction(Instruction::constant(string));
+            self.codegen.add_instruction(Instruction::push(string));
             // Discard the flowing value kept beneath the result, as the general path does.
             if value_type.is_some() {
                 self.codegen.add_instruction(Instruction::rotate(2));
@@ -7245,13 +7244,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if segments.is_empty() {
             // The empty string `""`: an empty binary, with nothing to concatenate.
             let empty = self.program.register_constant(Constant::Binary(Vec::new()));
-            self.codegen.add_instruction(Instruction::constant(empty));
+            self.codegen.add_instruction(Instruction::push(empty));
         }
         for (i, segment) in segments.into_iter().enumerate() {
             match segment {
                 ast::StrSegment::Text(bytes) => {
                     let index = self.program.register_constant(Constant::Binary(bytes));
-                    self.codegen.add_instruction(Instruction::constant(index));
+                    self.codegen.add_instruction(Instruction::push(index));
                 }
                 ast::StrSegment::Hole(block) => {
                     let (param_type, param_provenance) = match value_type {
@@ -7264,7 +7263,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             (vt, value_provenance.clone())
                         }
                         None => {
-                            self.codegen.add_instruction(Instruction::tuple(NIL));
+                            self.codegen.add_instruction(Instruction::build(NIL));
                             (self.program.register_type(Type::nil()), Provenance::Unknown)
                         }
                     };
@@ -7292,14 +7291,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
             // Fold left: once a second binary is on the stack, concatenate it onto the accumulator.
             if i > 0 {
-                self.codegen.add_instruction(Instruction::tuple(pair_tuple));
+                self.codegen.add_instruction(Instruction::build(pair_tuple));
                 // Push and apply the concat builtin, exactly as a `[a, b] __binary_concat__` call.
                 self.compile_builtin("binary_concat", &[], true)?;
                 self.codegen.add_instruction(Instruction::call());
             }
         }
         // Wrap the accumulated binary as `Str`.
-        self.codegen.add_instruction(Instruction::tuple(str_tuple));
+        self.codegen.add_instruction(Instruction::build(str_tuple));
         // Discard the flowing value kept beneath the result for `~` holes.
         if value_type.is_some() {
             self.codegen.add_instruction(Instruction::rotate(2));
@@ -7380,7 +7379,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let block_provenance = value_provenance.clone();
                 if value_type.is_none() {
                     // Blocks without a value need NIL on stack
-                    self.codegen.add_instruction(Instruction::tuple(NIL));
+                    self.codegen.add_instruction(Instruction::build(NIL));
                 }
                 let ty = self.compile_scoped_block(
                     block,
@@ -7636,10 +7635,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let id_constant = self
                     .program
                     .register_constant(Constant::Integer(process_id.into()));
+                self.codegen.add_instruction(Instruction::push(id_constant));
                 self.codegen
-                    .add_instruction(Instruction::constant(id_constant));
-                self.codegen
-                    .add_instruction(Instruction::process(function_index));
+                    .add_instruction(Instruction::refer(function_index));
 
                 Ok((process_type, Provenance::Unknown))
             }
@@ -7991,8 +7989,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let constant = self
             .program
             .register_constant(Constant::Builtin { id: builtin });
-        self.codegen
-            .add_instruction(Instruction::constant(constant));
+        self.codegen.add_instruction(Instruction::push(constant));
     }
 
     /// Call the named builtin with the argument on top of the stack — for syntax that types
@@ -8014,7 +8011,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.emit_builtin(forwarder.builtin);
         self.codegen.add_instruction(Instruction::call());
         for wrap in &forwarder.wraps {
-            self.codegen.add_instruction(Instruction::tuple(*wrap));
+            self.codegen.add_instruction(Instruction::build(*wrap));
         }
     }
 
@@ -8042,12 +8039,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let tail = &self.codegen.instructions;
         let len = tail.len();
         let juggled = len >= 3
-            && tail[len - 3].opcode() == Opcode::Tuple
+            && tail[len - 3].opcode() == Opcode::Build
             && tail[len - 2] == Instruction::rotate(2)
             && tail[len - 1] == Instruction::pop();
         let tuple_at = if juggled {
             len - 3
-        } else if len >= 1 && tail[len - 1].opcode() == Opcode::Tuple {
+        } else if len >= 1 && tail[len - 1].opcode() == Opcode::Build {
             len - 1
         } else {
             return false;
@@ -8077,10 +8074,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let elision::ArgSource::Constant(constant) = source else {
                 unreachable!("fusible_prefix admits only trailing constants");
             };
-            self.codegen
-                .add_instruction(Instruction::constant(*constant));
+            self.codegen.add_instruction(Instruction::push(*constant));
         }
-        self.codegen.add_instruction(Instruction::tuple(*tuple_id));
+        self.codegen.add_instruction(Instruction::build(*tuple_id));
         true
     }
 
@@ -8104,12 +8100,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         .add_instruction(Instruction::get_positional(*field));
                 }
                 elision::ArgSource::Constant(constant) => {
-                    self.codegen
-                        .add_instruction(Instruction::constant(*constant));
+                    self.codegen.add_instruction(Instruction::push(*constant));
                 }
             }
         }
-        self.codegen.add_instruction(Instruction::tuple(*tuple_id));
+        self.codegen.add_instruction(Instruction::build(*tuple_id));
         self.codegen.add_instruction(Instruction::rotate(2));
         self.codegen.add_instruction(Instruction::pop());
     }
@@ -8414,7 +8409,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // Push nil onto stack for tail call
                 let nil_tuple_id = self.program.register_tuple(None, vec![]);
                 self.codegen
-                    .add_instruction(Instruction::tuple(nil_tuple_id));
+                    .add_instruction(Instruction::build(nil_tuple_id));
                 self.program.register_type(Type::nil())
             } else {
                 return Err(Error::FeatureUnsupported(
@@ -8533,7 +8528,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 let nil_tuple_id = self.program.register_tuple(None, vec![]);
                 self.codegen
-                    .add_instruction(Instruction::tuple(nil_tuple_id));
+                    .add_instruction(Instruction::build(nil_tuple_id));
             }
         }
 
@@ -8761,10 +8756,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // it for nil.
                 if let Some(type_id) = check {
                     self.codegen.add_instruction(Instruction::pick(0));
-                    self.codegen.add_instruction(Instruction::is_type(type_id));
+                    self.codegen
+                        .add_instruction(Instruction::test_type(type_id));
                     let fits = self.codegen.emit_jump_if_placeholder();
                     self.codegen.add_instruction(Instruction::pop());
-                    self.codegen.add_instruction(Instruction::tuple(NIL));
+                    self.codegen.add_instruction(Instruction::build(NIL));
                     self.codegen.patch_jump_to_here(fits);
                 }
                 last_type = result_type;
