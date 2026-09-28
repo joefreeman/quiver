@@ -3,8 +3,8 @@
 is_continuation = #['bin, 'int] { $0 ~> %bin.get_byte [~, $1] ~> %int.and [~, 192] ~> =128 }
 
 skip_continuation = #[(data): 'bin, (byte_pos): 'int, (data_len): 'int] {
-  | $byte_pos ~> %num.ge? [~, $data_len] => $byte_pos
-  | is_continuation [$data, $byte_pos] => $byte_pos ~> %num.add [~, 1] ~> ^ [$data, ~, $data_len]
+  | __integer_compare__ [$byte_pos, $data_len] ~> =(0 | 1) => $byte_pos
+  | is_continuation [$data, $byte_pos] => __integer_add__ [$byte_pos, 1] ~> ^ [$data, ~, $data_len]
   | $byte_pos
 }
 
@@ -20,31 +20,170 @@ find_index = #[(haystack): 'bin, (needle): 'bin, (offset): 'int, (end): 'int] {
     | %bin.length needle ~> =0 => $offset
     | %bin.index [$haystack, %bin.get_byte [needle, 0], $offset]
       ~> =('int & pos)
-      %num.le? [pos, $end] => {
+      __integer_compare__ [pos, $end] ~> =(-1 | 0) => {
         | %bin.length needle
-          ~> %num.add [pos, ~]
+          ~> __integer_add__ [pos, ~]
           ~> %bin.slice [$haystack, pos, ~]
           ~> =^needle => pos
-        | %num.add [pos, 1] ~> ^ [$haystack, needle, ~, $end]
+        | __integer_add__ [pos, 1] ~> ^ [$haystack, needle, ~, $end]
       }
     | []
   }
 }
 
-// Convert byte position to character index by counting non-continuation bytes from start
-byte_pos_to_char_idx = #[(data): 'bin, (current_pos): 'int, (target_pos): 'int, (char_idx): 'int] {
-  | %num.ge? [$current_pos, $target_pos] => $char_idx
-  | is_continuation [$data, $current_pos] => $current_pos ~> %num.add [~, 1] ~> ^ [
-      $data,
-      ~,
-      $target_pos,
-      $char_idx,
-    ]
-  | {
-    // Start of character - count it
-    new_char_idx = %num.add [$char_idx, 1]
+// The byte index at or before `pos` where `needle`, whose first byte is `first`, occurs, or
+// nil. The scan runs back from the end, since what is searched for last usually lies near it.
+last_find_from = #[(haystack): 'bin, (needle): 'bin, (first): 'int, (pos): 'int] {
+  | __integer_compare__ [$pos, 0] ~> =-1 => []
+  | %bin.get_byte [$haystack, $pos] ~> =^$first
+    %bin.length $needle
+    ~> __integer_add__ [$pos, ~]
+    ~> %bin.slice [$haystack, $pos, ~]
+    ~> =^$needle => $pos
+  | ^ [$haystack, $needle, $first, __integer_subtract__ [$pos, 1]]
+}
 
-    $current_pos ~> %num.add [~, 1] ~> ^ [$data, ~, $target_pos, new_char_idx]
+// The byte index of the last occurrence of `needle`, or nil. An empty needle occurs last at
+// the very end.
+last_find_index = #[(haystack): 'bin, (needle): 'bin] {
+  | %bin.length $needle ~> =0 => %bin.length $haystack
+  | __integer_subtract__ [%bin.length $haystack, %bin.length $needle] ~> last_find_from [
+    $haystack,
+    $needle,
+    %bin.get_byte [$needle, 0],
+    ~,
+  ]
+}
+
+// The number of UTF-8 characters in a binary, counted without decoding: a character is
+// every byte but a continuation byte (`10xxxxxx`). Shifting the whole binary left one bit
+// lines each byte's second bit up under its first, so `b & ~(b << 1)` has its top bit set
+// on exactly the continuation bytes, and masking to top bits leaves one set bit per byte.
+char_count = #'bin {
+  n = %bin.length $
+
+  %bin.shift [$, 1]
+  ~> %bin.not
+  ~> %bin.and [$, ~]
+  ~> %bin.and [~, %bin.repeat [<80>, n]]
+  ~> %bin.popcount
+  ~> __integer_subtract__ [n, ~]
+}
+
+// Whether every byte is ASCII, where a byte index is also a character index.
+ascii? = #'bin { %bin.and [$, %bin.repeat [<80>, %bin.length $]] ~> %bin.popcount ~> =0 }
+
+// ASCII whitespace: space, tab, line feed, vertical tab, form feed and carriage return.
+space? = #'int { =(32 | 9 | 10 | 11 | 12 | 13) }
+
+// The first byte index at or after `pos`, and before `end`, that is not whitespace.
+skip_space = #[(data): 'bin, (pos): 'int, (end): 'int] {
+  | __integer_compare__ [$pos, $end] ~> =-1
+    %bin.get_byte [$data, $pos] ~> space? => ^ [
+      $data,
+      __integer_add__ [$pos, 1],
+      $end,
+    ]
+  | $pos
+}
+
+// The byte index just past the last non-whitespace byte before `end`, and at or after `pos`.
+skip_space_back = #[(data): 'bin, (pos): 'int, (end): 'int] {
+  | __integer_compare__ [$pos, $end] ~> =-1
+    __integer_subtract__ [$end, 1] ~> %bin.get_byte [$data, ~] ~> space? => ^ [
+      $data,
+      $pos,
+      __integer_subtract__ [$end, 1],
+    ]
+  | $end
+}
+
+split = #[(str): ', (sep): '] {
+  :doc "Splits a string on a non-empty delimiter, yielding an iterator of the pieces."
+  Str[haystack] = $str
+  Str[delim] = $sep ~> {
+    | =Str[<>] => __panic__ "Cannot split on an empty separator"
+    | ~
+  }
+  haystack_len = %bin.length haystack
+  delim_len = %bin.length delim
+  end = __integer_subtract__ [haystack_len, delim_len]
+  %iter.unfold [
+    0,
+    #'int {
+      =start
+      {
+        | __integer_compare__ [start, haystack_len] ~> =1 => []
+        | find_index [haystack, delim, start, end] ~> =('int & index) => [
+            haystack ~> %bin.slice [~, start, index] ~> Str[~],
+            __integer_add__ [index, delim_len],
+          ]
+        | [
+          haystack ~> %bin.slice [~, start, haystack_len] ~> Str[~],
+          __integer_add__ [haystack_len, 1],
+        ]
+      }
+    },
+  ]
+}
+
+join = #[(strs): '%iter<'>, (sep): '] {
+  :doc "Joins an iterator of strings with a separator between each."
+  Str[sep] = $sep
+
+  $strs
+  ~> %iter.map [~, #' { .0 }]
+  ~> %iter.intersperse [~, sep]
+  ~> %iter.fold [~, <>, %bin.concat]
+  ~> Str[~]
+}
+
+// `acc` followed by `data` from byte `start`, with every occurrence of `from` replaced by `to`.
+replace_from = #[(data): 'bin, (from): 'bin, (to): 'bin, (start): 'int, (acc): 'bin] {
+  data_len = %bin.length $data
+  from_len = %bin.length $from
+  {
+    | __integer_subtract__ [data_len, from_len]
+      ~> find_index [$data, $from, $start, ~]
+      ~> =('int & index) => ^ [
+        $data,
+        $from,
+        $to,
+        __integer_add__ [index, from_len],
+        %bin.slice [$data, $start, index] ~> %bin.concat [$acc, ~] ~> %bin.concat [~, $to],
+      ]
+    | %bin.slice [$data, $start, data_len] ~> %bin.concat [$acc, ~]
+  }
+}
+
+// The fill bytes that pad a string to a width in characters: none when it is already as
+// wide, and the fill repeated over the shortfall otherwise.
+pad = #[(str): ', (width): 'int, (fill): '] {
+  Str[fill] = $fill
+  {
+    // One byte is one character, which spares counting the usual ASCII fill.
+    | %bin.length fill ~> =1
+    | char_count fill ~> =1
+    | __panic__ "Padding must be a single character"
+  }
+  __integer_subtract__ [$width, char_count $str.0] ~> {
+    | %num.gt? [~, 0]; ~ => %bin.repeat [fill, ~]
+    | <>
+  }
+}
+
+// `acc` followed by `data` from byte `pos`, with each byte from `lo` to `hi` (inclusive)
+// moved by `by` — the one range of ASCII letters that a case mapping changes.
+map_case = #[(data): 'bin, (pos): 'int, (acc): 'bin, (lo): 'int, (hi): 'int, (by): 'int] {
+  | __integer_compare__ [$pos, %bin.length $data] ~> =(0 | 1) => $acc
+  | {
+    b = %bin.get_byte [$data, $pos]
+    mapped = {
+      | __integer_compare__ [b, $lo] ~> =(0 | 1)
+        __integer_compare__ [b, $hi] ~> =(-1 | 0) => __integer_add__ [b, $by]
+      | b
+    }
+    ^ [$data, __integer_add__ [$pos, 1], %bin.append [$acc, mapped, 1], $lo, $hi, $by]
   }
 }
 
@@ -53,29 +192,90 @@ byte_pos_to_char_idx = #[(data): 'bin, (current_pos): 'int, (target_pos): 'int, 
 // Straight-line per width rather than a fold: this runs once per character of every scan.
 decode_char = #[(enc): 'int, (width): 'int] {
   | $width ~> =1 => $enc
-  | $width ~> =2 => %int.shift [$enc, -8] ~> %int.and [~, 31] ~> %num.mul [~, 64] ~> %num.add [
+  | $width ~> =2 => {
+    %int.shift [$enc, -8]
+    ~> %int.and [~, 31]
+    ~> __integer_multiply__ [~, 64]
+    ~> __integer_add__ [
       ~,
       %int.and [$enc, 63],
     ]
+  }
   | $width ~> =3 => {
     %int.shift [$enc, -16]
     ~> %int.and [~, 15]
-    ~> %num.mul [~, 4096]
-    ~> %num.add [~, %int.shift [$enc, -8] ~> %int.and [~, 63] ~> %num.mul [~, 64]]
-    ~> %num.add [~, %int.and [$enc, 63]]
+    ~> __integer_multiply__ [~, 4096]
+    ~> __integer_add__ [
+      ~,
+      %int.shift [$enc, -8] ~> %int.and [~, 63] ~> __integer_multiply__ [~, 64],
+    ]
+    ~> __integer_add__ [~, %int.and [$enc, 63]]
   }
   | {
     %int.shift [$enc, -24]
     ~> %int.and [~, 7]
-    ~> %num.mul [~, 262144]
-    ~> %num.add [~, %int.shift [$enc, -16] ~> %int.and [~, 63] ~> %num.mul [~, 4096]]
-    ~> %num.add [~, %int.shift [$enc, -8] ~> %int.and [~, 63] ~> %num.mul [~, 64]]
-    ~> %num.add [~, %int.and [$enc, 63]]
+    ~> __integer_multiply__ [~, 262144]
+    ~> __integer_add__ [
+      ~,
+      %int.shift [$enc, -16] ~> %int.and [~, 63] ~> __integer_multiply__ [~, 4096],
+    ]
+    ~> __integer_add__ [
+      ~,
+      %int.shift [$enc, -8] ~> %int.and [~, 63] ~> __integer_multiply__ [~, 64],
+    ]
+    ~> __integer_add__ [~, %int.and [$enc, 63]]
   }
 }
 
-// Iterator over the Unicode codepoints (as ints) of a binary. The state is the
-// byte position; each step skips any continuation bytes, then decodes the char.
+// The width in bytes that a UTF-8 lead byte announces, or 0 for a byte that never leads (a
+// continuation byte, an overlong 2-byte lead `C0`/`C1`, or `F5`–`FF`).
+lead_width = #'int {
+  | __integer_compare__ [$, 128] ~> =-1 => 1
+  | __integer_compare__ [$, 194] ~> =-1 => 0
+  | __integer_compare__ [$, 224] ~> =-1 => 2
+  | __integer_compare__ [$, 240] ~> =-1 => 3
+  | __integer_compare__ [$, 245] ~> =-1 => 4
+  | 0
+}
+
+// Whether a decoded codepoint is what its width may encode: not overlong, not a UTF-16
+// surrogate, and not past U+10FFFF. Two-byte overlongs are ruled out by their lead bytes.
+well_formed? = #[(char): 'int, (width): 'int] {
+  | $width ~> =(1 | 2) => Ok
+  | $width ~> =3 => {
+    __integer_compare__ [$char, 2048] ~> =(0 | 1)
+    {
+      | __integer_compare__ [$char, 55296] ~> =-1
+      | __integer_compare__ [$char, 57343] ~> =1
+    }
+  }
+  | {
+    __integer_compare__ [$char, 65536] ~> =(0 | 1)
+    __integer_compare__ [$char, 1114111] ~> =(-1 | 0)
+  }
+}
+
+// The codepoint of the character spanning bytes `pos` to `end`, or U+FFFD, the replacement
+// character, when those bytes are not one well-formed UTF-8 encoding.
+decode_at = #[(data): 'bin, (pos): 'int, (end): 'int] {
+  width = __integer_subtract__ [$end, $pos]
+  lead = %bin.get_byte [$data, $pos]
+  {
+    | width ~> =1; __integer_compare__ [lead, 128] ~> =-1 => lead
+    | lead_width lead ~> =^width
+      __integer_multiply__ [width, 8]
+      ~> __binary_get__ [$data, $pos, 0, ~]
+      ~> decode_char [~, width]
+      ~> =('int & char)
+      well_formed? [char, width] => char
+    | 65533
+  }
+}
+
+// Iterator over the codepoints (as ints) of a binary. A character is a byte that is not a
+// continuation byte (`10xxxxxx`) together with the continuation bytes after it, which is
+// what `char_count` counts, so the two agree on any bytes. The state is the byte position;
+// each step skips any continuation bytes with no lead before them, then decodes a character.
 chars = #'bin {
   =data
   data_len = %bin.length data
@@ -85,17 +285,26 @@ chars = #'bin {
       =byte_pos
       byte_pos = skip_continuation [data, byte_pos, data_len]
       {
-        | %num.ge? [byte_pos, data_len] => []
+        | __integer_compare__ [byte_pos, data_len] ~> =(0 | 1) => []
         | {
-          char_end = byte_pos ~> %num.add [~, 1] ~> skip_continuation [data, ~, data_len]
-
-          width = %num.sub [char_end, byte_pos]
-          enc = %num.mul [width, 8] ~> __binary_get__ [data, byte_pos, 0, ~]
-
-          [decode_char [enc, width], char_end]
+          char_end = byte_pos ~> __integer_add__ [~, 1] ~> skip_continuation [data, ~, data_len]
+          [decode_at [data, byte_pos, char_end], char_end]
         }
       }
     },
+  ]
+}
+
+// The byte offset `count` characters on from byte `pos`, or `len` when the text runs out
+// first.
+char_offset = #[(data): 'bin, (pos): 'int, (len): 'int, (count): 'int] {
+  | __integer_compare__ [$count, 0] ~> =(-1 | 0) => $pos
+  | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $len
+  | __integer_add__ [$pos, 1] ~> skip_continuation [$data, ~, $len] ~> ^ [
+    $data,
+    ~,
+    $len,
+    __integer_subtract__ [$count, 1],
   ]
 }
 
@@ -103,80 +312,157 @@ chars = #'bin {
 // leading ones then a zero in the lead byte, and `10` over each continuation byte's six bits.
 encode_char = #[(char): 'int, (width): 'int] {
   | $width ~> =1 => $char
-  | $width ~> =2 => %int.shift [$char, -6] ~> %num.add [192, ~] ~> %num.mul [~, 256] ~> %num.add [
+  | $width ~> =2 => {
+    %int.shift [$char, -6]
+    ~> __integer_add__ [192, ~]
+    ~> __integer_multiply__ [~, 256]
+    ~> __integer_add__ [
       ~,
-      %int.and [$char, 63] ~> %num.add [128, ~],
+      %int.and [$char, 63] ~> __integer_add__ [128, ~],
     ]
+  }
   | $width ~> =3 => {
     %int.shift [$char, -12]
-    ~> %num.add [224, ~]
-    ~> %num.mul [~, 65536]
-    ~> %num.add [
+    ~> __integer_add__ [224, ~]
+    ~> __integer_multiply__ [~, 65536]
+    ~> __integer_add__ [
       ~,
-      %int.shift [$char, -6] ~> %int.and [~, 63] ~> %num.add [128, ~] ~> %num.mul [~, 256],
+      %int.shift [$char, -6]
+      ~> %int.and [~, 63]
+      ~> __integer_add__ [128, ~]
+      ~> __integer_multiply__ [~, 256],
     ]
-    ~> %num.add [~, %int.and [$char, 63] ~> %num.add [128, ~]]
+    ~> __integer_add__ [~, %int.and [$char, 63] ~> __integer_add__ [128, ~]]
   }
   | {
     %int.shift [$char, -18]
-    ~> %num.add [240, ~]
-    ~> %num.mul [~, 16777216]
-    ~> %num.add [
+    ~> __integer_add__ [240, ~]
+    ~> __integer_multiply__ [~, 16777216]
+    ~> __integer_add__ [
       ~,
-      %int.shift [$char, -12] ~> %int.and [~, 63] ~> %num.add [128, ~] ~> %num.mul [~, 65536],
+      %int.shift [$char, -12]
+      ~> %int.and [~, 63]
+      ~> __integer_add__ [128, ~]
+      ~> __integer_multiply__ [~, 65536],
     ]
-    ~> %num.add [
+    ~> __integer_add__ [
       ~,
-      %int.shift [$char, -6] ~> %int.and [~, 63] ~> %num.add [128, ~] ~> %num.mul [~, 256],
+      %int.shift [$char, -6]
+      ~> %int.and [~, 63]
+      ~> __integer_add__ [128, ~]
+      ~> __integer_multiply__ [~, 256],
     ]
-    ~> %num.add [~, %int.and [$char, 63] ~> %num.add [128, ~]]
+    ~> __integer_add__ [~, %int.and [$char, 63] ~> __integer_add__ [128, ~]]
   }
 }
 
-// Reassemble a Str from an iterator of codepoints, encoding each as UTF-8.
+// A radix from 2 to 36, the bases whose digits `0`–`9` and `a`–`z` can spell.
+radix = #'int {
+  | __integer_compare__ [$, 2] ~> =(0 | 1)
+    __integer_compare__ [$, 36] ~> =(-1 | 0)
+    $
+  | __panic__ "Radix must be between 2 and 36"
+}
+
+// The value of a digit byte — `0`–`9`, then `a`–`z` or `A`–`Z` for 10 to 35 — or nil when it
+// is not a digit below the radix.
+digit_value = #[(byte): 'int, (radix): 'int] {
+  {
+    | __integer_compare__ [$byte, 48] ~> =(0 | 1)
+      __integer_compare__ [$byte, 57] ~> =(-1 | 0) => __integer_subtract__ [$byte, 48]
+    | __integer_compare__ [$byte, 97] ~> =(0 | 1)
+      __integer_compare__ [$byte, 122] ~> =(-1 | 0) => __integer_subtract__ [$byte, 87]
+    | __integer_compare__ [$byte, 65] ~> =(0 | 1)
+      __integer_compare__ [$byte, 90] ~> =(-1 | 0) => __integer_subtract__ [$byte, 55]
+  }
+  ~> =('int & value)
+
+  __integer_compare__ [value, $radix] ~> =-1
+  value
+}
+
+// The digits from byte `pos` on, accumulated onto `acc`: `[n: value, end: pos]`, where `end`
+// is the first byte that is not a digit. Zero or more.
+int_digits = #[(data): 'bin, (pos): 'int, (radix): 'int, (acc): 'int] {
+  | __integer_compare__ [$pos, %bin.length $data] ~> =-1
+    %bin.get_byte [$data, $pos] ~> digit_value [~, $radix] ~> =('int & d) => ^ [
+      $data,
+      __integer_add__ [$pos, 1],
+      $radix,
+      __integer_multiply__ [$acc, $radix] ~> __integer_add__ [~, d],
+    ]
+  | [n: $acc, end: $pos]
+}
+
+// The digit bytes of a positive integer, prepended (lowest digit first) onto acc. The raw
+// division builtins (rather than `%int.div`/`%int.mod`) keep this total: the radix is at
+// least 2, so the zero-divisor nil the stdlib wrappers add can never arise.
+int_bytes = #[(n): 'int, (radix): 'int, (acc): 'bin] {
+  | $n ~> =0 => $acc
+  | {
+    d = __integer_modulo__ [$n, $radix]
+    digit = {
+      | __integer_compare__ [d, 10] ~> =-1 => __integer_add__ [d, 48]
+      | __integer_add__ [d, 87]
+    }
+    ^ [__integer_divide__ [$n, $radix], $radix, %bin.append [<>, digit, 1] ~> %bin.concat [~, $acc]]
+  }
+}
+
+// An integer in a radix: a `-` for a negative one, then its digits.
+int_text = #[(n): 'int, (radix): 'int] {
+  | $n ~> =0 => "0"
+  | __integer_compare__ [$n, 0] ~> =-1 => {
+    __integer_subtract__ [0, $n]
+    ~> int_bytes [~, $radix, <>]
+    ~> %bin.concat [<2d>, ~]
+    ~> Str[~]
+  }
+  | int_bytes [$n, $radix, <>] ~> Str[~]
+}
+
+// An optionally signed run of digits in a radix, or nil unless the whole text is one.
+parse_digits = #[(str): ', (radix): 'int] {
+  Str[data] = $str
+  len = %bin.length data
+  start = {
+    | __integer_compare__ [len, 0] ~> =1; %bin.get_byte [data, 0] ~> =45; 1
+    | 0
+  }
+  __integer_compare__ [start, len] ~> =-1
+  int_digits [data, start, $radix, 0] ~> =(n, end)
+  end ~> =^len
+  {
+    | start ~> =1 => __integer_subtract__ [0, n]
+    | n
+  }
+}
+
+not_a_char = #'int { __panic__ "Not a Unicode code point: {int_text [$, 10]}" }
+
+// Reassemble a Str from an iterator of codepoints, encoding each as UTF-8. A number that is
+// not a codepoint (negative, a UTF-16 surrogate, or past U+10FFFF) is a mistake in the program.
 from_chars = #'%iter<'int> {
   %iter.fold [
     ~,
     <>,
     #['bin, 'int] {
       =[acc, char]
+      // The encoded width, found by the same comparisons that rule out non-codepoints.
       byte_count = char ~> {
-        | %num.le? [~, 127] => 1
-        | %num.le? [~, 2047] => 2
-        | %num.le? [~, 65535] => 3
-        | 4
+        | __integer_compare__ [~, 0] ~> =-1 => not_a_char char
+        | __integer_compare__ [~, 128] ~> =-1 => 1
+        | __integer_compare__ [~, 2048] ~> =-1 => 2
+        | __integer_compare__ [~, 55296] ~> =-1 => 3
+        | __integer_compare__ [~, 57344] ~> =-1 => not_a_char char
+        | __integer_compare__ [~, 65536] ~> =-1 => 3
+        | __integer_compare__ [~, 1114112] ~> =-1 => 4
+        | not_a_char char
       }
       %bin.append [acc, encode_char [char, byte_count], byte_count]
     },
   ]
   ~> Str[~]
-}
-
-// Decimal digits from byte pos, accumulating onto acc: [n: value, end: pos]. Zero or more.
-int_digits = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'int] {
-  | %num.lt? [$pos, $len]
-    %bin.get_byte [$data, $pos] ~> =('int & b)
-    %num.ge? [b, 48]
-    %num.le? [b, 57] => %num.add [%num.mul [$acc, 10], %num.sub [b, 48]] ~> ^ [
-      $data,
-      %num.add [$pos, 1],
-      $len,
-      ~,
-    ]
-  | [n: $acc, end: $pos]
-}
-
-// The decimal digit bytes of a positive integer, prepended (lowest digit first) onto acc.
-// The raw division builtins (rather than `%int.div`/`%int.mod`) keep this total: the divisor
-// is the constant 10, so the zero-divisor nil the stdlib wrappers add can never arise.
-int_bytes = #[(n): 'int, (acc): 'bin] {
-  | $n ~> =0 => $acc
-  | {
-    d = __integer_modulo__ [$n, 10]
-    q = __integer_divide__ [$n, 10]
-    digit = %bin.append [<>, %num.add [d, 48], 1]
-    ^ [q, %bin.concat [digit, $acc]]
-  }
 }
 
 [
@@ -185,27 +471,16 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
     .0
   },
 
-  parse_int: #' {
-    :doc "Parses a string as an optionally signed decimal integer; nil unless the whole string is one."
-    =Str[data]
-    len = %bin.length data
-    start = {
-      | %num.gt? [len, 0]; %bin.get_byte [data, 0] ~> =45; 1
-      | 0
-    }
-    %num.lt? [start, len]
-    int_digits [data, start, len, 0] ~> =(n, end)
-    end ~> =^len
-    { start ~> =1 => %num.sub [0, n] | n }
+  parse_int: #(' | [', radix: 'int]) {
+    :doc "Parses a string as an optionally signed integer — decimal, or in a radix from 2 to 36 given as `[str, radix: r]`, whose digits past 9 are letters of either case; nil unless the whole string is one."
+    | =[str, radix: r] => parse_digits [str, radix r]
+    | parse_digits [~, 10]
   },
 
-  from_int: #'int {
-    :doc "The decimal representation of an integer."
-    {
-      | $ ~> =0 => "0"
-      | %num.lt? [$, 0] => %num.sub [0, $] ~> int_bytes [~, <>] ~> %bin.concat [<2d>, ~] ~> Str[~]
-      | int_bytes [$, <>] ~> Str[~]
-    }
+  from_int: #('int | ['int, radix: 'int]) {
+    :doc "The representation of an integer — in decimal, or in a radix from 2 to 36 given as `[n, radix: r]`, with lowercase letters for digits past 9."
+    | =[n, radix: r] => int_text [n, radix r]
+    | int_text [~, 10]
   },
 
   empty?: #' {
@@ -260,42 +535,32 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
     }
   },
 
-  split: #[(str): ', (sep): '] {
-    :doc "Splits a string on a delimiter, yielding an iterator of the pieces."
-    Str[haystack] = $str
-    Str[delim] = $sep
-    haystack_len = %bin.length haystack
-    delim_len = %bin.length delim
-    end = %num.sub [haystack_len, delim_len]
-    %iter.unfold [
-      0,
-      #'int {
-        =start
-        {
-          | start ~> %num.gt? [~, haystack_len] => []
-          | find_index [haystack, delim, start, end] ~> =('int & index) => [
-              haystack ~> %bin.slice [~, start, index] ~> Str[~],
-              %num.add [index, delim_len],
-            ]
-          | [haystack ~> %bin.slice [~, start, haystack_len] ~> Str[~], %num.add [haystack_len, 1]]
-        }
-      },
-    ]
-  },
+  split: split,
 
   length: #' {
     :doc "The number of Unicode characters in a string."
-    .0 ~> chars ~> %iter.count
+    char_count $0
   },
 
   slice: #[(str): ', (start): 'int, (end): 'int] {
     :doc "The substring from start (inclusive) to end (exclusive), in character indices."
     Str[data] = $str
-
-    chars data
-    ~> %iter.drop [~, $start]
-    ~> %iter.take [~, %num.sub [$end, $start]]
-    ~> from_chars
+    start = { %num.gt? [$start, 0] => $start | 0 }
+    {
+      | ascii? data => {
+        len = %bin.length data
+        end = { %num.lt? [$end, len] => $end | len }
+        %bin.slice [data, { %num.lt? [start, end] => start | end }, end] ~> Str[~]
+      }
+      | {
+        // Cut at character boundaries, so the bytes between them are kept exactly as they
+        // are, well-formed or not.
+        len = %bin.length data
+        from = skip_continuation [data, 0, len] ~> char_offset [data, ~, len, start]
+        to = char_offset [data, from, len, %num.sub [$end, start]]
+        %bin.slice [data, from, to] ~> Str[~]
+      }
+    }
   },
 
   index_of: #[(str): ', (needle): '] {
@@ -317,9 +582,149 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
         ~> find_index [haystack, needle, 0, ~]
         ~> =('int & byte_pos)
 
-        byte_pos_to_char_idx [haystack, 0, byte_pos, 0]
+        %bin.slice [haystack, 0, byte_pos] ~> char_count
       }
     }
+  },
+
+  last_index_of: #[(str): ', (needle): '] {
+    :doc "The character index of the last occurrence of a substring, or nil when absent."
+    Str[haystack] = $str
+    Str[needle] = $needle
+    last_find_index [haystack, needle] ~> =('int & index)
+    %bin.slice [haystack, 0, index] ~> char_count
+  },
+
+  split_once: #[(str): ', (sep): '] {
+    :doc "Splits a string at the first occurrence of a separator, answering the pieces before and after it, or nil when absent."
+    Str[haystack] = $str
+    Str[delim] = $sep
+    haystack_len = %bin.length haystack
+
+    __integer_subtract__ [haystack_len, %bin.length delim]
+    ~> find_index [haystack, delim, 0, ~]
+    ~> =('int & index)
+
+    [
+      %bin.slice [haystack, 0, index] ~> Str[~],
+      __integer_add__ [index, %bin.length delim]
+      ~> %bin.slice [haystack, ~, haystack_len]
+      ~> Str[~],
+    ]
+  },
+
+  split_last: #[(str): ', (sep): '] {
+    :doc "Splits a string at the last occurrence of a separator, answering the pieces before and after it, or nil when absent."
+    Str[haystack] = $str
+    Str[delim] = $sep
+    last_find_index [haystack, delim] ~> =('int & index)
+    [
+      %bin.slice [haystack, 0, index] ~> Str[~],
+      __integer_add__ [index, %bin.length delim]
+      ~> %bin.slice [haystack, ~, %bin.length haystack]
+      ~> Str[~],
+    ]
+  },
+
+  lines: #' {
+    :doc "An iterator over a string's lines, split on line feeds, with a trailing carriage return dropped from each. A final line feed ends the last line rather than starting an empty one."
+    Str[data] = $
+    len = %bin.length data
+    %iter.unfold [
+      0,
+      #'int {
+        =start
+        __integer_compare__ [start, len] ~> =-1
+        end = { %bin.index [data, 10, start] | len }
+        line_end = {
+          | __integer_compare__ [start, end] ~> =-1
+            __integer_subtract__ [end, 1]
+            ~> %bin.get_byte [data, ~]
+            ~> =13 => __integer_subtract__ [end, 1]
+          | end
+        }
+        [%bin.slice [data, start, line_end] ~> Str[~], __integer_add__ [end, 1]]
+      },
+    ]
+  },
+
+  replace: #[(str): ', (from): ', (to): '] {
+    :doc "Replaces every occurrence of a non-empty substring, scanning left to right without overlap."
+    Str[data] = $str
+    Str[from] = $from ~> {
+      | =Str[<>] => __panic__ "Cannot replace an empty string"
+      | ~
+    }
+    replace_from [data, from, $to.0, 0, <>] ~> Str[~]
+  },
+
+  strip_prefix: #[(str): ', (prefix): '] {
+    :doc "The rest of a string after a prefix, or nil when it does not start with it."
+    Str[data] = $str
+    Str[prefix] = $prefix
+    len = %bin.length prefix
+    %num.le? [len, %bin.length data]
+    %bin.slice [data, 0, len] ~> =^prefix
+    %bin.slice [data, len, %bin.length data] ~> Str[~]
+  },
+
+  strip_suffix: #[(str): ', (suffix): '] {
+    :doc "The rest of a string before a suffix, or nil when it does not end with it."
+    Str[data] = $str
+    Str[suffix] = $suffix
+    cut = __integer_subtract__ [%bin.length data, %bin.length suffix]
+    %num.ge? [cut, 0]
+    %bin.slice [data, cut, %bin.length data] ~> =^suffix
+    %bin.slice [data, 0, cut] ~> Str[~]
+  },
+
+  trim: #' {
+    :doc "The string without leading or trailing ASCII whitespace."
+    Str[data] = $
+    start = skip_space [data, 0, %bin.length data]
+    end = skip_space_back [data, start, %bin.length data]
+    %bin.slice [data, start, end] ~> Str[~]
+  },
+
+  trim_start: #' {
+    :doc "The string without leading ASCII whitespace."
+    Str[data] = $
+    len = %bin.length data
+    skip_space [data, 0, len] ~> %bin.slice [data, ~, len] ~> Str[~]
+  },
+
+  trim_end: #' {
+    :doc "The string without trailing ASCII whitespace."
+    Str[data] = $
+
+    skip_space_back [data, 0, %bin.length data]
+    ~> %bin.slice [data, 0, ~]
+    ~> Str[~]
+  },
+
+  repeat: #[(str): ', (count): 'int] {
+    :doc "A string repeated the given number of times."
+    %bin.repeat [$str.0, $count] ~> Str[~]
+  },
+
+  pad_start: #[(str): ', (width): 'int, fill: ' = " "] {
+    :doc "The string padded at the start with a one-character fill (a space by default) to at least the given width in characters."
+    pad [$str, $width, $fill] ~> %bin.concat [~, $str.0] ~> Str[~]
+  },
+
+  pad_end: #[(str): ', (width): 'int, fill: ' = " "] {
+    :doc "The string padded at the end with a one-character fill (a space by default) to at least the given width in characters."
+    pad [$str, $width, $fill] ~> %bin.concat [$str.0, ~] ~> Str[~]
+  },
+
+  ascii_lower: #' {
+    :doc "The string with ASCII letters lowercased; other characters are unchanged."
+    map_case [$0, 0, <>, 65, 90, 32] ~> Str[~]
+  },
+
+  ascii_upper: #' {
+    :doc "The string with ASCII letters uppercased; other characters are unchanged."
+    map_case [$0, 0, <>, 97, 122, -32] ~> Str[~]
   },
 
   iter: #' {
@@ -332,14 +737,5 @@ int_bytes = #[(n): 'int, (acc): 'bin] {
     from_chars ~
   },
 
-  join: #[(strs): '%iter<'>, (sep): '] {
-    :doc "Joins an iterator of strings with a separator between each."
-    Str[sep] = $sep
-
-    $strs
-    ~> %iter.map [~, #' { .0 }]
-    ~> %iter.intersperse [~, sep]
-    ~> %iter.fold [~, <>, %bin.concat]
-    ~> Str[~]
-  },
+  join: join,
 ]

@@ -293,12 +293,6 @@ join_strs = #<'x>[(items): '%list<'x>, (render): #'x -> '%str] {
   %list.iter $items ~> %iter.map [~, $render] ~> %str.join [~, ","]
 }
 
-// A binary of `n` copies of byte `b`.
-repeat_byte = #[(acc): 'bin, (b): 'int, (n): 'int] {
-  | $n ~> =0 => $acc
-  | ^ [%bin.append [$acc, $b, 1], $b, __integer_subtract__ [$n, 1]]
-}
-
 // Drop trailing `<30>` (`'0'`) bytes from a binary.
 strip_zeros = #'bin {
   =b
@@ -323,7 +317,7 @@ frac_bytes = #[(fracpart): 'int, (width): 'int] {
   ds = %str.from_int $fracpart ~> .0
   pad = __integer_subtract__ [$width, %bin.length ds]
 
-  %bin.concat [repeat_byte [<>, 48, pad], ds] ~> strip_zeros
+  %bin.concat [%bin.repeat [<30>, pad], ds] ~> strip_zeros
 }
 
 // Format a canonical rational `n/d` (`d > 0`, gcd 1) as a JSON decimal: the exact finite

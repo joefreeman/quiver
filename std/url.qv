@@ -1,8 +1,9 @@
 // Absolute URLs: parsing, rendering, and reference resolution.
 //
 // A URL is not HTTP-specific — `ws://` and `wss://` want the same shape — so this module
-// knows nothing about requests or headers. It works on bytes throughout (`%str.slice` and
-// `%str.index_of` count *characters*, which is the wrong unit for a wire format).
+// knows nothing about requests or headers. It works on bytes throughout, avoiding the
+// operations that count *characters* (`%str.slice`, `%str.index_of`), which is the wrong unit
+// for a wire format.
 //
 // The parse is deliberately narrow: `scheme://host[:port][/path][?query][#fragment]`, which
 // is what a client needs and nothing more. There is no userinfo (`user:pass@host`) — it is
@@ -15,22 +16,6 @@
 
 ' = Url[scheme: '%str, host: '%str, port: 'int, path: '%str, query: '%str, fragment: '%str]
 
-// Schemes are ASCII by definition, so a local fold keeps this module free of `%http`.
-lower_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
-  {
-    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
-    | {
-      b = %bin.get_byte [$data, $pos]
-      b2 = {
-        | __integer_compare__ [b, 65] ~> =(0 | 1)
-          __integer_compare__ [b, 90] ~> =(-1 | 0) => __integer_add__ [b, 32]
-        | b
-      }
-      ^ [$data, __integer_add__ [$pos, 1], $len, %bin.append [$acc, b2, 1]]
-    }
-  }
-}
-
 // The index of the first byte of `set` at or after `pos`, or `end` when there is none.
 scan_to = #[(data): 'bin, (pos): 'int, (end): 'int, (set): 'bin] {
   {
@@ -38,23 +23,6 @@ scan_to = #[(data): 'bin, (pos): 'int, (end): 'int, (set): 'bin] {
     | %bin.index [$set, %bin.get_byte [$data, $pos], 0] => $pos
     | ^ [$data, __integer_add__ [$pos, 1], $end, $set]
   }
-}
-
-// The index of the last `byte` at or before `from`, or nil.
-last_index = #[(data): 'bin, (byte): 'int, (from): 'int] {
-  {
-    | __integer_compare__ [$from, 0] ~> =-1 => []
-    | %bin.get_byte [$data, $from] ~> =^$byte => $from
-    | ^ [$data, $byte, __integer_subtract__ [$from, 1]]
-  }
-}
-
-// Whether `data` begins with the bytes of `prefix`.
-starts_with? = #[(data): 'bin, (prefix): 'bin] {
-  n = %bin.length $prefix
-  __integer_compare__ [n, %bin.length $data] ~> =(-1 | 0)
-  %bin.slice [$data, 0, n] ~> =^$prefix
-  Ok
 }
 
 default_port = #'%str {
@@ -65,26 +33,21 @@ default_port = #'%str {
 
 // `host` or `host:port`, with `[…]` bracketing an IPv6 literal (whose colons are not the
 // port separator). Yields `[host, port]`, the port 0 when absent.
-split_authority = #[(data): 'bin, (start): 'int, (end): 'int] {
-  ci = {
-    // A bracketed host: the port colon, if any, is the one after the closing bracket.
-    | %bin.get_byte [$data, $start] ~> =91
-      %bin.index [$data, 93, $start] ~> =('int & rb)
-      __integer_compare__ [__integer_add__ [rb, 1], $end] ~> =-1 => __integer_add__ [rb, 1]
-    | %bin.get_byte [$data, $start] ~> =91 => $end
-    | scan_to [$data, $start, $end, <3a>]
-  }
-  host = %bin.slice [$data, $start, ci] ~> Str[~]
-  {
-    | __integer_compare__ [ci, $end] ~> =(0 | 1) => [host, 0]
-    | {
-      %bin.slice [$data, __integer_add__ [ci, 1], $end]
-      ~> %str.parse_int Str[~]
-      ~> =('int & p)
-
-      __integer_compare__ [p, 0] ~> =(0 | 1)
-      [host, p]
+split_authority = #'%str {
+  =authority
+  parts = {
+    | %str.starts_with? [authority, "["] => {
+      | %str.split_once [authority, "]:"] ~> =[h, p] => ["{h}]", p]
+      | [authority, []]
     }
+    | %str.split_once [authority, ":"]
+    | [authority, []]
+  }
+  parts ~> {
+    | =[host, []] => [host, 0]
+    | =[host, ('%str & p)]
+      %str.parse_int p ~> =('int & port)
+      __integer_compare__ [port, 0] ~> =(0 | 1) => [host, port]
   }
 }
 
@@ -98,13 +61,13 @@ parse = #'%str {
   __integer_compare__ [__integer_add__ [ci, 2], len] ~> =-1
   %bin.get_byte [u, __integer_add__ [ci, 1]] ~> =47
   %bin.get_byte [u, __integer_add__ [ci, 2]] ~> =47
-  scheme = lower_loop [u, 0, ci, <>] ~> Str[~]
+  scheme = %bin.slice [u, 0, ci] ~> %str.ascii_lower Str[~]
 
   // authority, up to the first `/`, `?` or `#`
   astart = __integer_add__ [ci, 3]
   aend = scan_to [u, astart, len, <2f3f23>]
   __integer_compare__ [astart, aend] ~> =-1
-  split_authority [u, astart, aend] ~> =[host, p]
+  %bin.slice [u, astart, aend] ~> split_authority Str[~] ~> =[host, p]
   port = { p ~> =0 => default_port scheme | p }
 
   // path, up to the first `?` or `#`
@@ -142,13 +105,8 @@ authority = #' {
 // The path up to and including its last `/` — the directory a relative reference resolves
 // against.
 directory = #'%str {
-  =Str[p]
-  {
-    | last_index [p, 47, __integer_subtract__ [%bin.length p, 1]] ~> ='int => __integer_add__ [~, 1]
-      ~> %bin.slice [p, 0, ~]
-      ~> Str[~]
-    | "/"
-  }
+  | %str.split_last [~, "/"] ~> =[dir, _] => "{dir}/"
+  | "/"
 }
 
 [
@@ -175,17 +133,16 @@ directory = #'%str {
 
   resolve: #[(base): ', (ref): '%str] {
     :doc "Resolves a reference against a base URL — absolute, scheme-relative (//host/p), absolute-path (/p), fragment-only (#f) or relative (p) — as a redirect's Location is resolved. Nil when the result is not a well-formed URL."
-    $ref ~> =Str[r]
     {
       // An absolute reference stands alone.
       | parse $ref
       // `//host/path` — inherit only the scheme.
-      | starts_with? [r, <2f2f>] => parse "{$base.scheme}:{$ref}"
+      | %str.starts_with? [$ref, "//"] => parse "{$base.scheme}:{$ref}"
       // `/path` — inherit the authority.
-      | starts_with? [r, <2f>] => parse "{$base.scheme}://{authority $base}{$ref}"
-      // `#fragment` (and the empty reference) — the base, re-fragmented.
-      | starts_with? [r, <23>] => $base[..., fragment: %bin.slice [r, 1, %bin.length r] ~> Str[~]]
-      | %bin.length r ~> =0 => $base
+      | %str.starts_with? [$ref, "/"] => parse "{$base.scheme}://{authority $base}{$ref}"
+      // `#fragment` — the base, re-fragmented.
+      | %str.strip_prefix [$ref, "#"] => $base[..., fragment: ~]
+      | $ref ~> ="" => $base
       // Anything else is relative to the base path's directory.
       | parse "{$base.scheme}://{authority $base}{directory $base.path}{$ref}"
     }

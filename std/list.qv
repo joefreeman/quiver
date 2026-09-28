@@ -126,12 +126,12 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
   },
 
   take: #<'t>[(list): '<'t>, (n): 'int] {
-    :doc "The first n elements, or the whole list when it is shorter."
+    :doc "The first n elements, or the whole list when it is shorter (none when n is zero or negative)."
     to_iter $list ~> %iter.take [~, $n] ~> from_iter
   },
 
   drop: #<'t>[(list): '<'t>, (n): 'int] {
-    :doc "The list without its first n elements."
+    :doc "The list without its first n elements (the whole list when n is zero or negative)."
     to_iter $list ~> %iter.drop [~, $n] ~> from_iter
   },
 
@@ -185,7 +185,7 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
   },
 
   nth: #<'t>[(list): '<'t>, (n): 'int] {
-    :doc "The element at the given zero-based index, or nil when the list is too short."
+    :doc "The element at the given zero-based index, or nil when the list is too short or the index is negative."
     to_iter $list ~> %iter.nth [~, $n]
   },
 

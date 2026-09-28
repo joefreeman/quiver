@@ -32,37 +32,17 @@
 
 'parsed = Incomplete | Bad[status: 'int, reason: '%str] | [', 'bin]
 
-// ASCII-lowercased bytes (for case-insensitive names).
-lower_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
-  {
-    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
-    | {
-      b = %bin.get_byte [$data, $pos]
-      b2 = {
-        | __integer_compare__ [b, 65] ~> =(0 | 1)
-          __integer_compare__ [b, 90] ~> =(-1 | 0) => __integer_add__ [b, 32]
-        | b
-      }
-      ^ [$data, __integer_add__ [$pos, 1], $len, %bin.append [$acc, b2, 1]]
-    }
-  }
-}
-
-lower = #'%str {
-  :doc "The string with ASCII letters lowercased."
-  =Str[b]; lower_loop [b, 0, %bin.length b, <>] ~> Str[~]
-}
-
 // The first value whose name matches case-insensitively, or nil.
 header_find = #[(pairs): 'pairs, (target): 'bin] {
-  %list.find [$pairs, #{ lower $0 ~> =Str[^$$target] }] ~> =[_, v]
+  %list.find [$pairs, #{ %str.ascii_lower $0 ~> =Str[^$$target] }]
+  ~> =[_, v]
 
   v
 }
 
 header = #[(pairs): 'pairs, (name): '%str] {
   :doc "The first value of a header by case-insensitive name, or nil when absent."
-  lower $name ~> =Str[~] ~> header_find [$pairs, ~]
+  %str.ascii_lower $name ~> =Str[~] ~> header_find [$pairs, ~]
 }
 
 get = #[(pairs): 'pairs, (name): '%str] {
@@ -230,38 +210,10 @@ line_end = #[(data): 'bin, (pos): 'int, (end): 'int] {
   }
 }
 
-ows? = #'int { $ ~> =(32 | 9); $ }
-
-trim_start = #[(data): 'bin, (pos): 'int, (end): 'int] {
-  {
-    | __integer_compare__ [$pos, $end] ~> =(0 | 1) => $pos
-    | %bin.get_byte [$data, $pos] ~> ows? => ^ [$data, __integer_add__ [$pos, 1], $end]
-    | $pos
-  }
-}
-
-trim_end = #[(data): 'bin, (pos): 'int, (end): 'int] {
-  {
-    | __integer_compare__ [$end, $pos] ~> =(0 | -1) => $end
-    | %bin.get_byte [$data, __integer_subtract__ [$end, 1]] ~> ows? => ^ [
-        $data,
-        $pos,
-        __integer_subtract__ [$end, 1],
-      ]
-    | $end
-  }
-}
-
-// A `Name: value` header line as a pair (value trimmed of optional whitespace), or nil.
+// A `Name: value` header line as a pair (value trimmed of whitespace), or nil.
 parse_header_line = #'bin {
-  =line
-  %bin.index [line, 58, 0] ~> =('int & c)
-  c ~> =\0
-
-  vs = trim_start [line, __integer_add__ [c, 1], %bin.length line]
-
-  ve = trim_end [line, vs, %bin.length line]
-  [Str[%bin.slice [line, 0, c]], Str[%bin.slice [line, vs, ve]]]
+  %str.split_once [Str[$], ":"] ~> =[(\"" & name), value]
+  [name, %str.trim value]
 }
 
 parse_headers = #[(data): 'bin, (pos): 'int, (end): 'int, (acc): 'pairs] {
@@ -313,21 +265,11 @@ parse_request_line = #'bin {
 // The request-target split into decoded path segments and query pairs.
 split_target = #'%str {
   :doc "Splits a request target into `[path segments, query pairs]` — the same split `parse_request` applies, exposed for deriving a request from a new URL (live navigation)."
-  =Str[t]
-  qi = %bin.index [t, 63, 0]
-  {
-    | qi ~> =('int & q) => [
-        %bin.slice [t, 0, q] ~> path_segments,
-        qp_loop [
-          %bin.slice [t, __integer_add__ [q, 1], %bin.length t],
-          0,
-          0,
-          __integer_subtract__ [%bin.length t, __integer_add__ [q, 1]],
-          Nil,
-        ],
-      ]
-    | [path_segments t, Nil]
-  }
+  | %str.split_once [~, "?"] ~> =[Str[path], Str[query]] => [
+      path_segments path,
+      qp_loop [query, 0, 0, %bin.length query, Nil],
+    ]
+  | [path_segments $0, Nil]
 }
 
 // Content-Length as a non-negative int: absent → 0, present-but-invalid → nil.
@@ -430,29 +372,6 @@ parse_request = #'bin {
 
 'parsed_response = Incomplete | Bad[reason: '%str] | ['response, 'bin]
 
-// A hex digit's value, or nil.
-hex_value = #'int {
-  | __integer_compare__ [$, 48] ~> =(0 | 1)
-    __integer_compare__ [$, 57] ~> =(-1 | 0) => __integer_subtract__ [$, 48]
-  | __integer_compare__ [$, 97] ~> =(0 | 1)
-    __integer_compare__ [$, 102] ~> =(-1 | 0) => __integer_subtract__ [$, 87]
-  | __integer_compare__ [$, 65] ~> =(0 | 1)
-    __integer_compare__ [$, 70] ~> =(-1 | 0) => __integer_subtract__ [$, 55]
-}
-
-parse_hex = #[(data): 'bin, (pos): 'int, (end): 'int, (acc): 'int] {
-  {
-    | __integer_compare__ [$pos, $end] ~> =(0 | 1) => $acc
-    | %bin.get_byte [$data, $pos] ~> hex_value ~> =('int & v) => ^ [
-        $data,
-        __integer_add__ [$pos, 1],
-        $end,
-        __integer_add__ [__integer_multiply__ [$acc, 16], v],
-      ]
-    | $acc
-  }
-}
-
 // The position just past a chunked body's trailer section (zero or more header lines then a
 // blank one), or nil when the buffer does not reach it yet.
 trailer_end = #[(data): 'bin, (pos): 'int, (len): 'int] {
@@ -476,11 +395,13 @@ chunk_step = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
           __integer_compare__ [s, le] ~> =-1 => s
         | le
       }
+      // Hex digits alone, bar the whitespace allowed before an extension: no sign, and nothing
+      // after the digits, as a lenient read is how framing disagreements are smuggled.
+      size = %bin.slice [$data, $pos, size_end] ~> %str.trim_end Str[~]
       {
-        | __integer_compare__ [$pos, size_end] ~> =(0 | 1) => Bad[reason: "empty chunk size"]
-        | %bin.get_byte [$data, $pos] ~> hex_value ~> =[] => Bad[reason: "malformed chunk size"]
-        | {
-          n = parse_hex [$data, $pos, size_end, 0]
+        | %str.empty? size => Bad[reason: "empty chunk size"]
+        | %str.starts_with? [size, "-"] => Bad[reason: "malformed chunk size"]
+        | %str.parse_int [size, radix: 16] ~> =('int & n) => {
           dstart = __integer_add__ [le, 2]
           {
             | n ~> =0 => {
@@ -505,6 +426,7 @@ chunk_step = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
             }
           }
         }
+        | Bad[reason: "malformed chunk size"]
       }
     }
   }
@@ -559,7 +481,8 @@ parse_response_with = #[(data): 'bin, (eof): (Ok | []), (max_head): 'int, (max_b
                   {
                     | bodyless? status => done [<>, %bin.slice [$data, bstart, len]]
                     | header [hs, "transfer-encoding"] ~> =Str[te]
-                      lower Str[te] ~> ="chunked" => chunk_step [$data, bstart, len, <>] ~> {
+                      %str.ascii_lower Str[te] ~> ="chunked" => chunk_step [$data, bstart, len, <>]
+                      ~> {
                         | =Incomplete => Incomplete
                         | =Bad[reason: r] => Bad[reason: r]
                         | =[body, e] => {
@@ -745,29 +668,9 @@ form_encode = #'pairs {
 
 // One `k=v` cookie segment (edges trimmed, value verbatim) prepended to the accumulator;
 // segments without an `=` or with an empty name are skipped.
-cookie_seg = #[(data): 'bin, (s0): 'int, (e0): 'int, (acc): 'pairs] {
-  s = trim_start [$data, $s0, $e0]
-  e = trim_end [$data, s, $e0]
-  {
-    | %bin.index [$data, 61, s] ~> =('int & eq)
-      __integer_compare__ [eq, e] ~> =-1
-      __integer_compare__ [eq, s] ~> =1 => Cons[
-        [Str[%bin.slice [$data, s, eq]], Str[%bin.slice [$data, __integer_add__ [eq, 1], e]]],
-        $acc,
-      ]
-    | $acc
-  }
-}
-
-cookies_loop = #[(data): 'bin, (start): 'int, (pos): 'int, (len): 'int, (acc): 'pairs] {
-  {
-    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => cookie_seg [$data, $start, $pos, $acc]
-    | %bin.get_byte [$data, $pos] ~> =59 => {
-      acc2 = cookie_seg [$data, $start, $pos, $acc]
-      ^ [$data, __integer_add__ [$pos, 1], __integer_add__ [$pos, 1], $len, acc2]
-    }
-    | ^ [$data, $start, __integer_add__ [$pos, 1], $len, $acc]
-  }
+cookie_seg = #['pairs, '%str] {
+  | %str.trim $1 ~> %str.split_once [~, "="] ~> =[(\"" & name), value] => Cons[[name, value], $0]
+  | $0
 }
 
 cookies = #' {
@@ -776,9 +679,9 @@ cookies = #' {
     $headers,
     Nil,
     #{
-      $1 ~> =[n, Str[vb]]
+      $1 ~> =[n, v]
       {
-        | lower n ~> ="cookie" => cookies_loop [vb, 0, 0, %bin.length vb, $0]
+        | %str.ascii_lower n ~> ="cookie" => %str.split [v, ";"] ~> %iter.fold [~, $0, cookie_seg]
         | $0
       }
     },
@@ -811,7 +714,6 @@ headers_to_bytes = #'pairs {
 (
   header,
   get,
-  lower,
   form,
   form_decode,
   form_encode,

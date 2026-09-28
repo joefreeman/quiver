@@ -61,32 +61,9 @@ between = #[(min): 'int, (max): 'int] {
   __integer_add__ [$min, r]
 }
 
-// A nibble as a lowercase hex character code.
-hex_digit = #'int {
-  | __integer_compare__ [$, 10] ~> =-1 => __integer_add__ [$, 48]
-  | __integer_add__ [$, 87]
-}
-
-hex_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
-  {
-    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
-    | {
-      b = %bin.get_byte [$data, $pos]
-
-      acc2 = %bin.append [$acc, __integer_divide__ [b, 16] ~> hex_digit, 1] ~> %bin.append [
-        ~,
-        __integer_modulo__ [b, 16] ~> hex_digit,
-        1,
-      ]
-
-      ^ [$data, __integer_add__ [$pos, 1], $len, acc2]
-    }
-  }
-}
-
 hex = #'int {
   :doc "A random token: n cryptographically secure bytes as 2n lowercase hex characters."
-  b = __random_bytes__ $; hex_loop [b, 0, %bin.length b, <>] ~> Str[~]
+  __random_bytes__ $ ~> %bin.to_hex
 }
 
 [

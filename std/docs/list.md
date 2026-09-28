@@ -131,7 +131,8 @@ answers `Ok`, which gates the step, and the element itself is what flows out.
 ## Slicing
 
 `take` and `drop` cut at a count, and neither complains about one the list cannot honour — a
-short list is taken whole, and dropping past the end leaves nothing.
+short list is taken whole, dropping past the end leaves nothing, and a count below zero counts
+as zero.
 
 ```quiver
 xs = %list{ 1, 2, 3 }
@@ -140,6 +141,8 @@ xs = %list{ 1, 2, 3 }
 %list.take [xs, 0]            //= Nil
 %list.drop [xs, 1]            //= Cons[2, Cons[3, Nil]]
 %list.drop [xs, 5]            //= Nil
+%list.take [xs, -1]           //= Nil
+%list.drop [xs, -1]           //= Cons[1, Cons[2, Cons[3, Nil]]]
 ```
 
 `take_while` and `drop_while` cut at the first element a predicate rejects. They are two

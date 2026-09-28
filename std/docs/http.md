@@ -148,11 +148,11 @@ q = %list{ ["x", "1"], ["X", "2"] }
 %http.get [q, "X"]   //= "2"
 ```
 
-`lower` is the case fold both are built on, exposed because anything comparing header names
-needs it.
+Both are built on `%str.ascii_lower`, which is also how anything else comparing header names
+should fold them — HTTP names are case-insensitive over ASCII only.
 
 ```quiver
-%http.lower "Content-Type"   //= "content-type"
+%str.ascii_lower "Content-Type"   //= "content-type"
 ```
 
 A header *block* — the CRLF-separated lines, with no blank line after them — converts both
@@ -365,6 +365,17 @@ What is malformed, though, is reported:
 //= Bad[reason: "malformed chunk size"]
 "HTTP/1.1 200 OK\r\ncontent-length: nope\r\n\r\n" ~> .0 ~> %http.parse_response [~, []]
 //= Bad[reason: "invalid content-length"]
+```
+
+A chunk size is hex digits and nothing else — whitespace is allowed only before an extension's
+`;`. Reading as much of a size as parses and ignoring the rest would let two parsers disagree
+about where a body ends, which is how requests are smuggled past a proxy.
+
+```quiver
+chunked = #'%str { "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n{$}" ~> .0 ~> %http.parse_response [~, []] }
+chunked "A \r\n0123456789\r\n0\r\n\r\n" ~> =[r, _]; r.body   //= <30313233343536373839>
+chunked "5x\r\nhello\r\n0\r\n\r\n"                        //= Bad[reason: "malformed chunk size"]
+chunked "-5\r\nhello\r\n0\r\n\r\n"                        //= Bad[reason: "malformed chunk size"]
 ```
 
 `parse_response_with` states the caps, which default to 8 KiB of head and 8 MiB of body.

@@ -76,13 +76,15 @@ accumulator nor the result need resemble the elements:
 %list.iter %list{ "a", "b", "c" } ~> %iter.fold [~, "", #{ %str.concat [$0, $1] }]   //= "abc"
 ```
 
-`nth` indexes, zero-based, and answers nil past the end — a plain "found nothing".
+`nth` indexes, zero-based, and answers nil past the end — a plain "found nothing". A negative
+index is before the start, and finds nothing too.
 
 ```quiver
 xs = %list.iter %list{ 1, 2, 3 }
 %iter.nth [xs, 0]             //= 1
 %iter.nth [xs, 1]             //= 2
 %iter.nth [xs, 5]             //= []
+%iter.nth [xs, -1]            //= []
 ```
 
 An empty iterator folds to its initial accumulator and counts zero.
@@ -132,7 +134,8 @@ even? = #'int { %int.mod [$, 2] ~> =0; $ }
 ## Slicing
 
 `take` and `drop` cut at a count, and neither complains about one the source cannot honour — a
-short iterator is taken whole, and dropping past the end leaves nothing.
+short iterator is taken whole, dropping past the end leaves nothing, and a count below zero
+counts as zero.
 
 ```quiver
 xs = %list.iter %list{ 1, 2, 3, 4 }
@@ -140,6 +143,14 @@ xs = %list.iter %list{ 1, 2, 3, 4 }
 %iter.drop [xs, 2] ~> %list.collect ~   //= Cons[3, Cons[4, Nil]]
 %iter.take [xs, 9] ~> %list.collect ~   //= Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
 %iter.drop [xs, 9] ~> %list.collect ~   //= Nil
+%iter.take [xs, -1] ~> %list.collect ~  //= Nil
+%iter.drop [xs, -1] ~> %list.collect ~  //= Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]]
+```
+
+That holds on an endless source too, so a computed count that comes out negative still returns:
+
+```quiver
+%iter.repeat 1 ~> %iter.take [~, -3] ~> %list.collect ~   //= Nil
 ```
 
 `take` is also the thing standing between an endless source and a program that never returns.

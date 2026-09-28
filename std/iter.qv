@@ -41,7 +41,7 @@ take = #<'t>[(self): ^, (it): 'thunk<'t>, (n): 'int] -> 'thunk<'t> {
   it = $it
   n = $n
   #[] {
-    | n ~> =0 => []
+    | __integer_compare__ [n, 0] ~> =(-1 | 0) => []
     | { it [] ~> =[value, next]; n ~> %num.sub [~, 1] ~> self [self, next, ~] ~> [value, ~] }
   }
 }
@@ -51,7 +51,7 @@ drop = #<'t>[(self): ^, (it): 'thunk<'t>, (n): 'int] -> 'thunk<'t> {
   it = $it
   n = $n
   #[] {
-    | n ~> =0 => it []
+    | __integer_compare__ [n, 0] ~> =(-1 | 0) => it []
     | {
       it [] ~> =[_, next]
 
@@ -188,6 +188,7 @@ all = #<'t>[(it): 'thunk<'t>, (pred): #'t -> _] {
 }
 
 nth = #<'t>[(it): 'thunk<'t>, (n): 'int] {
+  | __integer_compare__ [$n, 0] ~> =-1 => []
   | $n ~> =0 => { $it [] ~> =[value, _]; value }
   | { $it [] ~> =[_, next]; $n ~> %num.sub [~, 1] ~> ^ [next, ~] }
 }
@@ -216,12 +217,12 @@ intersperse = #<'t>[(self): ^, (it): 'thunk<'t>, (sep): 't] -> 'thunk<'t> {
   },
 
   take: #<'t>[(iter): '<'t>, (n): 'int] {
-    :doc "An iterator over at most the first n elements."
+    :doc "An iterator over at most the first n elements, none when n is zero or negative."
     $iter ~> =Iter[~] ~> take [take, ~, $n] ~> Iter[~]
   },
 
   drop: #<'t>[(iter): '<'t>, (n): 'int] {
-    :doc "An iterator that skips the first n elements."
+    :doc "An iterator that skips the first n elements, skipping none when n is zero or negative."
     $iter ~> =Iter[~] ~> drop [drop, ~, $n] ~> Iter[~]
   },
 
@@ -301,7 +302,7 @@ intersperse = #<'t>[(self): ^, (it): 'thunk<'t>, (sep): 't] -> 'thunk<'t> {
   },
 
   nth: #<'t>[(iter): '<'t>, (n): 'int] {
-    :doc "The element at the given zero-based index, or nil when the iterator is too short."
+    :doc "The element at the given zero-based index, or nil when the iterator is too short or the index is negative."
     $iter ~> =Iter[~] ~> nth [~, $n]
   },
 

@@ -43,7 +43,7 @@ plain = #[(status): 'int, (body): '%str] {
 // Whether the connection should be kept open after answering the request.
 keep_alive? = #'request {
   | %http.header [$headers, "connection"] ~> =Str[cb]
-    %http.lower Str[cb] ~> ="close" => []
+    %str.ascii_lower Str[cb] ~> ="close" => []
   | $version ~> ="HTTP/1.1" => Ok
   | []
 }

@@ -55,8 +55,17 @@ b = %bin.new 3
 %bin.concat [a, b]            //= <0000000000>
 ```
 
+`repeat` tiles a binary a number of times. Like `concat`, it shares rather than copies, so
+even a large repetition is cheap until its bytes are read.
+
+```quiver
+%bin.repeat [<ab>, 3]         //= <ababab>
+%bin.repeat [<0102>, 2]       //= <01020102>
+%bin.repeat [<ff>, 0]         //= <>
+```
+
 Nothing else in the module can tell a rope from a flat binary; the sharing is an
-implementation detail of `concat` alone.
+implementation detail of `concat` and `repeat`.
 
 ```quiver
 %bin.concat [<6162>, <0a63>] ~> %bin.length ~   //= 4
@@ -228,6 +237,13 @@ significant, so a left shift moves bits toward the front.
 %bin.shift [<0102>, 8]        //= <0200>
 %bin.shift [<0102>, -8]       //= <0001>
 %bin.shift [<ff>, 100]        //= <00> // shifted out entirely
+```
+
+`popcount` counts the set bits.
+
+```quiver
+%bin.popcount <>              //= 0
+%bin.popcount <ff01>          //= 9
 ```
 
 Chained, the two families read as one expression — `¬(a ∧ b)`:

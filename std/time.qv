@@ -301,13 +301,8 @@ pow10 = #['int, 'int] {
   | ^ [isub [$0, 1], imul [$1, 10]]
 }
 
-pad_loop = #['%str, 'int] {
-  | icmp [%bin.length $0.0, $1] ~> =-1 => ^ ["0{$0}", $1]
-  | $0
-}
-
 // The decimal digits of a non-negative integer, zero-padded to a width.
-pad = #[(n): 'int, (width): 'int] { pad_loop [%str.from_int $n, $width] }
+pad = #[(n): 'int, (width): 'int] { %str.pad_start [%str.from_int $n, $width, fill: "0"] }
 
 // --- construction --------------------------------------------------------------------
 
@@ -1491,20 +1486,15 @@ month_name = #'int {
 
 fail_pattern = #['int, '%str] { [] ~> { :error InvalidPattern[offset: $0, message: $1] } }
 
-pad_fill = #['%str, 'int, '%str] {
-  | icmp [%bin.length $0.0, $1] ~> =-1 => ^ ["{$2}{$0}", $1, $2]
-  | $0
-}
-
 // A number for a directive: padded to its width with its usual fill, or as the flag says.
 numeric = #['int, 'int, '%str, ('%str | [])] {
   =[n, width, fill, flag]
   text = %str.from_int n
   flag ~> {
     | ="-" => text
-    | ="_" => pad_fill [text, width, " "]
-    | ="0" => pad_fill [text, width, "0"]
-    | pad_fill [text, width, fill]
+    | ="_" => %str.pad_start [text, width, fill: " "]
+    | ="0" => %str.pad_start [text, width, fill: "0"]
+    | %str.pad_start [text, width, fill: fill]
   }
 }
 
@@ -2571,18 +2561,6 @@ parse_http_date = #'%str {
 // The content is read by `parse` at compile time, around surrounding whitespace, and spliced
 // as the constant it denotes; anything `parse` rejects is a compile error at its position.
 
-skip_space = #['bin, 'int] {
-  | char_at $ ~> =(" " | "\t" | "\n" | "\r") => ^ [$0, iadd [$1, 1]]
-  | $1
-}
-
-// The end of the content with trailing whitespace dropped.
-trim_end = #['bin, 'int] {
-  | icmp [$1, 0] ~> =1
-    char_at [$0, isub [$1, 1]] ~> =(" " | "\t" | "\n" | "\r") => ^ [$0, isub [$1, 1]]
-  | $1
-}
-
 label = #['%str, 'int] { Labeled[label: $0, value: $1] }
 
 literal = #'parsed {
@@ -2645,9 +2623,10 @@ zoned_literal = #['bin, 'int] {
 literal_at = #['bin, 'int] { parse_from $ ~> =('parsed & v); literal v }
 
 time_dialect = #(content: '%str) {
-  $content ~> =Str[data]
-  body = trim_end [data, %bin.length data] ~> %bin.slice [data, 0, ~]
-  start = skip_space [data, 0]
+  // Leading whitespace is skipped rather than cut, so error offsets stay offsets into the
+  // content as written.
+  body = %str.trim_end $content ~> .0
+  start = %str.trim_start $content ~> .0 ~> %bin.length ~> isub [%bin.length $content.0, ~]
   {
     | find [body, "[", start] ~> ='int => zoned_literal [body, start]
     | =_ => literal_at [body, start]

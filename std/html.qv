@@ -107,37 +107,22 @@
 
 // === Escaping ===========================================================================
 
-// Append text bytes onto `acc`, escaping `&`, `<`, `>`.
-esc_text = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
-  {
-    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
-    | {
-      b = %bin.get_byte [$data, $pos]
-      acc2 = b ~> {
-        | =38 => %bin.concat [$acc, "&amp;" ~> .0]
-        | =60 => %bin.concat [$acc, "&lt;" ~> .0]
-        | =62 => %bin.concat [$acc, "&gt;" ~> .0]
-        | %bin.append [$acc, b, 1]
-      }
-      ^ [$data, __integer_add__ [$pos, 1], $len, acc2]
-    }
-  }
+// Text content escaped for HTML: `&`, `<` and `>`. The ampersand goes first, so the entities
+// the others introduce are not escaped again.
+esc_text = #'bin {
+  Str[$]
+  ~> %str.replace [~, "&", "&amp;"]
+  ~> %str.replace [~, "<", "&lt;"]
+  ~> %str.replace [~, ">", "&gt;"]
+  ~> .0
 }
 
-// Append attribute-value bytes onto `acc`, escaping `&` and `"`.
-esc_attr = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
-  {
-    | __integer_compare__ [$pos, $len] ~> =(0 | 1) => $acc
-    | {
-      b = %bin.get_byte [$data, $pos]
-      acc2 = b ~> {
-        | =38 => %bin.concat [$acc, "&amp;" ~> .0]
-        | =34 => %bin.concat [$acc, "&quot;" ~> .0]
-        | %bin.append [$acc, b, 1]
-      }
-      ^ [$data, __integer_add__ [$pos, 1], $len, acc2]
-    }
-  }
+// An attribute value escaped for double quotes: `&` (first, as above) and the quote.
+esc_attr = #'bin {
+  Str[$]
+  ~> %str.replace [~, "&", "&amp;"]
+  ~> %str.replace [~, "\"", "&quot;"]
+  ~> .0
 }
 
 // === The dialect grammar ================================================================
@@ -539,7 +524,7 @@ instrument_attrs = #[(items): 'pattrs, (ist): 'ist, (elem): 'int] {
             ...,
             cur: %bin.concat [%bin.append [$ist.cur, 32, 1], n]
             ~> %bin.concat [~, <3d22>]
-            ~> esc_attr [lv, 0, %bin.length lv, ~]
+            ~> %bin.concat [~, esc_attr lv]
             ~> %bin.append [~, 34, 1],
           ]
         | =Flag => $ist[..., cur: %bin.concat [%bin.append [$ist.cur, 32, 1], n]]
@@ -744,7 +729,7 @@ render_attrs = #[(items): 'attrs<_>, (acc): 'bin] {
         | =Str[vb] => {
           %bin.concat [%bin.append [$acc, 32, 1], n]
           ~> %bin.concat [~, <3d22>]
-          ~> esc_attr [vb, 0, %bin.length vb, ~]
+          ~> %bin.concat [~, esc_attr vb]
           ~> %bin.append [~, 34, 1]
         }
         | =Data[payload] => {
@@ -752,7 +737,7 @@ render_attrs = #[(items): 'attrs<_>, (acc): 'bin] {
 
           %bin.concat [%bin.append [$acc, 32, 1], n]
           ~> %bin.concat [~, <3d22>]
-          ~> esc_attr [eb, 0, %bin.length eb, ~]
+          ~> %bin.concat [~, esc_attr eb]
           ~> %bin.append [~, 34, 1]
         }
       }
@@ -768,7 +753,7 @@ render_list = #[(self): ^, (items): 'nodes<_>, (acc): 'bin] -> 'bin {
     | =Cons[node, rest] => {
       acc2 = node ~> {
         | =Raw[Str[b]] => %bin.concat [$acc, b]
-        | =Text[Str[b]] => esc_text [b, 0, %bin.length b, $acc]
+        | =Text[Str[b]] => %bin.concat [$acc, esc_text b]
         | =Fragment[~] => $self [$self, ~, $acc]
         | =Element[tag: Str[t], attrs: attrs, children: kids] => {
           opened = %bin.concat [%bin.append [$acc, 60, 1], t] ~> render_attrs [attrs, ~]
@@ -849,12 +834,12 @@ with_template = #<'d>[(tree): 'node<'d>, (statics): 'statics, (holes): 'holes<'d
 
 escape_text = #'%str {
   :doc "Escapes a string for HTML text content: `&`, `<`, `>`."
-  =Str[b]; esc_text [b, 0, %bin.length b, <>] ~> Str[~]
+  esc_text $0 ~> Str[~]
 }
 
 escape_attr = #'%str {
   :doc "Escapes a string for a double-quoted attribute value: `&` and the quote."
-  =Str[b]; esc_attr [b, 0, %bin.length b, <>] ~> Str[~]
+  esc_attr $0 ~> Str[~]
 }
 
 {

@@ -249,6 +249,8 @@ from_base64 = #Str['bin] {
 
   concat: __binary_concat__ ~> { :doc "The concatenation of two binaries." },
 
+  repeat: __binary_repeat__ ~> { :doc "A binary repeated the given number of times." },
+
   append: __binary_append__ ~> {
     :doc "The binary with a non-negative integer appended as the given number of big-endian bytes (1 to 8)."
   },
@@ -266,6 +268,8 @@ from_base64 = #Str['bin] {
   },
 
   not: __binary_not__ ~> { :doc "The bitwise complement of a binary." },
+
+  popcount: __binary_popcount__ ~> { :doc "The number of set bits (population count)." },
 
   shift: __binary_shift__ ~> {
     :doc "The binary shifted by a number of bits — left when positive, right when negative — with zeros shifted in; the length is preserved."
