@@ -874,3 +874,121 @@ fn test_patterns_test_a_type_variable_value_for_their_own_shape() {
         .evaluate("f = #<'t>'t -> 't { $ ~> { =[x: _] => ~ | $ } }; f [x: 1]")
         .expect("[x: 1]");
 }
+
+// A generic function passed as an argument brings its own type variables, which the call
+// solves along with the callee's: each use is instantiated afresh, and what the call pins
+// them to is checked against the function (and its bounds).
+
+const APPLY: &str = "apply = #<'a, 'b>[f: #'a -> 'b, x: 'a] -> 'b { $f $x }\n";
+
+#[test]
+fn test_a_generic_argument_is_instantiated_by_the_call() {
+    quiver()
+        .evaluate(&format!(
+            "{APPLY}id = #<'t>'t {{ $ }}; apply [f: id, x: 5] ~> __integer_add__ [~, 1]"
+        ))
+        .expect("6");
+    quiver()
+        .evaluate(&format!(
+            "{APPLY}id = #<'t>'t {{ $ }}; apply [f: id, x: <01>]"
+        ))
+        .expect_type("'bin");
+    // Its variables solved from whichever occurrence comes first.
+    quiver()
+        .evaluate(
+            "id = #<'t>'t { $ }
+             apply = #<'a, 'b>[x: 'a, f: #'a -> 'b] -> 'b { $f $x }
+             apply [x: <01>, f: id]",
+        )
+        .expect_type("'bin");
+    quiver()
+        .evaluate(&format!(
+            "{APPLY}dup = #<'q>'q {{ [$, $] }}; apply [f: dup, x: 1] ~> =[a, b]; __integer_add__ [a, b]"
+        ))
+        .expect("2");
+}
+
+#[test]
+fn test_a_generic_argument_cannot_launder_a_type() {
+    // `apply [f: id, x: <01>]` answered `id`'s own `'t`, which fitted anything.
+    quiver()
+        .evaluate(&format!(
+            "{APPLY}id = #<'t>'t {{ $ }}; apply [f: id, x: <01>] ~> __integer_add__ [~, 1]"
+        ))
+        .expect_type_mismatch();
+    quiver()
+        .evaluate(
+            "id = #<'t>'t { $ }
+             apply = #<'a, 'b>[x: 'a, f: #'a -> 'b] -> 'b { $f $x }
+             apply [x: <01>, f: id] ~> __integer_add__ [~, 1]",
+        )
+        .expect_type_mismatch();
+    // An unknown inside a structure (`['q, 'q]`) is solved too, to the union it meets.
+    quiver()
+        .evaluate(&format!(
+            "{APPLY}first = #<'q>['q, 'q] -> 'q {{ $0 }}; apply [f: first, x: [1, <01>]] ~> __integer_add__ [~, 1]"
+        ))
+        .expect_type_mismatch();
+    quiver()
+        .evaluate(
+            "id = #<'t>'t { $ }
+             %list{ \"a\" } ~> %list.map [~, id] ~> %list.fold [~, init: 0, f: %num.add]",
+        )
+        .expect_type_mismatch();
+    quiver()
+        .evaluate(
+            "compose = #<'a, 'b, 'c>[f: #'a -> 'b, g: #'b -> 'c] -> (#'a -> 'c) {
+               f = $f; g = $g; #'a { f $ ~> g }
+             }
+             id = #<'t>'t { $ }
+             inc = #'int { __integer_add__ [$, 1] }
+             h = compose [f: id, g: inc]
+             h <01>",
+        )
+        .expect_type_mismatch();
+}
+
+#[test]
+fn test_each_use_of_a_generic_argument_is_its_own_instance() {
+    quiver()
+        .evaluate(
+            "id = #<'t>'t { $ }
+             both = #<'a, 'b>[f: #'a -> 'a, g: #'b -> 'b, x: 'a, y: 'b] -> ['a, 'b] { [$f $x, $g $y] }
+             both [f: id, g: id, x: 1, y: <01>] ~> =[a, b]; [__integer_add__ [a, 1], __binary_length__ b]",
+        )
+        .expect("[2, 1]");
+    // A function returned still generic stays generic.
+    quiver()
+        .evaluate(
+            "mk = #<'a, 'b>[f: #'a -> 'b] -> (#'a -> 'b) { $f }
+             id = #<'t>'t { $ }
+             g = mk [f: id]
+             [g 1, g <01>]",
+        )
+        .expect("[1, <01>]");
+}
+
+#[test]
+fn test_a_generic_argument_keeps_its_bounds() {
+    quiver()
+        .evaluate(&format!(
+            "{APPLY}enc = #<'t: '%data>'t -> '%str {{ %data.encode $ }}; r = %ref []; apply [f: enc, x: r]"
+        ))
+        .expect_error_containing("'ref does not fit it");
+    quiver()
+        .evaluate(&format!(
+            "{APPLY}enc = #<'t: '%data>'t -> '%str {{ %data.encode $ }}; apply [f: enc, x: Point[x: 1]]"
+        ))
+        .expect("\"Point[x: 1]\"");
+    quiver()
+        .evaluate(&format!(
+            "{APPLY}r = %ref []; apply [f: %dict.get, x: [dict: %dict.new [], key: r]]"
+        ))
+        .expect_error_containing("'ref does not fit it");
+    // Positional fields are adopted only at a direct call, so they don't fit here.
+    quiver()
+        .evaluate(&format!(
+            "{APPLY}d = %dict{{ \"a\" => 1 }}; apply [f: %dict.get, x: [d, \"a\"]]"
+        ))
+        .expect_error_containing("Tuple fields have different names");
+}

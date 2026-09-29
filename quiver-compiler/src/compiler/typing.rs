@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast;
 use crate::resolver::{ModuleResolver, PackageId};
 use quiver_core::{
-    binders::{BinderStack, has_free_cycles, is_binder, rewrite_free_cycles},
+    binders::{BinderStack, close_against, has_free_cycles, is_binder, rewrite_free_cycles},
     program::Program,
     types::{Type, TypeLookup, is_subsumed_by},
 };
@@ -2193,6 +2193,127 @@ fn tuple_signature(
     }
 }
 
+/// `type_id` followed through the bindings while it is a bound variable.
+fn resolve_bound_variable(
+    bindings: &HashMap<String, usize>,
+    mut type_id: usize,
+    program: &Program,
+) -> usize {
+    let mut steps = 0;
+    while let Some(Type::Variable(name)) = program.lookup_type(type_id)
+        && let Some(&bound) = bindings.get(name)
+        && steps <= bindings.len()
+    {
+        type_id = bound;
+        steps += 1;
+    }
+    type_id
+}
+
+/// Follow `name`'s binding `bound` through variables bound in turn, answering the last
+/// variable on the way and what it holds.
+fn chain_end(
+    bindings: &HashMap<String, usize>,
+    name: &str,
+    mut bound: usize,
+    program: &Program,
+) -> (String, usize) {
+    let mut holder = name.to_string();
+    let mut steps = 0;
+    while let Some(Type::Variable(next)) = program.lookup_type(bound)
+        && let Some(&next_bound) = bindings.get(next)
+        && steps <= bindings.len()
+    {
+        holder = next.clone();
+        bound = next_bound;
+        steps += 1;
+    }
+    (holder, bound)
+}
+
+/// The name of `type_id` when it is a free (not rigid) type variable nothing has bound yet.
+fn unbound_free_variable(
+    bindings: &HashMap<String, usize>,
+    type_id: usize,
+    program: &Program,
+) -> Option<String> {
+    match program.lookup_type(type_id) {
+        Some(Type::Variable(name))
+            if !bindings.contains_key(name) && program.rigid_bound(name).is_none() =>
+        {
+            Some(name.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Whether `type_id` mentions a free variable nothing has bound yet.
+fn has_unbound_free_variables(
+    bindings: &HashMap<String, usize>,
+    type_id: usize,
+    program: &Program,
+) -> bool {
+    let mut names = Vec::new();
+    collect_type_variables(type_id, program, &mut names);
+    names
+        .iter()
+        .any(|name| !bindings.contains_key(name) && program.rigid_bound(name).is_none())
+}
+
+/// Separates a variable instantiated afresh from the variable it instantiates.
+const FRESH_SEPARATOR: char = '@';
+
+/// The declared variable a (possibly freshly instantiated) variable name stands for.
+pub fn declared_variable(name: &str) -> &str {
+    name.split(FRESH_SEPARATOR).next().unwrap_or(name)
+}
+
+/// `type_id` with each free variable nothing has bound yet renamed to a fresh one.
+fn instantiate_afresh(
+    bindings: &HashMap<String, usize>,
+    type_id: usize,
+    program: &mut Program,
+) -> usize {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let mut names = Vec::new();
+    collect_type_variables(type_id, &*program, &mut names);
+    names.retain(|name| !bindings.contains_key(name) && program.rigid_bound(name).is_none());
+    let renaming: HashMap<String, usize> = names
+        .into_iter()
+        .map(|name| {
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let declared = declared_variable(&name);
+            let fresh =
+                program.register_type(Type::Variable(format!("{declared}{FRESH_SEPARATOR}{n}")));
+            (name, fresh)
+        })
+        .collect();
+    substitute(type_id, &renaming, program)
+}
+
+/// Resolve bindings that mention other bound variables (`'b := 't`, `'t := 'bin`), so that
+/// substituting them leaves no variable that was solved — a binding to an unknown the
+/// argument supplied must not survive as that unknown once it is known.
+pub fn resolve_bindings(bindings: &mut HashMap<String, usize>, program: &mut Program) {
+    for _ in 0..bindings.len() {
+        let mut changed = false;
+        let names: Vec<String> = bindings.keys().cloned().collect();
+        for name in names {
+            // Without its own entry, so a binding that mentions itself stays as it is.
+            let mut others = bindings.clone();
+            let value = others.remove(&name).expect("a key of the map");
+            let resolved = substitute(value, &others, program);
+            if resolved != value {
+                bindings.insert(name, resolved);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
 /// Unify a pattern type (containing Type::Variable) with a concrete type.
 /// Builds up a mapping from type variable names to concrete type IDs.
 /// Returns an error if there's a conflict (e.g., variable bound to two different types).
@@ -2255,6 +2376,9 @@ struct Unifier {
     upper: HashSet<String>,
     binders: BinderStack,
     visiting: HashSet<(usize, usize)>,
+    /// How many concrete-side function types the walk is inside: a generic function value's
+    /// variables are instantiated afresh where the outermost one is met.
+    in_concrete_callable: usize,
 }
 
 impl Unifier {
@@ -2264,6 +2388,7 @@ impl Unifier {
             upper: HashSet::new(),
             binders: self.binders.clone(),
             visiting: self.visiting.clone(),
+            in_concrete_callable: self.in_concrete_callable,
         }
     }
 
@@ -2315,16 +2440,62 @@ fn unify_bounded(
 
         // When pattern is a variable, bind it or check consistency
         (Type::Variable(name), _) => {
-            // First, resolve concrete if it's also a variable
-            let resolved_concrete_id = if let Type::Variable(concrete_name) = &concrete {
-                bindings.get(concrete_name).copied().unwrap_or(concrete_id)
-            } else {
-                concrete_id
-            };
+            let resolved_concrete_id = resolve_bound_variable(bindings, concrete_id, program);
+
+            // An unbound free variable on the concrete side is the argument's own unknown: a
+            // generic function value passed where a function type is expected (`apply [f: id,
+            // x: <01>]`, `id`'s `'t`). It is solved here like the pattern's own, so meeting
+            // it binds rather than fits whatever it meets.
+            if let Some(unknown) = unbound_free_variable(bindings, resolved_concrete_id, program) {
+                if unknown == *name {
+                    return Ok(());
+                }
+                match bindings.get(name).copied() {
+                    Some(existing_id) => {
+                        let (_, existing_id) = chain_end(bindings, name, existing_id, program);
+                        if unbound_free_variable(bindings, existing_id, program).as_ref()
+                            != Some(&unknown)
+                        {
+                            bindings.insert(unknown, existing_id);
+                        }
+                    }
+                    None => {
+                        bindings.insert(name.clone(), resolved_concrete_id);
+                        if contra {
+                            ctx.upper.insert(name.clone());
+                        }
+                    }
+                }
+                return Ok(());
+            }
 
             if let Some(existing_id) = bindings.get(name).copied() {
+                // Bound through the argument's unknowns (`'a := 't` from `f: id`), the binding
+                // ends at the variable holding the value: widening happens there, and an
+                // unknown still unsolved is solved by this occurrence.
+                let (holder, existing_id) = chain_end(bindings, name, existing_id, program);
+                if let Some(unknown) = unbound_free_variable(bindings, existing_id, program) {
+                    bindings.insert(unknown, resolved_concrete_id);
+                    return Ok(());
+                }
+                // A binding holding unknowns inside (`'a := ['q, 'q]` from `f: first`) is
+                // solved by this occurrence. Widening past them instead would leave them
+                // unsolved, and the value — which must fit the function that supplied them —
+                // unchecked against it.
+                if existing_id != resolved_concrete_id
+                    && has_unbound_free_variables(bindings, existing_id, program)
+                {
+                    return unify_bounded(
+                        bindings,
+                        &mut ctx.fresh(),
+                        contra,
+                        existing_id,
+                        resolved_concrete_id,
+                        program,
+                    );
+                }
                 if existing_id != resolved_concrete_id {
-                    if ctx.upper.contains(name) {
+                    if ctx.upper.contains(name) || ctx.upper.contains(&holder) {
                         // The binding is an upper bound (see `unify_bounded`): this
                         // occurrence must fit inside it. Widening would hand the
                         // caller a capability the value never had.
@@ -2346,18 +2517,10 @@ fn unify_bounded(
                         // Widen the type variable to a union
                         let widened =
                             union_type_ids(program, vec![existing_id, resolved_concrete_id]);
-                        bindings.insert(name.clone(), widened);
+                        bindings.insert(holder, widened);
                     }
                 }
             } else {
-                // New binding - but make sure we're not binding a variable to itself
-                if let Some(Type::Variable(resolved_name)) =
-                    program.lookup_type(resolved_concrete_id)
-                    && resolved_name == name
-                {
-                    // Don't bind a variable to itself
-                    return Ok(());
-                }
                 bindings.insert(name.clone(), resolved_concrete_id);
                 if contra {
                     ctx.upper.insert(name.clone());
@@ -2419,6 +2582,13 @@ fn unify_bounded(
             if let Some(&resolved_id) = bindings.get(name) {
                 // Concrete variable is bound - unify with its binding
                 unify_bounded(bindings, ctx, contra, pattern_id, resolved_id, program)
+            } else if program.rigid_bound(name).is_none() {
+                // The argument's own unknown (see the variable-pattern arm) meeting a known
+                // shape takes it — closed against the pattern's binders, so a recursive
+                // reference in it keeps its meaning out of place.
+                let shape = close_against(pattern_id, ctx.binders.as_slice(), program);
+                bindings.insert(name.clone(), shape);
+                Ok(())
             } else {
                 // An unbound concrete-side variable is a *rigid* variable from an
                 // enclosing generic context (e.g. a captured value whose type mentions
@@ -2715,15 +2885,36 @@ fn unify_bounded(
                 ..
             },
         ) => {
+            // A generic function value is instantiated afresh wherever it is passed: two
+            // uses of `id` in one argument are two instantiations, not one `'t` for both.
+            let (param2, result2, receive2, states2) = if ctx.in_concrete_callable == 0
+                && has_unbound_free_variables(bindings, concrete_id, program)
+            {
+                let fresh = instantiate_afresh(bindings, concrete_id, program);
+                let Some(Type::Callable {
+                    parameter,
+                    result,
+                    receive,
+                    states,
+                    ..
+                }) = program.lookup_type(fresh).cloned()
+                else {
+                    unreachable!("renaming variables keeps a function type")
+                };
+                (parameter, result, receive, states)
+            } else {
+                (*param2, *result2, *receive2, *states2)
+            };
             // A function type is a binder over every part.
             ctx.binders.enter(pattern_id);
+            ctx.in_concrete_callable += 1;
             let parts = [
-                Some((*param1, *param2)),
-                Some((*result1, *result2)),
-                Some((*receive1, *receive2)),
+                Some((*param1, param2)),
+                Some((*result1, result2)),
+                Some((*receive1, receive2)),
                 // States unify only when both are known: a `#'t -> 'u` parameter (states
                 // unknown) accepts any literal without constraining its states.
-                (*states1).zip(*states2),
+                (*states1).zip(states2),
             ];
             let result = parts
                 .into_iter()
@@ -2731,6 +2922,7 @@ fn unify_bounded(
                 .try_for_each(|(pattern_part, part)| {
                     unify_bounded(bindings, ctx, contra, pattern_part, part, program)
                 });
+            ctx.in_concrete_callable -= 1;
             ctx.binders.leave(pattern_id);
             result
         }

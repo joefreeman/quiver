@@ -7889,9 +7889,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         &mut self,
         bindings: &HashMap<String, usize>,
     ) -> Result<(), Error> {
+        // A generic function value's variables, instantiated afresh where it was passed
+        // (see `typing::unify`), keep the bounds they were declared with.
         let bounds: Vec<(String, usize)> = bindings
             .keys()
-            .filter_map(|name| Some((name.clone(), *self.type_param_bounds.get(name)?)))
+            .filter_map(|name| {
+                let declared = typing::declared_variable(name);
+                Some((name.clone(), *self.type_param_bounds.get(declared)?))
+            })
             .collect();
         typing::check_type_parameter_bounds(
             bounds.iter().map(|(name, bound)| (name, *bound)),
@@ -8212,6 +8217,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let mut bindings = HashMap::new();
 
                 typing::unify(&mut bindings, param_id, arg_type, self.program)?;
+                typing::resolve_bindings(&mut bindings, self.program);
                 self.check_argument_fits(arg_type, param_id, &bindings, value_type)?;
                 self.check_bindings_fit_bounds(&bindings)?;
 
@@ -8340,6 +8346,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let result_type = if has_vars {
             let mut bindings = HashMap::new();
             typing::unify(&mut bindings, param_id, arg_type, self.program)?;
+            typing::resolve_bindings(&mut bindings, self.program);
             self.check_argument_fits(arg_type, param_id, &bindings, arg_type)?;
             self.check_bindings_fit_bounds(&bindings)?;
             typing::close_unpinned_result(result_id, &mut bindings, self.program);
