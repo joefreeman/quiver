@@ -10,7 +10,7 @@ use quiver_compiler::{CompiledUnit, UnitKey};
 use quiver_core::bytecode::Bytecode;
 use quiver_core::bytecode::ConcreteType;
 use quiver_core::bytecode::{Constant, Function};
-use quiver_core::compatibility::{CompatibilityInput, CompatibilityTables};
+use quiver_core::compatibility::{CompatibilityInput, CompatibilityTables, Verdict};
 use quiver_core::effects::{Effect, EffectBackend, ResultTupleInfo};
 use quiver_core::executor::{CompatibilityUpdate, ProgramUpdate, TableUpdate};
 use quiver_core::process::{
@@ -2159,7 +2159,8 @@ impl<E: Effect> Environment<E> {
                             .type_compatibility
                             .get(expected_type)
                             .is_some_and(|row| {
-                                row.contains(&ConcreteType::Process(*function_index))
+                                row.get(&ConcreteType::Process(*function_index))
+                                    == Some(&Verdict::Admit)
                             })
                     })
                     .map(|(pid, function_index)| WireValue::Process(*pid, *function_index))

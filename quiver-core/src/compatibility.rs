@@ -1,11 +1,164 @@
 use crate::bytecode::{ConcreteType, Function, Opcode};
-use crate::types::{BuiltinInfo, TupleTypeInfo, Type, TypeLookup, is_compatible};
+use crate::types::{BuiltinInfo, TupleTypeInfo, Type, TypeLookup, is_compatible, types_overlap};
 use std::collections::{HashMap, HashSet};
 
-/// The concrete types a type admits: what a runtime type test looks a value's concrete type
-/// up in. Fx-hashed, because the test runs on every pattern match and the keys are small
+/// What a runtime type test makes of the values of each concrete type: what it looks a
+/// value's concrete type up in. A concrete type absent from the row can hold no value of the
+/// type. Fx-hashed, because the test runs on every pattern match and the keys are small
 /// integers that need no protection against collision attacks.
-pub type ConcreteTypes = rustc_hash::FxHashSet<ConcreteType>;
+///
+/// Serialized as a list of pairs, since a serializing transport's format may only key maps
+/// by strings.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(
+    from = "Vec<(ConcreteType, Verdict)>",
+    into = "Vec<(ConcreteType, Verdict)>"
+)]
+pub struct ConcreteTypes(rustc_hash::FxHashMap<ConcreteType, Verdict>);
+
+impl std::ops::Deref for ConcreteTypes {
+    type Target = rustc_hash::FxHashMap<ConcreteType, Verdict>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ConcreteTypes {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<Vec<(ConcreteType, Verdict)>> for ConcreteTypes {
+    fn from(entries: Vec<(ConcreteType, Verdict)>) -> Self {
+        Self(entries.into_iter().collect())
+    }
+}
+
+impl From<ConcreteTypes> for Vec<(ConcreteType, Verdict)> {
+    fn from(row: ConcreteTypes) -> Self {
+        row.0.into_iter().collect()
+    }
+}
+
+/// A runtime type test's verdict on the values of one concrete type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Verdict {
+    /// Every value of it belongs to the type.
+    Admit,
+    /// Some may: a tuple built at a wider type than it holds, or in generic code, whose own
+    /// type can't say. The test looks at the value's fields.
+    Inspect,
+}
+
+/// The verdict on values of a concrete type represented by `rep`. Anything but a tuple is
+/// admitted exactly when its type fits. A tuple (`tuple` names it, with its facts) whose type
+/// doesn't settle it is inspected where some of its values could belong: its name and labels
+/// could match, and its type overlaps the pattern — or holds a function or pid, whose types
+/// can share values without overlapping as the relation reckons it (a function taking
+/// `'int | 'bin` is both an `#'int -> _` and a `#'bin -> _`).
+fn verdict(
+    rep: usize,
+    tuple: Option<(usize, TupleFacts)>,
+    pattern_id: usize,
+    lookup: &impl TypeLookup,
+) -> Option<Verdict> {
+    let Some((tuple_id, facts)) = tuple else {
+        return is_compatible(rep, pattern_id, lookup).then_some(Verdict::Admit);
+    };
+    if (facts.exact && is_compatible(rep, pattern_id, lookup))
+        || head_decides(tuple_id, pattern_id, lookup)
+    {
+        Some(Verdict::Admit)
+    } else if head_may_match(tuple_id, pattern_id, lookup)
+        && (facts.opaque || types_overlap(rep, pattern_id, lookup))
+    {
+        Some(Verdict::Inspect)
+    } else {
+        None
+    }
+}
+
+/// Whether a tuple of this name and these labels belongs to the type whatever its fields
+/// hold: the type has a member matching the head whose fields constrain nothing a test can
+/// check (`_`, a type variable, or a recursive reference past where the test starts — see
+/// `walk_inhabits`). The common case is a pattern telling a recursive union's members apart,
+/// such as `=Cons[h, t]` on a generically built list.
+fn head_decides(tuple_id: usize, pattern_id: usize, lookup: &impl TypeLookup) -> bool {
+    head_decides_within(tuple_id, pattern_id, 0, lookup)
+}
+
+/// `head_decides`, `entered` binders into the type the test starts from.
+fn head_decides_within(
+    tuple_id: usize,
+    pattern_id: usize,
+    entered: usize,
+    lookup: &impl TypeLookup,
+) -> bool {
+    let vacuous =
+        |type_id: usize| match lookup.lookup_type(Type::strip_annotations(type_id, lookup)) {
+            Some(Type::Top | Type::Variable(_)) => true,
+            Some(Type::Cycle(depth)) => *depth > entered,
+            _ => false,
+        };
+    match lookup.lookup_type(pattern_id) {
+        Some(Type::Top | Type::Variable(_)) => true,
+        Some(Type::Annotated { base, .. }) => head_decides_within(tuple_id, *base, entered, lookup),
+        Some(Type::Union(members)) => members
+            .iter()
+            .any(|&member| head_decides_within(tuple_id, member, entered + 1, lookup)),
+        Some(Type::Tuple(expected)) => {
+            head_may_match(tuple_id, pattern_id, lookup)
+                && lookup
+                    .lookup_tuple(*expected)
+                    .is_some_and(|expected| expected.fields.iter().all(|&(_, t)| vacuous(t)))
+        }
+        Some(Type::Partial { fields, rest, .. }) => {
+            head_may_match(tuple_id, pattern_id, lookup)
+                && fields.iter().all(|&(_, t)| vacuous(t))
+                && rest.is_none_or(vacuous)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a tuple of this name and these labels could belong to the type, whatever its
+/// fields hold: an over-approximation, so a tuple it rules out needs no inspection.
+fn head_may_match(tuple_id: usize, pattern_id: usize, lookup: &impl TypeLookup) -> bool {
+    let Some(actual) = lookup.lookup_tuple(tuple_id) else {
+        return false;
+    };
+    match lookup.lookup_type(pattern_id) {
+        Some(Type::Top | Type::Variable(_) | Type::Cycle(_)) => true,
+        Some(Type::Annotated { base, .. }) => head_may_match(tuple_id, *base, lookup),
+        Some(Type::Union(members)) => members
+            .iter()
+            .any(|&member| head_may_match(tuple_id, member, lookup)),
+        Some(Type::Intersection(members)) => members
+            .iter()
+            .all(|&member| head_may_match(tuple_id, member, lookup)),
+        Some(Type::Tuple(expected)) => lookup.lookup_tuple(*expected).is_some_and(|expected| {
+            expected.name == actual.name
+                && expected.fields.len() == actual.fields.len()
+                && expected
+                    .fields
+                    .iter()
+                    .zip(&actual.fields)
+                    .all(|((expected, _), (actual, _))| expected == actual)
+        }),
+        Some(Type::Partial { name, fields, .. }) => {
+            (name.is_none() || *name == actual.name)
+                && fields.iter().all(|(label, _)| {
+                    actual
+                        .fields
+                        .iter()
+                        .any(|(actual, _)| actual.as_deref() == Some(label.as_str()))
+                })
+        }
+        _ => false,
+    }
+}
 
 /// TypeLookup implementation for compatibility computation.
 ///
@@ -139,7 +292,7 @@ fn extract_function_type_info(
 /// Returns a Vec where index is type_id and value is the set of compatible concrete types.
 pub fn compute_type_compatibility(input: &CompatibilityInput) -> Vec<ConcreteTypes> {
     let lookup = TypeLookupImpl::new(input.types, input.tuples, input.functions);
-    let index = TypeIndex::build(input, &lookup);
+    let index = TypeIndex::build(input, &lookup, all_tuple_facts(input.tuples.len(), &lookup));
 
     // Collect all pattern type IDs (types used in `TestType` instructions)
     let mut pattern_type_ids = HashSet::new();
@@ -270,7 +423,7 @@ pub fn compute_param_compatibility(
     input: &CompatibilityInput,
 ) -> (Vec<ConcreteTypes>, Vec<ConcreteTypes>) {
     let lookup = TypeLookupImpl::new(input.types, input.tuples, input.functions);
-    let index = TypeIndex::build(input, &lookup);
+    let index = TypeIndex::build(input, &lookup, all_tuple_facts(input.tuples.len(), &lookup));
 
     // Many functions share a parameter type, so memoise the result by parameter type id.
     let mut memo: HashMap<usize, ConcreteTypes> = HashMap::new();
@@ -331,6 +484,10 @@ pub struct CompatibilityTables {
     /// costs one lookup each rather than a rebuild: existing entries can never change,
     /// since the map holds the *lowest* id for a shape and ids only ever grow.
     shapes: HashMap<(Option<String>, Vec<Option<String>>), usize>,
+    /// What each tuple's type says about its values (see `TupleFacts`), and the memo behind
+    /// it; both are functions of append-only tables, so they only ever extend.
+    tuple_facts: Vec<TupleFacts>,
+    facts_memo: FactsMemo,
     /// `[field name id][tuple id]` offsets, as `compute_field_offsets` returns.
     pub field_offsets: Vec<Vec<Option<usize>>>,
 }
@@ -350,15 +507,15 @@ pub struct CompatibilityDelta {
     /// New `type_compatibility` length; rows created by the resize start empty.
     pub types_len: usize,
     /// Members inserted into `type_compatibility` rows (new or pre-existing).
-    pub type_additions: Vec<(usize, Vec<ConcreteType>)>,
+    pub type_additions: Vec<(usize, Vec<(ConcreteType, Verdict)>)>,
     /// Rows appended to `function_params`, in order.
     pub function_rows: Vec<ConcreteTypes>,
     /// Members inserted into pre-existing `function_params` rows.
-    pub function_additions: Vec<(usize, Vec<ConcreteType>)>,
+    pub function_additions: Vec<(usize, Vec<(ConcreteType, Verdict)>)>,
     /// Rows appended to `builtin_params`, in order.
     pub builtin_rows: Vec<ConcreteTypes>,
     /// Members inserted into pre-existing `builtin_params` rows.
-    pub builtin_additions: Vec<(usize, Vec<ConcreteType>)>,
+    pub builtin_additions: Vec<(usize, Vec<(ConcreteType, Verdict)>)>,
     /// Entries appended to `canonical_tuples` (existing entries never change).
     pub canonical_appended: Vec<usize>,
     /// Cells appended to each pre-existing `field_offsets` row, in row order — every
@@ -414,13 +571,17 @@ impl CompatibilityTables {
         let old_field_rows = self.field_offsets.len();
         let old_function_rows = self.function_params.len();
         let old_builtin_rows = self.builtin_params.len();
-        let mut type_additions: Vec<(usize, Vec<ConcreteType>)> = Vec::new();
-        let mut function_additions: Vec<(usize, Vec<ConcreteType>)> = Vec::new();
-        let mut builtin_additions: Vec<(usize, Vec<ConcreteType>)> = Vec::new();
+        let mut type_additions: Vec<(usize, Vec<(ConcreteType, Verdict)>)> = Vec::new();
+        let mut function_additions: Vec<(usize, Vec<(ConcreteType, Verdict)>)> = Vec::new();
+        let mut builtin_additions: Vec<(usize, Vec<(ConcreteType, Verdict)>)> = Vec::new();
 
         self.extend_tuple_tables(input);
         let lookup = TypeLookupImpl::new(input.types, input.tuples, input.functions);
-        let index = TypeIndex::build(input, &lookup);
+        for tuple_id in self.tuple_facts.len()..input.tuples.len() {
+            self.tuple_facts
+                .push(TupleFacts::of(tuple_id, &lookup, &mut self.facts_memo));
+        }
+        let index = TypeIndex::build(input, &lookup, self.tuple_facts.clone());
 
         self.type_compatibility
             .resize(input.types.len(), ConcreteTypes::default());
@@ -431,6 +592,10 @@ impl CompatibilityTables {
         // through first appears (`TypeIndex` keeps first occurrences, so an index entry
         // with a new type id means there was none before).
         let mut new_concretes: Vec<(ConcreteType, usize)> = Vec::new();
+        let tuple_exact = |concrete: ConcreteType| match concrete {
+            ConcreteType::Tuple(tuple_id) => Some((tuple_id, index.tuple_facts[tuple_id])),
+            _ => None,
+        };
 
         for (concrete, slot) in [
             (ConcreteType::Integer, index.integer),
@@ -498,15 +663,17 @@ impl CompatibilityTables {
         // Extend existing pattern entries and parameter rows with the new concretes,
         // memoising verdicts per pattern id (parameters repeat heavily).
         if !new_concretes.is_empty() {
-            let mut verdicts: HashMap<usize, Vec<bool>> = HashMap::new();
-            let mut verdicts_for = |pattern_id: usize| -> Vec<bool> {
+            let mut verdicts: HashMap<usize, Vec<Option<Verdict>>> = HashMap::new();
+            let mut verdicts_for = |pattern_id: usize| -> Vec<Option<Verdict>> {
                 verdicts
                     .entry(pattern_id)
                     .or_insert_with(|| {
                         let stripped = Type::strip_annotations(pattern_id, &lookup);
                         new_concretes
                             .iter()
-                            .map(|&(_, rep)| is_compatible(rep, stripped, &lookup))
+                            .map(|&(concrete, rep)| {
+                                verdict(rep, tuple_exact(concrete), stripped, &lookup)
+                            })
                             .collect()
                     })
                     .clone()
@@ -515,8 +682,13 @@ impl CompatibilityTables {
             for &pattern_id in &self.pattern_ids {
                 let mut added = Vec::new();
                 for (hit, &(concrete, _)) in verdicts_for(pattern_id).iter().zip(&new_concretes) {
-                    if *hit && self.type_compatibility[pattern_id].insert(concrete) && want_delta {
-                        added.push(concrete);
+                    if let Some(verdict) = *hit
+                        && self.type_compatibility[pattern_id]
+                            .insert(concrete, verdict)
+                            .is_none()
+                        && want_delta
+                    {
+                        added.push((concrete, verdict));
                     }
                 }
                 if !added.is_empty() {
@@ -527,8 +699,13 @@ impl CompatibilityTables {
                 let (parameter, _, _, _, _) = extract_function_type_info(func, input.types);
                 let mut added = Vec::new();
                 for (hit, &(concrete, _)) in verdicts_for(parameter).iter().zip(&new_concretes) {
-                    if *hit && self.function_params[func_id].insert(concrete) && want_delta {
-                        added.push(concrete);
+                    if let Some(verdict) = *hit
+                        && self.function_params[func_id]
+                            .insert(concrete, verdict)
+                            .is_none()
+                        && want_delta
+                    {
+                        added.push((concrete, verdict));
                     }
                 }
                 if !added.is_empty() {
@@ -540,8 +717,13 @@ impl CompatibilityTables {
                 for (hit, &(concrete, _)) in
                     verdicts_for(info.param_type).iter().zip(&new_concretes)
                 {
-                    if *hit && self.builtin_params[builtin_id].insert(concrete) && want_delta {
-                        added.push(concrete);
+                    if let Some(verdict) = *hit
+                        && self.builtin_params[builtin_id]
+                            .insert(concrete, verdict)
+                            .is_none()
+                        && want_delta
+                    {
+                        added.push((concrete, verdict));
                     }
                 }
                 if !added.is_empty() {
@@ -550,36 +732,29 @@ impl CompatibilityTables {
             }
         }
 
-        // New pattern types (only new functions can introduce them) get a full scan.
-        // The pattern id may be an *old* type id first used as a pattern now, so its
+        // New pattern types (only new functions can introduce them) get a full scan, as does
+        // a new builtin instantiation's type argument (a runtime test like a fresh `TestType`
+        // operand). The pattern id may be an *old* type id first used as a pattern now, so its
         // delta entry is an addition at that row, not an append.
+        let mut roots: Vec<usize> = Vec::new();
         for function in &input.functions[self.functions_len..] {
             for instruction in &function.instructions {
-                let type_id = instruction.operand() as usize;
-                if instruction.opcode() == Opcode::TestType
-                    && type_id < input.types.len()
-                    && self.pattern_ids.insert(type_id)
-                {
-                    let compatible =
-                        compute_compatible_concrete_types(type_id, input, &lookup, &index);
-                    if want_delta && !compatible.is_empty() {
-                        type_additions.push((type_id, compatible.iter().copied().collect()));
-                    }
-                    self.type_compatibility[type_id] = compatible;
+                if instruction.opcode() == Opcode::TestType {
+                    roots.push(instruction.operand() as usize);
                 }
             }
         }
-
-        // A new builtin instantiation's type argument is a runtime test — a new pattern
-        // row, exactly like a fresh `TestType` operand.
-        for info in &input.builtins[self.builtins_len..] {
-            if let Some(type_id) = info.type_argument
-                && type_id < input.types.len()
-                && self.pattern_ids.insert(type_id)
-            {
+        roots.extend(
+            input.builtins[self.builtins_len..]
+                .iter()
+                .filter_map(|info| info.type_argument),
+        );
+        for type_id in roots {
+            if type_id < input.types.len() && self.pattern_ids.insert(type_id) {
                 let compatible = compute_compatible_concrete_types(type_id, input, &lookup, &index);
                 if want_delta && !compatible.is_empty() {
-                    type_additions.push((type_id, compatible.iter().copied().collect()));
+                    type_additions
+                        .push((type_id, compatible.iter().map(|(&c, &v)| (c, v)).collect()));
                 }
                 self.type_compatibility[type_id] = compatible;
             }
@@ -644,10 +819,19 @@ impl CompatibilityTables {
         if reclaimed {
             for (pattern, expected) in type_compatibility.iter().enumerate() {
                 assert!(
-                    expected.is_subset(&self.type_compatibility[pattern]),
+                    expected
+                        .iter()
+                        .all(
+                            |(concrete, verdict)| self.type_compatibility[pattern].get(concrete)
+                                == Some(verdict)
+                        ),
                     "incremental type_compatibility is missing entries for pattern type \
                      {pattern}: {:?}",
-                    expected.difference(&self.type_compatibility[pattern])
+                    expected
+                        .iter()
+                        .filter(|(concrete, _)| !self.type_compatibility[pattern]
+                            .contains_key(concrete))
+                        .collect::<Vec<_>>()
                 );
             }
         } else {
@@ -686,6 +870,8 @@ struct TypeIndex {
     reference: Option<usize>,
     /// tuple_id -> type id of `Type::Tuple(tuple_id)`
     tuple_to_type: Vec<Option<usize>>,
+    /// tuple_id -> what its type says about its values
+    tuple_facts: Vec<TupleFacts>,
     /// (parameter, result) -> type id of a never-receiving `Type::Callable` (for builtins)
     callable_to_type: HashMap<(usize, usize), usize>,
     /// resource name -> type id of `Type::Resource`
@@ -693,12 +879,17 @@ struct TypeIndex {
 }
 
 impl TypeIndex {
-    fn build(input: &CompatibilityInput, lookup: &TypeLookupImpl) -> Self {
+    fn build(
+        input: &CompatibilityInput,
+        lookup: &TypeLookupImpl,
+        tuple_facts: Vec<TupleFacts>,
+    ) -> Self {
         let mut index = TypeIndex {
             integer: None,
             binary: None,
             reference: None,
             tuple_to_type: vec![None; input.tuples.len()],
+            tuple_facts,
             callable_to_type: HashMap::new(),
             resource_to_type: HashMap::new(),
         };
@@ -779,16 +970,21 @@ fn compute_compatible_concrete_types(
         (index.reference, ConcreteType::Reference),
     ] {
         if top || slot.is_some_and(|type_id| is_compatible(type_id, pattern_id, lookup)) {
-            compat_set.insert(concrete);
+            compat_set.insert(concrete, Verdict::Admit);
         }
     }
 
     // Check all Tuples
     for (tuple_id, &found_type_id) in index.tuple_to_type.iter().enumerate() {
         if let Some(type_id) = found_type_id
-            && is_compatible(type_id, pattern_id, lookup)
+            && let Some(verdict) = verdict(
+                type_id,
+                Some((tuple_id, index.tuple_facts[tuple_id])),
+                pattern_id,
+                lookup,
+            )
         {
-            compat_set.insert(ConcreteType::Tuple(tuple_id));
+            compat_set.insert(ConcreteType::Tuple(tuple_id), verdict);
         }
     }
 
@@ -796,7 +992,7 @@ fn compute_compatible_concrete_types(
     for (func_id, func) in input.functions.iter().enumerate() {
         let (_, callable, _, _, _) = extract_function_type_info(func, input.types);
         if is_compatible(callable, pattern_id, lookup) {
-            compat_set.insert(ConcreteType::Function(func_id));
+            compat_set.insert(ConcreteType::Function(func_id), Verdict::Admit);
         }
     }
 
@@ -807,7 +1003,7 @@ fn compute_compatible_concrete_types(
             .get(&(builtin_info.param_type, builtin_info.result_type))
             && is_compatible(callable_id, pattern_id, lookup)
         {
-            compat_set.insert(ConcreteType::Builtin(builtin_id));
+            compat_set.insert(ConcreteType::Builtin(builtin_id), Verdict::Admit);
         }
     }
 
@@ -821,7 +1017,7 @@ fn compute_compatible_concrete_types(
             lookup.process_type_id((process_send, process_receive, process_state))
             && is_compatible(process_id, pattern_id, lookup)
         {
-            compat_set.insert(ConcreteType::Process(func_id));
+            compat_set.insert(ConcreteType::Process(func_id), Verdict::Admit);
         }
     }
 
@@ -830,9 +1026,194 @@ fn compute_compatible_concrete_types(
         if let Some(&type_id) = index.resource_to_type.get(resource_name)
             && is_compatible(type_id, pattern_id, lookup)
         {
-            compat_set.insert(ConcreteType::Resource(resource_id));
+            compat_set.insert(ConcreteType::Resource(resource_id), Verdict::Admit);
         }
     }
 
     compat_set
+}
+
+/// What a tuple's type says about the values built with it.
+#[derive(Debug, Clone, Copy)]
+struct TupleFacts {
+    /// No type variable (a tuple built in generic code, whose `'t` was whatever the caller
+    /// chose) and no recursive reference past the tuple (a member of a recursive union, whose
+    /// `^` means nothing on its own): the type describes its values exactly enough for a test
+    /// to trust it without looking inside.
+    exact: bool,
+    /// Holds a function or pid somewhere.
+    opaque: bool,
+}
+
+/// Memos behind `TupleFacts`, by type id: both facts are context-free.
+#[derive(Debug, Clone, Default)]
+struct FactsMemo {
+    escape_depths: HashMap<usize, Option<usize>>,
+    opaque: HashMap<usize, bool>,
+}
+
+impl TupleFacts {
+    fn of(tuple_id: usize, lookup: &impl TypeLookup, memo: &mut FactsMemo) -> Self {
+        let fields: Vec<usize> = lookup
+            .lookup_tuple(tuple_id)
+            .map(|info| info.fields.iter().map(|&(_, t)| t).collect())
+            .unwrap_or_default();
+        TupleFacts {
+            exact: fields
+                .iter()
+                .all(|&field| escape_depth(field, lookup, &mut memo.escape_depths) == Some(0)),
+            opaque: fields
+                .iter()
+                .any(|&field| holds_opaque(field, lookup, &mut memo.opaque)),
+        }
+    }
+}
+
+/// `TupleFacts` for every tuple.
+fn all_tuple_facts(tuples: usize, lookup: &impl TypeLookup) -> Vec<TupleFacts> {
+    let mut memo = FactsMemo::default();
+    (0..tuples)
+        .map(|tuple_id| TupleFacts::of(tuple_id, lookup, &mut memo))
+        .collect()
+}
+
+/// Whether a type's values may hold a function or pid.
+fn holds_opaque(type_id: usize, lookup: &impl TypeLookup, memo: &mut HashMap<usize, bool>) -> bool {
+    if let Some(&known) = memo.get(&type_id) {
+        return known;
+    }
+    let parts: Vec<usize> = match lookup.lookup_type(type_id) {
+        Some(Type::Callable { .. } | Type::Process { .. }) => {
+            memo.insert(type_id, true);
+            return true;
+        }
+        Some(Type::Tuple(tuple_id)) => lookup
+            .lookup_tuple(*tuple_id)
+            .map(|info| info.fields.iter().map(|&(_, t)| t).collect())
+            .unwrap_or_default(),
+        Some(Type::Partial { fields, rest, .. }) => {
+            fields.iter().map(|&(_, t)| t).chain(*rest).collect()
+        }
+        Some(Type::Union(members) | Type::Intersection(members)) => members.clone(),
+        Some(Type::Annotated { base, .. }) => vec![*base],
+        // A value of the top type or a type variable may be anything, a function included.
+        Some(Type::Top | Type::Variable(_)) => {
+            memo.insert(type_id, true);
+            return true;
+        }
+        _ => vec![],
+    };
+    let opaque = parts
+        .into_iter()
+        .any(|part| holds_opaque(part, lookup, memo));
+    memo.insert(type_id, opaque);
+    opaque
+}
+
+/// How many binders past `type_id` its recursive references reach (0 when it is closed), or
+/// `None` when it mentions a type variable. Context-free, so memoised by id.
+fn escape_depth(
+    type_id: usize,
+    lookup: &impl TypeLookup,
+    memo: &mut HashMap<usize, Option<usize>>,
+) -> Option<usize> {
+    if let Some(&known) = memo.get(&type_id) {
+        return known;
+    }
+    // The parts to look through, and whether `type_id` is a binder (which closes a reference
+    // to itself).
+    let (parts, binder): (Vec<usize>, bool) = match lookup.lookup_type(type_id) {
+        None | Some(Type::Variable(_)) => {
+            memo.insert(type_id, None);
+            return None;
+        }
+        Some(Type::Cycle(depth)) => return Some(*depth),
+        Some(Type::Integer | Type::Binary | Type::Reference | Type::Resource(_) | Type::Top) => {
+            (vec![], false)
+        }
+        Some(Type::Tuple(tuple_id)) => (
+            lookup
+                .lookup_tuple(*tuple_id)
+                .map(|info| info.fields.iter().map(|&(_, t)| t).collect())
+                .unwrap_or_default(),
+            false,
+        ),
+        Some(Type::Partial { fields, rest, .. }) => {
+            (fields.iter().map(|&(_, t)| t).chain(*rest).collect(), false)
+        }
+        Some(Type::Intersection(members)) => (members.clone(), false),
+        Some(Type::Process {
+            send,
+            receive,
+            state,
+        }) => (
+            [*send, *receive, *state].into_iter().flatten().collect(),
+            false,
+        ),
+        Some(Type::Annotated { base, .. }) => (vec![*base], false),
+        Some(Type::Union(members)) => (members.clone(), true),
+        Some(Type::Callable {
+            parameter,
+            result,
+            receive,
+            states,
+            ..
+        }) => (
+            [*parameter, *result, *receive]
+                .into_iter()
+                .chain(*states)
+                .collect(),
+            true,
+        ),
+    };
+    let mut deepest = Some(0);
+    for part in parts {
+        deepest = match (deepest, escape_depth(part, lookup, memo)) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            _ => None,
+        };
+    }
+    let depth = deepest.map(|depth| {
+        if binder {
+            depth.saturating_sub(1)
+        } else {
+            depth
+        }
+    });
+    memo.insert(type_id, depth);
+    depth
+}
+
+/// Whether a function, builtin or pid of this concrete type fits a type: what a walk over a
+/// value asks of a part it can't look inside. Only walks need it, so the executor computes it
+/// on demand rather than the tables holding a row for every function type a tested type
+/// contains. `builtin_signature` is a builtin's `(parameter, result)`.
+pub fn opaque_fits(
+    concrete: ConcreteType,
+    pattern_id: usize,
+    types: &[Type],
+    tuples: &[TupleTypeInfo],
+    functions: &[Function],
+    builtin_signature: Option<(usize, usize)>,
+) -> bool {
+    let lookup = TypeLookupImpl::new(types, tuples, functions);
+    let rep = match concrete {
+        ConcreteType::Function(func_id) => functions.get(func_id).map(|func| func.type_id),
+        ConcreteType::Process(func_id) => functions.get(func_id).and_then(|func| {
+            let (_, _, send, receive, state) = extract_function_type_info(func, types);
+            lookup.process_type_id((send, receive, state))
+        }),
+        // A builtin is represented as `TypeIndex` does: a plain callable of its signature.
+        ConcreteType::Builtin(_) => builtin_signature.and_then(|(parameter, result)| {
+            types.iter().position(|ty| {
+                matches!(ty, Type::Callable { parameter: p, result: r, receive, omittable, .. }
+                    if *p == parameter
+                        && *r == result
+                        && omittable.is_empty()
+                        && lookup.lookup_type(*receive).is_some_and(Type::is_never))
+            })
+        }),
+        _ => None,
+    };
+    rep.is_some_and(|rep| is_compatible(rep, pattern_id, &lookup))
 }

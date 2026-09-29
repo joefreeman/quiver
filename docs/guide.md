@@ -510,16 +510,14 @@ y = 2
 Point[1, 2] ~> =Point[x, ^y]  //= Point[1, 2] // binds x, checks y is 2
 ```
 
-A type test answers by what the value is known to be where it was built, without looking
-inside it. A value built at a wider type fails a narrower test even when its contents would
-fit, and a tuple pattern, which tests each field, is the precise alternative:
+A type test checks what the value holds, however it was built: a list decoded at the
+wider `'%list<'int>` is still a `'single` when it has one element.
 
 ```quiver
 'single = Cons['int, Nil]
 xs = %data.decode<'%list<'int>> "Cons[1, Nil]"   // built as a list of any length
-{ xs ~> ='single }                               //= []
-xs ~> =Cons[_, Nil]                              //= Cons[1, Nil]
-Cons[1, Nil] ~> ='single                         //= Cons[1, Nil]
+xs ~> ='single                                   //= Cons[1, Nil]
+{ Cons[1, Cons[2, Nil]] ~> ='single }            //= []
 ```
 
 A pin's target may be any access path — a field of a variable, or of the enclosing
