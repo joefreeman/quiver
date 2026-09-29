@@ -81,6 +81,14 @@ pub enum Error {
     TypeArgumentsNotApplicable {
         target: String,
     },
+    /// A type argument — written (`f<'t>`, `'alias<'t>`) or inferred at a call — that does
+    /// not fit the bound its parameter declares (`<'t: 'bound>`).
+    TypeParameterBound(Box<BoundMismatch>),
+    /// A nested literal re-declaring its enclosing function's type parameter (which it
+    /// shares) with a bound of its own: the enclosing declaration's bound is the one.
+    TypeParameterRedeclaredWithBound {
+        parameter: String,
+    },
     /// More explicit type arguments than the callable declares.
     TypeArgumentsTooMany {
         declared: usize,
@@ -297,6 +305,15 @@ pub enum Error {
     },
 }
 
+/// A type argument outside its parameter's bound (see [`Error::TypeParameterBound`]), each part
+/// as displayed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundMismatch {
+    pub parameter: String,
+    pub bound: String,
+    pub found: String,
+}
+
 /// Whether an access reads the value flowing into it rather than naming something else:
 /// `~` and `^~` consume it, and a sourceless access is a bare accessor path (`.y`) that
 /// reads it.
@@ -462,6 +479,25 @@ impl std::fmt::Display for Error {
                     "Explicit type arguments need a function with declared type parameters \
                      (`#<'t, …>`) whose definition is statically known — a declared boundary \
                      (e.g. a parameter's written type) sheds them; found {target}"
+                )
+            }
+            Error::TypeParameterBound(mismatch) => {
+                let BoundMismatch {
+                    parameter,
+                    bound,
+                    found,
+                } = mismatch.as_ref();
+                write!(
+                    f,
+                    "Type parameter {parameter} is bounded by {bound}, but {found} does not \
+                     fit it"
+                )
+            }
+            Error::TypeParameterRedeclaredWithBound { parameter } => {
+                write!(
+                    f,
+                    "{parameter} is the enclosing function's type parameter, so it keeps that \
+                     declaration's bound; state the bound there instead"
                 )
             }
             Error::TypeArgumentsTooMany { declared, given } => {
@@ -849,6 +885,8 @@ pub struct SessionTables {
     pub case_tables: HashMap<usize, usize>,
     /// Callable type id → its declared type parameters, in declaration order.
     pub callable_type_params: HashMap<usize, Vec<String>>,
+    /// Bounded type parameter (uniquified variable name) → its bound.
+    pub type_param_bounds: HashMap<String, usize>,
 }
 
 /// The products of a successful compilation. The caller-owned `program`, `module_cache`, and
@@ -1098,6 +1136,12 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // at function-literal compilation (declaration order) and builtin resolution
     // (first-occurrence order); cached/restored across modules like the dispatch tables.
     callable_type_params: HashMap<usize, Vec<String>>,
+    // The upper bound of every bounded type parameter declared so far, by its uniquified
+    // variable name — unique to its definition, so the bound follows the variable wherever
+    // its type travels. A call checks each variable it binds against this. Unbounded
+    // parameters (bound `_`) are left out. Cached/restored across modules like the tables
+    // above.
+    type_param_bounds: HashMap<String, usize>,
 
     // Span of the term currently being compiled, so an error can be located in source.
     // Only set when a recorder is interested (LSP); harmless otherwise.
@@ -1284,6 +1328,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             fn_case_tables: tables.fn_case_tables,
             case_tables: tables.case_tables,
             callable_type_params: tables.callable_type_params,
+            type_param_bounds: tables.type_param_bounds,
             current_span: None,
             type_param_suffix: None,
             suffix_scopes: Vec::new(),
@@ -1429,6 +1474,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 fn_case_tables: compiler.fn_case_tables,
                 case_tables: compiler.case_tables,
                 callable_type_params: compiler.callable_type_params,
+                type_param_bounds: compiler.type_param_bounds,
             },
             warnings: compiler
                 .module_warnings
@@ -1607,7 +1653,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn compile_type_alias(
         &mut self,
         name: Option<&str>,
-        type_parameters: Vec<String>,
+        type_parameters: Vec<ast::TypeParameter>,
         type_definition: ast::Type,
     ) -> Result<(), Error> {
         // Prevent shadowing primitive types
@@ -1623,25 +1669,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Validate the AST structure
         Self::validate_type_ast(&type_definition)?;
 
-        // Create Type::Variable bindings for type parameters
-        let mut bindings = HashMap::new();
-        for param in &type_parameters {
-            let var_type_id = self.program.register_type(Type::Variable(param.clone()));
-            bindings.insert(param.clone(), var_type_id);
-        }
-
-        // Resolve the type definition immediately
         let mut env = typing::TypeEnv {
             resolver: self.resolver,
             module_cache: &mut *self.module_cache,
             package: &self.current_package,
         };
-        let type_id = typing::resolve_ast_type_with_bindings(
+        let definition = typing::resolve_alias_definition(
             &mut env,
             &self.scopes,
+            &type_parameters,
             type_definition,
             self.program,
-            &bindings,
         )?;
 
         // Store the resolved alias. The nameless default marker is bound under the reserved
@@ -1650,14 +1688,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Some(name) => name.to_string(),
             None => typing::SELF_DEFAULT_KEY.to_string(),
         };
-        scopes::define_type_alias(
-            &mut self.scopes,
-            key,
-            TypeAliasDef {
-                parameters: type_parameters,
-                type_id,
-            },
-        );
+        scopes::define_type_alias(&mut self.scopes, key, definition);
         Ok(())
     }
 
@@ -1812,7 +1843,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         }
                     }
                 }
-                Ok(())
+                match &tuple.rest {
+                    Some(rest) => Self::validate_type_ast(rest),
+                    None => Ok(()),
+                }
             }
             ast::Type::Function(func) => {
                 Self::validate_type_ast(&func.input)?;
@@ -1993,6 +2027,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // whose constructions intern as distinct tuple ids: every member sharing one
         // name inherits it; mixed (or missing) names inherit none.
         let source_type = Type::strip_annotations(source_type, &*self.program);
+        // A rigid type variable spreads as its bound (see the spread's field sources).
+        let source_type = match self.program.lookup_type(source_type) {
+            Some(Type::Variable(name)) => self.program.rigid_bound(name)?,
+            _ => source_type,
+        };
         let members = match self.program.lookup_type(source_type) {
             Some(Type::Union(members)) => members.clone(),
             _ => vec![source_type],
@@ -3017,6 +3056,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     fn compile_function(
         &mut self,
+        function: ast::Function,
+        expected_parameter: Option<usize>,
+    ) -> Result<usize, Error> {
+        // The literal's type parameters are rigid from its signature to the end of its body;
+        // restored here so that no exit path, error included, leaks them to the enclosing code.
+        let enclosing_rigid = self.program.rigid_variables().clone();
+        let result = self.compile_function_literal(function, expected_parameter);
+        self.program.set_rigid_variables(enclosing_rigid);
+        result
+    }
+
+    fn compile_function_literal(
+        &mut self,
         mut function: ast::Function,
         expected_parameter: Option<usize>,
     ) -> Result<usize, Error> {
@@ -3083,6 +3135,25 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let inherited_suffix = self.type_param_suffix;
         let type_param_suffix = inherited_suffix.unwrap_or_else(|| self.mint_type_param_suffix());
         self.type_param_suffix = Some(type_param_suffix);
+        let declared = {
+            let mut env = typing::TypeEnv {
+                resolver: self.resolver,
+                module_cache: &mut *self.module_cache,
+                package: &self.current_package,
+            };
+            typing::resolve_type_parameters(
+                &mut env,
+                &self.scopes,
+                &function.type_parameters,
+                |name| format!("{name}#{type_param_suffix}"),
+                self.program,
+            )?
+        };
+        // The declared type parameters are rigid in the literal's own signature and body: each
+        // is one unknown type, known only through its bound, rather than a variable to solve.
+        let enclosing_rigid = self.program.rigid_variables().clone();
+        self.program
+            .set_rigid_variables(declared.rigid_over(&enclosing_rigid));
         // Which parameter labels this literal lets its callers omit (`#[(x): 'int]`). A
         // calling convention, so it rides the function type registered below rather than
         // the parameter's tuple type; an inferred parameter has no written spelling and so
@@ -3099,8 +3170,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     &mut env,
                     &self.scopes,
                     t.clone(),
-                    &function.type_parameters,
-                    type_param_suffix,
+                    &declared.bindings,
                     self.program,
                 )?;
                 parameter_omittable = omittable;
@@ -3115,7 +3185,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // inside `#<'t>['%list<'t>, …]`), which is an opaque but real type the literal
                 // can pass through.
                 let usable = expected_parameter.filter(|&ep| match self.program.lookup_type(ep) {
-                    Some(Type::Variable(name)) => typing::is_rigid_variable(name, inherited_suffix),
+                    Some(Type::Variable(name)) => self.program.rigid_bound(name).is_some(),
                     _ => true,
                 });
                 usable.ok_or(Error::ParameterNotInferable)?
@@ -3147,14 +3217,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // their uniquified variables, so body-position type references — patterns,
         // ascriptions, checked retrievals, explicit type applications, nested signatures
         // — can name them.
-        for param in &function.type_parameters {
-            let variable = self
-                .program
-                .register_type(Type::Variable(format!("{param}#{type_param_suffix}")));
+        for (param, &variable) in &declared.bindings {
             function_scope_bindings.type_aliases.insert(
                 param.clone(),
                 TypeAliasDef {
                     parameters: Vec::new(),
+                    bounds: Vec::new(),
                     type_id: variable,
                 },
             );
@@ -3326,8 +3394,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     &mut env,
                     &self.scopes,
                     return_type_ast.clone(),
-                    &function.type_parameters,
-                    type_param_suffix,
+                    &declared.bindings,
                     self.program,
                 )?;
                 Some(result)
@@ -3399,11 +3466,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // be instantiated with nil, so its stand-in holds nil too: a body failing on a `'t`
             // step (its `'t & []`) fits only a declared result admitting nil.
             let nil = self.program.register_type(Type::nil());
-            let rigid: HashMap<String, usize> = function
-                .type_parameters
-                .iter()
-                .map(|param| {
-                    let variable = format!("{param}#{type_param_suffix}");
+            let rigid: HashMap<String, usize> = declared
+                .names()
+                .into_iter()
+                .map(|variable| {
                     let opaque = self
                         .program
                         .register_tuple(Some(format!("'{variable}")), Vec::new());
@@ -3513,15 +3579,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Record the declared type parameters (as their uniquified variable names, in
         // declaration order) so an explicit instantiation (`f<'int>`) can bind them
         // positionally.
-        if !function.type_parameters.is_empty() {
-            self.callable_type_params.insert(
-                callable_type_id,
-                function
-                    .type_parameters
-                    .iter()
-                    .map(|p| format!("{p}#{type_param_suffix}"))
-                    .collect(),
-            );
+        if !declared.bounds.is_empty() {
+            self.callable_type_params
+                .insert(callable_type_id, declared.names());
+            self.record_type_parameter_bounds(declared.bounds.iter().cloned());
         }
 
         let function_index = self.program.register_function(Function {
@@ -3558,6 +3619,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.current_receive_type_id = saved_receive_type;
         self.current_states = saved_states;
         self.current_omittable = saved_omittable;
+        self.program.set_rigid_variables(enclosing_rigid);
 
         // Emit instructions to push capture values onto the stack
         // These will be popped by the `Enclose` instruction
@@ -5477,6 +5539,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     .entry(*k)
                     .or_insert_with(|| v.clone());
             }
+            self.record_type_parameter_bounds(
+                cached
+                    .type_param_bounds
+                    .iter()
+                    .map(|(name, bound)| (name.clone(), *bound)),
+            );
             cached
         } else {
             self.module_cache.import_stack.push(id.clone());
@@ -5606,6 +5674,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let dispatch_fn_before = self.fn_case_tables.clone();
         let dispatch_case_before = self.case_tables.clone();
         let type_params_before = self.callable_type_params.clone();
+        let bounds_before = self.type_param_bounds.clone();
 
         // Reset to clean state for module compilation
         self.local_count = 0;
@@ -5767,6 +5836,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .filter(|(k, v)| type_params_before.get(*k) != Some(*v))
             .map(|(k, v)| (*k, v.clone()))
             .collect();
+        let type_param_bounds: HashMap<String, usize> = self
+            .type_param_bounds
+            .iter()
+            .filter(|(name, _)| !bounds_before.contains_key(*name))
+            .map(|(name, bound)| (name.clone(), *bound))
+            .collect();
 
         let cached = modules::CachedModule {
             value: module_value,
@@ -5774,6 +5849,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             fn_case_tables,
             case_tables,
             callable_type_params,
+            type_param_bounds,
             warnings,
         };
 
@@ -6448,6 +6524,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 expected: quiver_core::format::format_type_by_id(&*self.program, parameter),
                 found: quiver_core::format::format_type_by_id(&*self.program, arg_type),
             });
+        }
+        // A generic root function is spawned uninstantiated, but its init must still fit the
+        // bounds of the type parameters it would pin.
+        if typing::contains_variables(parameter, &*self.program) {
+            let mut bindings = HashMap::new();
+            typing::unify(&mut bindings, parameter, arg_type, self.program)?;
+            self.check_bindings_fit_bounds(&bindings)?;
         }
 
         // The builtin takes `[function, init]`; the init went on the stack first.
@@ -7850,6 +7933,31 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
+    /// Record type parameters' bounds (see `type_param_bounds`), leaving out the unbounded.
+    fn record_type_parameter_bounds(&mut self, bounds: impl IntoIterator<Item = (String, usize)>) {
+        for (name, bound) in bounds {
+            if !matches!(self.program.lookup_type(bound), Some(Type::Top)) {
+                self.type_param_bounds.insert(name, bound);
+            }
+        }
+    }
+
+    /// Check a call's type-variable bindings against the bounds of the variables they bind.
+    fn check_bindings_fit_bounds(
+        &mut self,
+        bindings: &HashMap<String, usize>,
+    ) -> Result<(), Error> {
+        let bounds: Vec<(String, usize)> = bindings
+            .keys()
+            .filter_map(|name| Some((name.clone(), *self.type_param_bounds.get(name)?)))
+            .collect();
+        typing::check_type_parameter_bounds(
+            bounds.iter().map(|(name, bound)| (name, *bound)),
+            bindings,
+            self.program,
+        )
+    }
+
     /// Instantiate a callable type's declared type parameters with explicit type
     /// arguments (`f<'int>`): resolve each written argument, bind it to the callable's
     /// corresponding declared parameter (positionally — a prefix is allowed, the rest
@@ -7935,6 +8043,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 typing::resolve_ast_type(&mut env, &self.scopes, argument.clone(), self.program)?;
             bindings.insert(param.clone(), resolved);
         }
+        self.check_bindings_fit_bounds(&bindings)?;
 
         let instantiated = typing::substitute(base_id, &bindings, self.program);
         Ok(match row {
@@ -8162,15 +8271,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
                 typing::unify(&mut bindings, param_id, arg_type, self.program)?;
                 self.check_argument_fits(arg_type, param_id, &bindings, value_type)?;
+                self.check_bindings_fit_bounds(&bindings)?;
 
                 // Substitute bindings in the result type, closing unpinned parameters
                 // to the empty union (see close_unpinned_result).
-                typing::close_unpinned_result(
-                    result_id,
-                    &mut bindings,
-                    self.type_param_suffix,
-                    self.program,
-                );
+                typing::close_unpinned_result(result_id, &mut bindings, self.program);
                 typing::substitute(result_id, &bindings, self.program)
             } else {
                 // No type variables - just check compatibility
@@ -8294,12 +8399,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let mut bindings = HashMap::new();
             typing::unify(&mut bindings, param_id, arg_type, self.program)?;
             self.check_argument_fits(arg_type, param_id, &bindings, arg_type)?;
-            typing::close_unpinned_result(
-                result_id,
-                &mut bindings,
-                self.type_param_suffix,
-                self.program,
-            );
+            self.check_bindings_fit_bounds(&bindings)?;
+            typing::close_unpinned_result(result_id, &mut bindings, self.program);
             typing::substitute(result_id, &bindings, self.program)
         } else {
             self.check_argument_fits(arg_type, param_id, &HashMap::new(), arg_type)?;

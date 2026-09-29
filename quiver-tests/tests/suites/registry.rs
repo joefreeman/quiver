@@ -164,14 +164,11 @@ fn registered_service_survives_its_spawner_and_collection() {
 }
 
 #[test]
-fn identity_bearing_key_is_a_runtime_error() {
+fn identity_bearing_key_is_a_compile_error() {
+    // Keys are typed `'%data`, so identity anywhere inside one is refused statically.
     quiver()
         .evaluate("p = @#[] { !'int } []; %registry.register [[tag: %ref []], p]")
-        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
-            "invalid registry key: cannot encode a ref: %data notation carries data only \
-             (integers, binaries, and tuples)"
-                .to_string(),
-        ));
+        .expect_error_containing("[tag: 'ref]");
 }
 
 #[test]

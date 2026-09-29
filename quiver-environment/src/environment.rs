@@ -203,7 +203,7 @@ fn import_type_value(
             tuple_remap,
             old_tuple_id,
         )),
-        Type::Partial { name, fields } => Type::Partial {
+        Type::Partial { name, fields, rest } => Type::Partial {
             name,
             fields: fields
                 .into_iter()
@@ -214,6 +214,7 @@ fn import_type_value(
                     )
                 })
                 .collect(),
+            rest: rest.map(|rest| import_type(program, src, type_remap, tuple_remap, rest)),
         },
         Type::Union(type_ids) => Type::Union(
             type_ids

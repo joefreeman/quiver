@@ -208,7 +208,10 @@ module.exports = grammar({
     // annotation-retrieval access at the start of a block.
     annotation: $ => prec.dynamic(1, seq(field('key', $.annotation_name), $.chain)),
 
-    type_parameters: $ => immBracketed($, '<', $.type_name, '>'),
+    type_parameters: $ => immBracketed($, '<', choice($.type_name, $.bounded_type_parameter), '>'),
+
+    // A type parameter with an upper bound: `'t: (x: 'int)`.
+    bounded_type_parameter: $ => seq(field('name', $.type_name), ':', field('bound', $._type)),
 
     // ------------------------------------------------------------------- sequences
 
@@ -791,8 +794,13 @@ module.exports = grammar({
 
     _partial_type_field: $ => choice(
       $.type_spread,
+      $.rest_type,
       seq(field('name', $.identifier), ':', optional($._nl), $._type),
     ),
+
+    // A partial's rest type, `*'t`: the type of every field it does not list. The compiler
+    // requires it last; the grammar accepts it anywhere among the entries.
+    rest_type: $ => seq('*', field('type', $._type)),
 
     // A field of a tuple type. Every non-spread form may carry a default (a spread names no
     // field, so it takes none).

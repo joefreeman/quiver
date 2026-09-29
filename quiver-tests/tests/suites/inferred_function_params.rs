@@ -95,7 +95,7 @@ fn test_unsolved_callee_variable_is_not_inferable() {
     // Only a *rigid* variable is usable. One the callee has yet to solve has nothing to pin
     // it, so there is no parameter type to infer and the literal is rejected.
     quiver()
-        .evaluate("run = #<'t>[#'t -> 'int] { =[g]; g [] }; run [#{ 42 }]")
+        .evaluate("run = #<'t>[#'t -> 'int] { 42 }; run [#{ 42 }]")
         .expect_compile_error(quiver_compiler::compiler::Error::ParameterNotInferable);
 }
 
@@ -103,7 +103,7 @@ fn test_unsolved_callee_variable_is_not_inferable() {
 fn test_unsolved_callee_variable_takes_an_explicit_nil_parameter() {
     // Writing the parameter is what resolves it: `#[] { ... }` solves the callee's `'t` to nil.
     quiver()
-        .evaluate("run = #<'t>[#'t -> 'int] { =[g]; g [] }; run [#[] { 42 }]")
+        .evaluate("run = #<'t>[#'t -> 'int] { 42 }; run [#[] { 42 }]")
         .expect("42");
 }
 

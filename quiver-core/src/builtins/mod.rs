@@ -355,10 +355,8 @@ pub enum TypeSpec {
     Binary,
     Reference,
     Tuple(Option<&'static str>, Vec<(Option<&'static str>, TypeSpec)>),
-    /// The empty partial `()` — any tuple, nothing constrained. With `Integer` and
-    /// `Binary` in a union this spells "any data value" (identity-bearing values are
-    /// not tuples), which is what a `%registry` key parameter wants.
-    AnyTuple,
+    /// The unnamed partial `(*spec)`: any tuple whose every field is of the given type.
+    Rest(Box<TypeSpec>),
     Union(Vec<TypeSpec>),
     Process(Option<Box<TypeSpec>>, Option<Box<TypeSpec>>), // Process type: (send, receive)
     Resource(String), // Opaque resource type identifier (e.g., "File", "TcpSocket")
@@ -382,6 +380,16 @@ pub enum TypeSpec {
 }
 
 impl TypeSpec {
+    /// `'%data`, `'int | 'bin | (*^)`: integers, binaries, and tuples whose fields are data —
+    /// every value without identity, as a `%registry` key or a `%data.encode` argument must be.
+    pub fn data() -> TypeSpec {
+        TypeSpec::Union(vec![
+            TypeSpec::Integer,
+            TypeSpec::Binary,
+            TypeSpec::Rest(Box::new(TypeSpec::Cycle(1))),
+        ])
+    }
+
     /// Resolve this type specification to a type ID in the Program's type registry
     pub fn resolve_to_id(&self, program: &mut Program) -> usize {
         let typ = self.resolve(program);
@@ -408,9 +416,10 @@ impl TypeSpec {
                 let tuple_id = program.register_tuple(name.map(|s| s.to_string()), fields);
                 Type::Tuple(tuple_id)
             }
-            TypeSpec::AnyTuple => Type::Partial {
+            TypeSpec::Rest(rest) => Type::Partial {
                 name: None,
                 fields: vec![],
+                rest: Some(rest.resolve_to_id(program)),
             },
             TypeSpec::Union(specs) => {
                 let type_ids: Vec<usize> = specs
@@ -1050,7 +1059,7 @@ pub fn register_control_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 pub fn register_data_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     let str_spec = TypeSpec::Tuple(Some("Str"), vec![(None, TypeSpec::Binary)]);
     let nil = TypeSpec::Tuple(None, vec![]);
-    register_builtin!(registry, "data_encode", data::builtin_data_encode, TypeSpec::Var("t") => TypeSpec::Binary);
+    register_builtin!(registry, "data_encode", data::builtin_data_encode, TypeSpec::data() => TypeSpec::Binary);
     registry.register_generic(
         "data_decode".to_string(),
         coerce_builtin(data::builtin_data_decode),
@@ -1264,7 +1273,8 @@ pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     );
     register_builtin!(registry, "process_spawn", builtin_process_spawn, Purity::Process, spawn_param => pid.clone());
     register_builtin!(registry, "process_detach", builtin_process_detach, Purity::Process, pid.clone() => ok.clone());
-    let kill_param = TypeSpec::Tuple(None, vec![(None, pid.clone()), (None, TypeSpec::Top)]);
+    // A kill reason outlives the killer, so it must be data.
+    let kill_param = TypeSpec::Tuple(None, vec![(None, pid.clone()), (None, TypeSpec::data())]);
     register_builtin!(registry, "process_kill", builtin_process_kill, Purity::Process, kill_param => ok.clone());
     register_builtin!(registry, "process_link", builtin_process_link, Purity::Process, pid => ok);
     // `track`'s polymorphic type `#(#[] -> 'v) -> 'v`: it takes a nilary thunk and returns
@@ -1306,14 +1316,8 @@ pub fn register_process_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 /// environment; these signatures are universal and the implementations attach
 /// unconditionally, like `%proc`'s — no host capability is involved.
 pub fn register_registry_builtins<E: Effect>(reg: &mut BuiltinRegistry<E>) {
-    // Keys are data values: `'int | 'bin | ()`. The union statically excludes bare
-    // identity-bearing values (none of which are tuples); identity nested *inside* a
-    // tuple is rejected at runtime by key encoding.
-    let key = TypeSpec::Union(vec![
-        TypeSpec::Integer,
-        TypeSpec::Binary,
-        TypeSpec::AnyTuple,
-    ]);
+    // Keys are data values, compared structurally.
+    let key = TypeSpec::data();
     // The capability-less process type: registration demands nothing of the pid — what
     // a lookup grants is decided by the lookup's own type argument.
     let pid = TypeSpec::Process(None, None);

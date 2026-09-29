@@ -464,6 +464,88 @@
     }
   },
   {
+    "type": "bounded_type_parameter",
+    "named": true,
+    "fields": {
+      "bound": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "\n",
+            "named": false
+          },
+          {
+            "type": "(",
+            "named": false
+          },
+          {
+            "type": ")",
+            "named": false
+          },
+          {
+            "type": "cycle_type",
+            "named": true
+          },
+          {
+            "type": "function_type",
+            "named": true
+          },
+          {
+            "type": "intersection_type",
+            "named": true
+          },
+          {
+            "type": "module_type",
+            "named": true
+          },
+          {
+            "type": "partial_type",
+            "named": true
+          },
+          {
+            "type": "process_type",
+            "named": true
+          },
+          {
+            "type": "resource_type",
+            "named": true
+          },
+          {
+            "type": "self_default_type",
+            "named": true
+          },
+          {
+            "type": "top_type",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "union_type",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "type_name",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "branch",
     "named": true,
     "fields": {
@@ -1403,6 +1485,10 @@
         },
         {
           "type": "resource_type",
+          "named": true
+        },
+        {
+          "type": "rest_type",
           "named": true
         },
         {
@@ -2353,6 +2439,78 @@
     }
   },
   {
+    "type": "rest_type",
+    "named": true,
+    "fields": {
+      "type": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "\n",
+            "named": false
+          },
+          {
+            "type": "(",
+            "named": false
+          },
+          {
+            "type": ")",
+            "named": false
+          },
+          {
+            "type": "cycle_type",
+            "named": true
+          },
+          {
+            "type": "function_type",
+            "named": true
+          },
+          {
+            "type": "intersection_type",
+            "named": true
+          },
+          {
+            "type": "module_type",
+            "named": true
+          },
+          {
+            "type": "partial_type",
+            "named": true
+          },
+          {
+            "type": "process_type",
+            "named": true
+          },
+          {
+            "type": "resource_type",
+            "named": true
+          },
+          {
+            "type": "self_default_type",
+            "named": true
+          },
+          {
+            "type": "top_type",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "union_type",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "select",
     "named": true,
     "fields": {
@@ -3188,6 +3346,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "bounded_type_parameter",
+          "named": true
+        },
         {
           "type": "type_name",
           "named": true

@@ -9,9 +9,15 @@
 // concrete: `%data.decode<'event> text`. Anything that doesn't fit answers nil, like a
 // failed match.
 
+// The default type, `'%data`, is the data values themselves: integers, binaries, and tuples
+// whose fields are data — every value without identity (refs, pids, functions and resources
+// have none of this notation). Bound a type parameter by it (`#<'k: '%data>…`) to accept
+// any data.
+' = 'int | 'bin | (*^)
+
 [
-  encode: #_ {
-    :doc "Encodes a data value (integers, binaries, tuples — no refs, pids, functions, or resources, which are runtime errors) as Quiver data notation. `decode` reads it back."
+  encode: #' {
+    :doc "Encodes a data value (integers, binaries, and tuples of data — `'%data`) as Quiver data notation. `decode` reads it back."
     __data_encode__ $ ~> Str[~]
   },
   decode: __data_decode__ ~> {

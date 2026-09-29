@@ -114,6 +114,11 @@ fn extract_field_sources(program: &Program, type_id: usize) -> Vec<FieldSource> 
             .iter()
             .flat_map(|&tid| extract_field_sources(program, tid))
             .collect(),
+        // A rigid type variable's values have the fields its bound promises.
+        Type::Variable(name) => match program.rigid_bound(name) {
+            Some(bound) => extract_field_sources(program, bound),
+            None => vec![],
+        },
         _ => vec![],
     }
 }

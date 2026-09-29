@@ -65,6 +65,11 @@ fn extract_tuple_ids(program: &Program, type_id: usize) -> Vec<usize> {
                 })
             })
             .collect(),
+        // A rigid type variable spreads as its bound; the result is the bound's shape, as the
+        // variable's own identity says nothing about the fields a spread overrides.
+        Type::Variable(name) => program
+            .rigid_bound(name)
+            .map_or_else(Vec::new, |bound| extract_tuple_ids(program, bound)),
         _ => vec![],
     }
 }
@@ -266,10 +271,9 @@ fn build_field_variants(
                     let spread_tuple_ids = extract_tuple_ids(program, *type_id);
 
                     if spread_tuple_ids.is_empty() {
-                        let ty = program.lookup_type(*type_id);
                         return Err(Error::TypeMismatch {
                             expected: "tuple".to_string(),
-                            found: format!("{:?}", ty),
+                            found: quiver_core::format::format_type_by_id(program, *type_id),
                         });
                     }
 

@@ -14,8 +14,8 @@
 // message type: `!('event | '%proc.changed)`.
 'changed = Changed
 
-kill = #[(pid): @, reason: _ = []] {
-  :doc "Kills the process — always effective (there is no trapping). Its awaiters observe the Killed[reason] crash kind, with the given reason (nil when none is given, as for a link or teardown kill); its owned subtree is torn down, and its link peers are killed. The reason must be data: a pid, ref, function or resource in it is a runtime error. A no-op on an already-terminated process."
+kill = #[(pid): @, reason: '%data = []] {
+  :doc "Kills the process — always effective (there is no trapping). Its awaiters observe the Killed[reason] crash kind, with the given reason (nil when none is given, as for a link or teardown kill); its owned subtree is torn down, and its link peers are killed. The reason outlives the killer, so it must be data (`'%data`). A no-op on an already-terminated process."
   __process_kill__ [$pid, $reason]
 }
 

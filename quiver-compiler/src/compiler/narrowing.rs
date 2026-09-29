@@ -552,16 +552,19 @@ fn intersect_pair(a: usize, b: usize, stacks: &mut Walk, program: &mut Program) 
         | (Type::Binary, Type::Binary)
         | (Type::Reference, Type::Reference) => a,
         // Two partials constrain by name, so their intersection constrains by the union of
-        // their names: fields in both must intersect, fields in one carry over. Stated tuple
-        // names must agree; an unnamed partial adopts the other's.
+        // their names: fields in both must intersect, and a field one lists meets the other's
+        // rest type, when it states one. Their rest types meet too. Stated tuple names must
+        // agree; an unnamed partial adopts the other's.
         (
             Type::Partial {
                 name: n1,
                 fields: f1,
+                rest: r1,
             },
             Type::Partial {
                 name: n2,
                 fields: f2,
+                rest: r2,
             },
         ) => {
             if let (Some(a), Some(b)) = (n1, n2)
@@ -569,29 +572,48 @@ fn intersect_pair(a: usize, b: usize, stacks: &mut Walk, program: &mut Program) 
             {
                 return never;
             }
-            let mut fields = f1.clone();
-            for (name, bty) in f2 {
-                match fields.iter_mut().find(|(n, _)| n == name) {
-                    Some((_, aty)) => {
-                        let intersected = intersect_in(*aty, *bty, stacks, program);
-                        if intersected == program.never() {
-                            return never;
-                        }
-                        *aty = intersected;
-                    }
-                    None => fields.push((name.clone(), *bty)),
+            let mut fields = Vec::with_capacity(f1.len() + f2.len());
+            for (name, aty) in f1 {
+                let intersected = match (f2.iter().find(|(n, _)| n == name), r2) {
+                    (Some((_, bty)), _) => intersect_in(*aty, *bty, stacks, program),
+                    (None, Some(r2)) => intersect_in(*aty, *r2, stacks, program),
+                    (None, None) => *aty,
+                };
+                if intersected == never {
+                    return never;
                 }
+                fields.push((name.clone(), intersected));
             }
+            for (name, bty) in f2 {
+                if f1.iter().any(|(n, _)| n == name) {
+                    continue;
+                }
+                let intersected = match r1 {
+                    Some(r1) => intersect_in(*r1, *bty, stacks, program),
+                    None => *bty,
+                };
+                if intersected == never {
+                    return never;
+                }
+                fields.push((name.clone(), intersected));
+            }
+            // A never rest is no contradiction: it leaves only the tuples listing nothing else.
+            let rest = match (r1, r2) {
+                (Some(r1), Some(r2)) => Some(intersect_in(*r1, *r2, stacks, program)),
+                (rest, None) | (None, rest) => *rest,
+            };
             program.register_type(Type::Partial {
                 name: n1.clone().or_else(|| n2.clone()),
                 fields,
+                rest,
             })
         }
         // A partial meeting a concrete tuple keeps the tuple — the more specific of the two —
-        // with each constrained field narrowed. A tuple missing a constrained field, or whose
-        // name the partial contradicts, satisfies neither.
-        (Type::Partial { name, fields }, Type::Tuple(tuple_id))
-        | (Type::Tuple(tuple_id), Type::Partial { name, fields }) => {
+        // with each listed field narrowed, and each other field narrowed by the partial's rest
+        // type. A tuple missing a listed field, or whose name the partial contradicts,
+        // satisfies neither.
+        (Type::Partial { name, fields, rest }, Type::Tuple(tuple_id))
+        | (Type::Tuple(tuple_id), Type::Partial { name, fields, rest }) => {
             let Some(info) = program.lookup_tuple(*tuple_id).cloned() else {
                 return never;
             };
@@ -600,19 +622,39 @@ fn intersect_pair(a: usize, b: usize, stacks: &mut Walk, program: &mut Program) 
             {
                 return never;
             }
-            let mut tuple_fields = info.fields.clone();
-            for (name, constraint) in fields {
-                let Some((_, field)) = tuple_fields
-                    .iter_mut()
-                    .find(|(n, _)| n.as_deref() == Some(name.as_str()))
-                else {
-                    return never;
+            // Each side's recursive references resolve against its own binders, so the
+            // operands keep their sides.
+            let partial_is_a = matches!(ta, Type::Partial { .. });
+            let mut meet_field = |field: usize, constraint: usize, program: &mut Program| {
+                if partial_is_a {
+                    intersect_in(constraint, field, stacks, program)
+                } else {
+                    intersect_in(field, constraint, stacks, program)
+                }
+            };
+            if fields.iter().any(|(name, _)| {
+                !info
+                    .fields
+                    .iter()
+                    .any(|(n, _)| n.as_deref() == Some(name.as_str()))
+            }) {
+                return never;
+            }
+            let mut tuple_fields = Vec::with_capacity(info.fields.len());
+            for (label, field) in &info.fields {
+                let constraint = label
+                    .as_ref()
+                    .and_then(|label| fields.iter().find(|(n, _)| n == label))
+                    .map(|&(_, constraint)| constraint)
+                    .or(*rest);
+                let narrowed = match constraint {
+                    Some(constraint) => meet_field(*field, constraint, program),
+                    None => *field,
                 };
-                let intersected = intersect_in(*field, *constraint, stacks, program);
-                if intersected == program.never() {
+                if narrowed == never {
                     return never;
                 }
-                *field = intersected;
+                tuple_fields.push((label.clone(), narrowed));
             }
             let narrowed = program.register_tuple(info.name.clone(), tuple_fields);
             program.register_type(Type::Tuple(narrowed))
@@ -676,7 +718,26 @@ pub fn meet(members: Vec<usize>, program: &mut Program) -> usize {
     }
     variables.sort_by(|(a, _), (b, _)| a.cmp(b));
     let variables: Vec<usize> = variables.into_iter().map(|(_, id)| id).collect();
-    let rest = rest.filter(|&rest| !has_free_cycles(rest, program));
+    let mut rest = rest.filter(|&rest| !has_free_cycles(rest, program));
+    // A rigid variable's values lie within its bound, so the rest meets the bound too: a rest
+    // disjoint from it leaves nothing.
+    if let Some(known) = rest {
+        let mut narrowed = known;
+        for &variable in &variables {
+            if let Some(Type::Variable(name)) = program.lookup_type(variable)
+                && let Some(bound) = program.rigid_bound(name)
+                && !matches!(program.lookup_type(bound), Some(Type::Top))
+            {
+                narrowed = intersect_types(narrowed, bound, program);
+            }
+        }
+        if narrowed == program.never() {
+            return narrowed;
+        }
+        if !has_free_cycles(narrowed, program) {
+            rest = Some(narrowed);
+        }
+    }
     let Some(rest) = rest else {
         return match variables[..] {
             [] => program.register_type(Type::Top),

@@ -30,6 +30,10 @@ pub struct CachedModule {
     /// declaration order), restored like the dispatch tables so a caller can explicitly
     /// instantiate an imported generic (`%list.map<'int>`) without recompiling the module.
     pub callable_type_params: HashMap<usize, Vec<String>>,
+    /// The upper bounds of the module's bounded type parameters, by uniquified variable
+    /// name, restored alongside [`Self::callable_type_params`] so a caller checks an
+    /// imported generic's instantiations without recompiling the module.
+    pub type_param_bounds: HashMap<String, usize>,
     /// The module's own warnings, at positions in its source. Kept (and carried by its
     /// artifact) so that loading the module reports them whether or not it was compiled.
     pub warnings: Vec<(super::Warning, crate::parser::SourceSpan)>,
@@ -364,31 +368,19 @@ fn build_type_namespace(
             continue;
         };
 
-        // Create Type::Variable bindings for type parameters
-        let mut bindings = HashMap::new();
-        for param in type_parameters {
-            let var_type_id = program.register_type(Type::Variable(param.clone()));
-            bindings.insert(param.clone(), var_type_id);
-        }
-
-        // Resolve the type definition using the module scope built so far
+        // Resolve the definition using the module scope built so far
         let mut env = typing::TypeEnv {
             resolver,
             module_cache: &mut *module_cache,
             package,
         };
-        let type_id = typing::resolve_ast_type_with_bindings(
+        let def = typing::resolve_alias_definition(
             &mut env,
             &module_scope,
+            type_parameters,
             type_definition.clone(),
             program,
-            &bindings,
         )?;
-
-        let def = TypeAliasDef {
-            parameters: type_parameters.clone(),
-            type_id,
-        };
         match name {
             Some(name) => {
                 named.insert(name.clone(), def.clone());
@@ -616,6 +608,9 @@ impl Collector {
                             }
                         }
                     }
+                }
+                if let Some(rest) = &tuple.rest {
+                    self.type_def(rest);
                 }
             }
             ast::Type::Function(function) => {

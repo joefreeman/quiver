@@ -50,13 +50,32 @@ P[x: 1] ~> { :note "hi" } ~> %data.encode ~   //= "P[x: 1]"
 ## What has no notation
 
 A function, a process, a ref or a resource means something only inside the program that holds
-it; there is no text that could denote one. Encoding one is a runtime error rather than a
-silent placeholder, because a caller has nothing to do about it either way.
+it; there is no text that could denote one. The values that do have notation — integers,
+binaries, and tuples whose fields are data — are the module's default type, `'%data`, and
+`encode` takes nothing else, so an attempt to encode one of the others is a compile error.
+It is an ordinary union, `'int | 'bin | (*^)`: a partial whose rest type (`*`) is the
+union itself holds exactly the tuples whose every field is data.
 
 ```quiver
 f = #'int { $ }
-%data.encode f              //! cannot encode a function: %data notation carries data only
-%ref [] ~> %data.encode ~   //! cannot encode a ref: %data notation carries data only
+%data.encode f              //! Type mismatch
+%ref [] ~> %data.encode ~   //! Type mismatch
+```
+
+A generic that encodes its parameter bounds it by `'%data`, and its callers are held to that:
+
+```quiver
+key = #<'k: '%data>'k { %data.encode $ }
+key Point[x: 1]             //= "Point[x: 1]"
+key [f]                     //! bounded by
+```
+
+A type test `='%data` answers, as any type test does, by what the value was known to be where it
+was built:
+
+```quiver
+data? = #_ { | ='%data => Yes | No }
+[data? [1, "a"], data? [f]]   //= [Yes, No]
 ```
 
 ## Decoding

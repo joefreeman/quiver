@@ -150,7 +150,7 @@ fn test_diff_list_append_emits_one_ins_row() {
     quiver()
         .evaluate(
             r#"item = #Str['bin] { %html{ <li>{$}</li> } }
-               view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
+               view = #<'e: '%data>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[item "a", Cons[item "b", Nil]] ~> view ~ ~> %html/live.frame ~
                f2 = Cons[item "a", Cons[item "b", Cons[item "c", Nil]]] ~> view ~ ~> %html/live.frame ~
                %html/live.diff [f1, f2]"#,
@@ -166,7 +166,7 @@ fn test_diff_list_truncate_emits_del_rows_at_fixed_index() {
     // the rest down, so sequential application is correct.
     quiver()
         .evaluate(
-            r#"view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
+            r#"view = #<'e: '%data>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[%html.text "a", Cons[%html.text "b", Cons[%html.text "c", Nil]]] ~> view ~ ~> %html/live.frame ~
                f2 = Cons[%html.text "a", Nil] ~> view ~ ~> %html/live.frame ~
                %html/live.diff [f1, f2]"#,
@@ -193,7 +193,7 @@ fn test_row_frames_carry_key_annotations() {
 fn test_encode_row_ops() {
     quiver()
         .evaluate(
-            r#"view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
+            r#"view = #<'e: '%data>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[%html.text "a", Nil] ~> view ~ ~> %html/live.frame ~
                f2 = Cons[%html.text "a", Cons[%html.text "b", Nil]] ~> view ~ ~> %html/live.frame ~
                f3 = Cons[%html.text "a", Nil] ~> view ~ ~> %html/live.frame ~
@@ -454,7 +454,7 @@ fn test_keyed_reorder_emits_one_move() {
     quiver()
         .evaluate(
             r#"it = #[Str['bin], Str['bin]] { =[k, t]; %html{ <li>{t}</li> } ~> { :key k } }
-               view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
+               view = #<'e: '%data>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[it ["a", "a"], Cons[it ["b", "b"], Cons[it ["c", "c"], Nil]]] ~> view ~ ~> %html/live.frame ~
                f2 = Cons[it ["c", "c"], Cons[it ["a", "a"], Cons[it ["b", "b"], Nil]]] ~> view ~ ~> %html/live.frame ~
                %html/live.diff [f1, f2]"#,
@@ -467,7 +467,7 @@ fn test_keyed_middle_removal_is_one_del() {
     quiver()
         .evaluate(
             r#"it = #[Str['bin], Str['bin]] { =[k, t]; %html{ <li>{t}</li> } ~> { :key k } }
-               view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
+               view = #<'e: '%data>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[it ["a", "a"], Cons[it ["b", "b"], Cons[it ["c", "c"], Nil]]] ~> view ~ ~> %html/live.frame ~
                f2 = Cons[it ["a", "a"], Cons[it ["c", "c"], Nil]] ~> view ~ ~> %html/live.frame ~
                %html/live.diff [f1, f2]"#,
@@ -480,7 +480,7 @@ fn test_keyed_middle_insert_is_one_ins() {
     quiver()
         .evaluate(
             r#"it = #[Str['bin], Str['bin]] { =[k, t]; %html{ <li>{t}</li> } ~> { :key k } }
-               view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
+               view = #<'e: '%data>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[it ["a", "a"], Cons[it ["c", "c"], Nil]] ~> view ~ ~> %html/live.frame ~
                f2 = Cons[it ["a", "a"], Cons[it ["b", "b"], Cons[it ["c", "c"], Nil]]] ~> view ~ ~> %html/live.frame ~
                %html/live.diff [f1, f2]"#,
@@ -496,7 +496,7 @@ fn test_keyed_kept_row_patches_in_place() {
     quiver()
         .evaluate(
             r#"it = #[Str['bin], Str['bin]] { =[k, t]; %html{ <li>{t}</li> } ~> { :key k } }
-               view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
+               view = #<'e: '%data>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[it ["a", "old"], Nil] ~> view ~ ~> %html/live.frame ~
                f2 = Cons[it ["a", "new"], Nil] ~> view ~ ~> %html/live.frame ~
                %html/live.diff [f1, f2]"#,
@@ -512,7 +512,7 @@ fn test_mixed_keys_fall_back_to_positional() {
         .evaluate(
             r#"it = #[Str['bin], Str['bin]] { =[k, t]; %html{ <li>{t}</li> } ~> { :key k } }
                un = #Str['bin] { %html{ <li>{$}</li> } }
-               view = #<'e>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
+               view = #<'e: '%data>'%html.nodes<'e> { =items; %html{ <ul>{items}</ul> } }
                f1 = Cons[it ["a", "a"], Cons[un "b", Nil]] ~> view ~ ~> %html/live.frame ~
                f2 = Cons[un "b", Cons[it ["a", "a"], Nil]] ~> view ~ ~> %html/live.frame ~
                %html/live.diff [f1, f2]"#,

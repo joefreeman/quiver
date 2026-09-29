@@ -58,12 +58,12 @@ Negation is part of the value, not a sign on a shared magnitude:
 %dict.new [] ~> %dict.put [~, -3, 1] ~> %dict.get [~, 3]   //= []
 ```
 
-A key is hashed by encoding it as `%data` notation and hashing that text, so anything
-`%data` cannot encode — a function, a process, a ref, a resource — is
-a runtime error when used as a key, not a silently wrong lookup.
+A key is hashed by encoding it as `%data` notation and hashing that text, so keys are
+`'%data`: anything `%data` cannot encode — a function, a process, a ref, a resource — is
+rejected as a key at compile time, rather than making a silently wrong lookup.
 
 ```quiver
-%dict.new [] ~> %dict.put [~, __integer_add__, 1]   //! cannot encode a builtin
+%dict.new [] ~> %dict.put [~, __integer_add__, 1]   //! bounded by
 ```
 
 ## Building a dict

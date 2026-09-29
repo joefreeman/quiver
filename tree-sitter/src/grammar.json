@@ -277,8 +277,17 @@
               "type": "SEQ",
               "members": [
                 {
-                  "type": "SYMBOL",
-                  "name": "type_name"
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SYMBOL",
+                      "name": "type_name"
+                    },
+                    {
+                      "type": "SYMBOL",
+                      "name": "bounded_type_parameter"
+                    }
+                  ]
                 },
                 {
                   "type": "REPEAT",
@@ -314,8 +323,17 @@
                         ]
                       },
                       {
-                        "type": "SYMBOL",
-                        "name": "type_name"
+                        "type": "CHOICE",
+                        "members": [
+                          {
+                            "type": "SYMBOL",
+                            "name": "type_name"
+                          },
+                          {
+                            "type": "SYMBOL",
+                            "name": "bounded_type_parameter"
+                          }
+                        ]
                       }
                     ]
                   }
@@ -371,6 +389,31 @@
         {
           "type": "STRING",
           "value": ">"
+        }
+      ]
+    },
+    "bounded_type_parameter": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "type_name"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": ":"
+        },
+        {
+          "type": "FIELD",
+          "name": "bound",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_type"
+          }
         }
       ]
     },
@@ -5213,6 +5256,10 @@
           "name": "type_spread"
         },
         {
+          "type": "SYMBOL",
+          "name": "rest_type"
+        },
+        {
           "type": "SEQ",
           "members": [
             {
@@ -5244,6 +5291,23 @@
               "name": "_type"
             }
           ]
+        }
+      ]
+    },
+    "rest_type": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "*"
+        },
+        {
+          "type": "FIELD",
+          "name": "type",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_type"
+          }
         }
       ]
     },

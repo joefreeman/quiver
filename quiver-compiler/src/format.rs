@@ -89,7 +89,7 @@ pub fn format_program(program: &Sequence, source: &str) -> String {
 fn type_alias_doc(
     trivia: &Trivia,
     name: &Option<String>,
-    type_parameters: &[String],
+    type_parameters: &[TypeParameter],
     type_definition: &Type,
 ) -> Doc {
     let mut lhs = String::from("'");
@@ -137,9 +137,9 @@ fn leading_bar(first: bool) -> Doc {
     }
 }
 
-/// `<'a, 'b>` for a non-empty parameter list, otherwise empty. Type parameters are stored without
-/// their `'` prefix, so it is re-added here.
-fn render_type_parameters(params: &[String]) -> String {
+/// `<'a, 'b: bound>` for a non-empty parameter list, otherwise empty. Type parameters are stored
+/// without their `'` prefix, so it is re-added here.
+fn render_type_parameters(params: &[TypeParameter]) -> String {
     if params.is_empty() {
         return String::new();
     }
@@ -147,7 +147,10 @@ fn render_type_parameters(params: &[String]) -> String {
         "<{}>",
         params
             .iter()
-            .map(|p| format!("'{}", p))
+            .map(|param| match &param.bound {
+                Some(bound) => format!("'{}: {}", param.name, render_type(bound)),
+                None => format!("'{}", param.name),
+            })
             .collect::<Vec<_>>()
             .join(", ")
     )
@@ -2175,7 +2178,7 @@ fn tuple_type_doc(trivia: &Trivia, tuple_type: &TupleType) -> Doc {
         Some(alias) => format!("'{}", alias),
         None => tuple_type.name.clone().unwrap_or_default(),
     };
-    if tuple_type.fields.is_empty() {
+    if tuple_type.fields.is_empty() && tuple_type.rest.is_none() {
         return pretty::text(if tuple_type.is_partial {
             format!("{}()", name)
         } else if tuple_type.name.is_some() {
@@ -2184,11 +2187,13 @@ fn tuple_type_doc(trivia: &Trivia, tuple_type: &TupleType) -> Doc {
             "[]".to_string()
         });
     }
-    let sticky = tuple_type
-        .fields
-        .last()
-        .is_some_and(|field| trivia.trailing_comma(field_type_span(field)));
-    let fields = tuple_type
+    // A rest entry carries no span of its own, so only a field's trailing comma is kept.
+    let sticky = tuple_type.rest.is_none()
+        && tuple_type
+            .fields
+            .last()
+            .is_some_and(|field| trivia.trailing_comma(field_type_span(field)));
+    let mut fields: Vec<Doc> = tuple_type
         .fields
         .iter()
         .map(|field| {
@@ -2210,6 +2215,12 @@ fn tuple_type_doc(trivia: &Trivia, tuple_type: &TupleType) -> Doc {
             ])
         })
         .collect();
+    if let Some(rest) = &tuple_type.rest {
+        fields.push(pretty::concat(vec![
+            pretty::text("*"),
+            type_doc(trivia, rest),
+        ]));
+    }
     let (open, close) = if tuple_type.is_partial {
         ("(", ")")
     } else {
@@ -2359,6 +2370,7 @@ mod tests {
         // shorthand, so the `#` stays.
         assert_formats("@#'int { $ } 1\n", "@'int { $ } 1\n");
         assert_formats("@#<'t>'t { $ } 1\n", "@<'t>'t { $ } 1\n");
+        assert_formats("@#<'t: 'int>'t { $ } 1\n", "@<'t: 'int>'t { $ } 1\n");
         assert_formats("@#<'t>('t | []) { $ } 1\n", "@<'t>('t | []) { $ } 1\n");
         assert_formats(
             "@#'int -> ('int | 'bin) { $ } 1\n",
@@ -3351,6 +3363,9 @@ mod tests {
             "xs ~> [~, #{ $0 }, Nil] ~> map",
             "#['int, 'int] { =[a, b] => [b, a] }",
             "#<'t>'t { $ }",
+            "#<'t: (x: 'int)>'t { $x }",
+            "#<'k: 'int | 'bin, 'v>['k, 'v] { $0 }",
+            "#<'f: #'int -> 'int>'f { $ }",
             "#'int",
             "#'int -> 'bin { $ }",
             // --- multi-chain sequences & control flow ---
@@ -3369,6 +3384,8 @@ mod tests {
             "'tree<'t> = Leaf['t] | Node[^, ^]",
             "'json = Null | 'bool | 'int | Str['bin] | Array[(Nil | Cons[^, ^1])]",
             "'pair<'a, 'b> = Pair[first: 'a, second: 'b]",
+            "'keyed<'k: 'int | 'bin, 'v> = ['k, 'v]",
+            "'<'t: (x: 'int)> = Nil | Cons['t, ^]",
             "'adder = #'int -> 'int",
             "'writer = (write: (#'bin -> Ok))",
             "'np = Point(x: 'int)",

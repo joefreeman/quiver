@@ -31,6 +31,13 @@ pub struct Program {
     /// interning (see there). Transient compile state, 0 outside module compiles.
     #[serde(skip)]
     function_dedup_floor: usize,
+    /// The type parameters of the generic bodies being compiled, by uniquified variable
+    /// name, each with its upper bound (`_` when unbounded). Inside its body a parameter is
+    /// *rigid* — one unknown type, known only through its bound — where elsewhere it is a
+    /// variable a call solves (see [`TypeLookup::rigid_bound`]). Transient compile state,
+    /// empty outside a body.
+    #[serde(skip)]
+    rigid_variables: std::collections::HashMap<String, usize>,
     /// Interning indexes (value → first-occurrence id) for the registries above, so the
     /// `register_*` methods are hash lookups instead of scans of the whole table. Skipped
     /// by serde and lazily rebuilt on first registration after deserialization; mapping
@@ -98,6 +105,10 @@ impl TypeLookup for Program {
     fn lookup_annotation_key_name(&self, key: usize) -> Option<&str> {
         self.annotation_keys.get(key).map(|name| name.as_str())
     }
+
+    fn rigid_bound(&self, name: &str) -> Option<usize> {
+        self.rigid_variables.get(name).copied()
+    }
 }
 
 impl Default for Program {
@@ -122,6 +133,7 @@ impl Program {
             field_names: Vec::new(),
             debug: None,
             function_dedup_floor: 0,
+            rigid_variables: std::collections::HashMap::new(),
             constant_index: std::collections::HashMap::new(),
             function_index: std::collections::HashMap::new(),
             digest_keys: Default::default(),
@@ -380,6 +392,20 @@ impl Program {
     /// compile.
     pub fn set_function_dedup_floor(&mut self, floor: usize) -> usize {
         std::mem::replace(&mut self.function_dedup_floor, floor)
+    }
+
+    /// Replace the rigid type variables (see the field), returning the previous set so
+    /// callers can restore it stack-fashion around a generic body.
+    pub fn set_rigid_variables(
+        &mut self,
+        rigid: std::collections::HashMap<String, usize>,
+    ) -> std::collections::HashMap<String, usize> {
+        std::mem::replace(&mut self.rigid_variables, rigid)
+    }
+
+    /// The rigid type variables in force (see the field).
+    pub fn rigid_variables(&self) -> &std::collections::HashMap<String, usize> {
+        &self.rigid_variables
     }
 
     /// Append a function without structural interning — the linker's registration
@@ -661,12 +687,13 @@ impl Program {
                     .collect();
                 Type::Tuple(self.register_tuple(info.name, fields))
             }
-            Type::Partial { name, fields } => Type::Partial {
+            Type::Partial { name, fields, rest } => Type::Partial {
                 name,
                 fields: fields
                     .into_iter()
                     .map(|(label, _)| (label, next()))
                     .collect(),
+                rest: rest.map(|_| next()),
             },
             Type::Callable {
                 states, omittable, ..

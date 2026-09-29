@@ -1311,7 +1311,7 @@ fn test_enclosing_generic_variable_in_callee_argument() {
             r#"
             f = #<'t>[^, 't] -> ('t | []) {
               =[self, n]
-              me = #'int { [self, $] ~> self ~ }
+              me = #'t { [self, $] ~> self ~ }
               n
             }
             [f, 3] ~> f ~

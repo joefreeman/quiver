@@ -195,6 +195,9 @@ pub struct ModuleArtifact {
     /// Callable *type* id → declared type-parameter names (for explicit
     /// instantiation of imported generics).
     pub callable_type_params: Vec<(usize, Vec<String>)>,
+    /// Bounded type parameter (uniquified variable name) → its bound's type id, sorted
+    /// by name.
+    pub type_param_bounds: Vec<(String, usize)>,
     /// The module's type namespace (its `'name = …` aliases and nameless default).
     pub namespace: ArtifactNamespace,
     /// The module's own warnings (see `CachedModule`).
@@ -212,6 +215,8 @@ pub struct ArtifactNamespace {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AliasEntry {
     pub parameters: Vec<String>,
+    /// Each parameter's bound (artifact-local type ids), parallel to `parameters`.
+    pub bounds: Vec<usize>,
     pub type_id: usize,
 }
 
@@ -770,13 +775,15 @@ fn fingerprint_type(type_id: usize, program: &Program, memo: &mut HashMap<usize,
                 fingerprint_type(*field_type, program, memo).hash(&mut hasher);
             }
         }
-        Type::Partial { name, fields } => {
+        Type::Partial { name, fields, rest } => {
             7u8.hash(&mut hasher);
             name.hash(&mut hasher);
             for (field_name, field_type) in fields {
                 field_name.hash(&mut hasher);
                 fingerprint_type(*field_type, program, memo).hash(&mut hasher);
             }
+            rest.map(|rest| fingerprint_type(rest, program, memo))
+                .hash(&mut hasher);
         }
         Type::Callable {
             parameter,
@@ -900,6 +907,9 @@ pub(crate) fn extract(
         .chain(named_aliases.iter().map(|(_, def)| *def))
     {
         add_type(def.type_id, &mut closure, &mut queue);
+        for &bound in &def.bounds {
+            add_type(bound, &mut closure, &mut queue);
+        }
         drain(&mut queue, &mut closure, owner, program, module_cache).ok()?;
     }
     // 4. Dispatch tables. Their map keys are session ids, so entries order by the
@@ -961,6 +971,12 @@ pub(crate) fn extract(
     param_keys.sort_by_key(|(_, key)| *key);
     for (type_id, _) in param_keys {
         add_type(type_id, &mut closure, &mut queue);
+        drain(&mut queue, &mut closure, owner, program, module_cache).ok()?;
+    }
+    let mut bounds: Vec<(&String, &usize)> = cached.type_param_bounds.iter().collect();
+    bounds.sort();
+    for (_, &bound) in bounds {
+        add_type(bound, &mut closure, &mut queue);
         drain(&mut queue, &mut closure, owner, program, module_cache).ok()?;
     }
 
@@ -1044,6 +1060,7 @@ pub(crate) fn extract(
     let flatten_def = |def: &TypeAliasDef| -> AliasEntry {
         AliasEntry {
             parameters: def.parameters.clone(),
+            bounds: def.bounds.iter().map(|bound| remaps.types[bound]).collect(),
             type_id: *remaps
                 .types
                 .get(&def.type_id)
@@ -1149,6 +1166,15 @@ pub(crate) fn extract(
                 .map(|(type_id, params)| (remaps.types[type_id], params.clone()))
                 .collect();
             entries.sort_by_key(|(type_id, _)| *type_id);
+            entries
+        },
+        type_param_bounds: {
+            let mut entries: Vec<(String, usize)> = cached
+                .type_param_bounds
+                .iter()
+                .map(|(name, bound)| (name.clone(), remaps.types[bound]))
+                .collect();
+            entries.sort();
             entries
         },
         namespace: ArtifactNamespace {
@@ -1370,7 +1396,9 @@ fn type_children(ty: &Type) -> Vec<usize> {
         | Type::Top
         | Type::Tuple(_) => Vec::new(),
         Type::Union(members) | Type::Intersection(members) => members.clone(),
-        Type::Partial { fields, .. } => fields.iter().map(|(_, id)| *id).collect(),
+        Type::Partial { fields, rest, .. } => {
+            fields.iter().map(|(_, id)| *id).chain(*rest).collect()
+        }
         Type::Callable {
             parameter,
             result,
@@ -1744,9 +1772,12 @@ fn collect_type_children(ty: &Type, closure: &mut Closure, queue: &mut Vec<Item>
         | Type::Variable(_)
         | Type::Top => {}
         Type::Tuple(tuple_id) => add_tuple(*tuple_id, closure, queue),
-        Type::Partial { fields, .. } => {
+        Type::Partial { fields, rest, .. } => {
             for (_, type_id) in fields {
                 add_type(*type_id, closure, queue);
+            }
+            if let Some(rest) = rest {
+                add_type(*rest, closure, queue);
             }
         }
         Type::Callable {
@@ -1886,9 +1917,11 @@ impl std::fmt::Display for TypeNode {
 fn type_refs(ty: &Type) -> Vec<TypeRef> {
     match ty {
         Type::Tuple(tuple_id) => vec![TypeRef::Tuple(*tuple_id)],
-        Type::Partial { fields, .. } => fields
+        Type::Partial { fields, rest, .. } => fields
             .iter()
-            .map(|(_, type_id)| TypeRef::Type(*type_id))
+            .map(|(_, type_id)| *type_id)
+            .chain(*rest)
+            .map(TypeRef::Type)
             .collect(),
         Type::Callable {
             parameter,
@@ -2596,12 +2629,22 @@ pub fn link_module<E: Effect>(
             .iter()
             .map(|(type_id, params)| (remaps.types[type_id], params.clone()))
             .collect(),
+        type_param_bounds: artifact
+            .type_param_bounds
+            .iter()
+            .map(|(name, bound)| (name.clone(), remaps.types[bound]))
+            .collect(),
         warnings: artifact.warnings.clone(),
     };
     module_cache.cache_module(artifact.id.clone(), cached);
 
     let unflatten = |entry: &AliasEntry| TypeAliasDef {
         parameters: entry.parameters.clone(),
+        bounds: entry
+            .bounds
+            .iter()
+            .map(|bound| remaps.types[bound])
+            .collect(),
         type_id: remaps.types[&entry.type_id],
     };
     module_cache.type_namespace_cache.insert(

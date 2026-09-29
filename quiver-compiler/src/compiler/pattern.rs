@@ -1055,8 +1055,13 @@ fn analyze_match_tuple_pattern(
     // same-shaped member where one exists, since a complement-narrowed member's field types
     // would wrongly reject a value whose tuple id carries the declared (wider) field type (see
     // `declared_shape_witness`), and the member itself otherwise.
-    let needs_tuple_check = is_union(value_type_id, program)
-        || is_top(value_type_id, program)
+    // A rigid variable's values are tested as its bound's would be.
+    let tested = match program.lookup_type(value_type_id) {
+        Some(Type::Variable(name)) => program.rigid_bound(name).unwrap_or(value_type_id),
+        _ => value_type_id,
+    };
+    let needs_tuple_check = is_union(tested, program)
+        || is_top(tested, program)
         || has_partial_sources(program, value_type_id)
         || matching_types.len() > 1;
     let mut witnesses = Vec::new();
@@ -1288,7 +1293,8 @@ fn find_matching_match_tuples(
 ) -> Result<TupleMatchResult, Error> {
     // A `_` value may be any tuple at all: it is the partial `()` for this purpose.
     if is_top(value_type_id, program) {
-        return Ok(partial_as_match_tuple(program, tuple, &None, &[])
+        let top = program.register_type(Type::Top);
+        return Ok(partial_as_match_tuple(program, tuple, &None, &[], top)
             .map(|(tuple_id, field_mappings)| (tuple_id, field_mappings, None))
             .into_iter()
             .collect());
@@ -1300,8 +1306,14 @@ fn find_matching_match_tuples(
         let candidate = match source {
             FieldSource::Tuple(tuple_id) => check_match_tuple_match(program, tuple, tuple_id)?
                 .map(|field_mappings| (tuple_id, field_mappings)),
-            FieldSource::Partial { name, fields } => {
-                partial_as_match_tuple(program, tuple, &name, &fields)
+            FieldSource::Partial {
+                name,
+                fields,
+                rest,
+                boundary,
+            } => {
+                let unlisted = FieldSource::unlisted_field_type(rest, boundary, program);
+                partial_as_match_tuple(program, tuple, &name, &fields, unlisted)
             }
         };
         matching_types
@@ -1312,14 +1324,14 @@ fn find_matching_match_tuples(
 }
 
 /// The member a tuple pattern is tested for in a partial-typed value: the pattern's own shape,
-/// each field typed as the partial constrains it or `_` where it says nothing. `None` when the
-/// partial rules the shape out — a name other than the pattern's (an unnamed pattern requiring
+/// each field typed as the partial lists it, or as `unlisted` where it does not. `None` when the partial rules the shape out — a name other than the pattern's (an unnamed pattern requiring
 /// an unnamed value), or a constrained field the pattern does not have.
 fn partial_as_match_tuple(
     program: &mut Program,
     tuple: &ast::MatchTuple,
     name: &Option<String>,
     fields: &[(String, usize)],
+    unlisted: usize,
 ) -> Option<(usize, Vec<(usize, usize)>)> {
     if name.is_some() && *name != tuple.name {
         return None;
@@ -1333,7 +1345,6 @@ fn partial_as_match_tuple(
     if !fields.iter().all(|(label, _)| labelled(label)) {
         return None;
     }
-    let top = program.register_type(Type::Top);
     let tuple_fields = tuple
         .fields
         .iter()
@@ -1344,7 +1355,7 @@ fn partial_as_match_tuple(
                     .find(|(constrained, _)| constrained == label)
                     .map(|(_, type_id)| *type_id)
             });
-            (field.name.clone(), constraint.unwrap_or(top))
+            (field.name.clone(), constraint.unwrap_or(unlisted))
         })
         .collect();
     let tuple_id = program.register_tuple(tuple.name.clone(), tuple_fields);
@@ -1564,9 +1575,11 @@ fn analyze_partial_pattern(
                 // guarantees, the constraint itself is the runtime test; without it the
                 // field fetch below would run unguarded.
                 if needs_type_check || *widened {
+                    // The value's type already vouches for any rest type the source states.
                     let partial_type_id = program.register_type(Type::Partial {
                         name: name.clone(),
                         fields: fields.clone(),
+                        rest: None,
                     });
                     requirements.push(Requirement {
                         path: path.clone(),
@@ -1935,10 +1948,16 @@ fn find_types_with_fields_and_name(
                     });
                 }
             }
-            FieldSource::Partial { name, mut fields } => {
+            FieldSource::Partial {
+                name,
+                mut fields,
+                rest,
+                boundary,
+            } => {
                 // A partial says nothing about a name it does not state or fields it does not
                 // list, so the pattern may ask for them — tested at runtime, with the fields
-                // typed `_`. Only a different stated name rules the partial out.
+                // typed as its rest type, or `_`. Only a different stated name rules the
+                // partial out.
                 if let (Some(expected_name), Some(stated)) = (type_name, &name)
                     && stated != expected_name
                 {
@@ -1948,8 +1967,8 @@ fn find_types_with_fields_and_name(
                 let name = name.or_else(|| type_name.cloned());
                 for field_name in field_names {
                     if !fields.iter().any(|(label, _)| label == field_name) {
-                        let top = program.register_type(Type::Top);
-                        fields.push((field_name.clone(), top));
+                        let unlisted = FieldSource::unlisted_field_type(rest, boundary, program);
+                        fields.push((field_name.clone(), unlisted));
                         widened = true;
                     }
                 }
@@ -2006,7 +2025,36 @@ enum FieldSource {
     Partial {
         name: Option<String>,
         fields: Vec<(String, usize)>, // (field_name, type_id) - all partial fields are named
+        /// The type of every field it does not list, when it states one (`(*'t)`).
+        rest: Option<usize>,
+        /// The nearest union the partial is a member of, which a `^` in its rest refers to.
+        boundary: Option<usize>,
     },
+}
+
+impl FieldSource {
+    /// The type of every field the partial does not list: its rest type, closed against its
+    /// union so that its references don't dangle once taken out of it, or `_` when it states
+    /// none.
+    fn unlisted_field_type(
+        rest: Option<usize>,
+        boundary: Option<usize>,
+        program: &mut Program,
+    ) -> usize {
+        match (rest, boundary) {
+            (Some(rest), Some(boundary)) => super::narrowing::close_cycles(rest, boundary, program),
+            (Some(rest), None) => rest,
+            (None, _) => program.register_type(Type::Top),
+        }
+    }
+
+    /// Record `union` as the boundary of the partials drawn directly from its members.
+    fn within_union(mut self, union: usize) -> Self {
+        if let Self::Partial { boundary, .. } = &mut self {
+            boundary.get_or_insert(union);
+        }
+        self
+    }
 }
 
 /// Whether the type has members that contribute no field source at all (primitives,
@@ -2034,13 +2082,16 @@ fn extract_field_sources(program: &Program, type_id: usize) -> Vec<FieldSource> 
     match ty {
         Type::Annotated { base, .. } => extract_field_sources(program, *base),
         Type::Tuple(id) => vec![FieldSource::Tuple(*id)],
-        Type::Partial { name, fields } => vec![FieldSource::Partial {
+        Type::Partial { name, fields, rest } => vec![FieldSource::Partial {
             name: name.clone(),
             fields: fields.clone(),
+            rest: *rest,
+            boundary: None,
         }],
         Type::Union(type_ids) => type_ids
             .iter()
             .flat_map(|&tid| extract_field_sources(program, tid))
+            .map(|source| source.within_union(type_id))
             .collect(),
         _ => vec![],
     }
@@ -2057,20 +2108,33 @@ fn has_partial_sources(program: &Program, type_id: usize) -> bool {
 
 /// The field sources a tuple or partial pattern is tested for in a value of this type, each
 /// with the member involving a type variable it came from, if any. A variable could be any
-/// tuple, so it is the partial `()`, as the top type is; an intersection's values lie in its
-/// known member, so that member's sources stand for it, or `()` when it has none.
+/// tuple, so it is the partial `()`, as the top type is — unless it is rigid with a bound,
+/// whose sources then stand for it; an intersection's values lie in its known member, so that
+/// member's sources stand for it, or `()` when it has none.
 fn pattern_sources(program: &Program, type_id: usize) -> Vec<(FieldSource, Option<usize>)> {
     let open = || FieldSource::Partial {
         name: None,
         fields: Vec::new(),
+        rest: None,
+        boundary: None,
     };
     match program.lookup_type(type_id) {
         Some(Type::Annotated { base, .. }) => pattern_sources(program, *base),
         Some(Type::Union(members)) => members
             .iter()
             .flat_map(|&member| pattern_sources(program, member))
+            .map(|(source, within)| (source.within_union(type_id), within))
             .collect(),
-        Some(Type::Variable(_)) => vec![(open(), Some(type_id))],
+        Some(Type::Variable(name)) => match program
+            .rigid_bound(name)
+            .filter(|&bound| !is_top(bound, program))
+        {
+            Some(bound) => pattern_sources(program, bound)
+                .into_iter()
+                .map(|(source, _)| (source, Some(type_id)))
+                .collect(),
+            None => vec![(open(), Some(type_id))],
+        },
         Some(Type::Intersection(members)) => {
             let known: Vec<usize> = members
                 .iter()

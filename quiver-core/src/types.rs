@@ -19,6 +19,13 @@ pub trait TypeLookup {
     fn lookup_annotation_key_name(&self, _key: usize) -> Option<&str> {
         None
     }
+    /// The upper bound of a *rigid* type variable — a type parameter of the generic body
+    /// being compiled, which stands for one unknown type there rather than a variable to
+    /// solve — or `None` for a variable that is free here. Values of a rigid variable are
+    /// known only through its bound, and only its own values belong to it.
+    fn rigid_bound(&self, _name: &str) -> Option<usize> {
+        None
+    }
     /// Look up a type, seeing through an annotation row to its base shape. Most
     /// structural questions ("is this callable?", "which tuple?") want this — a bare
     /// `lookup_type` on an annotated id sees `Type::Annotated` and fails shape matches.
@@ -52,6 +59,9 @@ pub enum Type {
     Partial {
         name: Option<String>,
         fields: Vec<(String, usize)>, // (field_name, type_id) - all fields must be named
+        /// The type every field it does not list must have, written `(*'t)`. `None` leaves
+        /// those fields unconstrained, as `(*_)` would (and is how that is spelled).
+        rest: Option<usize>,
     },
     #[serde(rename = "fn")]
     Callable {
@@ -137,12 +147,13 @@ impl Type {
                 "tuple",
                 *tuple_id,
             )),
-            Type::Partial { name, fields } => Type::Partial {
+            Type::Partial { name, fields, rest } => Type::Partial {
                 name: name.clone(),
                 fields: fields
                     .iter()
                     .map(|(field, id)| (field.clone(), ty(id)))
                     .collect(),
+                rest: rest.as_ref().map(ty),
             },
             Type::Callable {
                 parameter,
@@ -288,8 +299,13 @@ enum TypeRepr {
     Reference,
     #[serde(rename = "tuple")]
     Tuple(usize),
+    /// `[name, fields]`, plus `rest` when present.
     #[serde(rename = "partial")]
-    Partial(Option<String>, Vec<(String, usize)>),
+    Partial(
+        Option<String>,
+        Vec<(String, usize)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] Option<usize>,
+    ),
     /// `[parameter, result, receive, states]`, plus `omittable` when non-empty.
     #[serde(rename = "fn")]
     Callable(
@@ -329,7 +345,7 @@ impl From<Type> for TypeRepr {
             Type::Binary => TypeRepr::Binary,
             Type::Reference => TypeRepr::Reference,
             Type::Tuple(id) => TypeRepr::Tuple(id),
-            Type::Partial { name, fields } => TypeRepr::Partial(name, fields),
+            Type::Partial { name, fields, rest } => TypeRepr::Partial(name, fields, rest),
             Type::Callable {
                 parameter,
                 result,
@@ -364,7 +380,7 @@ impl From<TypeRepr> for Type {
             TypeRepr::Binary => Type::Binary,
             TypeRepr::Reference => Type::Reference,
             TypeRepr::Tuple(id) => Type::Tuple(id),
-            TypeRepr::Partial(name, fields) => Type::Partial { name, fields },
+            TypeRepr::Partial(name, fields, rest) => Type::Partial { name, fields, rest },
             TypeRepr::Callable(parameter, result, receive, states, omittable) => Type::Callable {
                 parameter,
                 result,
@@ -423,9 +439,8 @@ impl Type {
         matches!(self, Type::Tuple(id) if *id == OK)
     }
 
-    /// This type's parts, in a fixed order: a union's or intersection's members, a tuple's or
-    /// partial type's field
-    /// types, a function type's parameter, result, receive and (when known) states, a process
+    /// This type's parts, in a fixed order: a union's or intersection's members, a tuple's
+    /// field types, a partial type's field types and then its rest type (when stated), a function type's parameter, result, receive and (when known) states, a process
     /// type's stated send, receive and state, an annotated type's base and entry types. A
     /// binder's parts sit one binder deeper than it (`binders::is_binder`).
     /// `Program::with_parts` rebuilds a type from replacements in the same order.
@@ -436,7 +451,11 @@ impl Type {
                 .lookup_tuple(*tuple_id)
                 .map(|info| info.fields.iter().map(|&(_, field)| field).collect())
                 .unwrap_or_default(),
-            Type::Partial { fields, .. } => fields.iter().map(|&(_, field)| field).collect(),
+            Type::Partial { fields, rest, .. } => fields
+                .iter()
+                .map(|&(_, field)| field)
+                .chain(*rest)
+                .collect(),
             Type::Callable {
                 parameter,
                 result,
@@ -531,14 +550,20 @@ impl Type {
     }
 
     /// Whether this non-union type may have nil among its values: nil itself, the top type,
-    /// the unnamed partial with no fields, `()` — the only partial nil satisfies, having
-    /// neither a name nor fields — or a type variable, which may be instantiated with a type
-    /// holding it. An intersection may if each member may. Sees through annotation rows.
+    /// an unnamed partial listing no fields (`()`, or `(*'t)` whatever `'t` is) — the only
+    /// partials nil satisfies, having neither a name nor fields — or a type variable, which may be instantiated with a type
+    /// holding it (a rigid one only if its bound holds it). An intersection may if each member
+    /// may. Sees through annotation rows.
     fn holds_nil<T: TypeLookup>(&self, lookup: &T) -> bool {
         match self {
             Type::Tuple(id) => *id == NIL,
-            Type::Top | Type::Variable(_) => true,
-            Type::Partial { name, fields } => name.is_none() && fields.is_empty(),
+            Type::Top => true,
+            Type::Variable(name) => lookup.rigid_bound(name).is_none_or(|bound| {
+                lookup
+                    .lookup_type(bound)
+                    .is_some_and(|bound| bound.contains_nil(lookup))
+            }),
+            Type::Partial { name, fields, .. } => name.is_none() && fields.is_empty(),
             Type::Intersection(members) => members.iter().all(|&member| {
                 lookup
                     .lookup_type(member)
@@ -713,6 +738,21 @@ fn rows_compatible<T: TypeLookup>(
     })
 }
 
+/// The types of a tuple's fields that a partial does not list — positional fields, and
+/// labelled ones it does not name — which its rest type (`(*'t)`) speaks for.
+fn unlisted<'a>(
+    fields: &'a [(Option<String>, usize)],
+    listed: &'a [(String, usize)],
+) -> impl Iterator<Item = usize> + 'a {
+    fields
+        .iter()
+        .filter(|(name, _)| {
+            name.as_ref()
+                .is_none_or(|name| !listed.iter().any(|(listed, _)| listed == name))
+        })
+        .map(|&(_, field)| field)
+}
+
 /// Unified implementation of type relation checking.
 ///
 /// When `mode` is `All` (used by `is_compatible`):
@@ -790,9 +830,38 @@ fn check_type_relation<T: TypeLookup>(
             }
         }
 
-        // Type variables match anything, except when proving subsumption, where a variable
-        // is rigid: it stands for one unknown type, so only it is known to hold its values.
-        // A union on the other side is split by its own arm.
+        // A rigid variable (see `TypeLookup::rigid_bound`) on the left: its values are known
+        // only through its bound, so it fits where the bound does, or where a union names the
+        // variable itself; it overlaps what the bound overlaps. Proving subsumption keeps to
+        // the variable's identity (below), so a union never folds it into its bound.
+        (Type::Variable(name), pattern)
+            if mode != UnionMode::Subsumption && lookup.rigid_bound(name).is_some() =>
+        {
+            let bound = lookup.rigid_bound(name).expect("checked by the guard");
+            let named = matches!(pattern, Type::Union(variants) if variants.iter().any(|&variant| {
+                check_type_relation(self_id, variant, lookup, mode, assumptions, stacks)
+            }));
+            named || check_type_relation(bound, pattern_id, lookup, mode, assumptions, stacks)
+        }
+        // A rigid variable on the right holds only its own values (never, and an intersection
+        // naming it, are handled above), but overlaps whatever its bound overlaps. A union on the
+        // left is split by its own arm, and a free variable on the left (a generic function
+        // value's own) may yet be instantiated to it, by the arm below.
+        (self_type, Type::Variable(name))
+            if lookup.rigid_bound(name).is_some()
+                && !matches!(self_type, Type::Union(_) | Type::Variable(_)) =>
+        {
+            match mode {
+                UnionMode::Any => {
+                    let bound = lookup.rigid_bound(name).expect("checked by the guard");
+                    check_type_relation(self_id, bound, lookup, mode, assumptions, stacks)
+                }
+                UnionMode::All | UnionMode::Subsumption => false,
+            }
+        }
+        // Free type variables match anything, except when proving subsumption, where a
+        // variable stands for one unknown type, so only it is known to hold its values. A
+        // union on the other side is split by its own arm.
         (Type::Variable(_), _) | (_, Type::Variable(_)) if mode != UnionMode::Subsumption => true,
         (Type::Variable(v1), Type::Variable(v2)) => v1 == v2,
         (Type::Variable(_), other) | (other, Type::Variable(_))
@@ -981,12 +1050,14 @@ fn check_type_relation<T: TypeLookup>(
                 )
         }
 
-        // Concrete tuple vs partial type
+        // Concrete tuple vs partial type: the tuple has every field the partial lists, relating
+        // to it, and every other field relates to the partial's rest type, when it states one.
         (
             Type::Tuple(concrete_id),
             Type::Partial {
                 name: partial_name,
                 fields: partial_fields,
+                rest,
             },
         ) => {
             let Some(concrete_info) = lookup.lookup_tuple(*concrete_id) else {
@@ -1016,6 +1087,10 @@ fn check_type_relation<T: TypeLookup>(
                                 stacks,
                             )
                     })
+            }) && rest.is_none_or(|rest| {
+                unlisted(&concrete_info.fields, partial_fields).all(|concrete_ftype| {
+                    check_type_relation(concrete_ftype, rest, lookup, mode, assumptions, stacks)
+                })
             })
         }
 
@@ -1024,10 +1099,12 @@ fn check_type_relation<T: TypeLookup>(
             Type::Partial {
                 name: name1,
                 fields: fields1,
+                rest: rest1,
             },
             Type::Partial {
                 name: name2,
                 fields: fields2,
+                rest: rest2,
             },
         ) => {
             // Names must match if both have names. Proving subsumption, a named pattern also
@@ -1039,9 +1116,17 @@ fn check_type_relation<T: TypeLookup>(
                 return false;
             }
 
+            let only_left = |fields1: &'_ [(String, usize)], fields2: &[(String, usize)]| {
+                fields1
+                    .iter()
+                    .filter(|(name, _)| !fields2.iter().any(|(other, _)| other == name))
+                    .map(|&(_, field)| field)
+                    .collect::<Vec<_>>()
+            };
             match mode {
                 // Assignability: every field the pattern constrains must be constrained by
-                // self, compatibly.
+                // self, compatibly. A pattern's rest type holds self's other listed fields, and
+                // the fields self does not list either, so self must state a rest that fits.
                 UnionMode::All | UnionMode::Subsumption => {
                     fields2.iter().all(|(fname2, ftype2)| {
                         fields1.iter().any(|(fname1, ftype1)| {
@@ -1055,28 +1140,54 @@ fn check_type_relation<T: TypeLookup>(
                                     stacks,
                                 )
                         })
+                    }) && rest2.is_none_or(|rest2| {
+                        rest1.is_some_and(|rest1| {
+                            check_type_relation(rest1, rest2, lookup, mode, assumptions, stacks)
+                        }) && only_left(fields1, fields2).into_iter().all(|field| {
+                            check_type_relation(field, rest2, lookup, mode, assumptions, stacks)
+                        })
                     })
                 }
-                // Overlap: a field only one side constrains is free on the other, so only the
-                // fields both constrain must overlap.
-                UnionMode::Any => fields2.iter().all(|(fname2, ftype2)| {
-                    fields1
-                        .iter()
-                        .filter(|(fname1, _)| fname1 == fname2)
-                        .all(|(_, ftype1)| {
-                            check_type_relation(*ftype1, *ftype2, lookup, mode, assumptions, stacks)
+                // Overlap: a field only one side lists is held by the other side's rest type,
+                // so the fields both list must overlap, and each field only one side lists must
+                // overlap the other's rest. Fields neither lists may be absent.
+                UnionMode::Any => {
+                    fields2.iter().all(|(fname2, ftype2)| {
+                        fields1
+                            .iter()
+                            .filter(|(fname1, _)| fname1 == fname2)
+                            .all(|(_, ftype1)| {
+                                check_type_relation(
+                                    *ftype1,
+                                    *ftype2,
+                                    lookup,
+                                    mode,
+                                    assumptions,
+                                    stacks,
+                                )
+                            })
+                    }) && rest2.is_none_or(|rest2| {
+                        only_left(fields1, fields2).into_iter().all(|field| {
+                            check_type_relation(field, rest2, lookup, mode, assumptions, stacks)
                         })
-                }),
+                    }) && rest1.is_none_or(|rest1| {
+                        only_left(fields2, fields1).into_iter().all(|field| {
+                            check_type_relation(rest1, field, lookup, mode, assumptions, stacks)
+                        })
+                    })
+                }
             }
         }
 
         // Partial vs concrete tuple. A partial holds tuples with fields it says nothing about,
         // so it is never assignable to a concrete tuple; it overlaps one whose name it allows
-        // and which has every field it constrains, overlapping.
+        // and which has every field it lists, overlapping, and whose other fields overlap its
+        // rest type.
         (
             Type::Partial {
                 name: partial_name,
                 fields: partial_fields,
+                rest,
             },
             Type::Tuple(concrete_id),
         ) => {
@@ -1106,6 +1217,10 @@ fn check_type_relation<T: TypeLookup>(
                                 stacks,
                             )
                     })
+            }) && rest.is_none_or(|rest| {
+                unlisted(&concrete_info.fields, partial_fields).all(|concrete_ftype| {
+                    check_type_relation(rest, concrete_ftype, lookup, mode, assumptions, stacks)
+                })
             })
         }
 
@@ -1369,10 +1484,17 @@ mod annotation_row_tests {
             Type::Partial {
                 name: None,
                 fields: vec![],
+                rest: None,
             },
             Type::Partial {
                 name: Some("Point".to_string()),
                 fields: vec![("x".to_string(), 1), ("y".to_string(), 2)],
+                rest: None,
+            },
+            Type::Partial {
+                name: None,
+                fields: vec![("x".to_string(), 1)],
+                rest: Some(3),
             },
             Type::Callable {
                 parameter: 1,

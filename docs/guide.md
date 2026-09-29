@@ -60,7 +60,7 @@ Quiver uses a keyword-less syntax. The table below gives an overview of the symb
 | `@` | spawn a process; the current process; a process type | `@worker`, `@`, `@'int` |
 | `!` | select operator (receive a message, awaits a process, etc) | `!'int`, `!p` |
 | `?` | sample a process's state | `?p` |
-| `:` | field label; annotation key | `[x: 1]`, `f:doc` |
+| `:` | field label; annotation key; type parameter bound | `[x: 1]`, `f:doc`, `#<'t: 'int>` |
 | `.` | field access | `p.x` |
 | `...` | spread operator | `[...p, y: 3]` |
 | `+` | identifies a resource type | `+File` |
@@ -819,6 +819,18 @@ nudge Point[x: 1, y: 2, z: 3]   //= 2
 
 `()` matches any tuple, and `Point()` any tuple named `Point`.
 
+A last entry `*'t` states a **rest type**, which every field the partial does not list
+must have — positional fields included. The listed fields keep their own types:
+
+```quiver
+'row = (id: 'int, *'%str)
+label = #'row { $id }
+label [id: 7, "a", name: "b"]   //= 7
+label [id: 7, 8]                //! Type mismatch // 8 is not a string
+```
+
+`(*_)` constrains nothing, so it is `()` again.
+
 ### The top type
 
 `_` is the type of every value — the type-level reading of the `_` that ignores a value in
@@ -933,6 +945,40 @@ A prefix may be given and the rest left inferred. A builtin can be *type-consumi
 that its behaviour depends on the type argument itself, and must then always be
 instantiated where it is applied — `%data.decode<'t>` is one.
 
+Inside its declaration, a type parameter is one unknown type. Its values can be passed on,
+matched, or used wherever `'t` itself is expected, but not as anything narrower:
+
+```quiver
+inc = #<'t>'t { %num.add [$, 1] }   //! Type mismatch // 't might not be a number
+```
+
+#### Bounds
+
+A parameter may state an upper bound, `'t: 'bound`. Every instantiation must fit it, inferred
+or written, and inside the declaration the parameter's values can be used as the bound's. The
+parameter still stands for the caller's own type, so a result of type `'t` keeps everything
+the bound says nothing about:
+
+```quiver
+'dated = (at: 'int)
+latest = #<'t: 'dated>['t, 't] { | %num.gt? [$0.at, $1.at] => $0 | $1 }
+
+latest [Post[at: 3, title: "a"], Post[at: 5, title: "b"]] ~> .title   //= "b"
+latest [Post[title: "a"], Post[title: "b"]]   //! bounded by (at: 'int)
+```
+
+A bound may name the parameters declared before it. An alias's parameters can be bounded
+too, and a generic that applies a bounded alias to one of its own parameters must bound the
+parameter at least as tightly — `%dict`'s keys are data, so a function generic in them says so:
+
+```quiver
+first_key = #<'k: '%data, 'v>'%dict<'k, 'v> { %dict.keys $ ~> %list.head }
+first_key %dict{ "a" => 1 }   //= "a"
+```
+
+A field update (`$[..., at: 0]`) builds the bound's shape rather than `'t`: whatever the
+caller's `'t` holds in that field may be narrower than what is written there.
+
 ### Spreads
 
 Types compose with `...` the way values do, and later fields override earlier ones.
@@ -994,10 +1040,15 @@ contain. Anything malformed or mismatched answers nil, like a failed match.
 
 Strings do not interpolate in data — a `{` is literal, and `encode` escapes it so encoded
 text also reads as literal. Values with identity (refs, pids, functions, resources) have
-no notation at all:
+no notation at all. The values that do are the type `'%data` — `'int | 'bin | (*^)`, the
+integers, binaries, and tuples whose fields are data, by a [rest type](#partial-types).
+`encode` takes one, as do `%dict` and `%registry` keys, and it is the [bound](#bounds) for a
+parameter that must be data:
 
 ```quiver
-%ref [] ~> %data.encode ~     //! cannot encode a ref
+%ref [] ~> %data.encode ~     //! Type mismatch
+key = #<'k: '%data>'k { %data.encode $ }
+key Point[x: 1]               //= "Point[x: 1]"
 ```
 
 ## Modules
@@ -1554,7 +1605,7 @@ compiler rejects, and rejected code cannot carry a compiled check. It is read by
 
 ```quiver
 5 ~> 99                        //! must use the value flowing into it
-%ref [] ~> %data.encode ~      //! cannot encode a ref
+__panic__ "boom"               //! boom
 ```
 
 A `//` ends the expected text and starts a note, as after a `//=` pattern. The marker

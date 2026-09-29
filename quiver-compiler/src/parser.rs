@@ -1589,23 +1589,25 @@ fn partial_type(input: Span) -> IResult<Span, Type> {
             map(
                 tuple((
                     tuple_name,
-                    delimited(pair(char('('), wsc), field_type_list, pair(wsc, char(')'))),
+                    delimited(pair(char('('), wsc), partial_entries, pair(wsc, char(')'))),
                 )),
-                |(name, fields)| TupleType {
+                |(name, (fields, rest))| TupleType {
                     name: Some(name),
                     fields,
                     is_partial: true,
+                    rest,
                 },
             ),
             // Unnamed partial: (field: type, ...)
             // Need to verify it's empty OR contains at least one named field to distinguish from grouping
             verify(
                 map(
-                    delimited(pair(char('('), wsc), field_type_list, pair(wsc, char(')'))),
-                    |fields| TupleType {
+                    delimited(pair(char('('), wsc), partial_entries, pair(wsc, char(')'))),
+                    |(fields, rest)| TupleType {
                         name: None,
                         fields,
                         is_partial: true,
+                        rest,
                     },
                 ),
                 |tuple_type: &TupleType| {
@@ -1622,6 +1624,30 @@ fn partial_type(input: Span) -> IResult<Span, Type> {
     )(input)
 }
 
+/// A partial type's entries: its fields, then optionally its rest type, `*'t` — the type of
+/// every field it does not list — as the last entry.
+fn partial_entries(input: Span) -> IResult<Span, (Vec<FieldType>, Option<Box<Type>>)> {
+    let (after_fields, fields) = field_type_list(input)?;
+    // The field list takes a trailing comma with it, so the rest entry follows either that
+    // comma or nothing at all.
+    let consumed = &input.fragment()[..after_fields.location_offset() - input.location_offset()];
+    if !fields.is_empty() && !consumed.trim_end().ends_with(',') {
+        return Ok((after_fields, (fields, None)));
+    }
+    let (rest, entry) = opt(preceded(
+        wsc,
+        terminated(
+            // Glued, as the other type sigils are.
+            preceded(char('*'), type_definition),
+            opt(pair(wsc, char(','))),
+        ),
+    ))(after_fields)?;
+    match entry {
+        Some(entry) => Ok((rest, (fields, Some(Box::new(entry))))),
+        None => Ok((after_fields, (fields, None))),
+    }
+}
+
 fn tuple_type(input: Span) -> IResult<Span, Type> {
     map(
         alt((
@@ -1634,6 +1660,7 @@ fn tuple_type(input: Span) -> IResult<Span, Type> {
                     name: Some(name),
                     fields,
                     is_partial: false,
+                    rest: None,
                 },
             ),
             // 'alias[...] - inherit name from type alias and auto-spread
@@ -1660,6 +1687,7 @@ fn tuple_type(input: Span) -> IResult<Span, Type> {
                             name: Some(id),
                             fields,
                             is_partial: false,
+                            rest: None,
                         }
                     },
                 ),
@@ -1675,6 +1703,7 @@ fn tuple_type(input: Span) -> IResult<Span, Type> {
                     name: None,
                     fields,
                     is_partial: false,
+                    rest: None,
                 },
             ),
             // Only parse bare tuple name if not followed by '(' (which would indicate a partial type)
@@ -1687,6 +1716,7 @@ fn tuple_type(input: Span) -> IResult<Span, Type> {
                     name: Some(name),
                     fields: vec![],
                     is_partial: false,
+                    rest: None,
                 },
             ),
         )),
@@ -1709,6 +1739,7 @@ fn named_tuple_type(input: Span) -> IResult<Span, Type> {
                     name: Some(name),
                     fields,
                     is_partial: false,
+                    rest: None,
                 },
             ),
             // Bare name, not followed by `(` (a named partial type), mirroring `tuple_type`.
@@ -1718,6 +1749,7 @@ fn named_tuple_type(input: Span) -> IResult<Span, Type> {
                     name: Some(name),
                     fields: vec![],
                     is_partial: false,
+                    rest: None,
                 },
             ),
         )),
@@ -2607,12 +2639,22 @@ fn block(input: Span) -> IResult<Span, Block> {
     )(input)
 }
 
-/// A function literal's type parameter list, glued to the `#` (or to the `@` of a spawn
-/// shorthand): `<'t, 'u>`.
-fn function_type_parameters(input: Span) -> IResult<Span, Vec<String>> {
+/// A declared type parameter list, glued to the `#` of a function literal (or the `@` of a
+/// spawn shorthand), or to an alias name: `<'t, 'u>`. Each parameter may state an upper
+/// bound: `<'t: (x: 'int), 'u>`.
+fn type_parameters(input: Span) -> IResult<Span, Vec<TypeParameter>> {
     delimited(
         char('<'),
-        separated_list1(tuple((ws0, char(','), ws0)), type_name),
+        separated_list1(
+            tuple((ws0, char(','), ws0)),
+            map(
+                pair(
+                    type_name,
+                    opt(preceded(tuple((ws0, char(':'), ws0)), type_definition)),
+                ),
+                |(name, bound)| TypeParameter { name, bound },
+            ),
+        ),
         char('>'),
     )(input)
 }
@@ -2623,7 +2665,7 @@ fn function(input: Span) -> IResult<Span, Function> {
         preceded(
             char('#'),
             tuple((
-                opt(function_type_parameters),
+                opt(type_parameters),
                 opt(preceded(not(peek(char('{'))), function_input_type)),
                 opt(preceded(tuple((ws1, tag("->"), ws1)), function_output_type)),
                 opt(alt((preceded(ws1, block), block))),
@@ -2720,7 +2762,11 @@ fn builtin_name(input: Span) -> IResult<Span, String> {
 // Build a spawn of an inline function (the `#`-elided `@'type { … }` / `@[…] { … }` /
 // `@(type) { … }` forms, each optionally generic: `@<'t>'t { … }`). The init argument, if
 // any, comes from the chained value.
-fn spawn_of_function(type_parameters: Vec<String>, parameter_type: Type, body: Block) -> Term {
+fn spawn_of_function(
+    type_parameters: Vec<TypeParameter>,
+    parameter_type: Type,
+    body: Block,
+) -> Term {
     Term::Spawn(
         Box::new(Term::Function(Function {
             type_parameters,
@@ -2756,7 +2802,7 @@ fn spawn_term(input: Span) -> IResult<Span, Term> {
                 preceded(
                     char('@'),
                     pair(
-                        opt(function_type_parameters),
+                        opt(type_parameters),
                         alt((
                             delimited(pair(char('('), wsc), type_definition, pair(wsc, char(')'))),
                             module_type,
@@ -3489,11 +3535,7 @@ fn type_alias(input: Span) -> IResult<Span, Step> {
             // `'name` for a named alias, or a bare `'` for the module's nameless
             // default-type marker (`' = ...` / `'<'t> = ...`).
             spanned(preceded(char('\''), opt(identifier))),
-            opt(delimited(
-                char('<'),
-                separated_list1(tuple((ws0, char(','), ws0)), type_name),
-                char('>'),
-            )),
+            opt(type_parameters),
             preceded(tuple((ws0, char('='), ws0)), type_definition),
         )),
         |((name_span, name), type_parameters, type_definition)| Step::TypeAlias {

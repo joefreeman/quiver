@@ -168,10 +168,12 @@ items = %list.map [%list{ "a", "b" }, #'%str { %html{ <li>{$}</li> } }]
 ```
 
 A component is just a function from props to a tree; there is no component protocol to learn.
-Children are passed as an ordinary field whose value is another `%html{ … }`.
+Children are passed as an ordinary field whose value is another `%html{ … }`. A tree's typed
+attribute values are rendered as `%data` notation, so a component generic in them bounds its
+parameter by `'%data`.
 
 ```quiver
-card = #<'e>[title: '%str, children: '%html<'e>] {
+card = #<'e: '%data>[title: '%str, children: '%html<'e>] {
   %html{ <section><h2>{$title}</h2>{$children}</section> }
 }
 %html{ <main>{ [title: "T", children: %html{ <p>b</p> }] ~> card ~ }</main> } ~> %html.render ~

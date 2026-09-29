@@ -443,3 +443,83 @@ open = #[(fd): +File] { $ ~> =(+TcpSocket & s) }
                   (pattern_and
                     (resource_type)
                     (identifier)))))))))))
+
+==================
+bounded type parameters
+==================
+
+'keyed<'k: 'int | 'bin, 'v> = ['k, 'v]
+f = #<'t: (x: 'int)>'t { $x }
+
+---
+
+(source_file
+  (sequence
+    (type_alias
+      (type_name)
+      (type_parameters
+        (bounded_type_parameter
+          (type_name)
+          (union_type
+            (type_identifier
+              (type_name))
+            (type_identifier
+              (type_name))))
+        (type_name))
+      (tuple_type
+        (type_identifier
+          (type_name))
+        (type_identifier
+          (type_name))))
+    (chain
+      (identifier)
+      (function
+        (type_parameters
+          (bounded_type_parameter
+            (type_name)
+            (partial_type
+              (identifier)
+              (type_identifier
+                (type_name)))))
+        (type_identifier
+          (type_name))
+        (block
+          (branch
+            (sequence
+              (chain
+                (access
+                  (parameter
+                    (identifier)))))))))))
+
+==================
+partial rest types
+==================
+
+' = 'int | 'bin | (*^)
+'row = Row(id: 'int, *'%str)
+
+---
+
+(source_file
+  (sequence
+    (type_alias
+      (default_type_name)
+      (union_type
+        (type_identifier
+          (type_name))
+        (type_identifier
+          (type_name))
+        (partial_type
+          (rest_type
+            (cycle_type)))))
+    (type_alias
+      (type_name)
+      (partial_type
+        (tuple_name)
+        (identifier)
+        (type_identifier
+          (type_name))
+        (rest_type
+          (module_type
+            (import
+              (identifier))))))))

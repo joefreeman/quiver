@@ -278,6 +278,61 @@ fn test_rigid_type_variable_rejects_concrete_requirement() {
 }
 
 #[test]
+fn test_rigid_type_variable_rejects_concrete_parameter() {
+    // Passing a `'t` value to a non-generic function is checked like any argument: the
+    // body cannot assume `'t` is an integer, whatever the caller happens to pass.
+    quiver()
+        .evaluate("f = #<'t>'t { __integer_add__ [$, 1] }; f 2")
+        .expect_type_mismatch();
+    quiver()
+        .evaluate("f = #<'t>'t { g = #'int { $ }; g $ }; f 2")
+        .expect_type_mismatch();
+}
+
+#[test]
+fn test_rigid_type_variable_accepts_only_its_own_values() {
+    // A function taking `'t` can only be given a `'t`: the body may not solve the
+    // enclosing generic's parameter to whatever it passes.
+    quiver()
+        .evaluate("f = #<'t>[f: #'t -> 't, x: 't] { $f 5 }; 1")
+        .expect_error_containing("'int is not 't");
+    quiver()
+        .evaluate("f = #<'t>[f: #'t -> 't, x: 't] { $f $x }; f [f: #'int { $ }, x: 3]")
+        .expect("3");
+}
+
+#[test]
+fn test_rigid_type_variable_fits_top_and_its_own_unions() {
+    // What a `'t` value may flow into: the top type, and unions naming `'t` itself.
+    quiver()
+        .evaluate(
+            r#"
+            keep = #_ { $ }
+            f = #<'t>'t { keep $; opt = #('t | []) { $ }; opt $ }
+            f 4
+            "#,
+        )
+        .expect("4");
+}
+
+#[test]
+fn test_nested_generic_is_instantiable_in_enclosing_body() {
+    // Rigidity is scoped to the body declaring the parameter: a generic literal nested in
+    // another's body is still called at whatever type the enclosing body passes it.
+    quiver()
+        .evaluate(
+            r#"
+            f = #<'t>'t {
+              pair = #<'u>'u { [$, $] }
+              [pair $, pair 1]
+            }
+            f "a"
+            "#,
+        )
+        .expect("[[\"a\", \"a\"], [1, 1]]");
+}
+
+#[test]
 fn test_generic_unification_of_resource_and_reference_types() {
     // Unifying Resource with Resource (and Reference with Reference) used to fall
     // through to unify's catch-all and fail — resource-bearing types could not flow
@@ -622,10 +677,10 @@ fn test_declared_generic_result_holds_its_parameters_rigid() {
         .expect("3");
     quiver()
         .evaluate("f = #<'t>'t -> 't { 5 }")
-        .expect_error_containing("Type mismatch");
+        .expect_error_containing("declared result: 'int is not 't");
     quiver()
         .evaluate("g = #<'t, 'u>['t, 'u] -> 't { $1 }")
-        .expect_error_containing("Type mismatch");
+        .expect_error_containing("declared result: 'u is not 't");
 }
 
 #[test]

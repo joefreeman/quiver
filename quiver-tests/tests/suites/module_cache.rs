@@ -26,22 +26,27 @@ const BODY: &str = r#"
 
 const EXPECTED: &str = "#P[data: 'bin, pos: 'int, len: 'int, err: (Expected[offset: 'int, message: Str['bin]] | [])] -> ([(Cons['int, μ1] | Nil), P[data: 'bin, pos: 'int, len: 'int, err: (Expected[offset: 'int, message: Str['bin]] | [])]] | [])";
 
-fn eval_line(
+fn process_types(
     environment: &mut Environment<NativeEffect>,
-    repl: &mut Repl<NativeEffect>,
-    virtual_time: &Arc<AtomicU64>,
-    source: &str,
-) -> String {
+) -> std::collections::HashMap<usize, (quiver_core::types::Type, usize)> {
     let types_request_id = environment.request_process_types().unwrap();
-    let process_types = loop {
+    loop {
         environment.step().ok();
         match environment.poll_request(types_request_id) {
             Ok(Some(quiver_environment::RequestResult::ProcessTypes(types))) => break types,
             Ok(None) => continue,
             other => panic!("unexpected process-types result: {:?}", other.is_ok()),
         }
-    };
+    }
+}
 
+fn eval_line(
+    environment: &mut Environment<NativeEffect>,
+    repl: &mut Repl<NativeEffect>,
+    virtual_time: &Arc<AtomicU64>,
+    source: &str,
+) -> String {
+    let process_types = process_types(environment);
     match repl.evaluate(environment, source, process_types) {
         Ok(Some(request_id)) => {
             let start = std::time::Instant::now();
@@ -91,6 +96,36 @@ fn run_session(
     first_line: Option<&str>,
     artifacts: Option<Rc<quiver_compiler::ArtifactStore>>,
 ) -> String {
+    let (mut environment, mut repl, virtual_time_ms) = start_session(debug, artifacts);
+    if let Some(first) = first_line {
+        eval_line(&mut environment, &mut repl, &virtual_time_ms, first);
+    }
+    let result = eval_line(&mut environment, &mut repl, &virtual_time_ms, BODY);
+    // Every session doubles as an incremental-tables check: the environment extended
+    // its compatibility tables once per merge above, and the result must equal a
+    // from-scratch recomputation over the final merged program.
+    environment.verify_compatibility_tables();
+    result
+}
+
+/// The compile error `source` raises in a session whose imports link from `store`.
+fn linked_compile_error(store: &Rc<quiver_compiler::ArtifactStore>, source: &str) -> String {
+    let (mut environment, mut repl, _) = start_session(false, Some(store.clone()));
+    let process_types = process_types(&mut environment);
+    match repl.evaluate(&mut environment, source, process_types) {
+        Err(error) => format!("{error:?}"),
+        Ok(_) => panic!("expected a compile error for: {source}"),
+    }
+}
+
+fn start_session(
+    debug: bool,
+    artifacts: Option<Rc<quiver_compiler::ArtifactStore>>,
+) -> (
+    Environment<NativeEffect>,
+    Repl<NativeEffect>,
+    Arc<AtomicU64>,
+) {
     let virtual_time_ms = Arc::new(AtomicU64::new(0));
 
     let builtins = quiver_core::builtins::BuiltinRegistry::<NativeEffect>::with_modules(
@@ -124,15 +159,7 @@ fn run_session(
         });
     }
 
-    if let Some(first) = first_line {
-        eval_line(&mut environment, &mut repl, &virtual_time_ms, first);
-    }
-    let result = eval_line(&mut environment, &mut repl, &virtual_time_ms, BODY);
-    // Every session doubles as an incremental-tables check: the environment extended
-    // its compatibility tables once per merge above, and the result must equal a
-    // from-scratch recomputation over the final merged program.
-    environment.verify_compatibility_tables();
-    result
+    (environment, repl, virtual_time_ms)
 }
 
 #[test]
@@ -417,6 +444,17 @@ fn linked_session_matches_cold_inference() {
 fn linked_session_matches_cold_inference_debug() {
     let store = build_artifacts(true);
     assert_eq!(session_with_artifacts(true, None, &store), EXPECTED);
+}
+
+#[test]
+fn linked_session_checks_type_parameter_bounds() {
+    // A linked module's bounds — on its generic functions and on its type aliases — are
+    // carried by its artifact, so a session linking it checks them as a cold compile does.
+    let store = build_artifacts(false);
+    let error = linked_compile_error(&store, "p = @[] { 1 } []; %dict{} ~> %dict.put [~, p, 1]");
+    assert!(error.contains("TypeParameterBound"), "{error}");
+    let error = linked_compile_error(&store, "f = #'%dict<#'int -> 'int, 'int> { $ }");
+    assert!(error.contains("TypeParameterBound"), "{error}");
 }
 
 #[test]

@@ -1,10 +1,9 @@
 // A persistent hash map (HAMT) keyed by data values.
 //
-// Keys are any data value — integers, binaries, and tuples (strings included), nested
-// freely; values are any type. A key is hashed by encoding it as %data notation and
+// Keys are any data value (`'%data`) — integers, binaries, and tuples (strings included),
+// nested freely; values are any type. A key is hashed by encoding it as %data notation and
 // hashing the text, and stored entries keep the original key value (compared with
-// structural equality), so keys never need decoding. Anything %data cannot encode —
-// functions, processes, refs, resources — is a runtime error when used as a key. The map
+// structural equality), so keys never need decoding. The map
 // is an immutable, structurally-shared 32-way hash-array-mapped trie. Each internal
 // `Node` carries a 32-bit `bitmap` recording which of its 32 slots are occupied, plus its
 // children in slot order; a 5-bit slice of a key's 32-bit hash selects a slot at each
@@ -21,10 +20,10 @@
 
 'list<'t> = Nil | Cons['t, ^]
 
-'<'k, 'v> = Empty | Leaf['int, 'k, 'v] | Collision['int, 'list<['k, 'v]>] | Node['int, 'list<^>]
+'<'k: '%data, 'v> = Empty | Leaf['int, 'k, 'v] | Collision['int, 'list<['k, 'v]>] | Node['int, 'list<^>]
 
 // --- key hashing -------------------------------------------------------------
-hash = #_ { __data_encode__ ~ ~> __binary_hash32__ }
+hash = #'%data { __data_encode__ ~ ~> __binary_hash32__ }
 
 // 5-bit hash fragment at `shift` bits, and the compact child index for a slot bit.
 fragment = #[(hash): 'int, (shift): 'int] {
@@ -59,7 +58,7 @@ map = #<'t, 'u>[(list): 'list<'t>, (f): #'t -> 'u, (acc): 'list<'u>] {
 
 // child at a compact index; `Empty` past the end (never reached for a set slot). Returning a
 // node — total, rather than failing to nil on `Nil` — keeps `[]` out of the tree-op result types.
-child_at = #<'k, 'v>[(children): 'list<'<'k, 'v>>, (index): 'int] {
+child_at = #<'k: '%data, 'v>[(children): 'list<'<'k, 'v>>, (index): 'int] {
   $children ~> {
     | =Nil => Empty
     | =Cons[h, t] => {
@@ -98,14 +97,14 @@ remove_at = #<'t>[(list): 'list<'t>, (index): 'int, (acc): 'list<'t>] {
 }
 
 // --- collision buckets -------------------------------------------------------
-bucket_get = #<'k, 'v>[(entries): 'list<['k, 'v]>, (key): 'k] {
+bucket_get = #<'k: '%data, 'v>[(entries): 'list<['k, 'v]>, (key): 'k] {
   $entries ~> {
     | =Nil => []
     | =Cons[[k, v], t] => { $key ~> =^k => v | ^ [t, $key] }
   }
 }
 
-bucket_put = #<'k, 'v>[(entries): 'list<['k, 'v]>, (key): 'k, (value): 'v, (acc): 'list<['k, 'v]>] {
+bucket_put = #<'k: '%data, 'v>[(entries): 'list<['k, 'v]>, (key): 'k, (value): 'v, (acc): 'list<['k, 'v]>] {
   $entries ~> {
     | =Nil => Cons[[$key, $value], Nil] ~> revcat [$acc, ~]
     | =Cons[[k, v], t] => {
@@ -115,7 +114,7 @@ bucket_put = #<'k, 'v>[(entries): 'list<['k, 'v]>, (key): 'k, (value): 'v, (acc)
   }
 }
 
-bucket_remove = #<'k, 'v>[(entries): 'list<['k, 'v]>, (key): 'k, (acc): 'list<['k, 'v]>] {
+bucket_remove = #<'k: '%data, 'v>[(entries): 'list<['k, 'v]>, (key): 'k, (acc): 'list<['k, 'v]>] {
   $entries ~> {
     | =Nil => revcat [$acc, Nil]
     | =Cons[[k, v], t] => {
@@ -126,7 +125,7 @@ bucket_remove = #<'k, 'v>[(entries): 'list<['k, 'v]>, (key): 'k, (acc): 'list<['
 }
 
 // --- tree operations ---------------------------------------------------------
-get = #<'k, 'v>[(node): '<'k, 'v>, (key): 'k, (hash): 'int, (shift): 'int] {
+get = #<'k: '%data, 'v>[(node): '<'k, 'v>, (key): 'k, (hash): 'int, (shift): 'int] {
   $node ~> {
     | =Empty => []
     | =Leaf[_, k, v] => { $key ~> =^k => v | [] }
@@ -147,7 +146,7 @@ get = #<'k, 'v>[(node): '<'k, 'v>, (key): 'k, (hash): 'int, (shift): 'int] {
 }
 
 // split two single entries (differing keys) into a fresh subtree at `shift`.
-split_pair = #<'k, 'v>[
+split_pair = #<'k: '%data, 'v>[
   (self): ^,
   (h1): 'int,
   (k1): 'k,
@@ -192,7 +191,7 @@ split_pair = #<'k, 'v>[
 }
 
 // split an existing node (a collision) against a new entry whose hash differs from it.
-split_node = #<'k, 'v>[
+split_node = #<'k: '%data, 'v>[
   (self): ^,
   (cnode): '<'k, 'v>,
   (chash): 'int,
@@ -220,7 +219,7 @@ split_node = #<'k, 'v>[
   }
 }
 
-put = #<'k, 'v>[
+put = #<'k: '%data, 'v>[
   (self): ^,
   (node): '<'k, 'v>,
   (key): 'k,
@@ -261,7 +260,7 @@ put = #<'k, 'v>[
 // lone child that is a `Leaf`/`Collision` is hoisted up — insertion never builds a single-`Leaf`
 // node, so leaving one would be non-canonical. A lone `Node` child is a real shared-hash-prefix
 // level and is kept.
-collapse_node = #<'k, 'v>[(bitmap): 'int, (children): 'list<'<'k, 'v>>] {
+collapse_node = #<'k: '%data, 'v>[(bitmap): 'int, (children): 'list<'<'k, 'v>>] {
   | $children ~> =Nil => Empty
   | $children ~> =Cons[only, Nil] => only ~> {
     | =Node[_, _] => Node[$bitmap, $children]
@@ -273,11 +272,11 @@ collapse_node = #<'k, 'v>[(bitmap): 'int, (children): 'list<'<'k, 'v>>] {
 // Drop the slot for `bit` (its child became `Empty`), then canonicalize. Non-recursive so the
 // generic `remove_at` call sits outside `remove`'s self-passing recursion — where (a quirk of
 // the type inferencer) it would otherwise leak its function type into the result type.
-remove_slot = #<'k, 'v>[(bitmap): 'int, (bit): 'int, (children): 'list<'<'k, 'v>>, (index): 'int] {
+remove_slot = #<'k: '%data, 'v>[(bitmap): 'int, (bit): 'int, (children): 'list<'<'k, 'v>>, (index): 'int] {
   collapse_node [%int.and [$bitmap, %int.not $bit], remove_at [$children, $index, Nil]]
 }
 
-remove = #<'k, 'v>[
+remove = #<'k: '%data, 'v>[
   (self): ^,
   (node): '<'k, 'v>,
   (key): 'k,
@@ -314,7 +313,7 @@ remove = #<'k, 'v>[
 }
 
 // collect every entry by walking a worklist of pending nodes (order is unspecified).
-entries = #<'k, 'v>[(worklist): 'list<'<'k, 'v>>, (acc): 'list<['k, 'v]>] {
+entries = #<'k: '%data, 'v>[(worklist): 'list<'<'k, 'v>>, (acc): 'list<['k, 'v]>] {
   $worklist ~> {
     | =Nil => $acc
     | =Cons[node, rest] => node ~> {
@@ -326,7 +325,7 @@ entries = #<'k, 'v>[(worklist): 'list<'<'k, 'v>>, (acc): 'list<['k, 'v]>] {
   }
 }
 
-from = #<'k, 'v>[(self): ^, (d): '<'k, 'v>, (pairs): 'list<['k, 'v]>] -> '<'k, 'v> {
+from = #<'k: '%data, 'v>[(self): ^, (d): '<'k, 'v>, (pairs): 'list<['k, 'v]>] -> '<'k, 'v> {
   $pairs ~> {
     | =Nil => $d
     | =Cons[[k, val], t] => put [put, $d, k, val, hash k, 0] ~> $self [$self, ~, t]
@@ -335,14 +334,14 @@ from = #<'k, 'v>[(self): ^, (d): '<'k, 'v>, (pairs): 'list<['k, 'v]>] -> '<'k, '
 
 // The iterable/collectable pair, shared by the exported `iter`/`collect` and the eager
 // sequence functions below (which compose them around the lazy `%iter` operations).
-to_iter = #<'k, 'v>'<'k, 'v> {
+to_iter = #<'k: '%data, 'v>'<'k, 'v> {
   Cons[~, Nil] ~> entries [~, Nil] ~> %iter.unfold [
     ~,
     #<'k, 'v>'list<['k, 'v]> { =Cons[e, t] => [e, t] | =Nil => [] },
   ]
 }
 
-from_iter = #<'k, 'v>'%iter<['k, 'v]> {
+from_iter = #<'k: '%data, 'v>'%iter<['k, 'v]> {
   %iter.fold [
     ~,
     Empty,
@@ -402,91 +401,91 @@ dict_dialect = #(content: '%str, chain: '%meta.cb) {
     Empty
   },
 
-  get: #<'k, 'v>[(dict): '<'k, 'v>, (key): 'k] {
+  get: #<'k: '%data, 'v>[(dict): '<'k, 'v>, (key): 'k] {
     :doc "The value stored for the key, or nil when the key is absent."
     get [$dict, $key, hash $key, 0]
   },
 
-  put: #<'k, 'v>[(dict): '<'k, 'v>, (key): 'k, (value): 'v] {
-    :doc "A dict with the key mapped to the value, replacing any existing mapping. Keys are data values (integers, binaries, tuples); a non-data key is a runtime error."
+  put: #<'k: '%data, 'v>[(dict): '<'k, 'v>, (key): 'k, (value): 'v] {
+    :doc "A dict with the key mapped to the value, replacing any existing mapping. Keys are data values (`'%data`: integers, binaries, and tuples of data)."
     put [put, $dict, $key, $value, hash $key, 0]
   },
 
-  remove: #<'k, 'v>[(dict): '<'k, 'v>, (key): 'k] {
+  remove: #<'k: '%data, 'v>[(dict): '<'k, 'v>, (key): 'k] {
     :doc "A dict with the key removed, or the dict unchanged when the key is absent."
     remove [remove, $dict, $key, hash $key, 0]
   },
 
-  has?: #<'k>[(dict): '<'k, _>, (key): 'k] {
+  has?: #<'k: '%data>[(dict): '<'k, _>, (key): 'k] {
     :doc "Whether the dict contains the key."
     get [$dict, $key, hash $key, 0]; Ok
   },
 
-  count: #'<_, _> {
+  count: #'<'%data, _> {
     :doc "The number of entries in the dict."
     Cons[~, Nil] ~> entries [~, Nil] ~> length [~, 0]
   },
 
-  entries: #<'k, 'v>'<'k, 'v> {
+  entries: #<'k: '%data, 'v>'<'k, 'v> {
     :doc "All entries as a list of [key, value] pairs, in unspecified order."
     Cons[~, Nil] ~> entries [~, Nil]
   },
 
-  keys: #<'k, 'v>'<'k, 'v> {
+  keys: #<'k: '%data, 'v>'<'k, 'v> {
     :doc "All keys in the dict as a list, in unspecified order."
     Cons[~, Nil] ~> entries [~, Nil] ~> map [~, #{ $0 }, Nil]
   },
-  values: #<'k, 'v>'<'k, 'v> {
+  values: #<'k: '%data, 'v>'<'k, 'v> {
     :doc "All values in the dict as a list, in unspecified order."
     Cons[~, Nil] ~> entries [~, Nil] ~> map [~, #{ $1 }, Nil]
   },
 
-  iter: #<'k, 'v>'<'k, 'v> {
+  iter: #<'k: '%data, 'v>'<'k, 'v> {
     :doc "An iterator over the dict's [key, value] entries, in unspecified order."
     to_iter ~
   },
 
-  collect: #<'k, 'v>'%iter<['k, 'v]> {
+  collect: #<'k: '%data, 'v>'%iter<['k, 'v]> {
     :doc "Builds a dict from an iterator of [key, value] pairs; later pairs win on duplicate keys."
     from_iter ~
   },
 
-  map: #<'k, 'v, 'j, 'u>[(dict): '<'k, 'v>, (f): #['k, 'v] -> ['j, 'u]] {
+  map: #<'k: '%data, 'v, 'j: '%data, 'u>[(dict): '<'k, 'v>, (f): #['k, 'v] -> ['j, 'u]] {
     :doc "A dict rebuilt with each [key, value] entry transformed; duplicate result keys collapse."
     to_iter $dict ~> %iter.map [~, $f] ~> from_iter
   },
 
-  filter: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
+  filter: #<'k: '%data, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
     :doc "A dict keeping only the entries for which the predicate is non-nil."
     to_iter $dict ~> %iter.filter [~, $pred] ~> from_iter
   },
 
-  fold: #<'k, 'v, 'acc>[(dict): '<'k, 'v>, (init): 'acc, (f): #['acc, ['k, 'v]] -> 'acc] {
+  fold: #<'k: '%data, 'v, 'acc>[(dict): '<'k, 'v>, (init): 'acc, (f): #['acc, ['k, 'v]] -> 'acc] {
     :doc "Reduces a dict by folding each [key, value] entry into an accumulator, in unspecified order."
     to_iter $dict ~> %iter.fold [~, $init, $f]
   },
 
-  find: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
+  find: #<'k: '%data, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
     :doc "An entry for which the predicate is non-nil, or nil when none matches (unspecified order)."
     to_iter $dict ~> %iter.find [~, $pred]
   },
 
-  any?: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
+  any?: #<'k: '%data, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
     :doc "Whether any [key, value] entry satisfies the predicate."
     to_iter $dict ~> %iter.any? [~, $pred]
   },
 
-  all?: #<'k, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
+  all?: #<'k: '%data, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
     :doc "Whether every [key, value] entry satisfies the predicate."
     to_iter $dict ~> %iter.all? [~, $pred]
   },
 
-  from: #<'k, 'v>'list<['k, 'v]> {
+  from: #<'k: '%data, 'v>'list<['k, 'v]> {
     :doc "Builds a dict from a list of [key, value] pairs; later pairs win on duplicate keys."
     from [from, Empty, ~]
   },
 
-  merge: #<'k, 'v>[(dict): '<'k, 'v>, (with): '<'k, 'v>] {
+  merge: #<'k: '%data, 'v>[(dict): '<'k, 'v>, (with): '<'k, 'v>] {
     :doc "A dict with every entry of the second dict added; the second's values win on conflict."
     Cons[$with, Nil] ~> entries [~, Nil] ~> from [from, $dict, ~]
   },

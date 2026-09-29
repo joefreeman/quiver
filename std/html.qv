@@ -52,9 +52,9 @@
 // is the union of the values the tree's `Data` attributes hold. A data-free tree is
 // generic in `'d` and embeds anywhere; a layer above pins `'d` to its own union (the
 // live layer, to its event union) so a stray value is a compile error.
-'attr_val<'d> = '%str | Ok | [] | Data['d]
+'attr_val<'d: '%data> = '%str | Ok | [] | Data['d]
 
-'node<'d> =
+'node<'d: '%data> =
   | Raw['%str]
   | Text['%str]
   | Element[
@@ -64,19 +64,19 @@
     ]
   | Fragment[(Nil | Cons[^1, ^])]
 
-'<'d> = 'node<'d>
+'<'d: '%data> = 'node<'d>
 
-'nodes<'d> = '%list<'node<'d>>
-'attrs<'d> = '%list<['%str, 'attr_val<'d>]>
+'nodes<'d: '%data> = '%list<'node<'d>>
+'attrs<'d: '%data> = '%list<['%str, 'attr_val<'d>]>
 
 // Template provenance: the instrumented static runs and the normalized hole values they
 // interleave with, in document order. A `Child` hole is a node in child position; an
 // `Attr` hole is one attribute's value, with its owning element's `data-q` anchor and
 // the attribute name carried statically.
 'statics = '%list<'%str>
-'hole<'d> = Child['node<'d>] | Attr[elem: 'int, name: '%str, value: 'attr_val<'d>]
-'holes<'d> = '%list<'hole<'d>>
-'tmpl<'d> = [statics: 'statics, holes: 'holes<'d>]
+'hole<'d: '%data> = Child['node<'d>] | Attr[elem: 'int, name: '%str, value: 'attr_val<'d>]
+'holes<'d: '%data> = '%list<'hole<'d>>
+'tmpl<'d: '%data> = [statics: 'statics, holes: 'holes<'d>]
 
 // The dialect's parse tree — the seam a layered dialect works against. Static text runs,
 // holes as content spans, and elements; emission (the tree expression, and the
@@ -719,7 +719,7 @@ html_dialect = #(content: '%str, term: '%meta.cb) {
 
 // Append rendered attributes onto `acc`: ` name`, ` name="escaped value"`; nil omits.
 // A `Data` value renders as its %data notation — the attribute text a client echoes back.
-render_attrs = #[(items): 'attrs<_>, (acc): 'bin] {
+render_attrs = #[(items): 'attrs<'%data>, (acc): 'bin] {
   $items ~> {
     | =Nil => $acc
     | =Cons[[Str[n], v], rest] => {
@@ -747,7 +747,7 @@ render_attrs = #[(items): 'attrs<_>, (acc): 'bin] {
 }
 
 // Render a list of nodes onto `acc`, self-passed to recurse into children.
-render_list = #[(self): ^, (items): 'nodes<_>, (acc): 'bin] -> 'bin {
+render_list = #[(self): ^, (items): 'nodes<'%data>, (acc): 'bin] -> 'bin {
   $items ~> {
     | =Nil => $acc
     | =Cons[node, rest] => {
@@ -777,12 +777,12 @@ render_list = #[(self): ^, (items): 'nodes<_>, (acc): 'bin] -> 'bin {
   }
 }
 
-render = #'<_> {
+render = #'<'%data> {
   :doc "Renders a node tree to its HTML string: Text nodes and attribute values are escaped, Raw nodes are emitted verbatim, nil-valued attributes are omitted, Ok-valued attributes render bare, and event values render as their %data notation."
   render_list [render_list, Cons[$, Nil], <>] ~> Str[~]
 }
 
-page = #'<_> {
+page = #'<'%data> {
   :doc "Renders a node tree as a whole page: the doctype followed by the rendered tree."
   %str.concat ["<!doctype html>", render $]
 }
@@ -800,7 +800,7 @@ text = #'%str {
 // Normalizes a child hole's value to a node: a node splices as itself, a Str becomes
 // escaped text, an int renders as digits, a list of nodes becomes a Fragment, and nil
 // renders nothing.
-child = #<'e>('node<'e> | '%str | 'int | 'nodes<'e> | []) {
+child = #<'e: '%data>('node<'e> | '%str | 'int | 'nodes<'e> | []) {
   | =Str[b] => Text[Str[b]]
   | =('int & i) => %str.from_int i ~> Text[~]
   | =[] => Fragment[Nil]
@@ -823,12 +823,12 @@ attr_value = #('%str | 'int | Ok | []) {
 // the data plane: `render` (the emitted attribute text) and the live layer's frame
 // derivation. A client echoing the attribute text back sends *typed* data, which the
 // sender decodes with `%data.decode`.
-data_value = #<'t>'t { Data[$] }
+data_value = #<'t: '%data>'t { Data[$] }
 
 // Attaches the template provenance to an expansion's tree (dialect plumbing): the
 // instrumented statics and the normalized hole values, as the `:template` annotation.
 // Identity on the tree; the annotation is invisible to matching, equality, and render.
-with_template = #<'d>[(tree): 'node<'d>, (statics): 'statics, (holes): 'holes<'d>] {
+with_template = #<'d: '%data>[(tree): 'node<'d>, (statics): 'statics, (holes): 'holes<'d>] {
   $tree ~> { :template ($statics, $holes) }
 }
 

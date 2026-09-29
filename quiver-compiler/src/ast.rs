@@ -122,7 +122,7 @@ pub enum Step {
         name: Option<String>,
         /// Span of the alias name (`'point` in `'point = ...`), for symbols/go-to-definition.
         name_span: Spanned,
-        type_parameters: Vec<String>,
+        type_parameters: Vec<TypeParameter>,
         type_definition: Type,
     },
     /// A value-producing step.
@@ -503,9 +503,18 @@ pub struct TupleField {
     pub value: FieldValue,
 }
 
+/// A declared type parameter (`'t` in `#<'t>…` or `'pair<'t> = …`), with its optional
+/// upper bound (`'t: (x: 'int)`): an instantiation must fit the bound, and where the
+/// parameter is in scope its values can be used as the bound's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeParameter {
+    pub name: String,
+    pub bound: Option<Type>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
-    pub type_parameters: Vec<String>,
+    pub type_parameters: Vec<TypeParameter>,
     pub parameter_type: Option<Type>,
     pub return_type: Option<Type>,
     pub body: Option<Block>,
@@ -765,6 +774,9 @@ pub struct TupleType {
     pub name: Option<String>,
     pub fields: Vec<FieldType>,
     pub is_partial: bool,
+    /// A partial's rest type, written `*'t` as its last entry: the type of every field it
+    /// does not list. Always `None` for a concrete tuple.
+    pub rest: Option<Box<Type>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

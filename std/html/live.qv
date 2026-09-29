@@ -157,13 +157,13 @@ live_policy = #'%html.pattr {
 // tree's typed data. The envelope is what the client echoes and `decode` reads back, so
 // it discriminates a decoded event from a dropped one; the `Data` marker is the tree's
 // and never reaches the wire.
-event_value = #<'t>'t { %html.data_value Ev[$] }
+event_value = #<'t: '%data>'t { %html.data_value Ev[$] }
 
 // A live view's markup: an `%html` tree whose data attributes carry `'e` events. Spell a
 // view's own type with these rather than `'%html<…>`, which would have to name the wire
 // envelope the bindings ride in.
-'<'e> = '%html<Ev['e]>
-'nodes<'e> = '%html.nodes<Ev['e]>
+'<'e: '%data> = '%html<Ev['e]>
+'nodes<'e: '%data> = '%html.nodes<Ev['e]>
 
 live_dialect = #(content: '%str, term: '%meta.cb) {
   %html.parse [$content, $term]
@@ -300,7 +300,7 @@ key_opts = #[
 
 // Encode an attribute value for its frame slot: an event becomes its %data notation —
 // the string the client echoes back — and literal values pass through.
-enc_attr = #'%html.attr_val<_> {
+enc_attr = #'%html.attr_val<'%data> {
   | =Str[b] => Str[b]
   | =Ok => Ok
   | =Data[~] => %data.encode ~
@@ -308,9 +308,9 @@ enc_attr = #'%html.attr_val<_> {
 }
 
 // A node's frame; self-passed to recurse into template slots.
-frame_of = #[(self): ^, (node): '%html<_>] -> 'frame {
+frame_of = #[(self): ^, (node): '%html<'%data>] -> 'frame {
   | $node:boundary<'bnd> ~> =(key: k, start: st) => Boundary[key: k, vid: [], start: st]
-  | $node:template<'%html.tmpl<_>> ~> =(statics: s, holes: h) => {
+  | $node:template<'%html.tmpl<'%data>> ~> =(statics: s, holes: h) => {
     slots = %list.map [
       h,
       #{
@@ -332,7 +332,7 @@ frame_of = #[(self): ^, (node): '%html<_>] -> 'frame {
   | Opaque[%html.render $node]
 }
 
-frame = #'%html<_> {
+frame = #'%html<'%data> {
   :doc "Derives a node tree's frame — the diffable shape of one render — from the :template provenance %html expansions attach. Un-annotated subtrees become Opaque (compared and replaced whole); event attribute values are encoded to their %data notation, so frames are event-type-erased."
   frame_of [frame_of, $]
 }
@@ -703,14 +703,14 @@ encode = #[(vid): '%str, (ps): 'patches] {
 // re-derives state from a new URL without remounting — the root view's live-navigation
 // hook, receiving the raw request the app synthesized for the target; a component that
 // doesn't navigate omits it (the `_base` record) and gets an identity `nav`.
-'component<'i, 's, 'e> = [
+'component<'i, 's, 'e: '%data> = [
   mount: #'i -> 's,
   update: #[(state): 's, (event): 'e] -> 's,
   view: #'s -> '<'e>,
   decode: #'%str -> (Ev['e] | []),
   nav: #[(state): 's, (request): '%http] -> 's,
 ]
-'component_base<'i, 's, 'e> = [
+'component_base<'i, 's, 'e: '%data> = [
   mount: #'i -> 's,
   update: #[(state): 's, (event): 'e] -> 's,
   view: #'s -> '<'e>,
@@ -721,7 +721,7 @@ encode = #[(vid): '%str, (ps): 'patches] {
 // which never navigate — stay four fields. Both the `component` constructor and the
 // `sim` harness normalize through this, so a `_base` record is accepted everywhere a
 // full one is.
-with_nav = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
+with_nav = #<'i, 's, 'e: '%data>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
   c = $
   {
     | c ~> =(mount: m, update: u, view: v, decode: d, nav: n) => [
@@ -746,7 +746,7 @@ with_nav = #<'i, 's, 'e>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
 
 // Render inside a tracked region: the process re-subscribes to exactly the stores the
 // view sampled, and their next state change delivers a `Changed` wakeup.
-render_view = #<'i, 's, 'e>[(state): 's, (comp): 'component<'i, 's, 'e>] {
+render_view = #<'i, 's, 'e: '%data>[(state): 's, (comp): 'component<'i, 's, 'e>] {
   %proc.track #{ $$comp.view $$state } ~> frame
 }
 
@@ -859,7 +859,7 @@ nav_of = #'%str {
 // unchanged. The browser metadata joins the decoded event here, as the `:event`
 // annotation — the last point where both halves are in hand, and the only one that
 // works for every component, since the event's type is a variable to this code.
-fold_event = #<'i, 's, 'e>[
+fold_event = #<'i, 's, 'e: '%data>[
   (state): 's,
   (comp): 'component<'i, 's, 'e>,
   (payload): '%str,
@@ -1111,7 +1111,7 @@ as_frame = #'frame
 // One render step of a view: render, assign boundary vids, diff against the frame
 // the client holds, send the delta (an empty diff sends nothing), then execute the
 // reconcile. Answers [the new frame, the new kids, the next child ordinal].
-step_view = #<'i, 's, 'e>[
+step_view = #<'i, 's, 'e: '%data>[
   (state): 's,
   (prev): 'frame,
   (comp): 'component<'i, 's, 'e>,
@@ -1145,7 +1145,7 @@ step_view = #<'i, 's, 'e>[
 // corpse so reconcile won't quietly respawn a repeat offender. (A deliberate
 // kill's Down finds no tracked vid — the entry is removed before the kill — and
 // is dropped.)
-vlife = #<'i, 's, 'e>[
+vlife = #<'i, 's, 'e: '%data>[
   (mode): 'vmode,
   (state): 's,
   (f): 'frame,
@@ -1205,7 +1205,7 @@ vlife = #<'i, 's, 'e>[
 // Settle: drain `Changed` in quiet-window steps, re-rendering after each burst,
 // until a window passes silently (or the deadline lapses). Answers the settled
 // frame. `left` is the remaining deadline budget.
-settle = #<'i, 's, 'e>[(state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e>, (left): 'int] {
+settle = #<'i, 's, 'e: '%data>[(state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e>, (left): 'int] {
   {
     | %num.lt? [0, $left] => ![#'%proc.changed, settle_quiet] ~> {
       | ='%proc.changed => {
@@ -1224,7 +1224,7 @@ settle = #<'i, 's, 'e>[(state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e>,
 // for a child. Children spawn strictly after the announcement, so their first
 // frames arrive behind the markup that holds their markers (or, at a dead render,
 // splice into it at the app).
-view_run = #<'i, 's, 'e>[
+view_run = #<'i, 's, 'e: '%data>[
   (init): 'i,
   (comp): 'component<'i, 's, 'e>,
   (vid): '%str,
@@ -1264,7 +1264,7 @@ view_run = #<'i, 's, 'e>[
 // runs it against the HTTP request instead of placing it. (The inner literal
 // re-declares `<'i>`: a nested signature reaches the enclosing type parameters by
 // re-declaration — suffix inheritance makes it the same variable.)
-component = #<'e, 'i, 's>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
+component = #<'e: '%data, 'i, 's>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
   :doc "Defines a component from its `[mount, update, view, decode]` record — `decode` reads the `on:*` payload the client echoes back, %data notation in the `Ev` envelope, so the field is the instantiated codec itself, `decode: %data.decode<Ev['ev]>` (add a `nav: #[(state): 's, (request): '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. Pin the event type — `component<'ev> [...]` — to compile-check the view's `on:*` payloads against it (unpinned, a stray payload widens the inferred union and is only dropped at decode). What the browser knows and the payload cannot carry — a click's coordinates, a submit's fields, an input's value — rides the event as the `:event` annotation, read in `update` with a checked retrieval (`e:event<Submit(fields: '%http.pairs)>`). The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
   comp = with_nav $
   #<'i>'place<'i> {
@@ -1762,16 +1762,16 @@ join = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (registry)
 // process, so after stepping a store a test receives the wakeup itself
 // (`!'%proc.changed`) and then applies `sim_changed`, mirroring the view's select.
 
-'sim<'i, 's, 'e> = Sim[comp: 'component<'i, 's, 'e>, state: 's, frame: 'frame]
+'sim<'i, 's, 'e: '%data> = Sim[comp: 'component<'i, 's, 'e>, state: 's, frame: 'frame]
 
-sim = #<'e, 'i, 's>[(init): 'i, (cfg): ('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>)] {
+sim = #<'e: '%data, 'i, 's>[(init): 'i, (cfg): ('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>)] {
   :doc "Mounts a component with no socket, for tests: answers a sim holding the mounted state and frame 0. Step it with `sim_text` / `sim_event` / `sim_changed`; read its region HTML with `sim_html`. Pin the wire-event type — `sim<'ev> [...]` — to compile-check the view's `on:*` payloads."
   comp = with_nav $cfg
   state = comp.mount $init
   Sim[comp: comp, state: state, frame: render_view [state, comp]]
 }
 
-sim_text = #<'i, 's, 'e>[(s): 'sim<'i, 's, 'e>, (text): '%str] {
+sim_text = #<'i, 's, 'e: '%data>[(s): 'sim<'i, 's, 'e>, (text): '%str] {
   :doc "Feeds a sim one wire envelope — the JSON a socket Text frame carries, `[vid, payload, metadata]` — through the session's own parse → decode → update seam. Answers `[sim2, patches]`; a malformed envelope drops silently (the sim unchanged, `Nil` patches) and a decode answering nil leaves the state untouched, exactly as the live path drops them."
   $s ~> =Sim(comp: comp, state: state, frame: prev)
   {
@@ -1784,7 +1784,7 @@ sim_text = #<'i, 's, 'e>[(s): 'sim<'i, 's, 'e>, (text): '%str] {
   }
 }
 
-sim_event = #<'i, 's, 'e>[(s): 'sim<'i, 's, 'e>, (ev): 'e] {
+sim_event = #<'i, 's, 'e: '%data>[(s): 'sim<'i, 's, 'e>, (ev): 'e] {
   :doc "Feeds a sim one already-decoded event, straight to `update` — the app-level step, for asserting `update`/`view` behavior without wire shapes. Answers `[sim2, patches]` (`Nil` when the render's diff is empty — the empty-frame suppression seam)."
   $s ~> =Sim(comp: comp, state: state, frame: prev)
   s2 = comp.update [state: state, event: $ev]
@@ -1792,14 +1792,14 @@ sim_event = #<'i, 's, 'e>[(s): 'sim<'i, 's, 'e>, (ev): 'e] {
   [Sim[comp: comp, state: s2, frame: f2], diff [prev, f2]]
 }
 
-sim_changed = #<'i, 's, 'e>'sim<'i, 's, 'e> {
+sim_changed = #<'i, 's, 'e: '%data>'sim<'i, 's, 'e> {
   :doc "The wakeup path: re-render and diff against the sim's frame, as the loop does after a `'%proc.changed` wakeup from a sampled store. Answers `[sim2, patches]`. The wakeup itself is the caller's to receive (`!'%proc.changed`) — the sim's tracked renders subscribed the calling process."
   =Sim(comp: comp, state: state, frame: prev)
   f2 = render_view [state, comp]
   [Sim[comp: comp, state: state, frame: f2], diff [prev, f2]]
 }
 
-sim_html = #<'i, 's, 'e>'sim<'i, 's, 'e> {
+sim_html = #<'i, 's, 'e: '%data>'sim<'i, 's, 'e> {
   :doc "The sim's current region HTML (instrumented, as a live client's DOM shows it)."
   =Sim(frame: f); render f
 }

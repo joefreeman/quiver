@@ -179,6 +179,9 @@ fn may_relate(program: &Program, member: usize, by: usize) -> bool {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TypeAliasDef {
     pub parameters: Vec<String>,
+    /// Each parameter's upper bound (`_` when unbounded), parallel to `parameters`: an
+    /// argument applying the alias must fit it.
+    pub bounds: Vec<usize>,
     pub type_id: usize,
 }
 
@@ -256,6 +259,14 @@ fn instantiate_alias_def(
     for (param, arg) in type_def.parameters.iter().zip(resolved_args.iter()) {
         new_bindings.insert(param.clone(), *arg);
     }
+    check_type_parameter_bounds(
+        type_def
+            .parameters
+            .iter()
+            .zip(type_def.bounds.iter().copied()),
+        &new_bindings,
+        program,
+    )?;
 
     // Substitute Type::Variable placeholders with concrete types
     Ok(substitute(type_def.type_id, &new_bindings, program))
@@ -444,29 +455,154 @@ pub fn resolve_ast_type_with_bindings(
     Ok(type_id)
 }
 
-/// Resolve a function parameter type with explicitly declared type parameters.
-/// Type parameters are resolved to Type::Variable, while undefined types cause errors.
+/// A declaration's type parameters, resolved (see [`resolve_type_parameters`]).
+#[derive(Debug, Clone, Default)]
+pub struct DeclaredTypeParameters {
+    /// Source name (`t`) → the parameter's variable type id, for resolving the
+    /// declaration's written types.
+    pub bindings: HashMap<String, usize>,
+    /// Each parameter's variable name and upper bound (`_` when unbounded), in declaration
+    /// order.
+    pub bounds: Vec<(String, usize)>,
+}
+
+impl DeclaredTypeParameters {
+    /// The variable names, in declaration order.
+    pub fn names(&self) -> Vec<String> {
+        self.bounds.iter().map(|(name, _)| name.clone()).collect()
+    }
+
+    /// The rigid set in force with these parameters added to `outer` (see
+    /// `TypeLookup::rigid_bound`).
+    pub fn rigid_over(&self, outer: &HashMap<String, usize>) -> HashMap<String, usize> {
+        let mut rigid = outer.clone();
+        rigid.extend(self.bounds.iter().cloned());
+        rigid
+    }
+}
+
+/// Resolve a declaration's type parameters: register each one's variable, named by
+/// `variable_name` from its source name, and resolve its bound. A bound may name the
+/// parameters declared before it, which are rigid while it resolves — so a bounded alias it
+/// applies to one of them checks that parameter's own bound — but not itself or later ones.
+///
+/// A parameter whose variable is already rigid is a nested literal re-declaring its
+/// enclosing function's parameter (the names are uniquified per definition, so the two are
+/// one variable): it keeps the enclosing bound, and may not state one of its own.
+pub fn resolve_type_parameters(
+    env: &mut TypeEnv,
+    scopes_ref: &[Scope],
+    parameters: &[ast::TypeParameter],
+    variable_name: impl Fn(&str) -> String,
+    program: &mut Program,
+) -> Result<DeclaredTypeParameters, Error> {
+    let outer = program.rigid_variables().clone();
+    let mut declared = DeclaredTypeParameters::default();
+    let result = (|| {
+        for parameter in parameters {
+            let variable = variable_name(&parameter.name);
+            let enclosing = outer.get(&variable).copied();
+            let bound = match (&parameter.bound, enclosing) {
+                (None, Some(enclosing)) => enclosing,
+                (Some(_), Some(_)) => {
+                    return Err(Error::TypeParameterRedeclaredWithBound {
+                        parameter: format!("'{}", parameter.name),
+                    });
+                }
+                (Some(bound), None) => {
+                    program.set_rigid_variables(declared.rigid_over(&outer));
+                    resolve_ast_type_with_bindings(
+                        env,
+                        scopes_ref,
+                        bound.clone(),
+                        program,
+                        &declared.bindings,
+                    )?
+                }
+                (None, None) => program.register_type(Type::Top),
+            };
+            let variable_id = program.register_type(Type::Variable(variable.clone()));
+            declared
+                .bindings
+                .insert(parameter.name.clone(), variable_id);
+            declared.bounds.push((variable, bound));
+        }
+        Ok(())
+    })();
+    program.set_rigid_variables(outer);
+    result.map(|()| declared)
+}
+
+/// Resolve a type alias's definition. Its parameters are variables named as written (an
+/// alias is substituted by name wherever it is applied), rigid within the definition, so a
+/// bounded alias the definition applies to one of them checks that parameter's own bound.
+pub fn resolve_alias_definition(
+    env: &mut TypeEnv,
+    scopes_ref: &[Scope],
+    type_parameters: &[ast::TypeParameter],
+    type_definition: ast::Type,
+    program: &mut Program,
+) -> Result<TypeAliasDef, Error> {
+    let declared =
+        resolve_type_parameters(env, scopes_ref, type_parameters, str::to_string, program)?;
+    let outer = program.set_rigid_variables(HashMap::new());
+    program.set_rigid_variables(declared.rigid_over(&outer));
+    let type_id = resolve_ast_type_with_bindings(
+        env,
+        scopes_ref,
+        type_definition,
+        program,
+        &declared.bindings,
+    );
+    program.set_rigid_variables(outer);
+    Ok(TypeAliasDef {
+        parameters: declared.names(),
+        bounds: declared.bounds.iter().map(|&(_, bound)| bound).collect(),
+        type_id: type_id?,
+    })
+}
+
+/// Check type arguments against the bounds of the parameters they instantiate: each bound,
+/// with the instantiation substituted (a bound may name earlier parameters), must hold the
+/// argument. `bindings` maps a parameter's variable name to its argument; a parameter it
+/// leaves out is not checked.
+pub fn check_type_parameter_bounds<'a>(
+    bounds: impl IntoIterator<Item = (&'a String, usize)>,
+    bindings: &HashMap<String, usize>,
+    program: &mut Program,
+) -> Result<(), Error> {
+    for (name, bound) in bounds {
+        let Some(&argument) = bindings.get(name) else {
+            continue;
+        };
+        if matches!(program.lookup_type(bound), Some(Type::Top)) {
+            continue;
+        }
+        let bound = substitute(bound, bindings, program);
+        if !quiver_core::types::is_compatible(argument, bound, &*program) {
+            return Err(Error::TypeParameterBound(Box::new(super::BoundMismatch {
+                parameter: format!("'{}", name.split('#').next().unwrap_or(name)),
+                bound: quiver_core::format::format_type_by_id(&*program, bound),
+                found: quiver_core::format::format_type_by_id(&*program, argument),
+            })));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a function's written parameter or result type, its declared type parameters
+/// bound (see [`resolve_type_parameters`]). A parameter's variable *name* is uniquified per
+/// definition (`t#42`): variables are name-keyed, so two generic functions both declaring
+/// `'t` would otherwise share one variable, and a call from one's body into the other would
+/// unify "a variable with itself" and silently fail to pin it. Display strips the suffix
+/// (see quiver-core's format).
 pub fn resolve_function_parameter_type(
     env: &mut TypeEnv,
     scopes_ref: &[Scope],
     ast_type: ast::Type,
-    type_parameters: &[String],
-    unique_suffix: usize,
+    bindings: &HashMap<String, usize>,
     program: &mut Program,
 ) -> Result<(usize, Vec<usize>), Error> {
-    // Create bindings for declared type parameters, mapping each to a Type::Variable.
-    // The variable's *name* is uniquified per definition (`t#42`): variables are
-    // name-keyed, so two generic functions both declaring `'t` would otherwise share one
-    // variable, and a call from one's body into the other would unify "a variable with
-    // itself" and silently fail to pin it. The binding key stays the source name, so the
-    // annotation's `'t` references resolve to the uniquified variable. Display strips
-    // the suffix (see quiver-core's format).
-    let mut bindings = HashMap::new();
-    for param in type_parameters {
-        let var_type_id = program.register_type(Type::Variable(format!("{param}#{unique_suffix}")));
-        bindings.insert(param.clone(), var_type_id);
-    }
-
     // Start at depth 1 since this is a function parameter (the function creates a recursion boundary)
     // This allows the parameter type to use & to refer to the enclosing function
     let mut recursion_depth = 1;
@@ -476,7 +612,7 @@ pub fn resolve_function_parameter_type(
         scopes_ref,
         ast_type,
         program,
-        &bindings,
+        bindings,
     )?;
     validate_productive(type_id, program)?;
     Ok((type_id, omittable))
@@ -794,7 +930,16 @@ fn extract_tuples_from_type_with_names(
                 .collect();
             Ok(vec![(tuple_info.name.clone(), fields)])
         }
-        Type::Partial { name, fields } => {
+        Type::Partial { rest: Some(_), .. } => Err(Error::TypeUnresolved(
+            "A partial type with a rest type (`*'t`) cannot be spread: the fields it speaks \
+             for are not listed"
+                .to_string(),
+        )),
+        Type::Partial {
+            name,
+            fields,
+            rest: None,
+        } => {
             // Convert partial fields (all named) to tuple field format
             let tuple_fields: FieldSet = fields
                 .iter()
@@ -834,6 +979,22 @@ fn resolve_tuple_ast(
     // passes false, so adoption stays top-level.
     parameter_position: bool,
 ) -> Result<(usize, Vec<usize>), Error> {
+    // A partial's rest type. `(*_)` constrains nothing, so it is spelled as `()` is.
+    let rest = tuple
+        .rest
+        .map(|rest| {
+            resolve_ast_type_impl(
+                recursion_depth,
+                env,
+                scopes_ref,
+                *rest,
+                program,
+                type_bindings,
+            )
+        })
+        .transpose()?
+        .filter(|&rest| !matches!(program.lookup_type(rest), Some(Type::Top)));
+
     // Resolve field types without distributing unions
     // Check if there are any spreads
     let has_spread = tuple
@@ -898,6 +1059,7 @@ fn resolve_tuple_ast(
                 let type_id = program.register_type(Type::Partial {
                     name: final_name,
                     fields: partial_fields,
+                    rest,
                 });
                 // A partial never carries marks - `check_no_omittable_in_partial` above
                 // has already rejected them.
@@ -999,6 +1161,7 @@ fn resolve_tuple_ast(
             program.register_type(Type::Partial {
                 name: resolved_name,
                 fields: partial_fields,
+                rest,
             }),
             Vec::new(),
         ))
@@ -1413,11 +1576,13 @@ pub fn contains_variables(type_id: usize, lookup: &impl TypeLookup) -> bool {
                 false
             }
         }
-        Type::Partial { fields, .. } => {
-            // Check if any field in the partial contains variables
+        Type::Partial { fields, rest, .. } => {
+            // Check if any field in the partial, or its rest type, contains variables
             fields
                 .iter()
-                .any(|(_, field_type_id)| contains_variables(*field_type_id, lookup))
+                .map(|(_, field_type_id)| field_type_id)
+                .chain(rest)
+                .any(|field_type_id| contains_variables(*field_type_id, lookup))
         }
         Type::Annotated { base, entries, .. } => {
             contains_variables(*base, lookup)
@@ -1485,9 +1650,13 @@ pub fn collect_type_variables(type_id: usize, lookup: &impl TypeLookup, names: &
                 }
             }
         }
-        Type::Partial { fields, .. } => {
+        Type::Partial { fields, rest, .. } => {
+            let rest = *rest;
             for (_, field_type_id) in fields.clone() {
                 collect_type_variables(field_type_id, lookup, names);
+            }
+            if let Some(rest) = rest {
+                collect_type_variables(rest, lookup, names);
             }
         }
         Type::Annotated { base, entries, .. } => {
@@ -1540,9 +1709,13 @@ fn collect_variables_by_variance(
                 }
             }
         }
-        Type::Partial { fields, .. } => {
+        Type::Partial { fields, rest, .. } => {
+            let rest = *rest;
             for (_, field) in fields.clone() {
                 collect_variables_by_variance(field, program, covariant, co, contra);
+            }
+            if let Some(rest) = rest {
+                collect_variables_by_variance(rest, program, covariant, co, contra);
             }
         }
         Type::Callable {
@@ -1588,26 +1761,17 @@ fn collect_variables_by_variance(
     }
 }
 
-/// Whether a type variable is *rigid* in a body compiled under `enclosing_suffix`: it
-/// carries that definition's uniquification suffix, so it names one of the enclosing
-/// generic's own parameters — an opaque but real type here — rather than a variable some
-/// callee has yet to solve.
-pub fn is_rigid_variable(name: &str, enclosing_suffix: Option<usize>) -> bool {
-    enclosing_suffix.is_some_and(|suffix| name.ends_with(&format!("#{suffix}")))
-}
-
 /// Close a call result's unpinned type parameters: any variable the unification left
 /// unbound, occurring only covariantly in the result, is bound to the empty union — no
 /// value of that type was supplied, so the result provably can't produce one
 /// (`child "x"` yields a tree that carries no events). Left open instead: a variable
 /// with a contravariant occurrence (a returned function's own parameter must stay
-/// callable), and a variable carrying the enclosing generic's uniquification suffix —
-/// that one is *rigid* here, not the callee's to instantiate (calling a `'p<'t>`-typed
-/// parameter inside a generic body must keep `'t` in the result).
+/// callable), and a *rigid* variable (see `TypeLookup::rigid_bound`) — one of the
+/// enclosing generic's own parameters, not the callee's to instantiate (calling a
+/// `'p<'t>`-typed parameter inside a generic body must keep `'t` in the result).
 pub fn close_unpinned_result(
     result_id: usize,
     bindings: &mut HashMap<String, usize>,
-    enclosing_suffix: Option<usize>,
     program: &mut Program,
 ) {
     let mut co = std::collections::HashSet::new();
@@ -1618,7 +1782,7 @@ pub fn close_unpinned_result(
         .filter(|name| {
             !contra.contains(name)
                 && !bindings.contains_key(name)
-                && !is_rigid_variable(name, enclosing_suffix)
+                && program.rigid_bound(name).is_none()
         })
         .collect();
     if unpinned.is_empty() {
@@ -2114,6 +2278,20 @@ fn unify_bounded(
     }
 
     match (&pattern, &concrete) {
+        // A rigid variable (a type parameter of the body being compiled) is not the call's to
+        // solve: it is one opaque type, which the value must already belong to.
+        (Type::Variable(name), _) if program.rigid_bound(name).is_some() => {
+            if quiver_core::types::is_compatible(concrete_id, pattern_id, &*program) {
+                Ok(())
+            } else {
+                Err(Error::TypeUnresolved(format!(
+                    "{} is not {}",
+                    quiver_core::format::format_type_by_id(&*program, concrete_id),
+                    quiver_core::format::format_type_by_id(&*program, pattern_id),
+                )))
+            }
+        }
+
         // When pattern is a variable, bind it or check consistency
         (Type::Variable(name), _) => {
             // First, resolve concrete if it's also a variable
@@ -2224,10 +2402,10 @@ fn unify_bounded(
                 // An unbound concrete-side variable is a *rigid* variable from an
                 // enclosing generic context (e.g. a captured value whose type mentions
                 // the enclosing function's parameter). Treat it as an opaque type: it
-                // can only satisfy a variable member of a union pattern (bound against
-                // it); any structural requirement is an error — generic bodies are
-                // checked once, so accepting here would let ill-typed calls through
-                // generics compile and fail at runtime.
+                // satisfies a variable member of a union pattern (bound against it, so
+                // the result keeps it), and otherwise whatever its bound satisfies —
+                // generic bodies are checked once, so accepting more here would let
+                // ill-typed calls through generics compile and fail at runtime.
                 if let Type::Union(members) = &pattern {
                     for member in members.clone() {
                         if let Some(Type::Variable(_)) = program.lookup_type(member) {
@@ -2241,6 +2419,11 @@ fn unify_bounded(
                             );
                         }
                     }
+                }
+                if let Some(bound) = program.rigid_bound(name)
+                    && !matches!(program.lookup_type(bound), Some(Type::Top))
+                {
+                    return unify_bounded(bindings, ctx, contra, pattern_id, bound, program);
                 }
                 Err(Error::TypeUnresolved(format!(
                     "Cannot unify rigid type variable {} with expected type {}",
@@ -2355,6 +2538,7 @@ fn unify_bounded(
             Type::Partial {
                 name: pattern_name,
                 fields: pattern_fields,
+                rest: pattern_rest,
             },
             Type::Tuple(concrete_tuple_id),
         ) => {
@@ -2398,6 +2582,25 @@ fn unify_bounded(
                 )?;
             }
 
+            // The fields the partial does not list are its rest type's.
+            if let Some(pattern_rest) = pattern_rest {
+                for (fname, concrete_ftype_id) in &concrete_fields {
+                    let listed = fname
+                        .as_ref()
+                        .is_some_and(|fname| pattern_fields.iter().any(|(name, _)| name == fname));
+                    if !listed {
+                        unify_bounded(
+                            bindings,
+                            ctx,
+                            contra,
+                            *pattern_rest,
+                            *concrete_ftype_id,
+                            program,
+                        )?;
+                    }
+                }
+            }
+
             Ok(())
         }
 
@@ -2406,10 +2609,12 @@ fn unify_bounded(
             Type::Partial {
                 name: pattern_name,
                 fields: pattern_fields,
+                rest: pattern_rest,
             },
             Type::Partial {
                 name: concrete_name,
                 fields: concrete_fields,
+                rest: concrete_rest,
             },
         ) => {
             // If partial has a name, concrete must match
@@ -2442,6 +2647,31 @@ fn unify_bounded(
                     *concrete_ftype_id,
                     program,
                 )?;
+            }
+
+            // The pattern's rest type holds the concrete partial's other listed fields, and
+            // its rest type, which it must therefore state.
+            if let Some(pattern_rest) = pattern_rest {
+                let Some(concrete_rest) = concrete_rest else {
+                    return Err(Error::TypeUnresolved(
+                        "Concrete partial states no rest type".to_string(),
+                    ));
+                };
+                let unlisted = concrete_fields
+                    .iter()
+                    .filter(|(fname, _)| !pattern_fields.iter().any(|(name, _)| name == fname))
+                    .map(|&(_, field)| field)
+                    .chain(Some(*concrete_rest));
+                for concrete_ftype_id in unlisted.collect::<Vec<_>>() {
+                    unify_bounded(
+                        bindings,
+                        ctx,
+                        contra,
+                        *pattern_rest,
+                        concrete_ftype_id,
+                        program,
+                    )?;
+                }
             }
 
             Ok(())

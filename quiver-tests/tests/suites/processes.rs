@@ -462,7 +462,8 @@ fn test_kill_reason_reaches_awaiters() {
 
 #[test]
 fn test_kill_reason_must_be_data() {
-    // The reason outlives the killer in the target's tombstone, so identity is refused.
+    // The reason outlives the killer in the target's tombstone, so identity is refused —
+    // statically, as the reason is typed `'%data`.
     quiver()
         .evaluate(
             r#"
@@ -470,9 +471,7 @@ fn test_kill_reason_must_be_data() {
             %proc.kill [p, reason: [by: @]]
             "#,
         )
-        .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
-            "invalid kill reason: cannot encode a process: %data notation carries data only (integers, binaries, and tuples)".to_string(),
-        ));
+        .expect_error_containing("reason: [by: @");
 }
 
 #[test]

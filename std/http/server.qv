@@ -146,13 +146,13 @@ serve = #[port: 'int, handler: 'handler, tls: ('tls | []) = []] {
   accept_loop [listener, $handler, $tls]
 }
 
-html = #'%html<_> {
+html = #'%html<'%data> {
   :doc "A 200 text/html response of the rendered tree (no doctype — see `page`)."
   %html.render $ ~> =Str[b]
   Response[status: 200, headers: %list{ ["content-type", "text/html; charset=utf-8"] }, body: b]
 }
 
-page = #'%html<_> {
+page = #'%html<'%data> {
   :doc "A 200 text/html response of the doctype-prefixed rendered tree — a whole page."
   %html.page $ ~> =Str[b]
   Response[status: 200, headers: %list{ ["content-type", "text/html; charset=utf-8"] }, body: b]

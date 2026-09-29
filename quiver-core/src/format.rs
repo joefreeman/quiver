@@ -130,7 +130,9 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
                 .collect();
             format!("{} {{ {} }}", base_str, rendered.join(", "))
         }
-        Type::Partial { name, fields } => format_partial_type(lookup, name.as_ref(), fields),
+        Type::Partial { name, fields, rest } => {
+            format_partial_type(lookup, name.as_ref(), fields, *rest)
+        }
         Type::Callable {
             parameter,
             result,
@@ -278,15 +280,23 @@ fn format_partial_type(
     lookup: &impl TypeLookup,
     name: Option<&String>,
     fields: &[(String, usize)],
+    rest: Option<usize>,
 ) -> String {
     let field_strs: Vec<String> = fields
         .iter()
+        .map(|(field_name, field_type_id)| (field_name.as_str(), *field_type_id))
+        .map(|(field_name, field_type_id)| (Some(field_name), field_type_id))
+        .chain(rest.map(|rest| (None, rest)))
         .map(|(field_name, field_type_id)| {
             let field_type_str = lookup
-                .lookup_type(*field_type_id)
+                .lookup_type(field_type_id)
                 .map(|t| format_type_impl(lookup, t, true))
                 .unwrap_or_else(|| format!("Type{}", field_type_id));
-            format!("{}: {}", field_name, field_type_str)
+            match field_name {
+                Some(field_name) => format!("{}: {}", field_name, field_type_str),
+                // The rest type, `*'t`.
+                None => format!("*{}", field_type_str),
+            }
         })
         .collect();
 
