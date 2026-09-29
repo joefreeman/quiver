@@ -2062,3 +2062,26 @@ fn test_union_parameter_dispatch_keeps_the_matched_members_result() {
         )
         .expect_type_mismatch();
 }
+
+#[test]
+fn test_alias_errors_point_at_the_alias() {
+    // An alias naming itself is told how recursion is written.
+    let error = quiver()
+        .evaluate("x = 1\n'l = Cons['int, 'l]\nx")
+        .expect_located_compile_error();
+    assert_eq!(
+        error.error,
+        quiver_compiler::compiler::Error::TypeAliasSelfReference("l".to_string())
+    );
+    assert_eq!(
+        error.span.map(|span| (span.line, span.column)),
+        Some((2, 1))
+    );
+    let error = quiver()
+        .evaluate("x = 1\n'a = [^]\nx")
+        .expect_located_compile_error();
+    assert_eq!(
+        error.span.map(|span| (span.line, span.column)),
+        Some((2, 1))
+    );
+}

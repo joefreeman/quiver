@@ -90,6 +90,38 @@ fn test_a_walk_asks_functions_their_own_type() {
 }
 
 #[test]
+fn test_a_function_is_tested_against_a_function_type() {
+    // Parameters are contravariant, results covariant, and a generic function is instantiated.
+    quiver()
+        .evaluate(
+            "f = #_ { | =(#'int -> _) => Fn | No }
+             [f #'int { $ }, f #('int | 'bin) { $ }, f #_ { 1 }, f #<'t>'t { $ }, f #'bin { $ }, f 5]",
+        )
+        .expect("[Fn, Fn, Fn, Fn, No, No]");
+    // The declared result is what's compared, not the body's narrower one.
+    quiver()
+        .evaluate(
+            "f = #_ { | =(#'int -> 'int) => Fn | No }
+             [f #'int { $ }, f #'int { <01> }, f #'int -> ('int | 'bin) { 5 }]",
+        )
+        .expect("[Fn, No, No]");
+    // A receive clause is part of the type.
+    quiver()
+        .evaluate(
+            "f = #_ { | =(#[] -> _ !'int) => Fn | No }
+             [f #[] { !'int }, f #[] { !'bin }]",
+        )
+        .expect("[Fn, No]");
+    // A conjunction binds the function at the tested type, so it can be called.
+    quiver()
+        .evaluate(
+            "f = #_ { | =((#'int -> 'int) & g) => g 3 | No }
+             [f #'int { %num.add [$, 1] }, f 4]",
+        )
+        .expect("[4, No]");
+}
+
+#[test]
 fn test_a_receive_tests_messages_by_their_contents() {
     // The message is built generically, as `A['t]`.
     quiver()

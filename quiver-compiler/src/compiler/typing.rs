@@ -1571,6 +1571,21 @@ pub fn is_uninhabited(type_id: usize, program: &Program) -> bool {
     }
 }
 
+/// Whether a type mentions a type variable that isn't rigid here: one nothing in scope binds,
+/// such as a generic function value's own.
+pub fn contains_free_variables(type_id: usize, program: &Program) -> bool {
+    let mut names = Vec::new();
+    collect_type_variables(type_id, program, &mut names);
+    names.iter().any(|name| program.rigid_bound(name).is_none())
+}
+
+/// Whether a type mentions the type variable `name`.
+pub fn mentions_variable(type_id: usize, name: &str, program: &Program) -> bool {
+    let mut names = Vec::new();
+    collect_type_variables(type_id, program, &mut names);
+    names.iter().any(|mentioned| mentioned == name)
+}
+
 /// Check if a type contains any unbound type variables
 pub fn contains_variables(type_id: usize, lookup: &impl TypeLookup) -> bool {
     let Some(typ) = lookup.lookup_type(type_id) else {
@@ -2725,9 +2740,22 @@ fn unify_bounded(
                 fields1.iter().zip(fields2.iter()).enumerate()
             {
                 if fname1 != fname2 {
-                    return Err(Error::TypeUnresolved(
-                        "Tuple fields have different names".to_string(),
-                    ));
+                    let describe = |name: &Option<String>| match name {
+                        Some(name) => format!("field `{name}`"),
+                        None => format!("positional field {index}"),
+                    };
+                    // A parameter's labels are adopted by a written call's positional
+                    // argument, not by a value passed on from elsewhere.
+                    let hint = if fname1.is_some() && fname2.is_none() {
+                        " (positional fields take a parameter's labels only in a direct call)"
+                    } else {
+                        ""
+                    };
+                    return Err(Error::TypeUnresolved(format!(
+                        "expected {} here, found {}{hint}",
+                        describe(fname1),
+                        describe(fname2),
+                    )));
                 }
                 unify_bounded(bindings, ctx, contra, *ftype1_id, *ftype2_id, program).map_err(
                     |e| match e {

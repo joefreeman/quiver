@@ -53,10 +53,39 @@ pub fn format_type_by_id(lookup: &impl TypeLookup, type_id: usize) -> String {
 }
 
 pub fn format_type(lookup: &impl TypeLookup, type_def: &Type) -> String {
-    format_type_impl(lookup, type_def, false)
+    format_type_impl(lookup, type_def, false, Style::default())
 }
 
-fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> String {
+/// Format a type by its ID, writing every function type's states clause: a callable whose
+/// states are only its parameter otherwise renders like one granting no sampling, which a
+/// mismatch between the two must tell apart.
+pub fn format_type_by_id_with_states(lookup: &impl TypeLookup, type_id: usize) -> String {
+    match lookup.lookup_type(type_id) {
+        Some(type_def) => format_type_impl(
+            lookup,
+            type_def,
+            false,
+            Style {
+                explicit_states: true,
+            },
+        ),
+        None => format!("Type{}", type_id),
+    }
+}
+
+/// How a type renders.
+#[derive(Clone, Copy, Default)]
+struct Style {
+    /// Write a function type's states clause even when it is only the parameter.
+    explicit_states: bool,
+}
+
+fn format_type_impl(
+    lookup: &impl TypeLookup,
+    type_def: &Type,
+    nested: bool,
+    style: Style,
+) -> String {
     match type_def {
         Type::Integer => "'int".to_string(),
         Type::Binary => "'bin".to_string(),
@@ -71,7 +100,7 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
             let fmt = |id: usize| {
                 lookup
                     .lookup_type(id)
-                    .map(|t| format_type_impl(lookup, t, true))
+                    .map(|t| format_type_impl(lookup, t, true, style))
                     .unwrap_or_else(|| format!("Type{}", id))
             };
             let mut formatted = "@".to_string();
@@ -101,7 +130,7 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
                 formatted
             }
         }
-        Type::Tuple(tuple_id) => format_tuple_type(lookup, *tuple_id),
+        Type::Tuple(tuple_id) => format_tuple_type(lookup, *tuple_id, style),
         // An annotated type prints its base followed by the attach syntax; openness is
         // not rendered (it is explained in prose by the visibility diagnostics).
         Type::Annotated { base, entries, .. } => {
@@ -111,12 +140,12 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
             if entries.is_empty() {
                 return lookup
                     .lookup_type(*base)
-                    .map(|t| format_type_impl(lookup, t, nested))
+                    .map(|t| format_type_impl(lookup, t, nested, style))
                     .unwrap_or_else(|| format!("Type{}", base));
             }
             let base_str = lookup
                 .lookup_type(*base)
-                .map(|t| format_type_impl(lookup, t, true))
+                .map(|t| format_type_impl(lookup, t, true, style))
                 .unwrap_or_else(|| format!("Type{}", base));
             let rendered: Vec<String> = entries
                 .iter()
@@ -131,7 +160,7 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
             format!("{} {{ {} }}", base_str, rendered.join(", "))
         }
         Type::Partial { name, fields, rest } => {
-            format_partial_type(lookup, name.as_ref(), fields, *rest)
+            format_partial_type(lookup, name.as_ref(), fields, *rest, style)
         }
         Type::Callable {
             parameter,
@@ -143,12 +172,12 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
             let fmt = |id: usize| {
                 lookup
                     .lookup_type(id)
-                    .map(|t| format_type_impl(lookup, t, true))
+                    .map(|t| format_type_impl(lookup, t, true, style))
                     .unwrap_or_else(|| format!("Type{}", id))
             };
             let mut formatted = format!(
                 "#{} -> {}",
-                format_parameter_type(lookup, *parameter, omittable),
+                format_parameter_type(lookup, *parameter, omittable, style),
                 fmt(*result)
             );
             // The written clause forms: ` !'recv` when the function receives, ` ?'states`
@@ -159,7 +188,7 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
                 formatted.push_str(&fmt(*receive));
             }
             if let Some(s) = states
-                && s != parameter
+                && (s != parameter || style.explicit_states)
             {
                 formatted.push_str(" ?");
                 formatted.push_str(&fmt(*s));
@@ -181,7 +210,7 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
                     .map(|&id| {
                         lookup
                             .lookup_type(id)
-                            .map(|t| format_type_impl(lookup, t, true))
+                            .map(|t| format_type_impl(lookup, t, true, style))
                             .unwrap_or_else(|| format!("Type{}", id))
                     })
                     .collect();
@@ -202,7 +231,7 @@ fn format_type_impl(lookup: &impl TypeLookup, type_def: &Type, nested: bool) -> 
                 .map(|&id| {
                     lookup
                         .lookup_type(id)
-                        .map(|t| format_type_impl(lookup, t, true))
+                        .map(|t| format_type_impl(lookup, t, true, style))
                         .unwrap_or_else(|| format!("Type{}", id))
                 })
                 .collect::<Vec<_>>()
@@ -229,11 +258,12 @@ fn format_parameter_type(
     lookup: &impl TypeLookup,
     parameter: usize,
     omittable: &[usize],
+    style: Style,
 ) -> String {
     let plain = || {
         lookup
             .lookup_type(parameter)
-            .map(|t| format_type_impl(lookup, t, true))
+            .map(|t| format_type_impl(lookup, t, true, style))
             .unwrap_or_else(|| format!("Type{}", parameter))
     };
     if omittable.is_empty() {
@@ -252,7 +282,7 @@ fn format_parameter_type(
         .map(|(index, (field_name, field_type_id))| {
             let rendered = lookup
                 .lookup_type(*field_type_id)
-                .map(|t| format_type_impl(lookup, t, true))
+                .map(|t| format_type_impl(lookup, t, true, style))
                 .unwrap_or_else(|| format!("Type{}", field_type_id));
             match field_name {
                 Some(name) if omittable.contains(&index) => format!("({name}): {rendered}"),
@@ -267,9 +297,9 @@ fn format_parameter_type(
     }
 }
 
-fn format_tuple_type(lookup: &impl TypeLookup, tuple_id: usize) -> String {
+fn format_tuple_type(lookup: &impl TypeLookup, tuple_id: usize, style: Style) -> String {
     if let Some(type_info) = lookup.lookup_tuple(tuple_id) {
-        format_tuple_info(lookup, type_info)
+        format_tuple_info_styled(lookup, type_info, style)
     } else {
         format!("Tuple{}", tuple_id)
     }
@@ -281,6 +311,7 @@ fn format_partial_type(
     name: Option<&String>,
     fields: &[(String, usize)],
     rest: Option<usize>,
+    style: Style,
 ) -> String {
     let field_strs: Vec<String> = fields
         .iter()
@@ -290,7 +321,7 @@ fn format_partial_type(
         .map(|(field_name, field_type_id)| {
             let field_type_str = lookup
                 .lookup_type(field_type_id)
-                .map(|t| format_type_impl(lookup, t, true))
+                .map(|t| format_type_impl(lookup, t, true, style))
                 .unwrap_or_else(|| format!("Type{}", field_type_id));
             match field_name {
                 Some(field_name) => format!("{}: {}", field_name, field_type_str),
@@ -313,13 +344,21 @@ fn format_partial_type(
 
 /// Format a TupleTypeInfo using a TypeLookup for field type resolution
 pub fn format_tuple_info(lookup: &impl TypeLookup, tuple_info: &TupleTypeInfo) -> String {
+    format_tuple_info_styled(lookup, tuple_info, Style::default())
+}
+
+fn format_tuple_info_styled(
+    lookup: &impl TypeLookup,
+    tuple_info: &TupleTypeInfo,
+    style: Style,
+) -> String {
     let field_strs: Vec<String> = tuple_info
         .fields
         .iter()
         .map(|(field_name, field_type_id)| {
             let field_type_str = lookup
                 .lookup_type(*field_type_id)
-                .map(|t| format_type_impl(lookup, t, true))
+                .map(|t| format_type_impl(lookup, t, true, style))
                 .unwrap_or_else(|| format!("Type{}", field_type_id));
             if let Some(field_name) = field_name {
                 format!("{}: {}", field_name, field_type_str)

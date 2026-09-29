@@ -64,6 +64,24 @@ pub enum Error {
     // Type system errors
     TypeUnresolved(String),
     TypeAliasMissing(String),
+    /// An alias naming itself in its own definition (`'l = Cons['int, 'l]`): aliases are
+    /// positional, and a type refers to its own recursion with `^`.
+    TypeAliasSelfReference(String),
+    /// A function body whose type doesn't fit its declared result; the detail names the
+    /// offending part.
+    DeclaredResultMismatch(String),
+    /// A `$` run in an annotation value reaching above the outermost function: annotation
+    /// values are evaluated around the braces they open, so a function literal's see its
+    /// enclosing function's parameter as `$`.
+    AnnotationParameterDepth {
+        written: String,
+    },
+    /// A receive whose message type mentions a type variable (`!'t` in `#<'t>`, or a generic
+    /// function as the receiver): a receive tests messages at runtime, where no type
+    /// parameter is known.
+    GenericReceive {
+        tested: String,
+    },
     TypeMismatch {
         expected: String,
         found: String,
@@ -470,6 +488,26 @@ impl std::fmt::Display for Error {
             Error::FunctionUndefined(index) => write!(f, "Undefined function: {index}"),
             Error::TypeUnresolved(name) => write!(f, "Unresolved type: {name}"),
             Error::TypeAliasMissing(name) => write!(f, "Unknown type alias: {name}"),
+            Error::GenericReceive { tested } => write!(
+                f,
+                "A receive can't take {tested}: messages are tested against the receive type \
+                 at runtime, where a type parameter's instantiation is unknown. Receive a \
+                 concrete type instead"
+            ),
+            Error::AnnotationParameterDepth { written } => write!(
+                f,
+                "'{written}' reaches above the outermost function: an annotation's value is \
+                 evaluated around the braces it opens, so in a function literal's annotations \
+                 '$' already names the enclosing function's parameter"
+            ),
+            Error::DeclaredResultMismatch(detail) => {
+                write!(f, "Type mismatch in the declared result: {detail}")
+            }
+            Error::TypeAliasSelfReference(name) => write!(
+                f,
+                "'{name} refers to itself by name: a type refers to its own recursion with `^`, \
+                 as in `'list = Nil | Cons['int, ^]`"
+            ),
             Error::TypeMismatch { expected, found } => {
                 write!(f, "Type mismatch: expected {expected}, found {found}")
             }
@@ -1440,7 +1478,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Additional receive types may be adopted during compilation when calling
         // functions that have receive types.
         compiler.current_receive_type_id =
-            compiler.extract_receive_type_from_steps(&ast_program.steps)?;
+            match compiler.extract_receive_type_from_steps(&ast_program.steps) {
+                Ok(receive_type) => receive_type,
+                Err(error) => return Err(LocatedError::new(error, compiler.current_span)),
+            };
 
         // The recorder is caller-owned, so whatever it gathered before an error (and the program it
         // indexes) is still available to the caller for hover/go-to-definition on the parts that
@@ -1643,14 +1684,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             for step in steps {
                 let ast::Step::TypeAlias {
                     name,
+                    name_span,
                     type_parameters,
                     type_definition,
-                    ..
                 } = step
                 else {
                     unreachable!("checked for chain steps above")
                 };
-                self.compile_type_alias(name.as_deref(), type_parameters, type_definition)?;
+                self.compile_type_alias(
+                    name.as_deref(),
+                    name_span,
+                    type_parameters,
+                    type_definition,
+                )?;
             }
             return Ok(self.program.register_type(Type::nil()));
         }
@@ -1664,9 +1710,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn compile_type_alias(
         &mut self,
         name: Option<&str>,
+        name_span: ast::Spanned,
         type_parameters: Vec<ast::TypeParameter>,
         type_definition: ast::Type,
     ) -> Result<(), Error> {
+        // An error in the definition is located at the alias it defines.
+        if let Some(span) = name_span.get() {
+            self.current_span = Some(span);
+        }
         // Prevent shadowing primitive types
         if let Some(name) = name
             && helpers::is_reserved_name(name)
@@ -1691,7 +1742,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             &type_parameters,
             type_definition,
             self.program,
-        )?;
+        )
+        .map_err(|error| match (error, name) {
+            (Error::TypeAliasMissing(missing), Some(name)) if missing == name => {
+                Error::TypeAliasSelfReference(missing)
+            }
+            (error, _) => error,
+        })?;
 
         // Store the resolved alias. The nameless default marker is bound under the reserved
         // self-default key, so a bare `'` elsewhere in the module resolves to it.
@@ -1785,7 +1842,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     false,
                     expected,
                     false, // an annotation value is data; nothing gates on it
-                )?
+                )
+                .map_err(|error| match error {
+                    Error::ParameterDepthExceeded { written } => {
+                        Error::AnnotationParameterDepth { written }
+                    }
+                    other => other,
+                })?
                 .ty;
             if let Some(expected) = expected
                 && !quiver_core::types::is_compatible(value_type, expected, &*self.program)
@@ -2727,12 +2790,34 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.program.register_type(Type::Union(unique_types))
     }
 
-    fn extract_receive_type(&mut self, body: Option<&ast::Block>) -> Result<usize, Error> {
-        let mut receive_types = Vec::new();
-        if let Some(body) = body {
-            self.collect_receive_types(body, &mut receive_types)?;
+    /// The receive type a function body's selects give it, found before the body compiles.
+    /// The body's type parameters are in scope as they will be in the body, so a receive
+    /// naming one is diagnosed as what it is.
+    fn extract_receive_type(
+        &mut self,
+        body: Option<&ast::Block>,
+        type_parameters: &HashMap<String, usize>,
+    ) -> Result<usize, Error> {
+        let mut aliases = Bindings::default();
+        for (param, &variable) in type_parameters {
+            aliases.type_aliases.insert(
+                param.clone(),
+                TypeAliasDef {
+                    parameters: Vec::new(),
+                    bounds: Vec::new(),
+                    type_id: variable,
+                },
+            );
         }
-
+        self.scopes
+            .push(Scope::new(aliases, None, scopes::ScopeKind::Block));
+        let mut receive_types = Vec::new();
+        let collected = match body {
+            Some(body) => self.collect_receive_types(body, &mut receive_types),
+            None => Ok(()),
+        };
+        self.scopes.pop();
+        collected?;
         Ok(self.unify_receive_types(receive_types))
     }
 
@@ -2759,10 +2844,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
     fn extract_receive_type_from_steps(&mut self, steps: &[ast::Step]) -> Result<usize, Error> {
         let mut receive_types = Vec::new();
-        for chain in steps.iter().filter_map(ast::Step::as_chain) {
-            self.collect_receive_types_from_chain(chain, &mut receive_types)?;
-        }
-
+        let sequence = ast::Sequence {
+            steps: steps.to_vec(),
+        };
+        self.collect_receive_types_from_sequence(&sequence, &mut receive_types)?;
         Ok(self.unify_receive_types(receive_types))
     }
 
@@ -2780,15 +2865,34 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(())
     }
 
+    /// A sequence's receive types, with the aliases it defines in scope for the steps after
+    /// them, as they will be when it compiles.
     fn collect_receive_types_from_sequence(
         &mut self,
         sequence: &ast::Sequence,
         receive_types: &mut Vec<usize>,
     ) -> Result<(), Error> {
-        for chain in sequence.chains() {
-            self.collect_receive_types_from_chain(chain, receive_types)?;
-        }
-        Ok(())
+        self.scopes.push(Scope::new(
+            Bindings::default(),
+            None,
+            scopes::ScopeKind::Block,
+        ));
+        let collected = sequence.steps.iter().try_for_each(|step| match step {
+            ast::Step::Chain(chain) => self.collect_receive_types_from_chain(chain, receive_types),
+            ast::Step::TypeAlias {
+                name,
+                name_span,
+                type_parameters,
+                type_definition,
+            } => self.compile_type_alias(
+                name.as_deref(),
+                *name_span,
+                type_parameters.clone(),
+                type_definition.clone(),
+            ),
+        });
+        self.scopes.pop();
+        collected
     }
 
     fn collect_receive_types_from_chain(
@@ -2839,6 +2943,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             )?;
                         }
                     }
+                }
+
+                // A receive tests its messages at runtime, which can't decide a type variable
+                // nothing instantiates: a generic function's own, received through it.
+                if let Some(&generic) = select_sources
+                    .iter()
+                    .find(|&&source| typing::contains_free_variables(source, &*self.program))
+                {
+                    return Err(Error::GenericReceive {
+                        tested: quiver_core::format::format_type_by_id(&*self.program, generic),
+                    });
                 }
 
                 // If this select has receive sources, add the unified type
@@ -3197,7 +3312,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         // Extract receive type from function body
-        let receive_type = self.extract_receive_type(function.body.as_ref())?;
+        let receive_type = self.extract_receive_type(function.body.as_ref(), &declared.bindings)?;
 
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_scopes = std::mem::take(&mut self.scopes);
@@ -3251,8 +3366,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // and it must point at the reference, not wherever compilation last
                     // recorded a span: materialisation runs far from the referencing site.
                     self.current_span = capture.span.get().or(self.current_span);
-                    let exceeded = || Error::ParameterDepthExceeded {
-                        written: ast::parameter_sigils(*levels),
+                    let exceeded = || {
+                        let written = ast::parameter_sigils(*levels);
+                        if capture.in_annotation {
+                            Error::AnnotationParameterDepth { written }
+                        } else {
+                            Error::ParameterDepthExceeded { written }
+                        }
                     };
                     if *levels == 1 {
                         let (param_type, _) = scopes::get_function_parameter(&saved_scopes)
@@ -3538,7 +3658,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     body_type,
                     self.program,
                 ) {
-                    return Err(Error::TypeUnresolved(format!("declared result: {message}")));
+                    return Err(Error::DeclaredResultMismatch(message));
                 }
                 // Get types for error message
                 let expected_type = self.program.lookup_type(expected_return_type).unwrap();
@@ -3575,6 +3695,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     })
                     .collect::<Vec<_>>()
             });
+
+        // A function can't receive its own type parameters, directly or through what it calls:
+        // each call or spawn instantiates them afresh, and the runtime test that selects a
+        // message can't tell which instantiation it serves. (An enclosing function's are
+        // fine — fixed for as long as a process created under them lives, and every send to
+        // it checked against the same instantiation.)
+        if let Some(own) = declared.names().into_iter().find(|name| {
+            typing::mentions_variable(self.current_receive_type_id, name, &*self.program)
+        }) {
+            return Err(Error::GenericReceive {
+                // Uniquified as `t#N`; shown as written.
+                tested: format!("'{}", own.split('#').next().unwrap_or(&own)),
+            });
+        }
 
         // Create type information for the function. The receive type is the final
         // `current_receive_type_id`: the body pre-pass seed (line above the save), widened
@@ -3646,8 +3780,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // one level shallower for deeper levels. Errors point at the reference,
                     // as in the registration loop above.
                     self.current_span = capture.span.get().or(self.current_span);
-                    let exceeded = || Error::ParameterDepthExceeded {
-                        written: ast::parameter_sigils(*levels),
+                    let exceeded = || {
+                        let written = ast::parameter_sigils(*levels);
+                        if capture.in_annotation {
+                            Error::AnnotationParameterDepth { written }
+                        } else {
+                            Error::ParameterDepthExceeded { written }
+                        }
                     };
                     if *levels == 1 {
                         let (param_type, param_index) =
@@ -4789,15 +4928,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             for step in &sequence.steps {
                 let ast::Step::TypeAlias {
                     name,
+                    name_span,
                     type_parameters,
                     type_definition,
-                    ..
                 } = step
                 else {
                     unreachable!("no chain steps")
                 };
                 self.compile_type_alias(
                     name.as_deref(),
+                    *name_span,
                     type_parameters.clone(),
                     type_definition.clone(),
                 )?;
@@ -4823,9 +4963,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 ast::Step::Chain(chain) => chain,
                 ast::Step::TypeAlias {
                     name,
+                    name_span,
                     type_parameters,
                     type_definition,
-                    ..
                 } => {
                     // Registers the alias in the current scope — no stack effect, and it does not
                     // participate in threading. Scoped to the enclosing scope, so an alias in a
@@ -4833,6 +4973,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // any other binding).
                     self.compile_type_alias(
                         name.as_deref(),
+                        *name_span,
                         type_parameters.clone(),
                         type_definition.clone(),
                     )?;
@@ -6212,11 +6353,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
         let mut offset = None;
         let mut message = None;
+        // `%parse`'s failure, `Expected[offset, message]`, says what was expected there.
+        let mut expected = false;
         if let Value::Tuple(tuple_id, fields) = payload {
             // Locate each field by label when the tuple carries one, else by position — the
             // same fallback as `Splicer::field`, so a positionally built `Expected[2, "…"]`
             // keeps its offset→source-position mapping.
             let info = self.program.lookup_tuple(*tuple_id);
+            expected = info.is_some_and(|info| info.name.as_deref() == Some("Expected"));
             let position_of = |label: &str, index: usize| {
                 info.and_then(|info| {
                     info.fields
@@ -6248,7 +6392,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 message = bytes.map(|b| String::from_utf8_lossy(&b).into_owned());
             }
         }
-        let text = message.unwrap_or_else(|| format!("failed with {payload:?}"));
+        let text = match message {
+            Some(message) if expected => format!("expected {message}"),
+            Some(message) => message,
+            None => format!("failed with {payload:?}"),
+        };
         (
             format!("failed: {text}"),
             offset.and_then(|offset| dialect::content_span(dialect, escapes, offset, 1)),
@@ -8482,13 +8630,28 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if quiver_core::types::is_compatible(message_type, send, &*self.program) {
             return Ok(());
         }
+        let (expected, found) = self.mismatch_types(send, message_type);
         Err(Error::TypeMismatch {
-            expected: format!(
-                "message compatible with {}",
-                quiver_core::format::format_type_by_id(&*self.program, send)
-            ),
-            found: quiver_core::format::format_type_by_id(&*self.program, message_type),
+            expected: format!("message compatible with {expected}"),
+            found,
         })
+    }
+
+    /// `expected` and `found` rendered for a mismatch message. Two types differing only in a
+    /// function's states render alike (its parameter as its states is left unwritten, as is
+    /// an absent states clause), so those are written out when the plain forms collide.
+    fn mismatch_types(&self, expected: usize, found: usize) -> (String, String) {
+        let plain = (
+            quiver_core::format::format_type_by_id(&*self.program, expected),
+            quiver_core::format::format_type_by_id(&*self.program, found),
+        );
+        if plain.0 != plain.1 {
+            return plain;
+        }
+        (
+            quiver_core::format::format_type_by_id_with_states(&*self.program, expected),
+            quiver_core::format::format_type_by_id_with_states(&*self.program, found),
+        )
     }
 
     fn check_argument_fits(
@@ -8516,12 +8679,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if fits {
             return Ok(());
         }
+        let (expected, found) = self.mismatch_types(param, shown);
         Err(Error::TypeMismatch {
-            expected: format!(
-                "function parameter compatible with {}",
-                quiver_core::format::format_type_by_id(&*self.program, param)
-            ),
-            found: quiver_core::format::format_type_by_id(&*self.program, shown),
+            expected: format!("function parameter compatible with {expected}"),
+            found,
         })
     }
 
@@ -8564,12 +8725,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // seed — no widening needed).
             let (func_param_type, _) = scopes::get_function_parameter_declared(&self.scopes)?;
             if !quiver_core::types::is_compatible(arg_type, func_param_type, &*self.program) {
+                let (expected, found) = self.mismatch_types(func_param_type, arg_type);
                 return Err(Error::TypeMismatch {
-                    expected: format!(
-                        "function parameter compatible with {}",
-                        quiver_core::format::format_type_by_id(&*self.program, func_param_type)
-                    ),
-                    found: quiver_core::format::format_type_by_id(&*self.program, arg_type),
+                    expected: format!("function parameter compatible with {expected}"),
+                    found,
                 });
             }
             self.codegen.add_instruction(Instruction::recurse());

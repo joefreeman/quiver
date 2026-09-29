@@ -299,8 +299,8 @@ fn test_function_with_return_type() {
 fn test_function_return_type_mismatch() {
     quiver()
         .evaluate("f = #'int -> 'bin { [~, 1] ~> __integer_add__ ~ }; 5 ~> f ~")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "declared result: 'int is not 'bin".to_string(),
+        .expect_compile_error(quiver_compiler::compiler::Error::DeclaredResultMismatch(
+            "'int is not 'bin".to_string(),
         ));
 }
 
@@ -325,8 +325,8 @@ fn test_function_tuple_return_type_mismatch() {
             [3, 4] ~> f ~
             "#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "declared result: 'int is not 'bin".to_string(),
+        .expect_compile_error(quiver_compiler::compiler::Error::DeclaredResultMismatch(
+            "'int is not 'bin".to_string(),
         ));
 }
 
@@ -367,8 +367,8 @@ fn test_identity_function_with_return_type() {
 fn test_identity_function_return_type_mismatch() {
     quiver()
         .evaluate("f = #'int -> 'bin; 42 ~> f ~")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "declared result: 'int is not 'bin".to_string(),
+        .expect_compile_error(quiver_compiler::compiler::Error::DeclaredResultMismatch(
+            "'int is not 'bin".to_string(),
         ));
 }
 
@@ -432,8 +432,8 @@ fn test_function_named_tuple_return_type_mismatch() {
             3 ~> f ~
             "#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "declared result: 'int is not Point[x: 'int, y: 'int]".to_string(),
+        .expect_compile_error(quiver_compiler::compiler::Error::DeclaredResultMismatch(
+            "'int is not Point[x: 'int, y: 'int]".to_string(),
         ));
 }
 
@@ -443,9 +443,8 @@ fn test_generic_function_return_type_mismatch() {
     // Body returns t, which doesn't match bin
     quiver()
         .evaluate("f = #<'t>'t -> 'bin { ~ }; 5 ~> f ~")
-        .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
-            "declared result: Cannot unify rigid type variable 't with expected type 'bin"
-                .to_string(),
+        .expect_compile_error(quiver_compiler::compiler::Error::DeclaredResultMismatch(
+            "Cannot unify rigid type variable 't with expected type 'bin".to_string(),
         ));
 }
 
@@ -642,4 +641,19 @@ fn test_uninhabited_parameter_types_are_warned_about() {
             .evaluate(&format!("f = #{parameter} {{ 1 }}; f"))
             .expect_no_warnings();
     }
+}
+
+#[test]
+fn test_a_mismatch_in_states_alone_shows_the_states() {
+    // A function whose states are its parameter prints like one granting none, so the
+    // clause is written out where it is the difference.
+    quiver()
+        .evaluate(
+            "g = #[f: (#'int -> 'int ?'int)] { 1 }
+             h = #[f: #'int -> 'int] -> (#'int -> 'int) { $f }
+             g [f: h [f: #'int { $ }]]",
+        )
+        .expect_error_containing(
+            "expected function parameter compatible with [f: (#'int -> 'int ?'int)], found [f: (#'int -> 'int)]",
+        );
 }

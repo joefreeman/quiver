@@ -69,7 +69,7 @@ fn test_genuine_mismatch_still_reports_type_mismatch() {
             Circle[1] ~> f ~
             "#,
         )
-        .expect_compile_error(Error::TypeUnresolved(
-            "declared result: 'int is not 'bin".to_string(),
+        .expect_compile_error(Error::DeclaredResultMismatch(
+            "'int is not 'bin".to_string(),
         ));
 }

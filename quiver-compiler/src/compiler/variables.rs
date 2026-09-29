@@ -32,6 +32,9 @@ pub struct Capture {
     /// The (first) referencing site — where diagnostics about this capture should point,
     /// since captures are materialised far from the reference, at closure creation.
     pub span: ast::Spanned,
+    /// Whether that site is in a nested literal's annotation value, which is evaluated where
+    /// the literal is — so its `$` run counts from there, which a diagnostic should say.
+    pub in_annotation: bool,
 }
 
 /// Collect free variables (captures) from a function body.
@@ -51,6 +54,7 @@ pub fn collect_free_variables(
         defined_variables,
         captures: Vec::new(),
         function_depth: 0,
+        in_annotation: false,
     };
     collector.visit_block(body);
     collector.captures
@@ -65,6 +69,8 @@ struct FreeVariableCollector<'a> {
     /// incremented inside each nested literal. Outer-parameter references (`$$`, `$$$`) are
     /// free exactly when they reach above this depth.
     function_depth: usize,
+    /// Inside a nested literal's annotation values (see `Capture::in_annotation`).
+    in_annotation: bool,
 }
 
 impl<'a> FreeVariableCollector<'a> {
@@ -145,7 +151,9 @@ impl<'a> FreeVariableCollector<'a> {
                 // Its annotation prefix, though, attaches to the closure and is evaluated
                 // where the literal is, so it belongs to this level.
                 if let Some(body) = &func.body {
+                    let in_annotation = std::mem::replace(&mut self.in_annotation, true);
                     self.visit_annotations(body);
+                    self.in_annotation = in_annotation;
                     self.function_depth += 1;
                     self.visit_branches(body);
                     self.function_depth -= 1;
@@ -229,6 +237,7 @@ impl<'a> FreeVariableCollector<'a> {
             source: CaptureSource::OuterParameter(depth - self.function_depth),
             accessors,
             span,
+            in_annotation: self.in_annotation,
         });
     }
 
@@ -258,6 +267,7 @@ impl<'a> FreeVariableCollector<'a> {
                 source: CaptureSource::Variable(identifier.to_string()),
                 accessors,
                 span,
+                in_annotation: self.in_annotation,
             });
         }
     }

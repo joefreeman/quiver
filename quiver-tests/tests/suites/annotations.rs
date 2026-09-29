@@ -777,3 +777,15 @@ fn test_defaults_rejects_mistyped_value() {
         .evaluate("f = #[a: 'int, b: 'int] { :defaults [b: <00>]; $a }; f:defaults")
         .expect_error_containing("default for 'b' compatible with 'int");
 }
+
+#[test]
+fn test_a_literals_annotations_see_the_enclosing_parameter() {
+    // Evaluated where the closure is made, so `$` is the enclosing function's parameter...
+    quiver()
+        .evaluate("tag = #'bin { #'int { :note $; $ } }; g = tag <0a>; g:note")
+        .expect("<0a>");
+    // ... and `$$` reaches above it, which the error says.
+    quiver()
+        .evaluate("f = #'bin { #'int { :note $$; $ } }; f")
+        .expect_error_containing("an annotation's value is evaluated around the braces it opens");
+}

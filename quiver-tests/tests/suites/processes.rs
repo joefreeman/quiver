@@ -1551,3 +1551,43 @@ fn test_constant_binary_crosses_in_a_message() {
         )
         .expect("4");
 }
+
+#[test]
+fn test_a_receive_cannot_take_a_type_variable_it_cannot_fix() {
+    // Messages are tested against the receive type at runtime, where no instantiation is
+    // known. A function's own type parameters are instantiated afresh by each call...
+    quiver()
+        .evaluate("f = #<'t>'t -> 't { !'t }; f")
+        .expect_error_containing("A receive can't take 't");
+    quiver()
+        .evaluate("f = #<'t>'t -> 't { g = #[] -> 't { !'t }; g [] }; f")
+        .expect_error_containing("A receive can't take 't");
+    // ... and a generic function value's are never instantiated at all: a receive through
+    // one would type any message as its `'q`.
+    quiver()
+        .evaluate(
+            "id = #<'q>'q { $ }
+             p = @[] { !id ~> __integer_add__ [~, 1] } []
+             p <01>",
+        )
+        .expect_error_containing("A receive can't take 'q");
+}
+
+#[test]
+fn test_a_process_may_receive_its_enclosing_type_parameter() {
+    // Fixed for as long as the process lives, and every send to it is checked against the
+    // same instantiation — how `%proc.race` collects its racers' results.
+    quiver()
+        .evaluate(
+            "g = #<'t>'t { v = $; c = @[] { !Box['t] ~> =Box[x]; x } []; c Box[v]; !c }
+             g 5 ~> { | =('int & n) => __integer_add__ [n, 1] | 0 }",
+        )
+        .expect("6");
+}
+
+#[test]
+fn test_a_receive_may_name_an_alias_from_its_body() {
+    quiver()
+        .evaluate("p = @[] { 'm = Ping | Pong; !'m } []; p Ping; !p")
+        .expect("Ping");
+}

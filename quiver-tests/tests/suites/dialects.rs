@@ -241,7 +241,7 @@ fn test_error_payload_maps_to_a_source_position() {
         error.error,
         Error::DialectFailed {
             module: "%m".to_string(),
-            message: "failed: a value".to_string(),
+            message: "failed: expected a value".to_string(),
         }
     );
     // Content starts at 1:4 (after `%m{`), so offset 2 is column 6.
@@ -413,7 +413,7 @@ fn test_json_dialect_reports_furthest_failure() {
         error.error,
         Error::DialectFailed {
             module: "%json".to_string(),
-            message: "failed: '['".to_string(),
+            message: "failed: expected '['".to_string(),
         }
     );
     assert_eq!(line_column(&error), Some((1, 23)));
@@ -452,7 +452,7 @@ fn test_positional_error_payload_maps_to_a_source_position() {
         error.error,
         Error::DialectFailed {
             module: "%m".to_string(),
-            message: "failed: a value".to_string(),
+            message: "failed: expected a value".to_string(),
         }
     );
     assert_eq!(line_column(&error), Some((1, 6)));

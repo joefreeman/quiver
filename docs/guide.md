@@ -520,6 +520,13 @@ xs ~> ='single                                   //= Cons[1, Nil]
 { Cons[1, Cons[2, Nil]] ~> ='single }            //= []
 ```
 
+A function or process can't be looked inside, so it is tested by its own type:
+
+```quiver
+#'int { $ } ~> =(#'int -> 'int)                  //= (#'int -> 'int)
+{ #'bin { $ } ~> =(#'int -> _) }                 //= []
+```
+
 A pin's target may be any access path — a field of a variable, or of the enclosing
 function's parameter via `$`.
 
@@ -1504,6 +1511,15 @@ div:doc                       //= "Integer division. Fails with :error on a zero
 A glued `:key` retrieves the annotation, or nil when absent. Since a failing sequence
 short-circuits with the *same* nil, an `:error` payload survives out through calls, while
 a recovering branch discards it along with the nil it replaces.
+
+An entry's value is evaluated around the braces, where the closure is made, so in a function
+literal's annotations `$` is the enclosing function's parameter:
+
+```quiver
+tag = #'bin { #'int { :note $; $ } }
+g = tag <0a>
+g:note                        //= <0a>
+```
 
 Bare retrieval compiles only where the annotation is statically visible. Inferred paths
 keep that knowledge, and explicitly declared types — function parameters, a type tested in

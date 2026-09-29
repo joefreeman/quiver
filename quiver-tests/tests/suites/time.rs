@@ -85,7 +85,7 @@ fn test_dialect_error_points_into_the_content() {
         error.error,
         Error::DialectFailed {
             module: "%time".to_string(),
-            message: "failed: a valid date".to_string(),
+            message: "failed: expected a valid date".to_string(),
         }
     );
     assert_eq!(error.span.map(|s| (s.line, s.column)), Some((1, 8)));
@@ -101,7 +101,7 @@ fn test_dialect_error_at_a_malformed_component() {
         error.error,
         Error::DialectFailed {
             module: "%time".to_string(),
-            message: "failed: two-digit minutes".to_string(),
+            message: "failed: expected two-digit minutes".to_string(),
         }
     );
     assert_eq!(error.span.map(|s| (s.line, s.column)), Some((1, 11)));

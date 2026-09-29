@@ -990,5 +990,5 @@ fn test_a_generic_argument_keeps_its_bounds() {
         .evaluate(&format!(
             "{APPLY}d = %dict{{ \"a\" => 1 }}; apply [f: %dict.get, x: [d, \"a\"]]"
         ))
-        .expect_error_containing("Tuple fields have different names");
+        .expect_error_containing("expected field `dict` here, found positional field 0");
 }
