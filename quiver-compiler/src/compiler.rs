@@ -112,6 +112,11 @@ pub enum Error {
     TypeTestNotConcrete {
         tested: String,
     },
+    /// A spread of a partial type: its values' fields sit wherever their own construction put
+    /// them, so there is no layout to copy them by.
+    SpreadOfPartial {
+        found: String,
+    },
     TupleNotInRegistry {
         tuple_id: usize,
     },
@@ -528,6 +533,13 @@ impl std::fmt::Display for Error {
                     f,
                     "`__{builtin}__` needs a concrete type argument — one still containing \
                      type variables has no runtime representation to embed"
+                )
+            }
+            Error::SpreadOfPartial { found } => {
+                write!(
+                    f,
+                    "Cannot spread {found}: a partial type has no fixed layout to copy its \
+                     fields by. Spread a concrete tuple type instead"
                 )
             }
             Error::TypeTestNotConcrete { tested } => {
@@ -1980,92 +1992,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    /// The static type of a spread source access, resolved without emitting code: through a
-    /// capture where the whole path is one, else the base plus an accessor walk. Ripple
-    /// sources read the flowing value's type.
-    fn peek_spread_source_type(
-        &mut self,
-        access: &ast::Access,
-        ripple_context: Option<&RippleContext>,
-    ) -> Option<usize> {
-        match &access.source {
-            Some(ast::AccessSource::Identifier(name)) => {
-                scopes::lookup_variable(&self.scopes, name, &access.accessors)
-                    .map(|(ty, _)| ty)
-                    .or_else(|| {
-                        let (base, _) = scopes::lookup_variable(&self.scopes, name, &[])?;
-                        self.peek_accessor_type(base, &access.accessors, name).ok()
-                    })
-            }
-            Some(ast::AccessSource::Parameter { depth: 0 }) => {
-                let (base, _) = scopes::get_function_parameter(&self.scopes).ok()?;
-                self.peek_accessor_type(base, &access.accessors, "$").ok()
-            }
-            Some(ast::AccessSource::Parameter { depth }) => {
-                let name = variables::CaptureSource::OuterParameter(*depth).scope_name();
-                scopes::lookup_variable(&self.scopes, &name, &access.accessors)
-                    .map(|(ty, _)| ty)
-                    .or_else(|| {
-                        let (base, _) = scopes::lookup_variable(&self.scopes, &name, &[])?;
-                        self.peek_accessor_type(base, &access.accessors, &name).ok()
-                    })
-            }
-            Some(ast::AccessSource::Ripple) => {
-                let base = ripple_context?.value_type_id;
-                self.peek_accessor_type(base, &access.accessors, "~").ok()
-            }
-            _ => None,
-        }
-    }
-
-    /// Resolve the name a name-inheriting spread (`~[...]`, `a[...]`, `$conn[...]`) takes from
-    /// its first spread's source: the source access's tuple type, or the flowing value's for
-    /// a bare `...`.
-    fn inherited_spread_name(
-        &mut self,
-        fields: &[ast::TupleField],
-        ripple_context: Option<&RippleContext>,
-    ) -> Option<String> {
-        let source = fields.iter().find_map(|f| match &f.value {
-            ast::FieldValue::Spread(s) => Some(s),
-            _ => None,
-        })?;
-        let source_type = match source {
-            Some(access) => {
-                let access = access.clone();
-                self.peek_spread_source_type(&access, ripple_context)?
-            }
-            None => ripple_context?.value_type_id,
-        };
-        // The source may be a union — e.g. an ascribed response alongside a fallback,
-        // whose constructions intern as distinct tuple ids: every member sharing one
-        // name inherits it; mixed (or missing) names inherit none.
-        let source_type = Type::strip_annotations(source_type, &*self.program);
-        // A rigid type variable spreads as its bound (see the spread's field sources).
-        let source_type = match self.program.lookup_type(source_type) {
-            Some(Type::Variable(name)) => self.program.rigid_bound(name)?,
-            _ => source_type,
-        };
-        let members = match self.program.lookup_type(source_type) {
-            Some(Type::Union(members)) => members.clone(),
-            _ => vec![source_type],
-        };
-        let mut name: Option<String> = None;
-        for member in members {
-            let stripped = Type::strip_annotations(member, &*self.program);
-            let Some(Type::Tuple(tuple_id)) = self.program.lookup_type(stripped) else {
-                return None;
-            };
-            let member_name = self.program.lookup_tuple(*tuple_id)?.name.clone()?;
-            match &name {
-                None => name = Some(member_name),
-                Some(existing) if *existing == member_name => {}
-                _ => return None,
-            }
-        }
-        name
-    }
-
     fn compile_tuple(
         &mut self,
         name: ast::TupleName,
@@ -2077,20 +2003,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     ) -> Result<(usize, Provenance), Error> {
         helpers::check_field_name_duplicates(&fields, |f| f.name.as_ref())?;
 
-        // `~[..., y]` / `a[..., y]` inherit the result name from their first spread's source.
+        if helpers::tuple_contains_spread(&fields) {
+            return spread::compile_tuple_with_spread(self, name, fields, ripple_context);
+        }
         let tuple_name = match name {
             ast::TupleName::Anonymous => None,
             ast::TupleName::Named(name) => Some(name),
-            ast::TupleName::Inherit => self.inherited_spread_name(&fields, ripple_context),
+            ast::TupleName::Inherit => unreachable!("the parser only inherits a spread's name"),
         };
-
-        // Check if this tuple contains spreads
-        let contains_spread = helpers::tuple_contains_spread(&fields);
-
-        if contains_spread {
-            // Use specialized compilation for tuples with spreads
-            return spread::compile_tuple_with_spread(self, tuple_name, fields, ripple_context);
-        }
 
         // Per-field expected types from a positionally-matching expected tuple type, used to infer
         // un-annotated function-literal fields (e.g. `map [xs, #{ $0 }, Nil]`). `bindings` solves

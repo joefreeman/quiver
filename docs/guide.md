@@ -976,8 +976,15 @@ first_key = #<'k: '%data, 'v>'%dict<'k, 'v> { %dict.keys $ ~> %list.head }
 first_key %dict{ "a" => 1 }   //= "a"
 ```
 
-A field update (`$[..., at: 0]`) builds the bound's shape rather than `'t`: whatever the
-caller's `'t` holds in that field may be narrower than what is written there.
+A field update (`$[..., x: 0]`) builds the bound's shape rather than `'t`: whatever the
+caller's `'t` holds in that field may be narrower than what is written there. A spread copies
+fields by their layout, so the bound must be a concrete tuple rather than a partial:
+
+```quiver
+reset = #<'t: Point[x: 'int, y: 'int]>'t { $[..., x: 0] }
+reset Point[x: 3, y: 4]       //= Point[x: 0, y: 4]
+touch = #<'t: (at: 'int)>'t { $[..., at: 0] }   //! no fixed layout
+```
 
 ### Spreads
 

@@ -238,7 +238,8 @@ fn test_name_inheriting_spread_over_union_source() {
                f 200"#,
         )
         .expect("201");
-    // Mixed names inherit none: the unnamed result is a type error at a named call.
+    // Mixed names: each member keeps its own, so an `Other` still doesn't fit a
+    // `Response` call.
     quiver()
         .evaluate(
             r#"check = #Response(status: 'int) { $status }
@@ -249,6 +250,48 @@ fn test_name_inheriting_spread_over_union_source() {
                f 200"#,
         )
         .expect_type_mismatch();
+}
+
+#[test]
+fn test_name_inheriting_spread_keeps_each_members_name() {
+    quiver()
+        .evaluate(
+            "'e = A[x: 'int] | B[y: 'bin]
+             f = #'e { $[..., at: 1] }
+             [f A[x: 5], f B[y: <01>]]",
+        )
+        .expect("[A[x: 5, at: 1], B[y: <01>, at: 1]]");
+    quiver()
+        .evaluate("'e = A[x: 'int] | B[y: 'bin]; #'e { $[..., at: 1] }")
+        .expect_type("#(A[x: 'int] | B[y: 'bin]) -> (A[x: 'int, at: 'int] | B[y: 'bin, at: 'int])");
+    // Nil is unnamed, so its update is too.
+    quiver()
+        .evaluate("f = #(A[x: 'int] | []) { $[..., y: 1] }; [f A[x: 1], f []]")
+        .expect("[A[x: 1, y: 1], [y: 1]]");
+}
+
+#[test]
+fn test_spread_of_a_union_with_a_non_tuple_member_is_rejected() {
+    // The fields are read from the source's layout, so every member must be a tuple.
+    quiver()
+        .evaluate("f = #(A[x: 'int] | 'int) { [...$, y: 1] }; f 5")
+        .expect_error_containing("expected tuple, found 'int | A[x: 'int]");
+}
+
+#[test]
+fn test_spread_of_a_partial_is_rejected() {
+    // A partial's values keep their fields wherever their own construction put them, so
+    // there is no layout to copy by.
+    quiver()
+        .evaluate("f = #(x: 'int) { [...$, y: 1] }; f [x: 1]")
+        .expect_error_containing("Cannot spread (x: 'int): a partial type has no fixed layout");
+    quiver()
+        .evaluate("f = #(A[x: 'int] | (x: 'int)) { $[..., y: 1] }; f A[x: 1]")
+        .expect_error_containing("Cannot spread (x: 'int)");
+    // Through a bound too: a field update needs a concrete-tuple bound.
+    quiver()
+        .evaluate("touch = #<'t: (at: 'int)>'t { $[..., at: 0] }; touch Post[at: 3]")
+        .expect_error_containing("Cannot spread (at: 'int)");
 }
 
 // Sourced spreads: the spread's source may be an access path — a variable path (`a.b`),

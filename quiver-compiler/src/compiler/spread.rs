@@ -44,33 +44,47 @@ enum FieldSource {
     SpreadField { spread_idx: usize, field_idx: usize },
 }
 
-/// Extract tuple IDs from a type (only concrete tuples, not partials)
-fn extract_tuple_ids(program: &Program, type_id: usize) -> Vec<usize> {
-    let Some(ty) = program.lookup_type(type_id) else {
-        return vec![];
+/// The tuple types a spread source may be, one per variant the spread builds. Every member
+/// must be a concrete tuple, as the fields are read from its layout: a spread of anything
+/// else (a partial, whose layout is unknown, or a non-tuple) is rejected.
+fn spread_tuple_ids(program: &Program, type_id: usize) -> Result<Vec<usize>, Error> {
+    // A mismatch deeper in names the whole source; a partial is reported as itself.
+    let whole = |error: Error| match error {
+        Error::TypeMismatch { .. } => not_a_tuple(program, type_id),
+        other => other,
     };
-    match ty {
-        Type::Annotated { base, .. } => extract_tuple_ids(program, *base),
-        Type::Tuple(id) => vec![*id],
-        Type::Union(type_ids) => type_ids
-            .iter()
-            .filter_map(|&tid| {
-                program.lookup_type(tid).and_then(|t| match t {
-                    Type::Tuple(id) => Some(*id),
-                    Type::Annotated { base, .. } => match program.lookup_type(*base) {
-                        Some(Type::Tuple(id)) => Some(*id),
-                        _ => None,
-                    },
-                    _ => None,
-                })
-            })
-            .collect(),
+    match program
+        .lookup_type(type_id)
+        .ok_or_else(|| not_a_tuple(program, type_id))?
+    {
+        Type::Annotated { base, .. } => spread_tuple_ids(program, *base),
+        Type::Tuple(id) => Ok(vec![*id]),
+        Type::Union(members) if !members.is_empty() => {
+            let mut ids = Vec::new();
+            for &member in members {
+                ids.extend(spread_tuple_ids(program, member).map_err(whole)?);
+            }
+            Ok(ids)
+        }
         // A rigid type variable spreads as its bound; the result is the bound's shape, as the
         // variable's own identity says nothing about the fields a spread overrides.
-        Type::Variable(name) => program
-            .rigid_bound(name)
-            .map_or_else(Vec::new, |bound| extract_tuple_ids(program, bound)),
-        _ => vec![],
+        Type::Variable(name) => {
+            let bound = program
+                .rigid_bound(name)
+                .ok_or_else(|| not_a_tuple(program, type_id))?;
+            spread_tuple_ids(program, bound).map_err(whole)
+        }
+        Type::Partial { .. } => Err(Error::SpreadOfPartial {
+            found: quiver_core::format::format_type_by_id(program, type_id),
+        }),
+        _ => Err(not_a_tuple(program, type_id)),
+    }
+}
+
+fn not_a_tuple(program: &Program, type_id: usize) -> Error {
+    Error::TypeMismatch {
+        expected: "tuple".to_string(),
+        found: quiver_core::format::format_type_by_id(program, type_id),
     }
 }
 
@@ -268,14 +282,7 @@ fn build_field_variants(
                 spread_count += 1;
 
                 if let CompiledValue::Spread { type_id, .. } = &compiled_values[compiled_idx] {
-                    let spread_tuple_ids = extract_tuple_ids(program, *type_id);
-
-                    if spread_tuple_ids.is_empty() {
-                        return Err(Error::TypeMismatch {
-                            expected: "tuple".to_string(),
-                            found: quiver_core::format::format_type_by_id(program, *type_id),
-                        });
-                    }
+                    let spread_tuple_ids = spread_tuple_ids(program, *type_id)?;
 
                     // For each existing variant, create new variants for each spread type
                     let mut new_variants = Vec::new();
@@ -459,7 +466,7 @@ fn emit_stack_cleanup_code<E: quiver_core::effects::Effect>(
 
 pub fn compile_tuple_with_spread<E: quiver_core::effects::Effect>(
     compiler: &mut Compiler<'_, E>,
-    tuple_name: Option<String>,
+    name: ast::TupleName,
     fields: Vec<ast::TupleField>,
     ripple_context: Option<&RippleContext>,
 ) -> Result<(usize, Provenance), Error> {
@@ -483,21 +490,9 @@ pub fn compile_tuple_with_spread<E: quiver_core::effects::Effect>(
 
     // Step 3: Generate bytecode based on number of variants
     let result_type_id = if variants.len() == 1 {
-        emit_single_variant_tuple(
-            compiler,
-            &variants[0],
-            &compiled_values,
-            stack_size,
-            tuple_name.clone(),
-        )?
+        emit_single_variant_tuple(compiler, &variants[0], &compiled_values, stack_size, &name)?
     } else {
-        emit_multi_variant_tuples(
-            compiler,
-            &variants,
-            &compiled_values,
-            stack_size,
-            tuple_name.clone(),
-        )?
+        emit_multi_variant_tuples(compiler, &variants, &compiled_values, stack_size, &name)?
     };
 
     // Clean up ripple value if we own it
@@ -513,14 +508,27 @@ pub fn compile_tuple_with_spread<E: quiver_core::effects::Effect>(
     Ok((result_type_id, Provenance::Unknown))
 }
 
+/// The name a variant's tuple takes: an inheriting spread (`a[..., y: 1]`) keeps the name of
+/// the tuple its first spread was, so each member of a union source keeps its own.
+fn variant_name(name: &ast::TupleName, variant: &VariantInfo, program: &Program) -> Option<String> {
+    match name {
+        ast::TupleName::Anonymous => None,
+        ast::TupleName::Named(name) => Some(name.clone()),
+        ast::TupleName::Inherit => program
+            .lookup_tuple(variant.spread_type_ids[0])
+            .and_then(|info| info.name.clone()),
+    }
+}
+
 /// Emit bytecode for a single variant tuple (no branching needed)
 fn emit_single_variant_tuple<E: quiver_core::effects::Effect>(
     compiler: &mut Compiler<'_, E>,
     variant: &VariantInfo,
     compiled_values: &[CompiledValue],
     stack_size: usize,
-    tuple_name: Option<String>,
+    name: &ast::TupleName,
 ) -> Result<usize, Error> {
+    let tuple_name = variant_name(name, variant, compiler.program);
     let field_sources = build_field_sources_for_variant(variant, compiled_values, compiler.program);
     emit_field_extraction_code(compiler, &field_sources, compiled_values, stack_size)?;
 
@@ -545,13 +553,14 @@ fn emit_multi_variant_tuples<E: quiver_core::effects::Effect>(
     variants: &[VariantInfo],
     compiled_values: &[CompiledValue],
     stack_size: usize,
-    tuple_name: Option<String>,
+    name: &ast::TupleName,
 ) -> Result<usize, Error> {
     let mut end_jumps = Vec::new();
     let mut variant_type_ids = Vec::new();
 
     for (variant_idx, variant) in variants.iter().enumerate() {
         let is_last = variant_idx == variants.len() - 1;
+        let tuple_name = variant_name(name, variant, compiler.program);
         let field_sources =
             build_field_sources_for_variant(variant, compiled_values, compiler.program);
 
