@@ -95,14 +95,13 @@ fn test_send_to_mixed_union_is_error() {
         )
         .expect_compile_error(quiver_compiler::compiler::Error::UnionApplication {
             union: "'int | (@'int !'int ?'int)".to_string(),
-            all_functions: false,
         });
 }
 
 #[test]
-fn test_pipe_into_function_union_is_error() {
-    // A union of function types cannot be applied (the members are separate
-    // functions); rejected rather than silently replacing.
+fn test_pipe_into_function_union_calls_it() {
+    // A union of function types is one function at runtime: the argument must suit every
+    // member, and the result is whichever member's.
     quiver()
         .evaluate(
             r#"
@@ -112,10 +111,8 @@ fn test_pipe_into_function_union_is_error() {
             42 ~> u ~
         "#,
         )
-        .expect_compile_error(quiver_compiler::compiler::Error::UnionApplication {
-            union: "(#'int -> 'int) | (#'int -> Str['bin])".to_string(),
-            all_functions: true,
-        });
+        .expect("42")
+        .expect_type("'int | Str['bin]");
 }
 
 #[test]

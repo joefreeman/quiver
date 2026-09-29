@@ -297,12 +297,11 @@ pub enum Error {
     /// unchanged.
     AssertionRipple,
 
-    /// A value is applied to a union whose members include functions or processes, and the
-    /// union is not sendable (a union of only process types is — the message is checked
-    /// against every member's send grant).
+    /// A value is applied to a union mixing functions or processes with other values: a
+    /// union of only functions is called (the argument must suit every member), and one of
+    /// only processes sent to (the message must fit every member's send grant).
     UnionApplication {
         union: String,
-        all_functions: bool,
     },
 
     /// A value is applied to (sent to) a process whose type grants no send.
@@ -743,25 +742,11 @@ impl std::fmt::Display for Error {
                 "An assertion pattern cannot contain a ripple `~`: an assertion only observes, \
                  and the value flows on unchanged"
             ),
-            Error::UnionApplication {
-                union,
-                all_functions,
-            } => {
-                if *all_functions {
-                    write!(
-                        f,
-                        "Cannot call {union}: a union of function types cannot be \
-                         applied (the members are separate functions). Narrow the union \
-                         first"
-                    )
-                } else {
-                    write!(
-                        f,
-                        "Cannot apply a value to {union}: only some of its members are \
-                         functions or processes. Narrow the union first"
-                    )
-                }
-            }
+            Error::UnionApplication { union } => write!(
+                f,
+                "Cannot apply a value to {union}: only some of its members are functions or \
+                 processes. Narrow the union first"
+            ),
             Error::SendNotGranted { process } => write!(
                 f,
                 "Cannot send to {process}: its type grants no send. A process type \
@@ -2027,17 +2012,31 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .unwrap_or_else(|| (0..fields.len()).collect());
         let mut bindings: HashMap<String, usize> = HashMap::new();
 
-        // Compile field values and collect their types and provenances
-        let mut field_types = Vec::new();
-        let mut field_provenances = Vec::new();
+        // The slots in the order their fields compile: an inferred-parameter literal (`#{…}`)
+        // goes after the other fields, so the variables they pin (`twice [f: #{ … }, x: 2]`)
+        // are solved before it infers its parameter. A literal only makes a closure, so
+        // evaluating it later changes nothing observable; the stack is put back in slot
+        // order before the tuple is built.
+        let compile_order: Vec<usize> = if expected_fields.is_some() {
+            let (literals, others): (Vec<usize>, Vec<usize>) = (0..order.len())
+                .partition(|&slot| helpers::is_inferred_literal(&fields[order[slot]].value));
+            others.into_iter().chain(literals).collect()
+        } else {
+            (0..order.len()).collect()
+        };
+
+        // Compile field values and collect their types and provenances, by slot
+        let mut slot_types: Vec<Option<(Option<String>, usize)>> = vec![None; order.len()];
+        let mut slot_provenances: Vec<Option<Provenance>> = vec![None; order.len()];
         // Where this literal's build starts, so a fully-constant one can be folded away
         // once the whole of it has been emitted (see below).
         let build_start = self.codegen.instructions.len();
-        for (fields_compiled, field) in order.iter().map(|&i| &fields[i]).enumerate() {
+        for (fields_compiled, &slot) in compile_order.iter().enumerate() {
+            let field = &fields[order[slot]];
             // This field's expected type, with the variables solved so far substituted in.
             let mut field_expected = expected_fields
                 .as_ref()
-                .map(|efs| typing::substitute(efs[fields_compiled], &bindings, self.program));
+                .map(|efs| typing::substitute(efs[slot], &bindings, self.program));
             let field_start = self.codegen.instructions.len();
             // What a retried field recorded for the language server goes with its instructions.
             let record_mark = helpers::is_inferred_literal(&field.value)
@@ -2091,9 +2090,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     break (field_type, field_prov);
                 };
                 let mut trial = bindings.clone();
-                if typing::unify(&mut trial, efs[fields_compiled], field_type, self.program)
-                    .is_err()
-                {
+                if typing::unify(&mut trial, efs[slot], field_type, self.program).is_err() {
                     break (field_type, field_prov);
                 }
                 // A second round still widening is growth, not a missing member: generalize it
@@ -2109,7 +2106,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         }
                     }
                 }
-                let widened = typing::substitute(efs[fields_compiled], &trial, self.program);
+                let widened = typing::substitute(efs[slot], &trial, self.program);
                 if !helpers::is_inferred_literal(&field.value) || Some(widened) == field_expected {
                     bindings = trial;
                     break (field_type, field_prov);
@@ -2142,9 +2139,38 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
             // Label adoption happens before this, on the argument AST (`adopt_labels`), so
             // a literal arriving here is already spelled exactly as it will be built.
-            field_types.push((field.name.clone(), field_type));
-            field_provenances.push(field_prov);
+            slot_types[slot] = Some((field.name.clone(), field_type));
+            slot_provenances[slot] = Some(field_prov);
         }
+
+        // Put the values back in slot order: fetch each slot's value to the top in turn,
+        // from among those not yet fetched (which sit below those that are).
+        if compile_order
+            .iter()
+            .enumerate()
+            .any(|(position, &slot)| position != slot)
+        {
+            let mut unplaced = compile_order.clone();
+            for (placed, slot) in (0..order.len()).enumerate() {
+                let index = unplaced
+                    .iter()
+                    .position(|&s| s == slot)
+                    .expect("every slot compiled");
+                let depth = placed + (unplaced.len() - 1 - index);
+                if depth > 0 {
+                    self.codegen.add_instruction(Instruction::rotate(depth + 1));
+                }
+                unplaced.remove(index);
+            }
+        }
+        let field_types: Vec<(Option<String>, usize)> = slot_types
+            .into_iter()
+            .map(|slot| slot.expect("every slot compiled"))
+            .collect();
+        let field_provenances: Vec<Provenance> = slot_provenances
+            .into_iter()
+            .map(|slot| slot.expect("every slot compiled"))
+            .collect();
 
         // Register the tuple type and emit instruction
         let tuple_id = self.program.register_tuple(tuple_name, field_types);
@@ -2331,7 +2357,36 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let callable = self
             .instantiate_type_arguments(callable, &access.type_arguments)
             .ok()?;
-        typing::open_callable(callable, self.program).map(|parts| parts.parameter)
+        match typing::open_callable(callable, self.program) {
+            Some(parts) => Some(parts.parameter),
+            // A union of functions expects what its members all do, if they agree.
+            None => {
+                let members = self.callable_union_members(callable)?;
+                let mut parameters = members.into_iter().map(|member| {
+                    typing::open_callable(member, self.program).map(|parts| parts.parameter)
+                });
+                let first = parameters.next()??;
+                parameters
+                    .all(|parameter| parameter == Some(first))
+                    .then_some(first)
+            }
+        }
+    }
+
+    /// The members of a union of function types, or `None` for anything else.
+    fn callable_union_members(&self, type_id: usize) -> Option<Vec<usize>> {
+        let type_id = Type::strip_annotations(type_id, &*self.program);
+        let Some(Type::Union(members)) = self.program.lookup_type(type_id) else {
+            return None;
+        };
+        (!members.is_empty()
+            && members.iter().all(|&member| {
+                matches!(
+                    self.program.lookup_base(member),
+                    Some(Type::Callable { .. })
+                )
+            }))
+        .then(|| members.clone())
     }
 
     /// The type of annotation `key` on `type_id`, when the row makes it definitely visible.
@@ -2513,10 +2568,22 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 let Some(callable) = self.callee_value_type(access) else {
                     return Vec::new();
                 };
-                let callable = Type::strip_annotations(callable, &*self.program);
-                match self.program.lookup_type(callable) {
-                    Some(Type::Callable { omittable, .. }) => omittable.clone(),
-                    _ => Vec::new(),
+                let omittable_of =
+                    |program: &Program, member: usize| match program.lookup_base(member) {
+                        Some(Type::Callable { omittable, .. }) => omittable.clone(),
+                        _ => Vec::new(),
+                    };
+                match self.callable_union_members(callable) {
+                    // A union of functions lets callers omit only what every member does.
+                    Some(members) => {
+                        let mut common = omittable_of(&*self.program, members[0]);
+                        for &member in &members[1..] {
+                            let theirs = omittable_of(&*self.program, member);
+                            common.retain(|index| theirs.contains(index));
+                        }
+                        common
+                    }
+                    None => omittable_of(&*self.program, callable),
                 }
             }
         }
@@ -3108,6 +3175,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     self.program,
                 )?;
                 parameter_omittable = omittable;
+                if typing::is_uninhabited(type_id, &*self.program) {
+                    self.warn(Warning::UninhabitedParameter, function.span.get());
+                }
                 type_id
             }
             None => {
@@ -8198,46 +8268,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 })?;
 
         if matches!(target_type, Type::Callable { .. }) {
-            // Function call (a normal call is not a state transition — only tail calls
-            // widen the states union)
-            let parts =
-                typing::open_callable(target_type_id, self.program).expect("a function type opens");
-            let (param_id, result_id, receive_id) = (parts.parameter, parts.result, parts.receive);
-
-            // Every call is written, so its argument is always type-checked: a nilary
-            // callable takes `f []` and rejects anything else.
-            let arg_type = value_type;
-
-            // Check if function has type variables - if so, perform unification
-            let has_vars_param = typing::contains_variables(param_id, &*self.program);
-            let has_vars_result = typing::contains_variables(result_id, &*self.program);
-
-            let result_type = if has_vars_param || has_vars_result {
-                // Perform unification to bind type variables
-                let mut bindings = HashMap::new();
-
-                typing::unify(&mut bindings, param_id, arg_type, self.program)?;
-                typing::resolve_bindings(&mut bindings, self.program);
-                self.check_argument_fits(arg_type, param_id, &bindings, value_type)?;
-                self.check_bindings_fit_bounds(&bindings)?;
-
-                // Substitute bindings in the result type, closing unpinned parameters
-                // to the empty union (see close_unpinned_result).
-                typing::close_unpinned_result(result_id, &mut bindings, self.program);
-                typing::substitute(result_id, &bindings, self.program)
-            } else {
-                // No type variables - just check compatibility
-                self.check_argument_fits(arg_type, param_id, &HashMap::new(), value_type)?;
-                // If this function dispatches on its parameter, specialize the result type to
-                // the concrete argument; otherwise fall back to its single frozen result.
-                self.dispatch_result(target_type_id, callee_fn, arg_type)
-                    .unwrap_or(result_id)
-            };
-
-            // Calling a function executes its receives in this process, so its receive
-            // type widens the current context's.
-            self.widen_receive_type(receive_id);
-
+            let (result_type, param_id, result_id) =
+                self.check_call(target_type_id, value_type, callee_fn)?;
             if let Some(forwarder) = elide {
                 // Wrapper elision: the callee was never pushed, and the argument on the
                 // stack compiles into the forwarded builtin call directly. The gate
@@ -8269,8 +8301,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 self.codegen.add_instruction(Instruction::call());
                 return Ok(self.program.register_type(Type::ok()));
             }
-            // Any other function- or process-bearing union is not applicable: its members
-            // would take the value in different ways, or not at all.
             let all_functions = !members.is_empty()
                 && members.iter().all(|&member| {
                     matches!(
@@ -8278,9 +8308,21 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         Some(Type::Callable { .. })
                     )
                 });
+            if all_functions {
+                // A union of functions is one of them at runtime, so the argument must suit
+                // every member, and the result is whichever member's. Contracts ride a
+                // callee's own type, which a union doesn't have, so none are enforced here.
+                let mut results = Vec::with_capacity(members.len());
+                for &member in &members {
+                    results.push(self.check_call(member, value_type, None)?.0);
+                }
+                self.codegen.add_instruction(Instruction::call());
+                return Ok(typing::union_type_ids(self.program, results));
+            }
+            // A union mixing functions with other values is not applicable: its members
+            // would take the value in different ways, or not at all.
             Err(Error::UnionApplication {
                 union: quiver_core::format::format_type_by_id(&*self.program, target_type_id),
-                all_functions,
             })
         } else {
             Err(Error::TypeMismatch {
@@ -8288,6 +8330,53 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 found: quiver_core::format::format_type_by_id(&*self.program, target_type_id),
             })
         }
+    }
+
+    /// Type-check a call of the function type `target_type_id` with an argument of
+    /// `value_type` (unifying its type variables when it is generic), widening the current
+    /// context's receive type by the callee's, and answer the call's result type with the
+    /// callee's opened parameter and result. Emits nothing. A normal call is not a state
+    /// transition — only tail calls widen the states union.
+    fn check_call(
+        &mut self,
+        target_type_id: usize,
+        value_type: usize,
+        callee_fn: Option<usize>,
+    ) -> Result<(usize, usize, usize), Error> {
+        let parts =
+            typing::open_callable(target_type_id, self.program).expect("a function type opens");
+        let (param_id, result_id, receive_id) = (parts.parameter, parts.result, parts.receive);
+
+        // Every call is written, so its argument is always type-checked: a nilary
+        // callable takes `f []` and rejects anything else.
+        let arg_type = value_type;
+
+        let result_type = if typing::contains_variables(param_id, &*self.program)
+            || typing::contains_variables(result_id, &*self.program)
+        {
+            // Unify to bind the type variables.
+            let mut bindings = HashMap::new();
+            typing::unify(&mut bindings, param_id, arg_type, self.program)?;
+            typing::resolve_bindings(&mut bindings, self.program);
+            self.check_argument_fits(arg_type, param_id, &bindings, value_type)?;
+            self.check_bindings_fit_bounds(&bindings)?;
+
+            // Substitute bindings in the result type, closing unpinned parameters
+            // to the empty union (see close_unpinned_result).
+            typing::close_unpinned_result(result_id, &mut bindings, self.program);
+            typing::substitute(result_id, &bindings, self.program)
+        } else {
+            self.check_argument_fits(arg_type, param_id, &HashMap::new(), value_type)?;
+            // If this function dispatches on its parameter, specialize the result type to
+            // the concrete argument; otherwise fall back to its single frozen result.
+            self.dispatch_result(target_type_id, callee_fn, arg_type)
+                .unwrap_or(result_id)
+        };
+
+        // Calling a function executes its receives in this process, so its receive
+        // type widens the current context's.
+        self.widen_receive_type(receive_id);
+        Ok((result_type, param_id, result_id))
     }
 
     /// Widen the current context's receive type by a callee's: calling (or

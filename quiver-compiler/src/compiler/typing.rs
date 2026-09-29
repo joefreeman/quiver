@@ -1552,6 +1552,25 @@ pub fn erase_type_variables(type_id: usize, program: &mut Program) -> usize {
     substitute(type_id, &bindings, program)
 }
 
+/// Whether no value has the type: `never`, or a union, tuple or partial that can't be built
+/// (`'int & 'bin`, `[x: never]`). Recursive references aren't followed, so a type is only
+/// reported uninhabited where that shows without unrolling it.
+pub fn is_uninhabited(type_id: usize, program: &Program) -> bool {
+    match program.lookup_type(type_id) {
+        Some(Type::Union(members)) => members
+            .iter()
+            .all(|&member| is_uninhabited(member, program)),
+        Some(Type::Tuple(tuple_id)) => program
+            .lookup_tuple(*tuple_id)
+            .is_some_and(|info| info.fields.iter().any(|&(_, t)| is_uninhabited(t, program))),
+        Some(Type::Partial { fields, .. }) => {
+            fields.iter().any(|&(_, t)| is_uninhabited(t, program))
+        }
+        Some(Type::Annotated { base, .. }) => is_uninhabited(*base, program),
+        _ => false,
+    }
+}
+
 /// Check if a type contains any unbound type variables
 pub fn contains_variables(type_id: usize, lookup: &impl TypeLookup) -> bool {
     let Some(typ) = lookup.lookup_type(type_id) else {

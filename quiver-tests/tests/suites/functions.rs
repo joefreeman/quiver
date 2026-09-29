@@ -575,3 +575,71 @@ fn test_outer_parameter_depth_exceeded() {
             written: "$$".to_string(),
         });
 }
+
+#[test]
+fn test_calling_a_union_of_functions() {
+    // The argument must suit every member; the result is whichever member's.
+    quiver()
+        .evaluate("h = [1] ~> { | =[1] => #'int { 1 } | #'int { <01> } }; h 5")
+        .expect("1")
+        .expect_type("'bin | 'int");
+    quiver()
+        .evaluate("h = [1] ~> { | =[1] => #'int { 1 } | #'bin { $ } }; h 5")
+        .expect_error_containing("expected function parameter compatible with 'bin, found 'int");
+    // A generic member is instantiated for the call like any callee.
+    quiver()
+        .evaluate(
+            "h = [1] ~> { | =[1] => #<'t>'t { $ } | #'int { 7 } }; h 5 ~> __integer_add__ [~, 1]",
+        )
+        .expect("6");
+    quiver()
+        .evaluate("%list{ #'int { 1 }, #'int { <01> } } ~> %list.map [~, #{ $ 3 }]")
+        .expect("Cons[1, Cons[<01>, Nil]]");
+}
+
+#[test]
+fn test_a_union_of_functions_takes_what_its_members_share() {
+    // Labels every member lets callers omit may be omitted; others must be written.
+    quiver()
+        .evaluate("h = [1] ~> { | =[1] => #[(x): 'int] { $x } | #[(x): 'int] { 2 } }; h [5]")
+        .expect("5");
+    quiver()
+        .evaluate("h = [1] ~> { | =[1] => #[(x): 'int] { $x } | #[x: 'int] { 2 } }; h [5]")
+        .expect_type_mismatch();
+    // A shared parameter is what an inferred-parameter literal argument infers from.
+    quiver()
+        .evaluate(
+            "h = [1] ~> {
+               | =[1] => #[f: #'int -> 'int] { $f 1 }
+               | #[f: #'int -> 'int] { 0 }
+             }
+             h [f: #{ __integer_add__ [$, 1] }]",
+        )
+        .expect("2");
+}
+
+#[test]
+fn test_uninhabited_parameter_types_are_warned_about() {
+    for parameter in [
+        "('int & 'bin)",
+        "((x: 'int) & (x: 'bin))",
+        "[a: 'int, b: ('int & 'bin)]",
+        // Function types don't intersect (there are no overloaded function types).
+        "((#'int -> 'int) & (#'bin -> 'bin))",
+    ] {
+        let result = quiver().evaluate(&format!("f = #{parameter} {{ 1 }}; f"));
+        assert!(
+            result.warnings().iter().any(|w| matches!(
+                w.warning,
+                quiver_compiler::compiler::Warning::UninhabitedParameter
+            )),
+            "expected an uninhabited-parameter warning for {parameter}, got {:?}",
+            result.warnings()
+        );
+    }
+    for parameter in ["('int | ('int & 'bin))", "'%list<'int>", "[]"] {
+        quiver()
+            .evaluate(&format!("f = #{parameter} {{ 1 }}; f"))
+            .expect_no_warnings();
+    }
+}

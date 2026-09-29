@@ -163,3 +163,33 @@ fn test_apply_site_argument_infers_parameter() {
         .evaluate("call = #[g: #'int -> 'int] { 5 ~> $g ~ }; call [g: #{ [$, $] ~> %num.add ~ }]")
         .expect("10");
 }
+
+#[test]
+fn test_inferred_literal_sees_variables_later_fields_pin() {
+    // `#{…}` compiles after the other fields, so `x` pins `'t` first, whatever the order.
+    quiver()
+        .evaluate(
+            "twice = #<'t>[f: #'t -> 't, x: 't] -> 't { f = $f; $x ~> f ~> f }
+             twice [f: #{ __integer_add__ [$, 1] }, x: 2]",
+        )
+        .expect("4");
+    // The fields are still built in their slots.
+    quiver()
+        .evaluate(
+            "g = #<'t>[a: 't, f: #'t -> 't, b: 'bin] -> ['t, 'bin] { [$f $a, $b] }
+             g [a: 5, f: #{ __integer_multiply__ [$, 3] }, b: <0a>]",
+        )
+        .expect("[15, <0a>]");
+    quiver()
+        .evaluate(
+            "p = #<'t>[#'t -> 't, 't] -> 't { $0 $1 }
+             p [#{ __integer_add__ [$, 1] }, 41]",
+        )
+        .expect("42");
+    quiver()
+        .evaluate(
+            "g = #<'t>[f: #'t -> 't, x: 't, y: 'int] -> ['t, 'int] { [$f $x, $y] }
+             7 ~> g [f: #{ __integer_add__ [$, 1] }, x: ~, y: ~]",
+        )
+        .expect("[8, 7]");
+}

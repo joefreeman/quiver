@@ -18,6 +18,9 @@ pub enum Warning {
     AlwaysNil,
     /// A binding nothing reads.
     UnusedBinding { name: String },
+    /// A function whose parameter type no value has (`#('int & 'bin)`), so it can never be
+    /// called.
+    UninhabitedParameter,
 }
 
 impl Warning {
@@ -28,6 +31,7 @@ impl Warning {
             Warning::ImpossibleMatch => "this step never succeeds",
             Warning::AlwaysNil => "this step is always nil",
             Warning::UnusedBinding { .. } => "never read",
+            Warning::UninhabitedParameter => "no value has this function's parameter type",
         }
     }
 
@@ -69,6 +73,11 @@ impl std::fmt::Display for Warning {
                 "This step always fails: it is always nil, so the steps after it never run"
             ),
             Warning::UnusedBinding { name } => write!(f, "Unused binding: nothing reads `{name}`"),
+            Warning::UninhabitedParameter => write!(
+                f,
+                "Uninhabited parameter: no value has this function's parameter type, so the \
+                 function can never be called"
+            ),
         }
     }
 }
