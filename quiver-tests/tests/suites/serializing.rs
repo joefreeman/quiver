@@ -3,12 +3,12 @@
 //! build's workers do across WASM memories.
 //!
 //! What this holds still is the *delta* path for program updates: a serializing worker
-//! is sent `TableUpdate::Appended` registries and `CompatibilityUpdate::Delta` derived
+//! is sent `TableUpdate::Appended` registries and `TupleTablesUpdate::Delta` derived
 //! tables, and must arrive at the same state a shared-memory worker gets by handle.
-//! The scenario leans on each derived table: `TestType` on late-defined patterns
-//! (type_compatibility), field access on late-defined tuples (field_offsets), structural
+//! The scenario leans on each: `TestType` on late-defined patterns (verdicts decided from
+//! appended types), field access on late-defined tuples (field_offsets), structural
 //! equality across separately built tuples (canonical_tuples), and messages into
-//! closures (parameter tables).
+//! closures (receives against appended parameter types).
 
 use quiver_compiler::PackageResolver;
 use quiver_compiler::compiler::CompileOptions;
@@ -127,8 +127,7 @@ fn a_serializing_worker_reaches_the_same_state_as_a_shared_one() {
         // rows past the seeded state.
         ("p = Point[x: 3, y: 4]", None),
         ("p.y", Some("Int(4)")),
-        // `TestType` on a pattern first named here: a type_compatibility row written
-        // below the table's tail.
+        // `TestType` on a pattern first named here, decided from the appended types.
         (
             "p ~> { =Point[x: a, y: b] => %num.add [a, b] | -1 }",
             Some("Int(7)"),
@@ -156,11 +155,12 @@ fn a_serializing_worker_reaches_the_same_state_as_a_shared_one() {
 
     // The property the deltas exist for: with the modules long linked, a repeated
     // line's updates carry its own code plus a small extension — not the program.
-    // (First-line updates linked whole modules and ran to hundreds of KB.)
+    // (Warm-up updates linked whole modules, well past the steady-state bound below.)
+    const STEADY_BOUND: usize = 20_000;
     let warm_mark = update_sizes.lock().unwrap().len();
     let peak_warmup = *update_sizes.lock().unwrap().iter().max().expect("updates");
     assert!(
-        peak_warmup > 100_000,
+        peak_warmup > STEADY_BOUND,
         "expected module linking to dominate warm-up updates, saw at most {peak_warmup} B"
     );
     assert!(evaluate(&mut environment, &mut repl, "%num.mul [8, 6]").contains("Int(48)"));
@@ -168,7 +168,7 @@ fn a_serializing_worker_reaches_the_same_state_as_a_shared_one() {
     let steady = &sizes[warm_mark..];
     assert!(!steady.is_empty(), "the repeat line must ship an update");
     assert!(
-        steady.iter().all(|&bytes| bytes < 20_000),
+        steady.iter().all(|&bytes| bytes < STEADY_BOUND),
         "a steady-state update must not scale with the program: {steady:?}"
     );
 }

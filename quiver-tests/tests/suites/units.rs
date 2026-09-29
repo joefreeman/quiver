@@ -122,7 +122,6 @@ fn run(program: &Program, entry: usize) -> String {
     let (value, _) = quiver_core::execute_bytecode_sync_with(
         program.to_bytecode(Some(entry)),
         &builtins(),
-        false,
         FUEL,
         None,
     )

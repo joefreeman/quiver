@@ -2,14 +2,14 @@ use crate::binary::BinaryData;
 use crate::binders::BinderStack;
 use crate::bytecode::{ConcreteType, Constant, Function, Instruction, Opcode};
 use crate::clock::Clock;
-use crate::compatibility::{ConcreteTypes, Verdict};
+use crate::compatibility::{Tables, TupleTablesDelta, Verdict, Verdicts, WalkValue};
 use crate::effects::Effect;
 use crate::error::{Error, Operation};
 use crate::process::{
     Action, Frame, Process, ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo,
     ProcessStatus, RestrictedContext, SelectState, StreamEvent, Wait, Watcher,
 };
-use crate::types::{BuiltinInfo, NIL, TupleTypeInfo, Type, TypeLookup};
+use crate::types::{BuiltinInfo, NIL, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Payload, ResourceId, Value};
 use crate::wire::{WirePayload, WireValue};
 use num_traits::ToPrimitive;
@@ -51,22 +51,15 @@ impl<T: Clone> TableUpdate<T> {
     }
 }
 
-/// How an update carries the derived compatibility tables (`TestType` sets, parameter
-/// sets, canonical tuple shapes, field offsets), shaped to the transport exactly as
-/// [`TableUpdate`] shapes the registries.
+/// How an update carries the derived tuple tables (canonical tuple shapes, field offsets),
+/// shaped to the transport exactly as [`TableUpdate`] shapes the registries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CompatibilityUpdate {
+pub enum TupleTablesUpdate {
     /// The complete tables by handle — the shared-memory transport. Every worker
     /// replaces its handles with these, so they all reference one allocation per table.
     /// (serde's `rc` feature makes the type serializable too, so it stays uniform
     /// across platforms; only the sharing differs.)
     Shared {
-        /// For each type_id, the set of concrete types compatible with it.
-        type_compatibility: Arc<Vec<ConcreteTypes>>,
-        /// For each function_id, the set of concrete types compatible with its parameter.
-        function_params: Arc<Vec<ConcreteTypes>>,
-        /// For each builtin_id, the set of concrete types compatible with its parameter.
-        builtin_params: Arc<Vec<ConcreteTypes>>,
         /// For each tuple_id, a canonical *value-shape* id (same name + field labels),
         /// letting `==` treat structurally-identical tuples built via different paths
         /// as equal.
@@ -77,7 +70,7 @@ pub enum CompatibilityUpdate {
     /// The extension since the previous update — the serializing transport, where
     /// re-encoding the whole tables per worker per update would swamp the payload.
     /// The worker extends its own copies in place.
-    Delta(crate::compatibility::CompatibilityDelta),
+    Delta(TupleTablesDelta),
 }
 
 /// Bundled program update data for incremental compilation.
@@ -89,21 +82,16 @@ pub struct ProgramUpdate {
     /// Full tuple type information (name, fields, is_partial). The arities a worker reads on
     /// the hot path are projected from this; the infos themselves serve `TypeLookup`.
     pub tuples: TableUpdate<TupleTypeInfo>,
-    /// The type table, for the worker's [`crate::types::TypeLookup`] — which serves the
-    /// *type-consuming* builtins alone (`%data.decode<'t>`, `%json.decode`/`encode<'t>`),
-    /// the only things that walk a type at runtime.
-    ///
-    /// Not, despite appearances, for `TestType`: pattern matching reads the precomputed
-    /// compatibility sets below, which the environment builds and ships already resolved. A
-    /// worker therefore uses a vanishingly small part of this table — 7 rows of 6,419 in
-    /// `examples/todo.qv` — but pruning it to the reachable closure has been measured and
-    /// rejected: the copy it would save is ~1% of startup.
+    /// The type table: what runtime type tests are decided from (see
+    /// [`crate::compatibility::Verdicts`]), and what the *type-consuming* builtins
+    /// (`%data.decode<'t>`, `%json.decode`/`encode<'t>`) read through the worker's
+    /// [`crate::types::TypeLookup`].
     pub types: TableUpdate<Type>,
     /// Builtin information (name and resolved types)
     pub builtins: TableUpdate<BuiltinInfo>,
     pub resources: Vec<String>,
-    /// The derived compatibility tables, whole or as a delta per the transport.
-    pub compatibility: CompatibilityUpdate,
+    /// The derived tuple tables, whole or as a delta per the transport.
+    pub tuple_tables: TupleTablesUpdate,
     /// Failure-provenance sites (debug builds): the full table, from which the executor
     /// prebuilds each site's annotated-nil value. `None` leaves any existing table as is.
     pub debug: Option<crate::bytecode::SiteTable>,
@@ -196,12 +184,11 @@ pub struct Executor<E: Effect> {
     builtin_type_arguments: Vec<Option<usize>>,
     /// Per builtin, the labels its instantiation builds tuples with.
     builtin_labels: Vec<Arc<crate::labels::LabelTable>>,
-    // Registered result types, indexed by builtin_id (parallel to `builtins`) — how an
-    // implementation that constructs typed results reads their ids off its own signature.
-    builtin_result_types: Vec<usize>,
-    /// Each builtin's parameter type, which a mailbox receiving through it tests messages
-    /// against.
-    builtin_param_types: Vec<usize>,
+    /// Each builtin's registered `(parameter, result)` types, indexed by builtin_id (parallel
+    /// to `builtins`): the parameter is what a mailbox receiving through it tests messages
+    /// against, and the result how an implementation that constructs typed results reads
+    /// their ids off its own signature.
+    builtin_signatures: Vec<(usize, usize)>,
     /// Whether this executor drives compile-time execution (a program's top level and
     /// module bodies), which must be deterministic: `Purity::HostRead` builtins are
     /// rejected. Set only by the sync driver; runtime workers leave it false.
@@ -223,16 +210,8 @@ pub struct Executor<E: Effect> {
     /// For each tuple_id, a canonical value-shape id (same name + field labels) — used by `==`
     /// so structurally-identical tuples built via different paths compare equal.
     canonical_tuples: Arc<Vec<usize>>,
-    /// For each type_id, the set of concrete types compatible with it (for `TestType` checks)
-    type_compatibility: Arc<Vec<ConcreteTypes>>,
-    /// For each function_id, the set of concrete types compatible with its parameter
-    function_param_compatibility: Arc<Vec<ConcreteTypes>>,
-    /// For each builtin_id, the set of concrete types compatible with its parameter
-    builtin_param_compatibility: Arc<Vec<ConcreteTypes>>,
-    /// Whether each function, builtin or pid concrete type fits each function or process type a
-    /// walk has met inside a tested type (see `compatibility::opaque_fits`), memoised as asked:
-    /// types and functions only ever append, so a verdict never changes.
-    opaque_verdicts: std::cell::RefCell<FxHashMap<(ConcreteType, usize), bool>>,
+    /// Runtime type tests' verdicts, decided as tests and receives meet each concrete type.
+    verdicts: std::cell::RefCell<Verdicts>,
     /// For each field-name id, each tuple_id's offset for that field — GetNamed's table.
     field_offsets: Arc<Vec<Vec<Option<usize>>>>,
     // Cumulative count of tombstone process entries reclaimed (see `reclaim_process`).
@@ -268,8 +247,6 @@ pub struct Executor<E: Effect> {
     next_ref: u64,
 }
 
-// Note: TupleLookup is not implemented for Executor anymore since tuples only stores arities
-// Type compatibility is now precomputed at compile time
 impl<E: Effect> Executor<E> {
     pub fn get_constant(&self, index: usize) -> Option<&Constant> {
         self.constants.get(index)
@@ -827,8 +804,7 @@ impl<E: Effect> Executor<E> {
             builtin_purities: vec![],
             builtin_type_arguments: vec![],
             builtin_labels: vec![],
-            builtin_result_types: vec![],
-            builtin_param_types: vec![],
+            builtin_signatures: vec![],
             compile_time: false,
             clock: None,
             assertions_passed: HashSet::new(),
@@ -849,10 +825,7 @@ impl<E: Effect> Executor<E> {
             // NIL (id 0) and OK (id 1) are each their own canonical shape; replaced on first update.
             canonical_tuples: Arc::new(vec![0, 1]),
             resources: vec![],
-            type_compatibility: Arc::default(),
-            function_param_compatibility: Arc::default(),
-            builtin_param_compatibility: Arc::default(),
-            opaque_verdicts: Default::default(),
+            verdicts: Default::default(),
             field_offsets: Arc::default(),
             reclaimed_processes: 0,
             constant_values: vec![],
@@ -1449,7 +1422,7 @@ impl<E: Effect> Executor<E> {
             || matches!(update.types, TableUpdate::Shared(_))
             || matches!(update.tuples, TableUpdate::Shared(_))
         {
-            self.opaque_verdicts.get_mut().clear();
+            self.verdicts.get_mut().clear();
         }
         update.constants.apply(&mut self.constants);
         update.functions.apply(&mut self.functions);
@@ -1500,8 +1473,7 @@ impl<E: Effect> Executor<E> {
             self.builtin_purities.clear();
             self.builtin_type_arguments.clear();
             self.builtin_labels.clear();
-            self.builtin_result_types.clear();
-            self.builtin_param_types.clear();
+            self.builtin_signatures.clear();
         }
         for b in infos.iter() {
             self.builtin_impls
@@ -1515,31 +1487,21 @@ impl<E: Effect> Executor<E> {
             self.builtin_type_arguments.push(b.type_argument);
             self.builtin_labels
                 .push(Arc::new(crate::labels::LabelTable::new(&b.labels)));
-            self.builtin_result_types.push(b.result_type);
-            self.builtin_param_types.push(b.param_type);
+            self.builtin_signatures.push((b.param_type, b.result_type));
             self.builtins.push(b.name.clone());
         }
         self.resources = update.resources;
-        match update.compatibility {
-            CompatibilityUpdate::Shared {
-                type_compatibility,
-                function_params,
-                builtin_params,
+        match update.tuple_tables {
+            TupleTablesUpdate::Shared {
                 canonical_tuples,
                 field_offsets,
             } => {
-                self.type_compatibility = type_compatibility;
-                self.function_param_compatibility = function_params;
-                self.builtin_param_compatibility = builtin_params;
                 self.canonical_tuples = canonical_tuples;
                 self.field_offsets = field_offsets;
             }
             // In place: on a serializing transport nothing else holds these handles,
             // so `make_mut` never clones.
-            CompatibilityUpdate::Delta(delta) => delta.apply(
-                Arc::make_mut(&mut self.type_compatibility),
-                Arc::make_mut(&mut self.function_param_compatibility),
-                Arc::make_mut(&mut self.builtin_param_compatibility),
+            TupleTablesUpdate::Delta(delta) => delta.apply(
                 Arc::make_mut(&mut self.canonical_tuples),
                 Arc::make_mut(&mut self.field_offsets),
             ),
@@ -2214,7 +2176,6 @@ impl<E: Effect> Executor<E> {
     ) -> Result<Option<Action<E>>, Error> {
         let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
-        // Use precomputed type compatibility instead of runtime type checking
         let is_match = self.check_type_compatible(&value, pattern_type_id);
 
         self.push_value(proc, if is_match { Value::ok() } else { Value::nil() });
@@ -2222,134 +2183,40 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
-    /// Whether a value inhabits a pattern type. The table admits or rejects it by its
-    /// construction type where that decides, and otherwise (a tuple built at a wider type than
-    /// it holds, or in generic code) has the test walk its fields.
+    /// Whether a value inhabits a type. Its concrete type decides where it can (see
+    /// [`Verdicts`]); a tuple built at a wider type than it holds, or in generic code, is
+    /// tested by its fields.
     fn check_type_compatible(&self, value: &Value, pattern_type_id: usize) -> bool {
-        self.type_compatibility
-            .get(pattern_type_id)
-            .is_some_and(|row| self.inhabits(value, pattern_type_id, row))
-    }
-
-    fn inhabits(&self, value: &Value, pattern_type_id: usize, row: &ConcreteTypes) -> bool {
-        match row.get(&self.get_concrete_type(value)) {
+        match self.verdict(value, pattern_type_id) {
             Some(Verdict::Admit) => true,
-            Some(Verdict::Inspect) => {
-                self.walk_inhabits(value, pattern_type_id, &mut BinderStack::default())
-            }
+            Some(Verdict::Inspect) => crate::compatibility::walk_inhabits(
+                value,
+                pattern_type_id,
+                self.tables(),
+                &mut BinderStack::default(),
+                &mut |part: &Value, part_type| {
+                    self.verdict(part, part_type) == Some(Verdict::Admit)
+                },
+            ),
             None => false,
         }
     }
 
-    /// Test a value against a type by its contents, the type's recursive references resolved
-    /// against the binders the walk has entered.
-    fn walk_inhabits(
-        &self,
-        value: &Value,
-        pattern_type_id: usize,
-        binders: &mut BinderStack,
-    ) -> bool {
-        let pattern_type_id = Type::strip_annotations(pattern_type_id, self);
-        let Some(pattern) = self.types.get(pattern_type_id) else {
-            return false;
-        };
-        match pattern {
-            Type::Top => true,
-            // A type variable left in a runtime test is one the test doesn't decide (the
-            // compiler rejects any other): a witness of a union member built in generic code,
-            // which the value is already known to belong to.
-            Type::Variable(_) => true,
-            Type::Integer => matches!(value, Value::Int(_) | Value::BigInt(_)),
-            Type::Binary => matches!(value, Value::Binary(_)),
-            Type::Reference => matches!(value, Value::Reference(_)),
-            Type::Resource(name) => matches!(
-                value,
-                Value::Resource(_, resource_type) if self.resources.get(*resource_type) == Some(name)
-            ),
-            // A function or pid can't be looked inside, but its construction type is exact.
-            Type::Callable { .. } | Type::Process { .. } => {
-                self.opaque_fits(value, pattern_type_id)
-            }
-            Type::Union(members) => {
-                binders.enter(pattern_type_id);
-                let found = members
-                    .iter()
-                    .any(|&member| self.walk_inhabits(value, member, binders));
-                binders.leave(pattern_type_id);
-                found
-            }
-            Type::Intersection(members) => members
-                .iter()
-                .all(|&member| self.walk_inhabits(value, member, binders)),
-            Type::Cycle(depth) => match binders.follow(*depth) {
-                Some((binder, cut)) => {
-                    let found = self.walk_inhabits(value, binder, binders);
-                    binders.restore(cut);
-                    found
-                }
-                // A reference past where the test started (a witness of a recursive union's
-                // member): presumed to hold, as the relation presumes it.
-                None => true,
-            },
-            Type::Tuple(pattern_tuple) => {
-                let (Value::Tuple(_, fields), Some(expected), Some(actual)) = (
-                    value,
-                    self.tuple_infos.get(*pattern_tuple),
-                    value_tuple_info(self, value),
-                ) else {
-                    return false;
-                };
-                expected.name == actual.name
-                    && expected.fields.len() == actual.fields.len()
-                    && expected
-                        .fields
-                        .iter()
-                        .zip(&actual.fields)
-                        .all(|((expected, _), (actual, _))| expected == actual)
-                    && expected
-                        .fields
-                        .iter()
-                        .zip(fields.iter())
-                        .all(|(&(_, field_type), field)| {
-                            self.walk_inhabits(field, field_type, binders)
-                        })
-            }
-            Type::Partial {
-                name,
-                fields: listed,
-                rest,
-            } => {
-                let (Value::Tuple(_, fields), Some(actual)) =
-                    (value, value_tuple_info(self, value))
-                else {
-                    return false;
-                };
-                if name.is_some() && *name != actual.name {
-                    return false;
-                }
-                let listed_fit = listed.iter().all(|(label, field_type)| {
-                    actual
-                        .fields
-                        .iter()
-                        .position(|(actual, _)| actual.as_deref() == Some(label.as_str()))
-                        .is_some_and(|index| {
-                            self.walk_inhabits(&fields[index], *field_type, binders)
-                        })
-                });
-                listed_fit
-                    && rest.is_none_or(|rest| {
-                        actual
-                            .fields
-                            .iter()
-                            .zip(fields.iter())
-                            .all(|((label, _), field)| {
-                                label.as_ref().is_some_and(|label| {
-                                    listed.iter().any(|(listed, _)| listed == label)
-                                }) || self.walk_inhabits(field, rest, binders)
-                            })
-                    })
-            }
-            Type::Annotated { .. } => unreachable!("stripped above"),
+    fn verdict(&self, value: &Value, pattern_type_id: usize) -> Option<Verdict> {
+        self.verdicts.borrow_mut().get(
+            self.get_concrete_type(value),
+            pattern_type_id,
+            self.tables(),
+        )
+    }
+
+    fn tables(&self) -> Tables<'_> {
+        Tables {
+            types: &self.types,
+            tuples: &self.tuple_infos,
+            functions: &self.functions,
+            builtin_signatures: &self.builtin_signatures,
+            resource_names: &self.resources,
         }
     }
 
@@ -2367,61 +2234,18 @@ impl<E: Effect> Executor<E> {
         }
     }
 
-    fn opaque_fits(&self, value: &Value, pattern_type_id: usize) -> bool {
-        let concrete = self.get_concrete_type(value);
-        if let Some(&fits) = self
-            .opaque_verdicts
-            .borrow()
-            .get(&(concrete, pattern_type_id))
-        {
-            return fits;
-        }
-        let builtin_signature = match concrete {
-            ConcreteType::Builtin(builtin_id) => self
-                .builtin_param_types
-                .get(builtin_id)
-                .zip(self.builtin_result_types.get(builtin_id))
-                .map(|(&parameter, &result)| (parameter, result)),
-            _ => None,
-        };
-        let fits = crate::compatibility::opaque_fits(
-            concrete,
-            pattern_type_id,
-            &self.types,
-            &self.tuple_infos,
-            &self.functions,
-            builtin_signature,
-        );
-        self.opaque_verdicts
-            .borrow_mut()
-            .insert((concrete, pattern_type_id), fits);
-        fits
-    }
-
-    /// Check if a message is compatible with a function/builtin's parameter type, as a type
-    /// test would (see `check_type_compatible`). Without tables (see `execute`), anything is.
+    /// Whether a message belongs to a receiving function's or builtin's parameter type, tested
+    /// as a type test would.
     fn check_message_compatible(&self, message: &Value, source: &Value) -> bool {
-        let (row, parameter) = match source {
-            Value::Function(func_id, _) => (
-                self.function_param_compatibility.get(*func_id),
-                self.functions
-                    .get(*func_id)
-                    .and_then(|func| match self.types.get(func.type_id) {
-                        Some(Type::Callable { parameter, .. }) => Some(*parameter),
-                        _ => None,
-                    }),
-            ),
-            Value::Builtin(builtin_id, _) => (
-                self.builtin_param_compatibility.get(*builtin_id),
-                self.builtin_param_types.get(*builtin_id).copied(),
-            ),
+        let parameter = match source {
+            Value::Function(func_id, _) => match self.types.get(self.functions[*func_id].type_id) {
+                Some(Type::Callable { parameter, .. }) => *parameter,
+                _ => unreachable!("a function's type is callable"),
+            },
+            Value::Builtin(builtin_id, _) => self.builtin_signatures[*builtin_id].0,
             _ => return true,
         };
-        match (row, parameter) {
-            (Some(row), Some(parameter)) => self.inhabits(message, parameter, row),
-            (Some(row), None) => row.get(&self.get_concrete_type(message)) == Some(&Verdict::Admit),
-            (None, _) => true,
-        }
+        self.check_type_compatible(message, parameter)
     }
 
     /// Jump by `offset` — counted, like the counter, from the instruction after the jump.
@@ -2542,7 +2366,10 @@ impl<E: Effect> Executor<E> {
                 // The context wraps the step-local `proc` (out of the map for the
                 // slice) and the executor; its verbs mutate the caller's record and
                 // queue at most one routed action.
-                let result_type = self.builtin_result_types.get(builtin_id).copied();
+                let result_type = self
+                    .builtin_signatures
+                    .get(builtin_id)
+                    .map(|&(_, result)| result);
                 let labels = self
                     .builtin_labels
                     .get(builtin_id)
@@ -3641,11 +3468,31 @@ fn collect_binaries(value: &Value, out: &mut HashMap<*const BinaryData, BinarySt
 // The executor carries the program's full type/tuple tables (shipped in every build),
 // so a type-consuming builtin can resolve its type argument's structure at runtime —
 // `format_type_by_id`, and eventually type-directed decoding, read through this.
-/// The tuple type info of a tuple value's construction type.
-fn value_tuple_info<'a>(lookup: &'a impl TypeLookup, value: &Value) -> Option<&'a TupleTypeInfo> {
-    match value {
-        Value::Tuple(tuple_id, _) => lookup.lookup_tuple(*tuple_id),
-        _ => None,
+impl WalkValue for Value {
+    fn is_integer(&self) -> bool {
+        matches!(self, Value::Int(_) | Value::BigInt(_))
+    }
+
+    fn is_binary(&self) -> bool {
+        matches!(self, Value::Binary(_))
+    }
+
+    fn is_reference(&self) -> bool {
+        matches!(self, Value::Reference(_))
+    }
+
+    fn resource_type(&self) -> Option<usize> {
+        match self {
+            Value::Resource(_, resource_type) => Some(*resource_type),
+            _ => None,
+        }
+    }
+
+    fn tuple(&self) -> Option<(usize, &[Self])> {
+        match self {
+            Value::Tuple(tuple_id, fields) => Some((*tuple_id, fields)),
+            _ => None,
+        }
     }
 }
 

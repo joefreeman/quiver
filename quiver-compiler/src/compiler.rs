@@ -5720,12 +5720,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         bytecode.entry = Some(bytecode.functions.len() - 1);
 
         // Execute the module to get the result value
-        // Modules are executed at compile time only to produce their value; they don't
-        // receive messages, so skip the (expensive) parameter-compatibility tables.
         let (module_value, _executor) = match quiver_core::execute_bytecode_sync_with(
             bytecode,
             self.builtins,
-            false,
             self.fuel,
             self.cancel.as_deref(),
         ) {
@@ -5985,7 +5982,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let (expr_value, executor) = quiver_core::execute_bytecode_sync_with(
             bytecode,
             &registry,
-            false,
             self.fuel,
             self.cancel.as_deref(),
         )

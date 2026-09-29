@@ -102,9 +102,9 @@ fn run_session(
     }
     let result = eval_line(&mut environment, &mut repl, &virtual_time_ms, BODY);
     // Every session doubles as an incremental-tables check: the environment extended
-    // its compatibility tables once per merge above, and the result must equal a
-    // from-scratch recomputation over the final merged program.
-    environment.verify_compatibility_tables();
+    // its tuple tables once per merge above, and the result must equal a from-scratch
+    // recomputation over the final merged program.
+    environment.verify_tuple_tables();
     result
 }
 
@@ -564,7 +564,8 @@ fn linked_html_live_encodes_frames() {
     // Regression lock: a linked tuple that is constructed but never referenced as a
     // type must still be runtime-testable. The linker now registers a `Type::Tuple`
     // wrapper entry for every tuple it interns — without one, the compatibility
-    // tables can't represent the tuple, every `TestType` rejects it, and %json's
+    // tables (since replaced by lazily decided verdicts) couldn't represent the tuple,
+    // every `TestType` rejected it, and %json's
     // encoder (called by %html/live.encode on the wire value) fell through its
     // Array branch into the Object branch, failing with `TypeMismatch { expected:
     // tuple, found: integer }`.

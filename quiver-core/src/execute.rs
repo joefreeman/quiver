@@ -1,8 +1,5 @@
 use crate::bytecode::Bytecode;
-use crate::compatibility::{
-    CompatibilityInput, compute_canonical_tuples, compute_field_offsets,
-    compute_param_compatibility, compute_type_compatibility,
-};
+use crate::compatibility::{compute_canonical_tuples, compute_field_offsets};
 use crate::effects::Effect;
 use crate::error::{Error, Operation};
 use crate::executor::Executor;
@@ -13,23 +10,14 @@ use crate::wire::WireValue;
 use std::sync::Arc;
 
 /// Execute bytecode synchronously, returning the result value and executor.
-///
-/// Computes type_compatibility and parameter_compatibility from the bytecode's
-/// type information for O(1) type checking at runtime.
 pub fn execute_bytecode_sync<E: Effect>(
     bytecode: Bytecode,
     builtins: &crate::builtins::BuiltinRegistry<E>,
 ) -> Result<(Value, Executor<E>), Error> {
-    execute_bytecode_sync_with(bytecode, builtins, true, u64::MAX, None)
+    execute_bytecode_sync_with(bytecode, builtins, u64::MAX, None)
 }
 
-/// As [`execute_bytecode_sync`], but `param_compat` controls whether parameter-compatibility
-/// tables (used only for mailbox message filtering during select/receive) are computed,
-/// and execution is bounded:
-///
-/// Computing them is O(functions × types) and is the dominant cost of compiling modules,
-/// which are executed at compile time purely to produce a value and do not receive messages.
-/// Skipping it leaves the tables empty, which `check_message_compatible` treats permissively.
+/// As [`execute_bytecode_sync`], but bounded:
 ///
 /// `fuel` is the step budget in executor units; running past it answers
 /// [`Error::ExhaustedAtCompileTime`], the bound that turns an infinite loop at a
@@ -39,7 +27,6 @@ pub fn execute_bytecode_sync<E: Effect>(
 pub fn execute_bytecode_sync_with<E: Effect>(
     bytecode: Bytecode,
     builtins: &crate::builtins::BuiltinRegistry<E>,
-    param_compat: bool,
     fuel: u64,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<(Value, Executor<E>), Error> {
@@ -53,29 +40,12 @@ pub fn execute_bytecode_sync_with<E: Effect>(
     // are rejected at the builtin dispatch site.
     executor.compile_time = true;
 
-    // Compute type compatibility for O(1) runtime type checks
     assert!(
         bytecode.tuples.len() >= 2,
         "Bytecode must have at least NIL and OK tuples"
     );
-
-    let input = CompatibilityInput {
-        types: &bytecode.types,
-        tuples: &bytecode.tuples,
-        functions: &bytecode.functions,
-        builtins: &bytecode.builtins,
-        resource_names: &bytecode.resources,
-        field_names: &bytecode.field_names,
-    };
-
-    let type_compatibility = compute_type_compatibility(&input);
     let canonical_tuples = compute_canonical_tuples(&bytecode.tuples);
     let field_offsets = compute_field_offsets(&bytecode.field_names, &bytecode.tuples);
-    let (function_param_compatibility, builtin_param_compatibility) = if param_compat {
-        compute_param_compatibility(&input)
-    } else {
-        (Vec::new(), Vec::new())
-    };
 
     let program_update = ProgramUpdate {
         // Appended, not shared: this drives one executor that is already pre-seeded with the
@@ -89,10 +59,7 @@ pub fn execute_bytecode_sync_with<E: Effect>(
         builtins: TableUpdate::Appended(bytecode.builtins),
         resources: bytecode.resources,
         // Whole tables: this executor applies exactly one update, from empty.
-        compatibility: crate::executor::CompatibilityUpdate::Shared {
-            type_compatibility: Arc::new(type_compatibility),
-            function_params: Arc::new(function_param_compatibility),
-            builtin_params: Arc::new(builtin_param_compatibility),
+        tuple_tables: crate::executor::TupleTablesUpdate::Shared {
             canonical_tuples: Arc::new(canonical_tuples),
             field_offsets: Arc::new(field_offsets),
         },

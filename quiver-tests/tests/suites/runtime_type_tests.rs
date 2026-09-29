@@ -115,3 +115,29 @@ fn test_a_generically_built_tuple_holding_a_function_is_inspected() {
         )
         .expect("[Fits, No]");
 }
+
+#[test]
+fn test_verdicts_follow_the_program_as_it_grows() {
+    // Verdicts are decided as tests meet each concrete type, so a later line's tuples and
+    // functions — which the first line's tests never saw — are decided when they arrive.
+    quiver()
+        .evaluate(
+            "'ai = A['int]
+             check = #_ { | ='ai => Yes | No }
+             'fs = [f: #'int -> 'int]
+             checkf = #_ { | ='fs => Yes | No }
+             [A[1] ~> check, [f: #'int { $ }] ~> checkf]",
+        )
+        .expect("[Yes, Yes]")
+        .then_evaluate(
+            "mk = #<'t>'t { A[$] }
+             wrap = #<'t>'t { [f: $] }
+             [mk 2 ~> check, mk <01> ~> check, B[1] ~> check]",
+        )
+        .expect("[Yes, No, No]")
+        .then_evaluate(
+            "g = #'bin { $ }
+             [[f: g] ~> checkf, wrap #'int { $ } ~> checkf, wrap g ~> checkf]",
+        )
+        .expect("[No, Yes, No]");
+}

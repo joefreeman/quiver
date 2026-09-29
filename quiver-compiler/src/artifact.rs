@@ -2240,9 +2240,9 @@ pub fn link_unit<E: Effect>(
         remaps.field_names.insert(local, session);
     }
     intern_types_and_tuples(unit, program, &mut remaps);
-    // Every linked tuple must also have its `Type::Tuple` wrapper entry: the runtime
-    // compatibility tables represent a concrete tuple by that entry, so a tuple
-    // without one is invisible to every `TestType` test. A from-source compile
+    // Every linked tuple must also have its `Type::Tuple` wrapper entry: runtime type
+    // tests decide a concrete tuple by that entry, so a tuple without one can only be
+    // walked field by field. A from-source compile
     // registers the wrapper while typing the construction, but the artifact closure
     // only carries types the module's code references by type id — a tuple that is
     // constructed yet never referenced as a type would otherwise arrive untestable.

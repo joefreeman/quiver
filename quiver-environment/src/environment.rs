@@ -10,9 +10,9 @@ use quiver_compiler::{CompiledUnit, UnitKey};
 use quiver_core::bytecode::Bytecode;
 use quiver_core::bytecode::ConcreteType;
 use quiver_core::bytecode::{Constant, Function};
-use quiver_core::compatibility::{CompatibilityInput, CompatibilityTables, Verdict};
+use quiver_core::compatibility::{Tables, TupleTables, Verdict, Verdicts};
 use quiver_core::effects::{Effect, EffectBackend, ResultTupleInfo};
-use quiver_core::executor::{CompatibilityUpdate, ProgramUpdate, TableUpdate};
+use quiver_core::executor::{ProgramUpdate, TableUpdate, TupleTablesUpdate};
 use quiver_core::process::{
     ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo, ProcessStatus, RegistryRequest,
 };
@@ -533,9 +533,14 @@ pub struct Environment<E: Effect> {
     runtime_declarations: quiver_core::builtins::RuntimeDeclarations,
     resource_ownership: HashMap<ResourceId, ProcessId>,
 
-    /// Compatibility tables for the merged program, extended incrementally at each merge
-    /// (the program grows append-only) and shipped whole to the workers.
-    compatibility: CompatibilityTables,
+    /// Tuple tables for the merged program, extended incrementally at each merge (the
+    /// program grows append-only) and shipped to the workers.
+    tuple_tables: TupleTables,
+    /// Verdicts for the type tests the environment itself makes (`%registry.lookup`), and
+    /// the merged program's resource names and builtin signatures they are decided with.
+    verdicts: Verdicts,
+    resource_names: Vec<String>,
+    builtin_signatures: Vec<(usize, usize)>,
 
     /// The `%registry` name table: canonical data-notation key → `(pid, root function)`.
     /// Entries only ever name live processes — registration installs a
@@ -589,7 +594,10 @@ impl<E: Effect> Environment<E> {
             effect_backend: None,
             runtime_declarations: quiver_core::builtins::RuntimeDeclarations::default(),
             resource_ownership: HashMap::new(),
-            compatibility: CompatibilityTables::default(),
+            tuple_tables: TupleTables::default(),
+            verdicts: Verdicts::default(),
+            resource_names: Vec::new(),
+            builtin_signatures: Vec::new(),
             registry: HashMap::new(),
             collection: None,
             spawns_since_collection: 0,
@@ -1441,15 +1449,13 @@ impl<E: Effect> Environment<E> {
             || !patched_constants.is_empty()
         {
             let resource_names = self.program.collect_resource_names();
-
-            let input = CompatibilityInput {
-                types: self.program.get_types(),
-                tuples: self.program.get_tuples(),
-                functions: self.program.get_functions(),
-                builtins: self.program.get_builtins(),
-                resource_names: &resource_names,
-                field_names: self.program.get_field_names(),
-            };
+            self.resource_names = resource_names.clone();
+            self.builtin_signatures = self
+                .program
+                .get_builtins()
+                .iter()
+                .map(|info| (info.param_type, info.result_type))
+                .collect();
 
             // Shape the growing tables to the transport. Where the workers are threads, each
             // takes the whole merged table by pointer and they all reference one allocation —
@@ -1458,23 +1464,23 @@ impl<E: Effect> Environment<E> {
             // form: the whole program would otherwise be re-encoded, per worker, per update.
             let shared = self.workers.iter().all(|worker| worker.shares_memory());
 
-            // Extend the incrementally-maintained compatibility tables to the merged
-            // program, capturing the extension as a delta when a serializing transport
-            // will ship it.
-            let delta = self.compatibility.update(&input, !shared);
+            // Extend the incrementally-maintained tuple tables to the merged program,
+            // capturing the extension as a delta when a serializing transport will ship it.
+            let delta = self.tuple_tables.update(
+                self.program.get_tuples(),
+                self.program.get_field_names(),
+                !shared,
+            );
 
             // Built once and wrapped once for the shared form: `update_cmd.clone()` below
             // runs per worker, so without the `Arc` each table was deep-copied N times
             // into N identical private copies; now the clone is a refcount bump and the
             // natives share one copy.
-            let compatibility = match delta {
-                Some(delta) => CompatibilityUpdate::Delta(delta),
-                None => CompatibilityUpdate::Shared {
-                    type_compatibility: Arc::new(self.compatibility.type_compatibility.clone()),
-                    function_params: Arc::new(self.compatibility.function_params.clone()),
-                    builtin_params: Arc::new(self.compatibility.builtin_params.clone()),
-                    canonical_tuples: Arc::new(self.compatibility.canonical_tuples.clone()),
-                    field_offsets: Arc::new(self.compatibility.field_offsets.clone()),
+            let tuple_tables = match delta {
+                Some(delta) => TupleTablesUpdate::Delta(delta),
+                None => TupleTablesUpdate::Shared {
+                    canonical_tuples: Arc::new(self.tuple_tables.canonical_tuples.clone()),
+                    field_offsets: Arc::new(self.tuple_tables.field_offsets.clone()),
                 },
             };
 
@@ -1502,7 +1508,7 @@ impl<E: Effect> Environment<E> {
                 types: table(shared, self.program.get_types(), new_types),
                 builtins: table(shared, self.program.get_builtins(), new_builtins),
                 resources: resource_names,
-                compatibility,
+                tuple_tables,
                 // Full snapshot: the executor rebuilds its prebuilt site values from it.
                 debug: self.program.debug_sites().cloned(),
                 runtime: Some(runtime_tables),
@@ -1526,21 +1532,11 @@ impl<E: Effect> Environment<E> {
         Ok(())
     }
 
-    /// Assert the incrementally-maintained compatibility tables equal a full
-    /// recomputation over the merged program. A validation hook for tests.
-    pub fn verify_compatibility_tables(&self) {
-        let resource_names = self.program.collect_resource_names();
-        self.compatibility.assert_matches_full(
-            &CompatibilityInput {
-                types: self.program.get_types(),
-                tuples: self.program.get_tuples(),
-                functions: self.program.get_functions(),
-                builtins: self.program.get_builtins(),
-                resource_names: &resource_names,
-                field_names: self.program.get_field_names(),
-            },
-            self.program.stubbed_counts() != (0, 0),
-        );
+    /// Assert the incrementally-maintained tuple tables equal a full recomputation over
+    /// the merged program. A validation hook for tests.
+    pub fn verify_tuple_tables(&self) {
+        self.tuple_tables
+            .assert_matches_full(self.program.get_tuples(), self.program.get_field_names());
     }
 
     fn handle_event(&mut self, event: Event<E>) -> Result<(), EnvironmentError> {
@@ -2146,25 +2142,28 @@ impl<E: Effect> Environment<E> {
                 self.answer_registry(caller, verdict)
             }
             RegistryRequest::Lookup { key, expected_type } => {
-                // The type test is the same set-membership check `TestType` performs on
-                // a worker: the builtin's type argument seeded a compatibility row,
-                // and the pid's root function is its concrete discriminator. The
-                // variance rules (send contravariant, result covariant, state
-                // covariant and strict) were applied when the row was built.
-                let result = self
-                    .registry
-                    .get(&key)
-                    .filter(|(_, function_index)| {
-                        self.compatibility
-                            .type_compatibility
-                            .get(expected_type)
-                            .is_some_and(|row| {
-                                row.get(&ConcreteType::Process(*function_index))
-                                    == Some(&Verdict::Admit)
-                            })
-                    })
-                    .map(|(pid, function_index)| WireValue::Process(*pid, *function_index))
-                    .unwrap_or_else(WireValue::nil);
+                // The same verdict `TestType` reaches on a worker: a pid is judged by its
+                // root function's process type, with the usual variance rules (send
+                // contravariant, result covariant, state covariant and strict).
+                let tables = Tables {
+                    types: self.program.get_types(),
+                    tuples: self.program.get_tuples(),
+                    functions: self.program.get_functions(),
+                    builtin_signatures: &self.builtin_signatures,
+                    resource_names: &self.resource_names,
+                };
+                let result = match self.registry.get(&key) {
+                    Some(&(pid, function_index))
+                        if self.verdicts.get(
+                            ConcreteType::Process(function_index),
+                            expected_type,
+                            tables,
+                        ) == Some(Verdict::Admit) =>
+                    {
+                        WireValue::Process(pid, function_index)
+                    }
+                    _ => WireValue::nil(),
+                };
                 self.answer_registry(caller, result)
             }
         }
