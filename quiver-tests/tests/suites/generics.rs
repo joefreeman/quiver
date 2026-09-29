@@ -481,15 +481,20 @@ fn test_type_parameters_visible_in_body_positions() {
                first_full [Empty, Full[7]] ~> =Full[x]; x"#,
         )
         .expect("7");
-    // A checked annotation retrieval can state a shape mentioning the parameter.
+}
+
+#[test]
+fn test_checked_retrieval_cannot_test_a_type_parameter() {
+    // The entry's `'t` is whatever the caller chose, which no runtime test can check: an
+    // annotation carrying a binary would come back as the `'int` of a `Box[1]`.
     quiver()
         .evaluate(
             r#"'meta<'t> = [it: 't]
-               tag = #<'t>[Box['t], 't] { =[v, m]; v ~> { :meta [it: m] } }
-               peek = #<'t>Box['t] { $:meta<'meta<'t>> ~> =(it: x); x }
-               tag [Box[1], 2] ~> peek ~"#,
+               peek = #<'t>Box['t] -> 't { $:meta<'meta<'t>> ~> =(it: x); x }
+               b = Box[1] ~> { :meta [it: <01>] }
+               peek b ~> __integer_add__ [~, 1]"#,
         )
-        .expect("2");
+        .expect_error_containing("Cannot test a value against [it: 't]");
 }
 
 #[test]
@@ -782,6 +787,69 @@ fn test_a_declared_result_must_admit_a_type_variable_step_failing() {
     quiver()
         .evaluate("#<'t>'t -> ('int | []) { $; 5 }")
         .expect_type("#'t -> ('int | [])");
+    // A failing `'t` step's nil is a `'t`, so a result of `'t` admits it.
+    quiver()
+        .evaluate("f = #<'t>'t -> 't { $; $ }; f 5")
+        .expect("5");
+}
+
+#[test]
+fn test_a_bare_nil_is_not_a_type_variable() {
+    // `'t` may be instantiated without nil, so nil alongside `'t` fits only where nil does.
+    quiver()
+        .evaluate("f = #<'t: 'bin>('t | []) -> 't { $ }; f [] ~> __binary_length__ ~")
+        .expect_error_containing("'t | [] is not 't");
+    quiver()
+        .evaluate(
+            "f = #<'t: 'bin>['t, 'int] { g = #'t { $ }; $ ~> { =[~, _] | =[_, ~] } ~> g }
+             f [<01>, 5]",
+        )
+        .expect_error_containing("'int | 't is not 't");
+}
+
+#[test]
+fn test_a_type_test_cannot_decide_a_type_parameter() {
+    // No runtime test knows what the caller chose for `'t`, so a test the variable decides
+    // is rejected — otherwise it would cast any value to `'t`.
+    quiver()
+        .evaluate(
+            "cast = #<'t>['t, _] -> 't { | $1 ~> =('t & v) => v | $0 }
+             cast [<01>, 42] ~> __binary_length__ ~",
+        )
+        .expect_error_containing("Cannot test a value against 't");
+    quiver()
+        .evaluate("f = #<'t>[_] -> ('t | []) { $ ~> { =[('t & v)] => v } }; f<'bin> [5]")
+        .expect_error_containing("Cannot test a value against 't");
+    quiver()
+        .evaluate("f = #<'t>_ { | =A['t] => Yes | No }; f<'int> A[<01>]")
+        .expect_error_containing("Cannot test a value against 't");
+    // Nil passes a test of `'t` (the caller may have chosen a type holding it), so the test
+    // can't strip it.
+    quiver()
+        .evaluate("f = #<'t: 'bin>('t | []) { $ ~> =('t & v); __binary_length__ v }; f []")
+        .expect_error_containing("Cannot test a value against 't");
+    // Bounds don't help: two values within the bound may still be different types.
+    quiver()
+        .evaluate("cast = #<'t: '%data>['t, _] -> 't { | $1 ~> =('t & v) => v | $0 }; cast")
+        .expect_error_containing("Cannot test a value against 't");
+}
+
+#[test]
+fn test_a_type_test_the_variables_do_not_decide_is_allowed() {
+    // Testing a `'t` value against `'t` needs no runtime test.
+    quiver()
+        .evaluate("f = #<'t>'t { $ ~> =('t & v); v }; f 5")
+        .expect("5");
+    // Only the nil is ruled out here, whatever `'t` is.
+    quiver()
+        .evaluate(
+            "f = #<'t>('%list<'t> | []) -> ('%list<'t> | []) { $ ~> =('%list<'t> & xs); xs }
+             [f %list{ 1 }, f []]",
+        )
+        .expect("[Cons[1, Nil], []]");
+    quiver()
+        .evaluate("%list{ 1, 2 } ~> %list.iter ~> %list.try_collect")
+        .expect("Cons[1, Cons[2, Nil]]");
 }
 
 #[test]

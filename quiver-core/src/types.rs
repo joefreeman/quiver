@@ -861,8 +861,13 @@ fn check_type_relation<T: TypeLookup>(
         }
         // Free type variables match anything, except when proving subsumption, where a
         // variable stands for one unknown type, so only it is known to hold its values. A
-        // union on the other side is split by its own arm.
-        (Type::Variable(_), _) | (_, Type::Variable(_)) if mode != UnionMode::Subsumption => true,
+        // union on the other side is split by its own arm, which must see it first: a rigid
+        // variable holds only its own values, so `'t | []` does not fit `'t`.
+        (Type::Variable(_), other) | (other, Type::Variable(_))
+            if mode != UnionMode::Subsumption && !matches!(other, Type::Union(_)) =>
+        {
+            true
+        }
         (Type::Variable(v1), Type::Variable(v2)) => v1 == v2,
         (Type::Variable(_), other) | (other, Type::Variable(_))
             if !matches!(other, Type::Union(_)) =>

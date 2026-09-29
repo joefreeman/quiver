@@ -720,6 +720,23 @@ fn type_check_requirements(
     for member in members {
         let resolved = super::typing::resolve_ast_type(env, scopes, member.clone(), program)?;
         let next = intersect_types(narrowed, resolved, program);
+        // A type variable stands for whatever the caller chose, which the running code does
+        // not know, so a test can only check the type with its variables erased to `_`. That
+        // is enough where the variables don't decide the outcome (`=('<'t> & xs)` on a
+        // `'<'t> | []`, where only the nil is ruled out); where they do (`=('t & v)` on a
+        // `_`), the narrowing would claim what nothing tested.
+        let tested = if super::typing::contains_variables(resolved, &*program) {
+            let erased = super::typing::erase_type_variables(resolved, program);
+            let by_erased = intersect_types(narrowed, erased, program);
+            if !quiver_core::types::is_compatible(by_erased, next, &*program) {
+                return Err(Error::TypeTestNotConcrete {
+                    tested: quiver_core::format::format_type_by_id(&*program, resolved),
+                });
+            }
+            erased
+        } else {
+            resolved
+        };
         // Elide the runtime check only when the scrutinee *provably* fits: identical
         // ids always do, and otherwise `is_compatible` can vouch only for cycle-free
         // operands — it traverses a `Cycle` optimistically, so trusting it on a
@@ -738,7 +755,7 @@ fn type_check_requirements(
         if !provable {
             requirements.push(Requirement {
                 path: path.clone(),
-                check: RuntimeCheck::TypeId(resolved),
+                check: RuntimeCheck::TypeId(tested),
             });
         }
         narrowed = next;

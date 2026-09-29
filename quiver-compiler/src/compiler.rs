@@ -106,6 +106,12 @@ pub enum Error {
     TypeArgumentNotConcrete {
         builtin: String,
     },
+    /// A type test (`='t`, `('t & v)`) or checked retrieval (`x:key<'t>`) against a type
+    /// still containing type variables. A type parameter stands for whatever the caller
+    /// chose, which the running code does not know, so no runtime test can decide it.
+    TypeTestNotConcrete {
+        tested: String,
+    },
     TupleNotInRegistry {
         tuple_id: usize,
     },
@@ -522,6 +528,14 @@ impl std::fmt::Display for Error {
                     f,
                     "`__{builtin}__` needs a concrete type argument — one still containing \
                      type variables has no runtime representation to embed"
+                )
+            }
+            Error::TypeTestNotConcrete { tested } => {
+                write!(
+                    f,
+                    "Cannot test a value against {tested}: a type parameter stands for whatever \
+                     the caller chose, which is unknown at runtime. Test against a concrete type \
+                     instead"
                 )
             }
             Error::TupleNotInRegistry { tuple_id } => {
@@ -3462,29 +3476,40 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // Compatibility treats a type variable as matching anything, so a generic function's
             // own type parameters are held rigid first: each stands in as a distinct opaque type
             // (a field-less tuple whose name no program can spell), which a body only fits by keeping
-            // it where the declaration has it — whatever the parameter is instantiated to. It may
-            // be instantiated with nil, so its stand-in holds nil too: a body failing on a `'t`
-            // step (its `'t & []`) fits only a declared result admitting nil.
+            // it where the declaration has it — whatever the parameter is instantiated to. Whether
+            // an instantiation admits nil matters too: a body failing on a `'t` step (its
+            // `'t & []`) answers nil exactly when `'t` holds one, which is a `'t` but not an
+            // `'int`; and a bare `[]` alongside `'t` is not a `'t` that holds none. So the body
+            // must fit under every choice of which stand-ins hold nil.
             let nil = self.program.register_type(Type::nil());
-            let rigid: HashMap<String, usize> = declared
+            let stand_ins: Vec<(String, usize)> = declared
                 .names()
                 .into_iter()
                 .map(|variable| {
                     let opaque = self
                         .program
                         .register_tuple(Some(format!("'{variable}")), Vec::new());
-                    let opaque = self.program.register_type(Type::Tuple(opaque));
-                    (
-                        variable,
-                        typing::union_type_ids(self.program, vec![opaque, nil]),
-                    )
+                    (variable, self.program.register_type(Type::Tuple(opaque)))
                 })
                 .collect();
-            let types_match = body_type == expected_return_type || {
-                let body = typing::substitute(body_type, &rigid, self.program);
-                let expected = typing::substitute(expected_return_type, &rigid, self.program);
-                quiver_core::types::is_compatible(body, expected, &*self.program)
-            };
+            let types_match = body_type == expected_return_type
+                || (0..1usize << stand_ins.len()).all(|nils| {
+                    let rigid: HashMap<String, usize> = stand_ins
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (variable, opaque))| {
+                            let stand_in = if nils & (1 << index) == 0 {
+                                *opaque
+                            } else {
+                                typing::union_type_ids(self.program, vec![*opaque, nil])
+                            };
+                            (variable.clone(), stand_in)
+                        })
+                        .collect();
+                    let body = typing::substitute(body_type, &rigid, self.program);
+                    let expected = typing::substitute(expected_return_type, &rigid, self.program);
+                    quiver_core::types::is_compatible(body, expected, &*self.program)
+                });
 
             if !types_match {
                 // If the *only* reason for the mismatch is the body falling through to nil over a
@@ -6347,6 +6372,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             ast_type.clone(),
                             self.program,
                         )?;
+                        typing::require_testable(asked, &*self.program)?;
                         let (key_id, result_type, _) = annotations::checked_retrieval_type(
                             self.program,
                             current_type,
@@ -8839,6 +8865,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             ast_type.clone(),
                             self.program,
                         )?;
+                        typing::require_testable(asked, &*self.program)?;
                         let (key_id, result_type, needs_check) =
                             annotations::checked_retrieval_type(
                                 self.program,

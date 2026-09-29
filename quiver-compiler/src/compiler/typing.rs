@@ -1531,6 +1531,27 @@ fn display_module_type(module: &[String], member: Option<&str>) -> String {
     }
 }
 
+/// Require that a runtime type test can decide `type_id`: one mentioning a type variable
+/// has no runtime meaning, as the code does not know what its caller chose.
+pub fn require_testable(type_id: usize, lookup: &impl TypeLookup) -> Result<(), Error> {
+    if contains_variables(type_id, lookup) {
+        return Err(Error::TypeTestNotConcrete {
+            tested: quiver_core::format::format_type_by_id(lookup, type_id),
+        });
+    }
+    Ok(())
+}
+
+/// `type_id` with every type variable replaced by the top type: what a runtime test of it
+/// can actually check, knowing nothing of what the variables were instantiated to.
+pub fn erase_type_variables(type_id: usize, program: &mut Program) -> usize {
+    let mut names = Vec::new();
+    collect_type_variables(type_id, &*program, &mut names);
+    let top = program.register_type(Type::Top);
+    let bindings = names.into_iter().map(|name| (name, top)).collect();
+    substitute(type_id, &bindings, program)
+}
+
 /// Check if a type contains any unbound type variables
 pub fn contains_variables(type_id: usize, lookup: &impl TypeLookup) -> bool {
     let Some(typ) = lookup.lookup_type(type_id) else {
