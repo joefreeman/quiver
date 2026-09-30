@@ -77,6 +77,7 @@ quiv run program.qv
   - `-e, --eval <CODE>` - Execute code directly from the command line
   - `-q, --quiet` - Print nothing but the program's own output
   - `--release` - Skip failure-provenance stamps (`run` compiles debug by default)
+  - `-d, --detach` - Start the program on the server and return, printing its pid. It runs until it finishes or `quiv kill` stops it, and `quiv proc <PID>` shows its result
 - **`quiv compile <FILE>`** - Compile source to bytecode, writing `foo.qv` to `foo.qx` beside it (`--eval` and stdin write to stdout)
   - `-o, --output <FILE>` - Write the bytecode here instead, or `-` for stdout
   - `--debug` - Include failure-provenance stamps in the bytecode

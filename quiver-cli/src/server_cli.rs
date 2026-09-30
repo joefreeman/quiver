@@ -207,6 +207,7 @@ pub fn server_command(
             get(inspect_process).delete(delete_process),
         )
         .route("/processes/{id}/resume", post(resume_process))
+        .route("/processes/{id}/start", post(start_process))
         .route("/processes/{id}/compact", post(compact_process))
         .route("/processes/{id}/cancel", post(cancel_process))
         .route("/processes/{id}/heartbeat", post(heartbeat_process))
@@ -623,6 +624,53 @@ async fn resume_process(
     Ok(axum::Json(outcome))
 }
 
+/// `POST …/start` — hand a program to the root as `resume` does, but answer as soon as
+/// it is running rather than when it finishes: a detached run. The root then belongs to
+/// the server, which stops it — with the subtree it owns — once the program finishes,
+/// as the client of an attached run would. Its outcome stays readable on the tombstone
+/// until reclamation.
+async fn start_process(
+    State(state): State<Shared>,
+    AxumPath(id): AxumPath<u64>,
+    axum::Json(payload): axum::Json<ResumePayload>,
+) -> Result<StatusCode, Response> {
+    let control = root_control(&state, id)?;
+    let shared = Arc::clone(&state);
+    blocking(move || {
+        if control.busy.swap(true, Ordering::Acquire) {
+            return Err((
+                StatusCode::CONFLICT,
+                "a resume is already in flight for this process".to_string(),
+            )
+                .into_response());
+        }
+        let pid = id as ProcessId;
+        let request = ResumeRequest {
+            payload,
+            keep: None,
+        };
+        let request_id = match begin_resume(&shared, pid, &control, request) {
+            Ok(request_id) => request_id,
+            Err(response) => {
+                control.busy.store(false, Ordering::Release);
+                return Err(response);
+            }
+        };
+        std::thread::spawn(move || {
+            // The outcome is the tombstone's to show; nobody is waiting for it here.
+            let _ = wait_for(&shared, request_id, None);
+            lock(&shared.roots, "roots").remove(&pid);
+            match lock(&shared.environment, "environment").stop_process(pid) {
+                // Already stopped and reclaimed, by a `DELETE` that raced completion.
+                Ok(()) | Err(EnvironmentError::ProcessNotFound(_)) => {}
+                Err(e) => eprintln!("quiv server: stopping detached process {pid}: {e:?}"),
+            }
+        });
+        Ok(StatusCode::ACCEPTED)
+    })
+    .await?
+}
+
 /// The blocking heart of `resume`: hand the unit to the process, wait on the
 /// progress signal (stopping the root once if a cancel lands), render the outcome.
 fn run_resume(
@@ -631,6 +679,18 @@ fn run_resume(
     control: &RootControl,
     request: ResumeRequest,
 ) -> Result<Outcome, Response> {
+    let request_id = begin_resume(state, pid, control, request)?;
+    finish_resume(state, pid, control, request_id)
+}
+
+/// Link the unit and the modules it names, and resume the root with it: the request
+/// to wait on for its result.
+fn begin_resume(
+    state: &Shared,
+    pid: ProcessId,
+    control: &RootControl,
+    request: ResumeRequest,
+) -> Result<u64, Response> {
     control.cancel.store(false, Ordering::Relaxed);
     let request_id = {
         let mut env = lock(&state.environment, "environment");
@@ -663,6 +723,16 @@ fn run_resume(
         }
         env.request_result(pid, request.keep).map_err(internal)?
     };
+    Ok(request_id)
+}
+
+/// Wait for a resume's result, stopping the root once if a cancel lands, and render it.
+fn finish_resume(
+    state: &Shared,
+    pid: ProcessId,
+    control: &RootControl,
+    request_id: u64,
+) -> Result<Outcome, Response> {
     match wait_for(state, request_id, Some((pid, &control.cancel))) {
         Ok(RequestResult::Result(Ok(value))) => {
             if control.cancel.load(Ordering::Relaxed) {

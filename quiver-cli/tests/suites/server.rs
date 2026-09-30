@@ -1442,6 +1442,51 @@ fn the_listing_shows_ownership_links_and_names_and_any_process_can_be_stopped() 
 }
 
 #[test]
+fn a_started_program_runs_detached_and_the_server_stops_it_when_it_finishes() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::start(&[]);
+    let client = server.client();
+
+    // The start answers before the program finishes: its child is still waiting.
+    let pid = client.create_process(None).expect("create failed");
+    client
+        .start(
+            pid,
+            ResumePayload {
+                unit: program("#[] { c = @[] { !'int } []; [c]; 7 }"),
+                modules: Vec::new(),
+            },
+        )
+        .expect("start failed");
+
+    // Once it finishes, the server stops the root as an attached client would delete
+    // it: no longer a client's root, its owned child torn down, its result kept.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let listing = loop {
+        let listing = client.processes().expect("listing failed");
+        let root = listing.processes.iter().find(|process| process.id == pid);
+        if root.is_some_and(|root| root.root.is_none()) {
+            break listing;
+        }
+        assert!(Instant::now() < deadline, "the root was never stopped");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let child = listing
+        .processes
+        .iter()
+        .find(|process| process.owner == Some(pid))
+        .expect("the child is listed under the root");
+    assert!(!quiver_cli::inspection::is_live(child.status));
+    let detail = client.process(pid).expect("detail failed");
+    assert_eq!(detail.status, ProcessStatus::Completed);
+    assert!(
+        matches!(&detail.result, Some(Outcome::Value { rendered, .. }) if rendered == "7"),
+        "the result stays readable: {:?}",
+        detail.result
+    );
+}
+
+#[test]
 fn the_client_reads_the_events_stream_over_the_socket() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let server = Server::start(&[]);

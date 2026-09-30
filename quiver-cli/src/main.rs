@@ -62,6 +62,11 @@ enum Commands {
         /// Release build: skip failure-provenance stamps (`run` compiles debug by default).
         #[arg(long)]
         release: bool,
+
+        /// Start the program on the server and return, printing its pid. It runs until it
+        /// finishes or `quiv kill` stops it; `quiv proc <PID>` shows its result.
+        #[arg(short, long)]
+        detach: bool,
     },
 
     /// Print a program's bytecode, compiling it first if given source.
@@ -263,7 +268,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             input,
             quiet,
             release,
-        }) => run_command(input, quiet, release)?,
+            detach,
+        }) => run_command(input, quiet, release, detach)?,
         Some(Commands::Inspect { input, debug }) => {
             exit_on_broken_pipe();
             inspect_command(input, debug)?
@@ -495,6 +501,7 @@ fn run_command(
     input: ProgramInput,
     quiet: bool,
     release: bool,
+    detach: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Compile client-side (parse and compile errors are local, with the usual
     // diagnostics), or take a compiled program as given. Either way the server is handed
@@ -514,7 +521,37 @@ fn run_command(
         }
     };
 
-    run_on_server(compiled, quiet)
+    if detach {
+        start_on_server(compiled, quiet)
+    } else {
+        run_on_server(compiled, quiet)
+    }
+}
+
+/// Start a compiled program on the shared server and return, printing its pid unless
+/// `quiet`. The root has no lease, since nothing stays behind to beat for it; the server
+/// stops it when the program finishes.
+fn start_on_server(
+    compiled: quiver_compiler::CompiledProgram,
+    quiet: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = quiver_cli::client::connect_or_spawn(
+        &quiver_cli::protocol::default_socket_path(),
+        &std::env::current_exe()?,
+    )?;
+    let pid = client.create_process(None).map_err(|e| e.to_string())?;
+    let payload = quiver_cli::protocol::ResumePayload {
+        unit: compiled.unit,
+        modules: compiled.modules,
+    };
+    if let Err(e) = client.start(pid, payload) {
+        let _ = client.delete_process(pid);
+        return Err(e.to_string().into());
+    }
+    if !quiet {
+        println!("{pid}");
+    }
+    Ok(())
 }
 
 /// Execute a compiled program on the shared server: create a root process, resume it

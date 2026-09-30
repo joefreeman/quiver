@@ -424,6 +424,19 @@ impl Client {
         self.json("POST", &format!("/processes/{id}/resume"), Some(&body))
     }
 
+    /// Hand the root a program and return once it is running: a detached run, which the
+    /// server stops when the program finishes. The root must have no lease, as nothing
+    /// will be beating for it.
+    pub fn start(
+        &self,
+        id: u64,
+        payload: crate::protocol::ResumePayload,
+    ) -> Result<(), RequestError> {
+        let body =
+            serde_json::to_vec(&payload).map_err(|e| RequestError::Io(std::io::Error::other(e)))?;
+        self.expect_ok("POST", &format!("/processes/{id}/start"), Some(&body))
+    }
+
     pub fn compact(&self, id: u64, keep: Vec<usize>) -> Result<(), RequestError> {
         let body = serde_json::to_vec(&CompactRequest { keep })
             .map_err(|e| RequestError::Io(std::io::Error::other(e)))?;
