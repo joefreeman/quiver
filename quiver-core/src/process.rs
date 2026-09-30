@@ -31,7 +31,7 @@ pub type ProcessId = usize;
 /// requester receives.
 pub type ProcessResult = Result<crate::wire::WireValue, crate::error::Error>;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProcessStatus {
     Active,
     Waiting,
@@ -94,6 +94,22 @@ pub struct ProcessInfo {
     pub persistent: bool,
     pub result: Option<ProcessResult>,
     pub heap: ProcessHeapUsage,
+    /// The process that owns this one (see [`Process::owner`]), and its link peers.
+    pub owner: Option<ProcessId>,
+    pub links: Vec<ProcessId>,
+}
+
+/// A process's place in the environment, cheap enough to report for every process at
+/// once: what it runs, what state it is in, and its ownership and link edges.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessOverview {
+    pub id: ProcessId,
+    pub status: ProcessStatus,
+    pub function_index: Option<usize>,
+    pub persistent: bool,
+    pub mailbox_size: usize,
+    pub owner: Option<ProcessId>,
+    pub links: Vec<ProcessId>,
 }
 
 /// How a process participates in the reclamation graph.
@@ -162,6 +178,9 @@ pub enum Action<E: Effect> {
         caller: ProcessId,
         target: ProcessId,
     },
+    /// Clear the child-side record of ownership (`%proc.detach` — the caller dropped its
+    /// owned-child entry at the call site; fire-and-forget)
+    Detach { child: ProcessId },
     /// A name-registry operation (`%registry`). The caller parks until the
     /// environment — which owns the name table — answers with a value push.
     Registry {
@@ -475,6 +494,11 @@ pub struct Process {
     /// Who to notify when this process terminates (see [`Watcher`]). Taken (emptied)
     /// exactly once, when the process completes.
     pub watchers: Vec<Watcher>,
+    /// The process that spawned this one and owns it, until `%proc.detach`. The owner's
+    /// `Watcher::OwnedChild` entry is what enforces ownership, and is flushed when the
+    /// owner terminates; this child-side record is kept for inspection, so a subtree
+    /// stays recognisable after its owner or itself has terminated.
+    pub owner: Option<ProcessId>,
     /// The observable state: the argument the root function was most recently
     /// (tail-)entered with — the spawn init, then each root-frame tail call. Sampled
     /// by `?`; persists after termination, like `result`.
@@ -513,7 +537,7 @@ impl Process {
             .is_some_and(|s| s.receiving.is_some())
     }
 
-    pub fn new(persistent: bool) -> Self {
+    pub fn new(persistent: bool, owner: Option<ProcessId>) -> Self {
         Self {
             stack: Vec::new(),
             locals: Vec::new(),
@@ -525,6 +549,7 @@ impl Process {
             result: None,
             select_state: None,
             watchers: Vec::new(),
+            owner,
             state: Value::nil(),
             subscriber_count: 0,
             subscriptions: Vec::new(),

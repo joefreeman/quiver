@@ -14,7 +14,8 @@ use quiver_core::compatibility::{Tables, TupleTables, Verdict, Verdicts};
 use quiver_core::effects::{Effect, EffectBackend, ResultTupleInfo};
 use quiver_core::executor::{ProgramUpdate, TableUpdate, TupleTablesUpdate};
 use quiver_core::process::{
-    ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo, ProcessStatus, RegistryRequest,
+    ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo, ProcessOverview, ProcessStatus,
+    RegistryRequest,
 };
 use quiver_core::program::Program;
 use quiver_core::types::{NIL, OK, Type, TypeLookup};
@@ -31,6 +32,7 @@ enum Aggregation {
     ProcessTypes(WorkerRequestMap<usize>), // Maps request_id -> Option<HashMap<ProcessId, function_index>>
     WorkerInfo(HashMap<u64, Option<quiver_core::process::WorkerInfo>>), // Maps request_id -> Option<WorkerInfo>
     AssertionsPassed(HashMap<u64, Option<HashSet<String>>>),
+    ProcessOverviews(HashMap<u64, Option<Vec<ProcessOverview>>>),
 }
 
 /// Phase of an in-flight reclamation round. The
@@ -452,6 +454,8 @@ pub enum RequestResult {
     AssertionsPassed(HashSet<String>),
     ProcessTypes(HashMap<ProcessId, (Type, usize)>),
     ProcessInfo(Option<ProcessInfo>),
+    /// Every worker's process overviews, merged and ordered by pid.
+    ProcessOverviews(Vec<ProcessOverview>),
     Locals(Vec<WireValue>),
 }
 
@@ -1167,6 +1171,29 @@ impl<E: Effect> Environment<E> {
         Ok(aggregation_id)
     }
 
+    /// Request an overview of every process on every worker. Returns a single aggregation ID
+    /// that collects them all.
+    pub fn request_process_overviews(&mut self) -> Result<u64, EnvironmentError> {
+        let aggregation_id = self.allocate_request_id();
+        let request_ids: Vec<u64> = (0..self.workers.len())
+            .map(|_| self.allocate_request_id())
+            .collect();
+        for &request_id in &request_ids {
+            self.pending_requests.insert(request_id, None);
+        }
+        self.aggregations.insert(
+            aggregation_id,
+            Aggregation::ProcessOverviews(request_ids.iter().map(|&id| (id, None)).collect()),
+        );
+        self.pending_requests.insert(aggregation_id, None);
+        for (worker, &request_id) in self.workers.iter_mut().zip(&request_ids) {
+            worker
+                .send(Command::GetProcessOverviews { request_id })
+                .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))?;
+        }
+        Ok(aggregation_id)
+    }
+
     /// Request all process types (for REPL process references)
     /// Returns a single aggregation ID that will collect results from all workers
     pub fn request_process_types(&mut self) -> Result<u64, EnvironmentError> {
@@ -1553,6 +1580,7 @@ impl<E: Effect> Environment<E> {
             }
             Event::KillAction { target, reason } => self.handle_kill(target, reason),
             Event::LinkAction { caller, target } => self.handle_link(caller, target),
+            Event::DetachAction { child } => self.handle_detach(child),
             Event::ProcessResults { awaiter, results } => {
                 self.handle_process_results(awaiter, results)
             }
@@ -1570,6 +1598,9 @@ impl<E: Effect> Environment<E> {
             }
             Event::ProcessTypesResponse { request_id, result } => {
                 self.handle_process_types_response(request_id, result)
+            }
+            Event::ProcessOverviewsResponse { request_id, result } => {
+                self.handle_process_overviews_response(request_id, result)
             }
             Event::InfoResponse { request_id, result } => {
                 self.handle_info_response(request_id, result)
@@ -1728,6 +1759,28 @@ impl<E: Effect> Environment<E> {
     /// How many resources are open (owned by some process) right now.
     pub fn open_resource_count(&self) -> usize {
         self.resource_ownership.len()
+    }
+
+    /// How many open resources each process owns; processes owning none are absent.
+    pub fn owned_resource_counts(&self) -> HashMap<ProcessId, usize> {
+        let mut counts = HashMap::new();
+        for owner in self.resource_ownership.values() {
+            *counts.entry(*owner).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// The `%registry` names bound to each process, each rendered in data notation and
+    /// sorted; processes holding none are absent.
+    pub fn registered_names(&self) -> HashMap<ProcessId, Vec<String>> {
+        let mut names: HashMap<ProcessId, Vec<String>> = HashMap::new();
+        for (key, (pid, _)) in &self.registry {
+            names.entry(*pid).or_default().push(key.clone());
+        }
+        for keys in names.values_mut() {
+            keys.sort();
+        }
+        names
     }
 
     /// Number of processes the environment still tracks: live processes plus tombstones not
@@ -2206,6 +2259,17 @@ impl<E: Effect> Environment<E> {
             .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))
     }
 
+    /// Route the child-side half of a detach to the child's worker. The child can only
+    /// have been reclaimed if it terminated, and then there is nothing left to clear.
+    fn handle_detach(&mut self, child: ProcessId) -> Result<(), EnvironmentError> {
+        let Some(worker_id) = self.process_router.get(&child) else {
+            return Ok(());
+        };
+        self.workers[*worker_id]
+            .send(Command::DetachProcess { child })
+            .map_err(|e| EnvironmentError::WorkerCommunication(e.to_string()))
+    }
+
     fn handle_process_results(
         &mut self,
         awaiter: ProcessId,
@@ -2316,6 +2380,7 @@ impl<E: Effect> Environment<E> {
         self.workers[worker_id]
             .send(Command::SpawnProcess {
                 id: new_pid,
+                owner: caller,
                 function_index,
                 captures,
                 argument,
@@ -2496,6 +2561,46 @@ impl<E: Effect> Environment<E> {
             self.pending_requests.insert(
                 aggregation_id,
                 Some(RequestResult::AssertionsPassed(merged)),
+            );
+        }
+        Ok(())
+    }
+
+    fn handle_process_overviews_response(
+        &mut self,
+        request_id: u64,
+        result: Result<Vec<ProcessOverview>, EnvironmentError>,
+    ) -> Result<(), EnvironmentError> {
+        let overviews = result?;
+        let aggregation_id = self
+            .aggregations
+            .iter()
+            .find_map(|(id, aggregation)| match aggregation {
+                Aggregation::ProcessOverviews(requests) if requests.contains_key(&request_id) => {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect("a process-overviews response belongs to an aggregation");
+        let Some(Aggregation::ProcessOverviews(requests)) =
+            self.aggregations.get_mut(&aggregation_id)
+        else {
+            unreachable!("found above");
+        };
+        requests.insert(request_id, Some(overviews));
+        self.pending_requests.remove(&request_id);
+        if requests.values().all(Option::is_some) {
+            let Some(Aggregation::ProcessOverviews(requests)) =
+                self.aggregations.remove(&aggregation_id)
+            else {
+                unreachable!("found above");
+            };
+            let mut merged: Vec<ProcessOverview> =
+                requests.into_values().flatten().flatten().collect();
+            merged.sort_by_key(|overview| overview.id);
+            self.pending_requests.insert(
+                aggregation_id,
+                Some(RequestResult::ProcessOverviews(merged)),
             );
         }
         Ok(())

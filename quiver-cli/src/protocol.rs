@@ -19,9 +19,10 @@
 //! POST   /processes/{id}/compact        CompactRequest
 //! POST   /processes/{id}/cancel
 //! POST   /processes/{id}/heartbeat      renew a lease
-//! DELETE /processes/{id}                stop + ownership cascade
-//! GET    /processes[/{id}]              text/plain inspection
-//! GET    /workers[/{id}]                text/plain inspection
+//! DELETE /processes/{id}                stop any process + ownership cascade
+//! GET    /processes                     → ProcessListing
+//! GET    /processes/{id}                → ProcessDetail
+//! GET    /workers                       → WorkersEvent
 //! POST   /shutdown
 //! ```
 
@@ -244,6 +245,46 @@ pub struct ProcessDetail {
     pub persistent: bool,
     pub result: Option<Outcome>,
     pub heap: quiver_core::process::ProcessHeapUsage,
+    /// The process that owns it, and its link peers.
+    pub owner: Option<u64>,
+    pub links: Vec<u64>,
+    /// Its `%registry` names, in data notation.
+    pub names: Vec<String>,
+    /// How many open resources it owns.
+    pub resources: usize,
+}
+
+/// `GET /processes` — every process the server hosts, tombstones not yet reclaimed
+/// included, ordered by pid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessListing {
+    pub processes: Vec<ProcessEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessEntry {
+    pub id: u64,
+    pub status: quiver_core::process::ProcessStatus,
+    /// The process that owns it: `None` for a client's root and for a detached process.
+    /// Kept after either has terminated, until the process is reclaimed.
+    pub owner: Option<u64>,
+    pub links: Vec<u64>,
+    /// Set when it is a client's root (a REPL or `quiv run` session).
+    pub root: Option<RootEntry>,
+    /// The process type its root function gives it; `None` for a client's root, whose
+    /// function changes with every resume.
+    pub process_type: Option<String>,
+    pub mailbox_size: usize,
+    /// Its `%registry` names, in data notation.
+    pub names: Vec<String>,
+    /// How many open resources it owns.
+    pub resources: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RootEntry {
+    /// The lease its client holds on it, if any (see [`CreateParams`]).
+    pub lease_ms: Option<u64>,
 }
 
 /// What a resume answered.

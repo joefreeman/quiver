@@ -13,6 +13,7 @@ use std::io::{self, IsTerminal, Read};
 mod diagnostics;
 use quiver_cli::build_builtin_registry;
 mod format_cli;
+mod process_cli;
 mod repl_cli;
 mod server_cli;
 mod test_cli;
@@ -93,6 +94,34 @@ enum Commands {
     Test {
         /// Markdown documents to run.
         input: Vec<String>,
+    },
+
+    /// List the running server's processes, or show one in detail.
+    Proc {
+        /// Show this process in detail.
+        pid: Option<u64>,
+
+        /// Show the ownership tree instead of a table.
+        #[arg(long)]
+        tree: bool,
+
+        /// Include terminated processes not yet reclaimed.
+        #[arg(short, long)]
+        all: bool,
+
+        /// Print JSON.
+        #[arg(long, conflicts_with = "watch")]
+        json: bool,
+
+        /// Keep the listing on screen, redrawn as it changes (Ctrl-C to quit).
+        #[arg(short, long, conflicts_with = "pid")]
+        watch: bool,
+    },
+
+    /// Stop processes on the running server, with the subtrees they own.
+    Kill {
+        #[arg(required = true)]
+        pids: Vec<u64>,
     },
 
     /// Run the persistent server: one shared environment that client sessions connect
@@ -243,6 +272,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             format_cli::format_command(input, eval, check)
         }
         Some(Commands::Test { input }) => test_cli::test_command(input)?,
+        Some(Commands::Proc {
+            pid,
+            tree,
+            all,
+            json,
+            watch,
+        }) => {
+            if watch {
+                process_cli::watch_command(tree, all)?
+            } else {
+                exit_on_broken_pipe();
+                process_cli::list_command(pid, tree, all, json)?
+            }
+        }
+        Some(Commands::Kill { pids }) => process_cli::kill_command(pids)?,
         Some(Commands::Server {
             action,
             socket,

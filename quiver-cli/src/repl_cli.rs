@@ -13,6 +13,7 @@
 
 use colored::Colorize;
 use quiver_cli::client::Client;
+use quiver_cli::inspection;
 use quiver_cli::protocol::{MissingModules, Outcome, ResumePayload};
 use quiver_compiler::{PackageResolver, find_project_root};
 use quiver_environment::{LineCompiler, ReplError};
@@ -398,8 +399,9 @@ impl ReplCli {
         }
     }
 
-    fn inspect(&mut self, path: &str) {
-        match self.client.inspect(path) {
+    /// Print an inspection, rendered from what the server answers.
+    fn inspect(&self, render: impl FnOnce(&Client) -> Result<String, Box<dyn std::error::Error>>) {
+        match render(&self.client) {
             Ok(text) => {
                 for line in text.lines() {
                     println!("{}", line.bright_black());
@@ -423,7 +425,10 @@ impl ReplCli {
                     "  \\r - Reload project modules (keeps variables)".bright_black()
                 );
                 println!("{}", "  \\v - List variables".bright_black());
-                println!("{}", "  \\p - List processes".bright_black());
+                println!(
+                    "{}",
+                    "  \\p - List processes (ownership tree)".bright_black()
+                );
                 println!("{}", "  \\p X - Inspect process with ID X".bright_black());
                 println!("{}", "  \\w - List workers".bright_black());
                 println!("{}", "  \\w X - Inspect worker with ID X".bright_black());
@@ -462,14 +467,32 @@ impl ReplCli {
                 let last = self.compiler.get_last_result_type().clone();
                 println!("{}", self.compiler.format_type(&last).bright_black());
             }
-            ["p"] => self.inspect("/processes"),
+            ["p"] => self.inspect(|client| {
+                let listing = client.processes()?;
+                let processes: Vec<_> = listing.processes.iter().collect();
+                Ok(inspection::render_tree(
+                    &processes,
+                    inspection::Style::Plain,
+                ))
+            }),
             ["p", id_str] => match id_str.parse::<u64>() {
-                Ok(id) => self.inspect(&format!("/processes/{id}")),
+                Ok(id) => self.inspect(|client| {
+                    let detail = client.process(id)?;
+                    let owned = inspection::owned_by(&client.processes()?, id);
+                    Ok(inspection::render_detail(&detail, &owned))
+                }),
                 Err(_) => eprintln!("{}", format!("Invalid process ID: {id_str}").red()),
             },
-            ["w"] => self.inspect("/workers"),
-            ["w", id_str] => match id_str.parse::<u64>() {
-                Ok(id) => self.inspect(&format!("/workers/{id}")),
+            ["w"] => self.inspect(|client| Ok(inspection::render_workers(&client.workers()?))),
+            ["w", id_str] => match id_str.parse::<u16>() {
+                Ok(id) => self.inspect(|client| {
+                    let workers = client.workers()?;
+                    let worker = workers
+                        .iter()
+                        .find(|worker| worker.worker_id == id)
+                        .ok_or_else(|| format!("No worker {id}"))?;
+                    Ok(inspection::render_worker(worker))
+                }),
                 Err(_) => eprintln!("{}", format!("Invalid worker ID: {id_str}").red()),
             },
 

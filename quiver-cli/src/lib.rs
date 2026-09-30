@@ -1,5 +1,6 @@
 pub mod client;
 pub mod compile;
+pub mod inspection;
 pub mod native_transport;
 pub mod protocol;
 

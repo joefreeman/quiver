@@ -7,7 +7,7 @@ use crate::effects::Effect;
 use crate::error::{Error, Operation};
 use crate::process::{
     Action, Frame, Process, ProcessAdjacency, ProcessCategory, ProcessId, ProcessInfo,
-    ProcessStatus, RestrictedContext, SelectState, StreamEvent, Wait, Watcher,
+    ProcessOverview, ProcessStatus, RestrictedContext, SelectState, StreamEvent, Wait, Watcher,
 };
 use crate::types::{BuiltinInfo, NIL, TupleTypeInfo, Type};
 use crate::value::{Binary, MAX_BINARY_SIZE, Payload, ResourceId, Value};
@@ -464,6 +464,14 @@ impl<E: Effect> Executor<E> {
     /// Add the target-side half of a link (idempotent — one entry per peer): `peer` is
     /// killed when `target` terminates abnormally. No-op on a terminated or unknown
     /// target (the caller decides what an already-dead target means).
+    /// Forget `child`'s owner (the child-side half of `%proc.detach`). A no-op for an
+    /// unknown process.
+    pub fn clear_owner(&mut self, child: ProcessId) {
+        if let Some(process) = self.get_process_mut(child) {
+            process.owner = None;
+        }
+    }
+
     pub fn add_link(&mut self, target: ProcessId, peer: ProcessId) {
         if let Some(process) = self.get_process_mut(target) {
             let entry = Watcher::Link { pid: peer };
@@ -871,9 +879,10 @@ impl<E: Effect> Executor<E> {
         captures: Vec<WireValue>,
         argument: WireValue,
         persistent: bool,
+        owner: Option<ProcessId>,
     ) -> Result<(), Error> {
         // Create the process
-        let mut process = Process::new(persistent);
+        let mut process = Process::new(persistent, owner);
 
         // If no function, create a sleeping process directly
         let Some(function_index) = function_index else {
@@ -1392,8 +1401,37 @@ impl<E: Effect> Executor<E> {
                 persistent: process.persistent,
                 result,
                 heap: self.process_heap_usage(process),
+                owner: process.owner,
+                links: Self::link_peers(process),
             }
         })
+    }
+
+    /// An overview of every process on this executor, tombstones included.
+    pub fn process_overviews(&self) -> Vec<ProcessOverview> {
+        self.processes
+            .iter()
+            .map(|(id, process)| ProcessOverview {
+                id: *id,
+                status: Self::get_status(process),
+                function_index: self.process_function_indices.get(id).copied(),
+                persistent: process.persistent,
+                mailbox_size: process.mailbox.len(),
+                owner: process.owner,
+                links: Self::link_peers(process),
+            })
+            .collect()
+    }
+
+    fn link_peers(process: &Process) -> Vec<ProcessId> {
+        process
+            .watchers
+            .iter()
+            .filter_map(|watcher| match watcher {
+                Watcher::Link { pid } => Some(*pid),
+                _ => None,
+            })
+            .collect()
     }
 
     // Program data accessors
@@ -3835,7 +3873,7 @@ mod process_adjacency_tests {
     #[test]
     fn live_process_is_root_and_sweeps_every_edge_kind() {
         let mut ex = executor();
-        let mut p = Process::new(false);
+        let mut p = Process::new(false, None);
         p.stack.push(pid(10));
         p.locals.push(pid(11));
         p.mailbox.push_back(pid(12));
@@ -3869,7 +3907,7 @@ mod process_adjacency_tests {
     #[test]
     fn completed_process_is_tombstone_with_result_and_state_edges() {
         let mut ex = executor();
-        let mut p = Process::new(false);
+        let mut p = Process::new(false, None);
         // A tombstone keeps only result + state; those pids remain reachable via !p / ?p.
         p.result = Some(Ok(pid(20)));
         p.state = pid(21);
@@ -3883,7 +3921,7 @@ mod process_adjacency_tests {
     #[test]
     fn persistent_completed_process_stays_root() {
         let mut ex = executor();
-        let mut p = Process::new(true); // persistent (REPL): never a sweep candidate
+        let mut p = Process::new(true, None); // persistent (REPL): never a sweep candidate
         p.result = Some(Ok(Value::nil()));
         ex.processes.insert(0, p);
 
@@ -3893,7 +3931,7 @@ mod process_adjacency_tests {
     #[test]
     fn error_result_contributes_no_edges() {
         let mut ex = executor();
-        let mut p = Process::new(false);
+        let mut p = Process::new(false, None);
         p.result = Some(Err(Box::new(Error::Killed(None)))); // Error carries no Value
         ex.processes.insert(0, p);
 
@@ -3959,7 +3997,7 @@ mod awaiting_lifecycle_tests {
 
     /// A process parked on a select that names `targets` as process sources.
     fn selecting_on(targets: &[ProcessId]) -> Process {
-        let mut process = Process::new(false);
+        let mut process = Process::new(false, None);
         process.frames.push(Frame::new(0, 0, 0));
         process.select_state = Some(Box::new(SelectState {
             frame: 0,
@@ -4210,7 +4248,7 @@ mod reactive_notification_tests {
 
     /// A target process at a root frame (so `record_state` fires) with the given state.
     fn target_with_state(state: Value) -> Process {
-        let mut p = Process::new(false);
+        let mut p = Process::new(false, None);
         p.frames.push(Frame::new(0, 0, 0));
         p.state = state;
         p
@@ -4294,7 +4332,7 @@ mod reactive_notification_tests {
         ex.processes.insert(1, target_with_state(Value::int(0)));
         ex.add_subscriber(1, 0);
         // Tracker mid-render, having sampled nothing this time.
-        let mut tracker = Process::new(false);
+        let mut tracker = Process::new(false, None);
         tracker.frames.push(Frame::new(0, 0, 0));
         tracker.subscriptions = vec![1];
         tracker.tracking = Some(Box::new(TrackingState {

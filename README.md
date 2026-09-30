@@ -94,6 +94,12 @@ quiv run program.qv
   - `--listen [<ADDRESS>]` - Additionally listen for browser clients on a loopback TCP address (default `127.0.0.1:2192`). Every request must carry the bearer token written beside the socket; non-loopback addresses are refused
   - `--allow-origin <ORIGIN>` - Allow this browser origin on the TCP listener (repeatable)
   - `quiv server status` / `quiv server stop` - Whether a server is listening, and stop it
+- **`quiv proc [PID]`** - List the running server's processes, under a summary of their statuses and the workers: each one's status, owner, mailbox, owned resources, registry names and type; or, given a pid, show that process in detail
+  - `--tree` - Show the ownership tree instead of a table
+  - `-a, --all` - Include terminated processes not yet reclaimed
+  - `--json` - Print JSON
+  - `-w, --watch` - Keep the listing on screen, redrawn as it changes (Ctrl-C to quit)
+- **`quiv kill <PID>...`** - Stop processes on the running server, with the subtrees they own
 
 A `FILE` of `-` reads stdin instead: `run` and `inspect` accept source or bytecode there, telling them apart by content.
 
@@ -106,7 +112,7 @@ Within the REPL:
 - `\!` - Reset the REPL
 - `\r` - Reload project modules (keeps variables)
 - `\v` - List all variables
-- `\p` - List all processes
+- `\p` - List all processes, as an ownership tree
 - `\p X` - Inspect process with ID `X`
 - `\w` - List workers
 - `\w X` - Inspect worker with ID `X`

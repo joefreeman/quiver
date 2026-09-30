@@ -3,8 +3,8 @@ use crate::environment::{LocalsResult, ProcessResultsMap};
 use quiver_core::effects::Effect;
 use quiver_core::executor::ProgramUpdate;
 use quiver_core::process::{
-    ProcessAdjacency, ProcessId, ProcessInfo, ProcessStatus, RegistryRequest, StreamEvent,
-    WorkerInfo,
+    ProcessAdjacency, ProcessId, ProcessInfo, ProcessOverview, ProcessStatus, RegistryRequest,
+    StreamEvent, WorkerInfo,
 };
 use quiver_core::value::ResourceId;
 use quiver_core::wire::WireValue;
@@ -46,9 +46,10 @@ pub enum Command<E: Effect> {
         function_index: Option<usize>,
     },
 
-    /// Spawn a new process (from another process)
+    /// Spawn a new process (from another process, which owns it)
     SpawnProcess {
         id: ProcessId,
+        owner: ProcessId,
         function_index: usize,
         captures: Vec<WireValue>,
         argument: WireValue,
@@ -111,6 +112,9 @@ pub enum Command<E: Effect> {
     /// Request all process types (for REPL process references)
     GetProcessTypes { request_id: u64 },
 
+    /// Request an overview of every process
+    GetProcessOverviews { request_id: u64 },
+
     /// Request process info
     GetProcessInfo {
         request_id: u64,
@@ -161,6 +165,9 @@ pub enum Command<E: Effect> {
     /// `target` terminates abnormally. An already-crashed target kills `peer`
     /// immediately; a normally-completed one makes this a no-op.
     LinkProcess { target: ProcessId, peer: ProcessId },
+
+    /// Forget `child`'s owner (the child-side half of `%proc.detach`).
+    DetachProcess { child: ProcessId },
 
     /// Effect operation completed. A failure is classified rather than stringly typed: an
     /// `Expected` outcome resumes the process with a `:error`-stamped nil, a `Fault`
@@ -295,6 +302,10 @@ pub enum Event<E: Effect> {
         target: ProcessId,
     },
 
+    /// Action: clear the child-side record of ownership (`%proc.detach` — the owner's
+    /// half was dropped at the call site)
+    DetachAction { child: ProcessId },
+
     /// Process results (initial snapshot or later completions)
     /// None means process not yet completed, Some means completed with result
     ProcessResults {
@@ -330,6 +341,12 @@ pub enum Event<E: Effect> {
     ProcessTypesResponse {
         request_id: u64,
         result: Result<HashMap<ProcessId, usize>, crate::environment::EnvironmentError>,
+    },
+
+    /// Response to GetProcessOverviews
+    ProcessOverviewsResponse {
+        request_id: u64,
+        result: Result<Vec<ProcessOverview>, crate::environment::EnvironmentError>,
     },
 
     /// Response to GetProcessInfo

@@ -11,6 +11,7 @@ use quiver_cli::client::Client;
 use quiver_cli::protocol::Outcome;
 use quiver_cli::protocol::{MissingModules, ResumePayload};
 use quiver_core::bytecode::Instruction;
+use quiver_core::process::ProcessStatus;
 use quiver_core::types::Type;
 use quiver_environment::LineCompiler;
 use quiver_io::NativeEffect;
@@ -400,20 +401,12 @@ fn abandoned_processes_stay_visible_and_collectable() {
     assert_eq!(session.evaluate_value("[40, 2] ~> __integer_add__ ~"), "42");
 
     // ...the orphan is visible...
-    let listing = client.inspect("/processes").expect("inspect failed");
-    assert!(
-        listing.contains(&format!("{pid}: Active")),
-        "expected process {pid} running in:\n{listing}"
-    );
+    assert_eq!(status_of(&client, pid), Some(ProcessStatus::Active));
 
     // ...and manually collectable.
     client.cancel(pid).expect("cancel failed");
     client.delete_process(pid).expect("delete failed");
-    let listing = client.inspect("/processes").expect("inspect failed");
-    assert!(
-        !listing.contains(&format!("{pid}: Active")),
-        "expected process {pid} stopped in:\n{listing}"
-    );
+    assert_ne!(status_of(&client, pid), Some(ProcessStatus::Active));
 }
 
 #[test]
@@ -492,6 +485,17 @@ impl Drop for SpawnedServer {
         let _ = std::fs::remove_file(self.socket.with_extension("log"));
         let _ = std::fs::remove_file(quiver_cli::protocol::pidfile_path(&self.socket));
     }
+}
+
+/// A process's status in the server's listing, or `None` once it has been reclaimed.
+fn status_of(client: &Client, pid: u64) -> Option<ProcessStatus> {
+    client
+        .processes()
+        .expect("listing failed")
+        .processes
+        .into_iter()
+        .find(|process| process.id == pid)
+        .map(|process| process.status)
 }
 
 fn exe() -> PathBuf {
@@ -862,11 +866,7 @@ fn a_leased_root_outlives_its_client_only_as_long_as_its_lease() {
         client.heartbeat(orphan).is_err(),
         "the orphan's lease should have run out"
     );
-    let listing = client.inspect("/processes").expect("inspect failed");
-    assert!(
-        !listing.contains(&format!("{orphan}: Active")),
-        "expected the orphan stopped in:\n{listing}"
-    );
+    assert_ne!(status_of(&client, orphan), Some(ProcessStatus::Active));
     // The other two are untouched.
     client.heartbeat(kept).expect("a beaten root must survive");
     client
@@ -1347,4 +1347,135 @@ fn registry_names_free_when_session_teardown_kills_the_service() {
         b.evaluate_value("mine = @#[] { !'int } []; %registry.register [Owned, mine]"),
         "Ok"
     );
+}
+
+#[test]
+fn the_listing_shows_ownership_links_and_names_and_any_process_can_be_stopped() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::start(&[]);
+    let client = server.client();
+
+    let mut session = Session::open(&server);
+    assert_eq!(
+        session.evaluate_value(
+            "child = @#[] { !'int } []; \
+             grandchild = @#[] { g = @#[] { !'int } []; %proc.link g; !'int } []; \
+             svc = @#[] { !'int } []; %proc.detach svc; \
+             %registry.register [Named, svc]"
+        ),
+        "Ok"
+    );
+
+    let listing = client.processes().expect("listing failed");
+    let entry = |id: u64| {
+        listing
+            .processes
+            .iter()
+            .find(|process| process.id == id)
+            .unwrap_or_else(|| panic!("process {id} missing from {listing:?}"))
+    };
+    let root = entry(session.pid);
+    assert!(root.root.is_some(), "the session's root is marked as one");
+    assert_eq!(root.owner, None);
+    let owned: Vec<&quiver_cli::protocol::ProcessEntry> = listing
+        .processes
+        .iter()
+        .filter(|process| process.owner == Some(session.pid))
+        .collect();
+    assert_eq!(
+        owned.len(),
+        2,
+        "the session owns both spawned children: {listing:?}"
+    );
+    let named = listing
+        .processes
+        .iter()
+        .find(|process| process.names == ["Named"])
+        .expect("the registered service is listed with its name");
+    assert_eq!(named.owner, None, "a detached process has no owner");
+    let grandchild = listing
+        .processes
+        .iter()
+        .find(|process| process.owner.is_some_and(|owner| owner != session.pid))
+        .expect("the grandchild is listed under its spawner");
+    let spawner = entry(grandchild.owner.unwrap());
+    assert_eq!(spawner.owner, Some(session.pid));
+    assert_eq!(
+        grandchild.links,
+        [spawner.id],
+        "a link is listed from both ends"
+    );
+    assert_eq!(spawner.links, [grandchild.id]);
+
+    // Stopping a non-root process takes its subtree with it.
+    client.delete_process(spawner.id).expect("delete failed");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while status_of(&client, grandchild.id) == Some(ProcessStatus::Waiting) {
+        assert!(
+            Instant::now() < deadline,
+            "the owned grandchild was never stopped"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // The stopped subtree keeps its shape until it is reclaimed, though the spawner's
+    // teardown has flushed its record of the children it owned.
+    let listing = client.processes().expect("listing failed");
+    let owner_of = |id: u64| {
+        listing
+            .processes
+            .iter()
+            .find(|process| process.id == id)
+            .unwrap_or_else(|| panic!("process {id} missing from {listing:?}"))
+            .owner
+    };
+    assert_eq!(owner_of(grandchild.id), Some(spawner.id));
+    assert_eq!(owner_of(spawner.id), Some(session.pid));
+    let detail = client.process(grandchild.id).expect("detail failed");
+    assert_eq!(detail.owner, Some(spawner.id));
+
+    // An unknown pid answers 404.
+    assert!(matches!(
+        client.delete_process(1_000_000),
+        Err(quiver_cli::client::RequestError::Http { status: 404, .. })
+    ));
+}
+
+#[test]
+fn the_client_reads_the_events_stream_over_the_socket() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::start(&[]);
+    let client = server.client();
+
+    // The stream opens with a snapshot of each subscription...
+    let mut events = client
+        .events("processes=true&workers=true")
+        .expect("events failed");
+    let mut names = Vec::new();
+    while names.len() < 2 {
+        let (name, _) = events.next().expect("stream ended").expect("read failed");
+        names.push(name);
+    }
+    names.sort();
+    assert_eq!(names, ["processes", "workers"]);
+
+    // ...and then pushes changes as they happen, each a whole JSON payload however the
+    // chunks fell.
+    let pid = client.create_process(None).expect("create failed");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the new process was never reported"
+        );
+        let (name, data) = events.next().expect("stream ended").expect("read failed");
+        if name == "processes" {
+            let event: quiver_cli::protocol::ProcessesEvent =
+                serde_json::from_str(&data).expect("a ProcessesEvent");
+            if event.processes.iter().any(|process| process.id == pid) {
+                break;
+            }
+        }
+    }
+    client.delete_process(pid).expect("delete failed");
 }

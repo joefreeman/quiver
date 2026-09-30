@@ -279,7 +279,8 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
     }
 
     /// Detach `child` from the caller's owned children (the parent-only `%proc.detach`),
-    /// so it survives the caller's termination. Fail-fast: no owned-child entry means
+    /// so it survives the caller's termination, and route an `Action::Detach` to clear
+    /// the child's own record. Fail-fast: no owned-child entry means
     /// the caller doesn't own the child — ownership is the parent's to relinquish.
     pub fn detach(&mut self, child: ProcessId) -> Result<(), Error> {
         self.allow(Operation::Detach)?;
@@ -290,6 +291,7 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
         if self.process.watchers.len() == before {
             return Err(Error::NotAnOwnedChild);
         }
+        self.queue(Action::Detach { child });
         Ok(())
     }
 

@@ -827,6 +827,12 @@ impl Environment {
                     "Unexpected result type: AssertionsPassed",
                 ));
             }
+            RequestResult::ProcessOverviews(_) => {
+                // Only the native server lists process overviews.
+                callback.invoke::<()>(crate::types::Result::err(
+                    "Unexpected result type: ProcessOverviews",
+                ));
+            }
         }
     }
 }

@@ -22,9 +22,9 @@ use axum::routing::{get, post};
 use quiver_cli::native_transport::Progress;
 use quiver_cli::protocol::{
     CompactRequest, CreateParams, CreateResponse, EventsParams, FINGERPRINT_HEADER, MissingModules,
-    Outcome, PROTOCOL_VERSION, ProcessDetail, ProcessEvent, ProcessSummary, ProcessesEvent,
-    ResumePayload, ResumeRequest, StatusResponse, WorkersEvent, http_endpoint_path, pidfile_path,
-    token_path,
+    Outcome, PROTOCOL_VERSION, ProcessDetail, ProcessEntry, ProcessEvent, ProcessListing,
+    ProcessSummary, ProcessesEvent, ResumePayload, ResumeRequest, RootEntry, StatusResponse,
+    WorkersEvent, http_endpoint_path, pidfile_path, token_path,
 };
 use quiver_cli::spawn_worker;
 use quiver_core::process::ProcessId;
@@ -211,7 +211,6 @@ pub fn server_command(
         .route("/processes/{id}/cancel", post(cancel_process))
         .route("/processes/{id}/heartbeat", post(heartbeat_process))
         .route("/workers", get(list_workers))
-        .route("/workers/{id}", get(inspect_worker))
         .route("/events", get(events))
         .layer(axum::middleware::from_fn(check_fingerprint));
     let router = axum::Router::new()
@@ -513,11 +512,12 @@ async fn delete_process(
     AxumPath(id): AxumPath<u64>,
 ) -> Result<StatusCode, Response> {
     let pid = id as ProcessId;
-    if lock(&state.roots, "roots").remove(&pid).is_none() {
-        return Err(StatusCode::NOT_FOUND.into_response());
+    lock(&state.roots, "roots").remove(&pid);
+    match stop_process(&state, pid).await? {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(EnvironmentError::ProcessNotFound(_)) => Err(StatusCode::NOT_FOUND.into_response()),
+        Err(e) => Err(internal(e)),
     }
-    stop_root(&state, pid).await?.map_err(internal)?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn cancel_process(
@@ -540,9 +540,9 @@ async fn heartbeat_process(
     Ok(StatusCode::OK)
 }
 
-/// Stop a root and its owned subtree, off the async threads like every other
+/// Stop a process and its owned subtree, off the async threads like every other
 /// environment operation.
-async fn stop_root(
+async fn stop_process(
     state: &Shared,
     pid: ProcessId,
 ) -> Result<Result<(), EnvironmentError>, Response> {
@@ -573,7 +573,7 @@ async fn reap_expired_roots(state: Shared) {
         });
         for pid in expired {
             eprintln!("quiv server: stopping root {pid}, whose client stopped answering");
-            if let Ok(Err(error)) = stop_root(&state, pid).await {
+            if let Ok(Err(error)) = stop_process(&state, pid).await {
                 eprintln!("quiv server: root {pid} would not stop: {error:?}");
             }
         }
@@ -863,25 +863,7 @@ fn render_event(
         }
         RequestResult::WorkerInfo(workers) => serde_json::to_string(&WorkersEvent { workers }),
         RequestResult::ProcessInfo(info) => {
-            let process = info.map(|info| ProcessDetail {
-                id: info.id as u64,
-                status: info.status,
-                process_type: info
-                    .function_index
-                    .and_then(|index| env.format_process_type(index)),
-                stack_size: info.stack_size,
-                locals_count: info.locals_count,
-                frames_count: info.frames_count,
-                mailbox_size: info.mailbox_size,
-                persistent: info.persistent,
-                result: info.result.map(|result| match result {
-                    Ok(value) => render_value(env, &value),
-                    Err(error) => Outcome::Error {
-                        message: error.to_string(),
-                    },
-                }),
-                heap: info.heap,
-            });
+            let process = info.map(|info| process_detail(info, env));
             serde_json::to_string(&ProcessEvent { process })
         }
         _ => return None,
@@ -901,35 +883,53 @@ fn root_control(state: &Shared, id: u64) -> Result<Arc<RootControl>, Response> {
     Ok(control)
 }
 
-// --- Inspection (text/plain) -------------------------------------------------------
+// --- Inspection ----------------------------------------------------------------------
 
-async fn list_processes(State(state): State<Shared>) -> Result<String, Response> {
+async fn list_processes(
+    State(state): State<Shared>,
+) -> Result<axum::Json<ProcessListing>, Response> {
     let shared = Arc::clone(&state);
     blocking(move || {
-        let request = shared
-            .environment
-            .lock()
-            .unwrap()
-            .request_statuses()
+        let request = lock(&shared.environment, "environment")
+            .request_process_overviews()
             .map_err(internal)?;
-        match wait_for(&shared, request, None) {
-            Ok(RequestResult::Statuses(statuses)) if statuses.is_empty() => {
-                Ok("No processes".to_string())
-            }
-            Ok(RequestResult::Statuses(statuses)) => {
-                let mut processes: Vec<_> = statuses.into_iter().collect();
-                processes.sort_by_key(|(id, _)| *id);
-                let mut lines = vec!["Processes:".to_string()];
-                lines.extend(
-                    processes
-                        .into_iter()
-                        .map(|(id, status)| format!("  {id}: {status:?}")),
-                );
-                Ok(lines.join("\n"))
-            }
-            Ok(_) => Err(internal("unexpected result for statuses")),
-            Err(e) => Err(internal(e)),
-        }
+        let overviews = match wait_for(&shared, request, None) {
+            Ok(RequestResult::ProcessOverviews(overviews)) => overviews,
+            Ok(_) => return Err(internal("unexpected result for process overviews")),
+            Err(e) => return Err(internal(e)),
+        };
+        let roots: HashMap<ProcessId, Option<u64>> = lock(&shared.roots, "roots")
+            .iter()
+            .map(|(pid, control)| (*pid, control.lease.map(|lease| lease.as_millis() as u64)))
+            .collect();
+        let env = lock(&shared.environment, "environment");
+        let mut names = env.registered_names();
+        let resources = env.owned_resource_counts();
+        let processes = overviews
+            .into_iter()
+            .map(|overview| {
+                let root = roots.get(&overview.id).map(|lease_ms| RootEntry {
+                    lease_ms: *lease_ms,
+                });
+                ProcessEntry {
+                    id: overview.id as u64,
+                    status: overview.status,
+                    owner: overview.owner.map(|owner| owner as u64),
+                    links: overview.links.iter().map(|pid| *pid as u64).collect(),
+                    process_type: match root {
+                        Some(_) => None,
+                        None => overview
+                            .function_index
+                            .and_then(|index| env.format_process_type(index)),
+                    },
+                    root,
+                    mailbox_size: overview.mailbox_size,
+                    names: names.remove(&overview.id).unwrap_or_default(),
+                    resources: resources.get(&overview.id).copied().unwrap_or(0),
+                }
+            })
+            .collect();
+        Ok(axum::Json(ProcessListing { processes }))
     })
     .await?
 }
@@ -937,19 +937,16 @@ async fn list_processes(State(state): State<Shared>) -> Result<String, Response>
 async fn inspect_process(
     State(state): State<Shared>,
     AxumPath(id): AxumPath<u64>,
-) -> Result<String, Response> {
+) -> Result<axum::Json<ProcessDetail>, Response> {
     let shared = Arc::clone(&state);
     blocking(move || {
-        let request = shared
-            .environment
-            .lock()
-            .unwrap()
+        let request = lock(&shared.environment, "environment")
             .request_process_info(id as ProcessId)
             .map_err(|e| (StatusCode::NOT_FOUND, format!("{e:?}")).into_response())?;
         match wait_for(&shared, request, None) {
             Ok(RequestResult::ProcessInfo(Some(info))) => {
                 let mut env = lock(&shared.environment, "environment");
-                Ok(render_process_info(id as usize, &info, &mut env))
+                Ok(axum::Json(process_detail(info, &mut env)))
             }
             Ok(RequestResult::ProcessInfo(None)) => Err(StatusCode::NOT_FOUND.into_response()),
             Ok(_) => Err(internal("unexpected result for process info")),
@@ -959,152 +956,53 @@ async fn inspect_process(
     .await?
 }
 
-async fn list_workers(State(state): State<Shared>) -> Result<String, Response> {
-    let workers = worker_info(&state).await?;
-    let mut lines = vec![format!("Workers ({}):", workers.len())];
-    for worker in workers {
-        let count = worker.process_ids.len();
-        let mut line = format!(
-            "  Worker {}: {} proc{} · {} binar{} · {}",
-            worker.worker_id,
-            count,
-            if count == 1 { "" } else { "s" },
-            worker.live_binaries,
-            if worker.live_binaries == 1 {
-                "y"
-            } else {
-                "ies"
+/// A process's detail, rendered against the session program.
+fn process_detail(
+    info: quiver_core::process::ProcessInfo,
+    env: &mut Environment<NativeEffect>,
+) -> ProcessDetail {
+    ProcessDetail {
+        id: info.id as u64,
+        status: info.status,
+        process_type: info
+            .function_index
+            .and_then(|index| env.format_process_type(index)),
+        stack_size: info.stack_size,
+        locals_count: info.locals_count,
+        frames_count: info.frames_count,
+        mailbox_size: info.mailbox_size,
+        persistent: info.persistent,
+        result: info.result.map(|result| match result {
+            Ok(value) => render_value(env, &value),
+            Err(error) => Outcome::Error {
+                message: error.to_string(),
             },
-            format_bytes(worker.live_bytes)
-        );
-        if worker.shared_bytes > 0 {
-            line.push_str(&format!(" ({} shared)", format_bytes(worker.shared_bytes)));
-        }
-        lines.push(line);
-    }
-    Ok(lines.join("\n"))
-}
-
-async fn inspect_worker(
-    State(state): State<Shared>,
-    AxumPath(id): AxumPath<u64>,
-) -> Result<String, Response> {
-    let workers = worker_info(&state).await?;
-    match workers.iter().find(|w| w.worker_id as u64 == id) {
-        Some(worker) => Ok(render_worker_info(worker)),
-        None => Err(StatusCode::NOT_FOUND.into_response()),
+        }),
+        heap: info.heap,
+        owner: info.owner.map(|owner| owner as u64),
+        links: info.links.iter().map(|pid| *pid as u64).collect(),
+        names: env.registered_names().remove(&info.id).unwrap_or_default(),
+        resources: env
+            .owned_resource_counts()
+            .get(&info.id)
+            .copied()
+            .unwrap_or(0),
     }
 }
 
-async fn worker_info(state: &Shared) -> Result<Vec<quiver_core::process::WorkerInfo>, Response> {
-    let shared = Arc::clone(state);
+async fn list_workers(State(state): State<Shared>) -> Result<axum::Json<WorkersEvent>, Response> {
+    let shared = Arc::clone(&state);
     blocking(move || {
-        let request = shared
-            .environment
-            .lock()
-            .unwrap()
+        let request = lock(&shared.environment, "environment")
             .request_worker_info()
             .map_err(internal)?;
         match wait_for(&shared, request, None) {
-            Ok(RequestResult::WorkerInfo(workers)) => Ok(workers),
+            Ok(RequestResult::WorkerInfo(workers)) => Ok(axum::Json(WorkersEvent { workers })),
             Ok(_) => Err(internal("unexpected result for worker info")),
             Err(e) => Err(internal(e)),
         }
     })
     .await?
-}
-
-fn render_process_info(
-    id: usize,
-    info: &quiver_core::process::ProcessInfo,
-    env: &mut Environment<NativeEffect>,
-) -> String {
-    let mut lines = vec![format!("Process {id}:")];
-    lines.push(if info.persistent {
-        format!("  Status: {:?} (persistent)", info.status)
-    } else {
-        format!("  Status: {:?}", info.status)
-    });
-    lines.push(format!(
-        "  Stack: {} ({})",
-        info.stack_size,
-        format_bytes(info.heap.stack.bytes)
-    ));
-    lines.push(format!(
-        "  Locals: {} ({})",
-        info.locals_count,
-        format_bytes(info.heap.locals.bytes)
-    ));
-    lines.push(format!("  Frames: {}", info.frames_count));
-    lines.push(format!(
-        "  Mailbox: {} ({})",
-        info.mailbox_size,
-        format_bytes(info.heap.mailbox.bytes)
-    ));
-    // Distinct across all roots, so it is ≤ the sum of the per-root figures above
-    // (a binary referenced from two roots is counted once here).
-    lines.push(format!(
-        "  Binaries: {} · {}",
-        info.heap.total.binaries,
-        format_bytes(info.heap.total.bytes)
-    ));
-    let type_str = info
-        .function_index
-        .and_then(|idx| env.format_process_type(idx))
-        .unwrap_or_else(|| "―".to_string());
-    lines.push(format!("  Type: {type_str}"));
-    match &info.result {
-        Some(Ok(value)) => lines.push(format!("  Result: {}", env.format_value(value))),
-        Some(Err(err)) => lines.push(format!("  Result: Error({err:?})")),
-        None => lines.push("  Result: ―".to_string()),
-    }
-    lines.join("\n")
-}
-
-fn render_worker_info(worker: &quiver_core::process::WorkerInfo) -> String {
-    let mut lines = vec![format!("Worker {}:", worker.worker_id)];
-    let pids: Vec<String> = worker.process_ids.iter().map(|p| p.to_string()).collect();
-    lines.push(format!(
-        "  Processes: {}  [{}]",
-        worker.process_ids.len(),
-        pids.join(", ")
-    ));
-    // Distinct buffers, counted by identity: one shared between two processes — or
-    // two workers — appears once.
-    lines.push(format!(
-        "  Binaries: {} · {}",
-        worker.live_binaries,
-        format_bytes(worker.live_bytes)
-    ));
-    // Bytes whose allocation has another holder — another value here, or one on
-    // another worker, since a send passes the handle.
-    lines.push(format!("  Shared: {}", format_bytes(worker.shared_bytes)));
-    // Unrealised ropes. Every read realises one and nothing caches the result, so a
-    // deep rope read repeatedly redoes the work each time.
-    if worker.rope_binaries > 0 {
-        lines.push(format!(
-            "  Ropes: {} unrealised · max depth {}",
-            worker.rope_binaries, worker.max_rope_depth
-        ));
-    }
-    lines.push(format!(
-        "  Constants: {} · {}",
-        worker.constant_binaries,
-        format_bytes(worker.constant_bytes)
-    ));
-    lines.join("\n")
-}
-
-fn format_bytes(bytes: usize) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = 1024.0 * 1024.0;
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if (bytes as f64) < MB {
-        format!("{:.1} KB", bytes as f64 / KB)
-    } else {
-        format!("{:.1} MB", bytes as f64 / MB)
-    }
 }
 
 // --- Socket plumbing and the status/stop subcommands -------------------------------

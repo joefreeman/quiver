@@ -89,6 +89,8 @@ fn process_info_changed(old: &Option<ProcessInfo>, new: &Option<ProcessInfo>) ->
                 || result_discriminant(&a.result) != result_discriminant(&b.result)
                 || a.heap.total.binaries != b.heap.total.binaries
                 || a.heap.total.bytes != b.heap.total.bytes
+                || a.owner != b.owner
+                || a.links != b.links
         }
         _ => true,
     }
@@ -244,11 +246,12 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             }
             Command::SpawnProcess {
                 id,
+                owner,
                 function_index,
                 captures,
                 argument,
             } => {
-                self.spawn_process(id, function_index, captures, argument)?;
+                self.spawn_process(id, owner, function_index, captures, argument)?;
             }
             Command::ResumeProcess { id, function_index } => {
                 self.resume_process(id, function_index)?;
@@ -289,6 +292,7 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             Command::StopProcess { id } => {
                 self.executor.stop(id);
             }
+            Command::DetachProcess { child } => self.executor.clear_owner(child),
             Command::LinkProcess { target, peer } => {
                 // The target-side half of a link. An already-terminated target:
                 // crashed or killed → the link fires immediately (tombstones keep the
@@ -329,6 +333,12 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             }
             Command::GetProcessTypes { request_id } => {
                 self.get_process_types(request_id)?;
+            }
+            Command::GetProcessOverviews { request_id } => {
+                self.sender.send(Event::ProcessOverviewsResponse {
+                    request_id,
+                    result: Ok(self.executor.process_overviews()),
+                })?;
             }
             Command::GetProcessInfo {
                 request_id,
@@ -576,6 +586,9 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
             Action::Link { caller, target } => {
                 self.sender.send(Event::LinkAction { caller, target })?;
             }
+            Action::Detach { child } => {
+                self.sender.send(Event::DetachAction { child })?;
+            }
             Action::Registry { caller, request } => {
                 // The caller is already parked (the dispatch site's Suspend handling).
                 self.sender
@@ -607,13 +620,14 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
 
         // Spawn the persistent process (sleeping if no function)
         self.executor
-            .spawn_process(id, function_index, vec![], WireValue::nil(), true)
+            .spawn_process(id, function_index, vec![], WireValue::nil(), true, None)
             .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))
     }
 
     fn spawn_process(
         &mut self,
         id: ProcessId,
+        owner: ProcessId,
         function_index: usize,
         captures: Vec<WireValue>,
         argument: WireValue,
@@ -625,7 +639,14 @@ impl<E: Effect, R: CommandReceiver<E>, S: EventSender<E>> Worker<E, R, S> {
 
         // The executor rebuilds the wire values on its own heap and initialises the process.
         self.executor
-            .spawn_process(id, Some(function_index), captures, argument, false)
+            .spawn_process(
+                id,
+                Some(function_index),
+                captures,
+                argument,
+                false,
+                Some(owner),
+            )
             .map_err(|e| EnvironmentError::HeapData(format!("{:?}", e)))
     }
 

@@ -14,9 +14,10 @@
 //! HTTP at all.
 
 use crate::protocol::{
-    CompactRequest, CreateResponse, FINGERPRINT_HEADER, Outcome, ResumeRequest, StatusResponse,
-    pidfile_path,
+    CompactRequest, CreateResponse, FINGERPRINT_HEADER, Outcome, ProcessDetail, ProcessListing,
+    ResumeRequest, StatusResponse, WorkersEvent, pidfile_path,
 };
+use quiver_core::process::WorkerInfo;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -124,6 +125,104 @@ fn summarise(body: &[u8]) -> String {
     )
 }
 
+/// How a response's body is framed.
+#[derive(Default)]
+struct ResponseHead {
+    content_length: Option<usize>,
+    chunked: bool,
+}
+
+/// A response body read as it arrives, undoing chunked transfer encoding when the
+/// server used it.
+struct ChunkedBody {
+    reader: BufReader<UnixStream>,
+    chunked: bool,
+    /// Bytes left in the current chunk.
+    remaining: usize,
+}
+
+impl ChunkedBody {
+    /// The next byte of the body, or `None` at its end.
+    fn next_byte(&mut self) -> std::io::Result<Option<u8>> {
+        if self.chunked && self.remaining == 0 {
+            let mut size_line = String::new();
+            if self.reader.read_line(&mut size_line)? == 0 {
+                return Ok(None);
+            }
+            // A chunk after the first is preceded by the previous one's CRLF.
+            if size_line.trim().is_empty() && self.reader.read_line(&mut size_line)? == 0 {
+                return Ok(None);
+            }
+            let size = size_line.trim().split(';').next().unwrap_or("");
+            self.remaining = usize::from_str_radix(size, 16).map_err(|_| {
+                std::io::Error::other(format!("bad chunk size line: {size_line:?}"))
+            })?;
+            if self.remaining == 0 {
+                return Ok(None);
+            }
+        }
+        let mut byte = [0];
+        if self.reader.read(&mut byte)? == 0 {
+            return Ok(None);
+        }
+        self.remaining = self.remaining.saturating_sub(1);
+        Ok(Some(byte[0]))
+    }
+}
+
+/// The server-sent events of an open `/events` stream: each item is an event's name
+/// and its `data:` payload (the JSON of the corresponding protocol event type). The
+/// iterator ends when the server closes the stream.
+pub struct EventStream {
+    body: ChunkedBody,
+    line: Vec<u8>,
+}
+
+impl EventStream {
+    fn next_line(&mut self) -> std::io::Result<Option<String>> {
+        self.line.clear();
+        loop {
+            match self.body.next_byte()? {
+                None => return Ok(None),
+                Some(b'\n') => {
+                    let line = String::from_utf8_lossy(&self.line);
+                    return Ok(Some(line.trim_end_matches('\r').to_string()));
+                }
+                Some(byte) => self.line.push(byte),
+            }
+        }
+    }
+}
+
+impl Iterator for EventStream {
+    type Item = std::io::Result<(String, String)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (mut name, mut data) = (String::new(), String::new());
+        loop {
+            match self.next_line() {
+                Err(e) => return Some(Err(e)),
+                Ok(None) => return None,
+                Ok(Some(line)) if line.is_empty() => {
+                    if !name.is_empty() || !data.is_empty() {
+                        return Some(Ok((name, data)));
+                    }
+                }
+                Ok(Some(line)) => {
+                    if let Some(value) = line.strip_prefix("event:") {
+                        name = value.trim_start().to_string();
+                    } else if let Some(value) = line.strip_prefix("data:") {
+                        if !data.is_empty() {
+                            data.push('\n');
+                        }
+                        data.push_str(value.strip_prefix(' ').unwrap_or(value));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A non-2xx answer, or the transport failing under a request.
 #[derive(Debug)]
 pub enum RequestError {
@@ -177,6 +276,34 @@ impl Client {
     ) -> std::io::Result<(u16, Vec<u8>)> {
         let trace = Trace::current();
         trace.request(method, path, body);
+        let (status, head, mut reader) = self.open(method, path, body, fingerprint)?;
+        // The server answers ours with `Connection: close`, so draining to EOF is always
+        // correct where no length is given.
+        let body = match head.content_length {
+            Some(length) => {
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body)?;
+                body
+            }
+            None => {
+                let mut body = Vec::new();
+                reader.read_to_end(&mut body)?;
+                body
+            }
+        };
+        trace.response(status, &body);
+        Ok((status, body))
+    }
+
+    /// Send a request, and read the response up to its body: the status, the headers
+    /// that say how the body is framed, and the reader positioned at the body.
+    fn open(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        fingerprint: bool,
+    ) -> std::io::Result<(u16, ResponseHead, BufReader<UnixStream>)> {
         let mut stream = UnixStream::connect(&self.socket)?;
         let mut head = format!("{method} {path} HTTP/1.1\r\nHost: quiv\r\nConnection: close\r\n");
         if fingerprint {
@@ -209,9 +336,7 @@ impl Client {
             .nth(1)
             .and_then(|code| code.parse().ok())
             .ok_or_else(|| std::io::Error::other(format!("bad status line: {status_line:?}")))?;
-        // Headers: only content-length matters (the server answers ours with
-        // `Connection: close`, so draining to EOF is also always correct).
-        let mut content_length: Option<usize> = None;
+        let mut response = ResponseHead::default();
         loop {
             let mut line = String::new();
             reader.read_line(&mut line)?;
@@ -219,26 +344,15 @@ impl Client {
             if line.is_empty() {
                 break;
             }
-            if let Some((name, value)) = line.split_once(':')
-                && name.eq_ignore_ascii_case("content-length")
-            {
-                content_length = value.trim().parse().ok();
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    response.content_length = value.trim().parse().ok();
+                } else if name.eq_ignore_ascii_case("transfer-encoding") {
+                    response.chunked = value.trim().eq_ignore_ascii_case("chunked");
+                }
             }
         }
-        let body = match content_length {
-            Some(length) => {
-                let mut body = vec![0; length];
-                reader.read_exact(&mut body)?;
-                body
-            }
-            None => {
-                let mut body = Vec::new();
-                reader.read_to_end(&mut body)?;
-                body
-            }
-        };
-        trace.response(status, &body);
-        Ok((status, body))
+        Ok((status, response, reader))
     }
 
     fn json<T: for<'de> serde::Deserialize<'de>>(
@@ -324,16 +438,44 @@ impl Client {
         self.expect_ok("DELETE", &format!("/processes/{id}"), None)
     }
 
-    /// Inspection text: `GET /processes`, `/processes/{id}`, `/workers`, `/workers/{id}`.
-    pub fn inspect(&self, path: &str) -> Result<String, RequestError> {
-        let (status, body) = self.request("GET", path, None, true)?;
+    /// `GET /processes` — every process the server hosts.
+    pub fn processes(&self) -> Result<ProcessListing, RequestError> {
+        self.json("GET", "/processes", None)
+    }
+
+    /// `GET /processes/{id}` — one process's detail.
+    pub fn process(&self, id: u64) -> Result<ProcessDetail, RequestError> {
+        self.json("GET", &format!("/processes/{id}"), None)
+    }
+
+    /// `GET /workers` — each worker's executor snapshot.
+    pub fn workers(&self) -> Result<Vec<WorkerInfo>, RequestError> {
+        let response: WorkersEvent = self.json("GET", "/workers", None)?;
+        Ok(response.workers)
+    }
+
+    /// `GET /events` — open the realtime inspection stream for the interest set in
+    /// `query` (see [`crate::protocol::EventsParams`]). It stays open until the server
+    /// goes away or the stream is dropped.
+    pub fn events(&self, query: &str) -> Result<EventStream, RequestError> {
+        let (status, head, mut reader) =
+            self.open("GET", &format!("/events?{query}"), None, true)?;
         if !(200..300).contains(&status) {
+            let mut body = Vec::new();
+            reader.read_to_end(&mut body)?;
             return Err(RequestError::Http {
                 status,
                 body: String::from_utf8_lossy(&body).into_owned(),
             });
         }
-        Ok(String::from_utf8_lossy(&body).into_owned())
+        Ok(EventStream {
+            body: ChunkedBody {
+                reader,
+                chunked: head.chunked,
+                remaining: 0,
+            },
+            line: Vec::new(),
+        })
     }
 
     /// `POST /shutdown` — fingerprint-exempt, so a newer client can stop a stale

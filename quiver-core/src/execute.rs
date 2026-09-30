@@ -77,7 +77,14 @@ pub fn execute_bytecode_sync_with<E: Effect>(
     let process_id = 0;
 
     // Spawn a process with the entry function (no captures, nil argument)
-    executor.spawn_process(process_id, Some(entry), vec![], WireValue::nil(), false)?;
+    executor.spawn_process(
+        process_id,
+        Some(entry),
+        vec![],
+        WireValue::nil(),
+        false,
+        None,
+    )?;
 
     // Execute until completion
     const SLICE: u64 = 1000;
@@ -121,6 +128,7 @@ pub fn execute_bytecode_sync_with<E: Effect>(
                 Action::ReadState { .. } => Operation::ReadState,
                 Action::Kill { .. } => Operation::Kill,
                 Action::Link { .. } => Operation::Link,
+                Action::Detach { .. } => Operation::Detach,
                 Action::Registry { .. } => Operation::Registry,
             };
             return Err(Error::UnsupportedAtCompileTime { operation });
