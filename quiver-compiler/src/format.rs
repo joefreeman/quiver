@@ -425,10 +425,14 @@ fn branch_doc(trivia: &Trivia, branch: &Branch, multi_branch: bool) -> Doc {
             // flattened onto one line instead, so that a consequence too wide for what is left of
             // the line breaks *itself* rather than dragging the guard apart with it — a guard reads
             // as one thing, and splitting it to make room for a tuple would be the wrong trade.
-            let condition = break_if_wider_than(
-                sequence_parts(trivia, &branch.condition, multi_branch, 0, false),
-                GUARD_SOFT_WIDTH,
-            );
+            // A single-step guard has no step boundary to break at, so the threshold would change
+            // only the consequence's indent; its chain breaks by its own rules instead.
+            let condition = sequence_parts(trivia, &branch.condition, multi_branch, 0, false);
+            let condition = if branch.condition.steps.len() > 1 {
+                break_if_wider_than(condition, GUARD_SOFT_WIDTH)
+            } else {
+                condition
+            };
             // A consequence opens mid-line, after the ` => `, and is placed under the arm's content
             // by the `nest` below. A single chain breaks there, so a closing delimiter lines up with
             // the line that opened it; the steps of a compound one go a level deeper, reading as the
@@ -2881,6 +2885,12 @@ mod tests {
         assert_formats(
             "#{ x ~> { =Cons[k, t] => [alpha_value, beta_value, gamma_value, delta_value, epsilon_value, zeta_value, eta_value] | other } }",
             "#{\n  x ~> {\n    | =Cons[k, t] => [\n        alpha_value,\n        beta_value,\n        gamma_value,\n        delta_value,\n        epsilon_value,\n        zeta_value,\n        eta_value,\n      ]\n    | other\n  }\n}\n",
+        );
+        // A single-step guard past the threshold has no step to break at, so it stays on its line
+        // and a consequence block still closes at the bar.
+        assert_formats(
+            "f = #'t { | $node:template<'%html.tmpl<'%data>> ~> =(statics: s, holes: h) => {\n a = s\n [a, h]\n } | other }",
+            "f = #'t {\n  | $node:template<'%html.tmpl<'%data>> ~> =(statics: s, holes: h) => {\n    a = s\n    [a, h]\n  }\n  | other\n}\n",
         );
     }
 

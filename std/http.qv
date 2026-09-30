@@ -412,15 +412,15 @@ chunk_step = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
               dend = __integer_add__ [dstart, n]
               {
                 | __integer_compare__ [__integer_add__ [dend, 2], $len] ~> =(-1 | 0) => {
-                    | %bin.get_byte [$data, dend] ~> =13
-                      %bin.get_byte [$data, __integer_add__ [dend, 1]] ~> =10 => ^ [
-                        $data,
-                        __integer_add__ [dend, 2],
-                        $len,
-                        %bin.concat [$acc, %bin.slice [$data, dstart, dend]],
-                      ]
-                    | Bad[reason: "chunk not terminated by CRLF"]
-                  }
+                  | %bin.get_byte [$data, dend] ~> =13
+                    %bin.get_byte [$data, __integer_add__ [dend, 1]] ~> =10 => ^ [
+                      $data,
+                      __integer_add__ [dend, 2],
+                      $len,
+                      %bin.concat [$acc, %bin.slice [$data, dstart, dend]],
+                    ]
+                  | Bad[reason: "chunk not terminated by CRLF"]
+                }
                 | Incomplete
               }
             }
@@ -467,63 +467,63 @@ parse_response_with = #[(data): 'bin, (eof): (Ok | []), (max_head): 'int, (max_b
         sle = line_end [$data, 0, h]
         {
           | %bin.slice [$data, 0, sle] ~> parse_status_line ~> =('int & status) => {
-              hstart = {
-                | __integer_compare__ [sle, h] ~> =-1 => __integer_add__ [sle, 2]
-                | h
-              }
-              parse_headers [$data, hstart, h, Nil] ~> {
-                | =Bad[status: _, reason: br] => Bad[reason: br]
-                | =hs => {
-                  bstart = __integer_add__ [h, 4]
-                  done = #[(body): 'bin, (rest): 'bin] {
-                    [Response[status: status, headers: hs, body: $body], $rest]
-                  }
-                  {
-                    | bodyless? status => done [<>, %bin.slice [$data, bstart, len]]
-                    | header [hs, "transfer-encoding"] ~> =Str[te]
-                      %str.ascii_lower Str[te] ~> ="chunked" => chunk_step [$data, bstart, len, <>]
-                      ~> {
-                        | =Incomplete => Incomplete
-                        | =Bad[reason: r] => Bad[reason: r]
-                        | =[body, e] => {
-                          | %bin.length body ~> __integer_compare__ [~, $max_body] ~> =1 => Bad[
-                              reason: "response body too large",
-                            ]
-                          | done [body, %bin.slice [$data, e, len]]
-                        }
-                      }
-                    | header [hs, "transfer-encoding"] ~> =Str[_] => Bad[
-                        reason: "unsupported transfer encoding",
-                      ]
-                    | header [hs, "content-length"] ~> =Str[_] => {
-                      | content_length hs ~> =('int & cl) => {
-                        | __integer_compare__ [cl, $max_body] ~> =1 => Bad[
+            hstart = {
+              | __integer_compare__ [sle, h] ~> =-1 => __integer_add__ [sle, 2]
+              | h
+            }
+            parse_headers [$data, hstart, h, Nil] ~> {
+              | =Bad[status: _, reason: br] => Bad[reason: br]
+              | =hs => {
+                bstart = __integer_add__ [h, 4]
+                done = #[(body): 'bin, (rest): 'bin] {
+                  [Response[status: status, headers: hs, body: $body], $rest]
+                }
+                {
+                  | bodyless? status => done [<>, %bin.slice [$data, bstart, len]]
+                  | header [hs, "transfer-encoding"] ~> =Str[te]
+                    %str.ascii_lower Str[te] ~> ="chunked" => chunk_step [$data, bstart, len, <>]
+                    ~> {
+                      | =Incomplete => Incomplete
+                      | =Bad[reason: r] => Bad[reason: r]
+                      | =[body, e] => {
+                        | %bin.length body ~> __integer_compare__ [~, $max_body] ~> =1 => Bad[
                             reason: "response body too large",
                           ]
-                        | {
-                          bend = __integer_add__ [bstart, cl]
-                          {
-                            | __integer_compare__ [bend, len] ~> =(-1 | 0) => done [
-                                %bin.slice [$data, bstart, bend],
-                                %bin.slice [$data, bend, len],
-                              ]
-                            | Incomplete
-                          }
+                        | done [body, %bin.slice [$data, e, len]]
+                      }
+                    }
+                  | header [hs, "transfer-encoding"] ~> =Str[_] => Bad[
+                      reason: "unsupported transfer encoding",
+                    ]
+                  | header [hs, "content-length"] ~> =Str[_] => {
+                    | content_length hs ~> =('int & cl) => {
+                      | __integer_compare__ [cl, $max_body] ~> =1 => Bad[
+                          reason: "response body too large",
+                        ]
+                      | {
+                        bend = __integer_add__ [bstart, cl]
+                        {
+                          | __integer_compare__ [bend, len] ~> =(-1 | 0) => done [
+                              %bin.slice [$data, bstart, bend],
+                              %bin.slice [$data, bend, len],
+                            ]
+                          | Incomplete
                         }
                       }
-                      | Bad[reason: "invalid content-length"]
                     }
-                    // Neither header: the body is whatever arrives before the peer hangs up.
-                    | $eof ~> =Ok => {
-                      | __integer_compare__ [__integer_subtract__ [len, bstart], $max_body]
-                        ~> =1 => Bad[reason: "response body too large"]
-                      | done [%bin.slice [$data, bstart, len], <>]
-                    }
-                    | Incomplete
+                    | Bad[reason: "invalid content-length"]
                   }
+                  // Neither header: the body is whatever arrives before the peer hangs up.
+                  | $eof ~> =Ok => {
+                    | __integer_compare__ [__integer_subtract__ [len, bstart], $max_body]
+                      ~> =1 => Bad[reason: "response body too large"]
+                    | done [%bin.slice [$data, bstart, len], <>]
+                  }
+                  | Incomplete
                 }
               }
             }
+          }
           | Bad[reason: "malformed status line"]
         }
       }

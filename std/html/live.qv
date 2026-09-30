@@ -1205,7 +1205,12 @@ vlife = #<'i, 's, 'e: '%data>[
 // Settle: drain `Changed` in quiet-window steps, re-rendering after each burst,
 // until a window passes silently (or the deadline lapses). Answers the settled
 // frame. `left` is the remaining deadline budget.
-settle = #<'i, 's, 'e: '%data>[(state): 's, (f): 'frame, (comp): 'component<'i, 's, 'e>, (left): 'int] {
+settle = #<'i, 's, 'e: '%data>[
+  (state): 's,
+  (f): 'frame,
+  (comp): 'component<'i, 's, 'e>,
+  (left): 'int,
+] {
   {
     | %num.lt? [0, $left] => ![#'%proc.changed, settle_quiet] ~> {
       | ='%proc.changed => {
@@ -1764,7 +1769,10 @@ join = #[(conn): '%http/websocket, (req): '%http, (root): 'root_view, (registry)
 
 'sim<'i, 's, 'e: '%data> = Sim[comp: 'component<'i, 's, 'e>, state: 's, frame: 'frame]
 
-sim = #<'e: '%data, 'i, 's>[(init): 'i, (cfg): ('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>)] {
+sim = #<'e: '%data, 'i, 's>[
+  (init): 'i,
+  (cfg): ('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>),
+] {
   :doc "Mounts a component with no socket, for tests: answers a sim holding the mounted state and frame 0. Step it with `sim_text` / `sim_event` / `sim_changed`; read its region HTML with `sim_html`. Pin the wire-event type — `sim<'ev> [...]` — to compile-check the view's `on:*` payloads."
   comp = with_nav $cfg
   state = comp.mount $init

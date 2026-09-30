@@ -20,7 +20,11 @@
 
 'list<'t> = Nil | Cons['t, ^]
 
-'<'k: '%data, 'v> = Empty | Leaf['int, 'k, 'v] | Collision['int, 'list<['k, 'v]>] | Node['int, 'list<^>]
+'<'k: '%data, 'v> =
+  | Empty
+  | Leaf['int, 'k, 'v]
+  | Collision['int, 'list<['k, 'v]>]
+  | Node['int, 'list<^>]
 
 // --- key hashing -------------------------------------------------------------
 hash = #'%data { __data_encode__ ~ ~> __binary_hash32__ }
@@ -104,7 +108,12 @@ bucket_get = #<'k: '%data, 'v>[(entries): 'list<['k, 'v]>, (key): 'k] {
   }
 }
 
-bucket_put = #<'k: '%data, 'v>[(entries): 'list<['k, 'v]>, (key): 'k, (value): 'v, (acc): 'list<['k, 'v]>] {
+bucket_put = #<'k: '%data, 'v>[
+  (entries): 'list<['k, 'v]>,
+  (key): 'k,
+  (value): 'v,
+  (acc): 'list<['k, 'v]>,
+] {
   $entries ~> {
     | =Nil => Cons[[$key, $value], Nil] ~> revcat [$acc, ~]
     | =Cons[[k, v], t] => {
@@ -272,7 +281,12 @@ collapse_node = #<'k: '%data, 'v>[(bitmap): 'int, (children): 'list<'<'k, 'v>>] 
 // Drop the slot for `bit` (its child became `Empty`), then canonicalize. Non-recursive so the
 // generic `remove_at` call sits outside `remove`'s self-passing recursion — where (a quirk of
 // the type inferencer) it would otherwise leak its function type into the result type.
-remove_slot = #<'k: '%data, 'v>[(bitmap): 'int, (bit): 'int, (children): 'list<'<'k, 'v>>, (index): 'int] {
+remove_slot = #<'k: '%data, 'v>[
+  (bitmap): 'int,
+  (bit): 'int,
+  (children): 'list<'<'k, 'v>>,
+  (index): 'int,
+] {
   collapse_node [%int.and [$bitmap, %int.not $bit], remove_at [$children, $index, Nil]]
 }
 
