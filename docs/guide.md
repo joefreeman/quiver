@@ -1678,7 +1678,7 @@ name = "world"
 ```
 
 The standard library ships `%num{ … }`, `%list{ … }`, `%dict{ … }`, `%json{ … }`,
-`%time{ … }`, `%html{ … }` and `%html/live{ … }`. A dialect is an ordinary exported
+`%time{ … }`, `%path{ … }`, `%html{ … }` and `%html/live{ … }`. A dialect is an ordinary exported
 function, usually built from `%parse` combinators, returning the code IR that `%meta`
 defines. `%html` exports its grammar seam so other modules can layer their own attribute
 policies over it.

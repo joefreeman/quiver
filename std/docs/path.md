@@ -103,6 +103,68 @@ pipeline as nil instead of becoming a type error:
 %path.to_string []            //= []
 ```
 
+## Literals
+
+`%path{ … }` writes a path as its text. It is parsed and normalised when the program
+compiles, by the same rules as `parse`, so a literal costs nothing at runtime and can't fail:
+
+```quiver
+%path{ /etc/hosts }           //= Path["hosts", Path["etc", Root]]
+%path{ a/./b/../c }           //= Path["c", Path["a", Relative[0]]]
+%path{ ../x }                 //= Path["x", Relative[1]]
+%path{ /etc/hosts } ~> %path.basename ~   //= "hosts"
+```
+
+Whitespace around the path is ignored, and whitespace inside it is part of a segment:
+
+```quiver
+%path{ /my dir/notes.txt } ~> %path.to_string ~   //= "/my dir/notes.txt"
+```
+
+A `{ … }` hole is a string, evaluated in the surrounding scope like a hole in a string
+literal. The segment it sits in — its value, with any text glued to it — must be exactly one
+name: not empty, not `.` or `..`, and without a `/` or NUL byte.
+
+```quiver
+name = "report"
+%path{ /srv/{name}.txt }      //= Path["report.txt", Path["srv", Root]]
+"x" ~> %path{ /tmp/{~} }      //= Path["x", Path["tmp", Root]]
+```
+
+This is the difference from interpolating a string and parsing it. `parse` reads the whole
+string as path syntax, so a hole's `..`s are normalised away and the result is quietly
+somewhere else. A hole in the literal can only ever be one segment, so a value that would
+add segments or climb is refused instead, as nil carrying `:error InvalidSegment[…]`:
+
+```quiver
+name = "../../etc/passwd"
+%path.parse "/srv/{name}"                             //= Path["passwd", Path["etc", Root]]
+%path{ /srv/{name} }                                  //= []
+%path{ /srv/{name} } ~> :error<'%path.error>          //= InvalidSegment["../../etc/passwd"]
+```
+
+So a literal with a hole is typed `'%path | []`, and one without is a plain `'%path`. A
+relative path starting with a hole is written with a leading `./`, as in a shell, or not —
+the two are the same path:
+
+```quiver
+dir = "src"
+%path{ ./{dir}/main.qv }      //= Path["main.qv", Path["src", Relative[0]]]
+%path{ {dir}/main.qv }        //= Path["main.qv", Path["src", Relative[0]]]
+```
+
+A hole holds a string, never a path. To extend a path value, `join` it or `push` onto it.
+
+A literal that doesn't make sense is a compile error: a `..` above the root, or one that
+would cancel a hole's segment (the hole would go unchecked):
+
+```quiver
+%path{ /.. }                  //! no '..' above the root
+n = "a"; %path{ /{n}/.. }     //! no '..' cancelling a placeholder
+```
+
+Content braces are holes, so a literal `{` or `}` in a name goes through one: `%path{ /tmp/{"\{x}"} }`.
+
 ## Segments and parents
 
 `basename` is the final segment. A path that has none — a root, or a dots-only relative
@@ -214,4 +276,24 @@ A relative starting point has no such floor — ascending simply raises the coun
 
 ```quiver
 [Relative[1], Relative[2]] ~> %path.join ~   //= Relative[3]
+```
+
+## Adding a segment
+
+`push [path, segment]` adds one segment, checked as a literal's hole is: a string that
+isn't exactly one name is nil carrying `:error InvalidSegment[…]`. This is the way to put a
+name from outside, such as an uploaded file's, under a directory.
+
+```quiver
+%path{ /srv } ~> %path.push [~, "a.txt"]                            //= Path["a.txt", Path["srv", Root]]
+%path{ /srv } ~> %path.push [~, "../etc"] ~> :error<'%path.error>   //= InvalidSegment["../etc"]
+%path{ /srv } ~> %path.push [~, ""] ~> :error<'%path.error>         //= InvalidSegment[""]
+```
+
+A nil path is answered as itself, keeping its `:error`, so pushes chain and the first
+refusal is the one reported:
+
+```quiver
+%path{ /srv } ~> %path.push [~, ".."] ~> %path.push [~, "x"] ~> :error<'%path.error>
+//= InvalidSegment[".."]
 ```

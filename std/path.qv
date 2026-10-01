@@ -53,6 +53,162 @@ parse = #[(segments): '%list<'%str>, (init): '] {
   ]
 }
 
+// The reason a segment was refused: it is empty, `.` or `..`, or holds a `/` or NUL byte, so
+// it could not stand as one name.
+'error = InvalidSegment['%str]
+
+iadd = __integer_add__
+isub = __integer_subtract__
+icmp = __integer_compare__
+
+segment? = #'%str {
+  =(\("" | "." | "..") & Str[b])
+  %bin.index [b, 47, 0] ~> =[]
+  %bin.index [b, 0, 0] ~> =[]
+  Ok
+}
+
+push = #[(path): (' | []), (segment): '%str] {
+  | $path ~> =[] => $path
+  | $path ~> =(' & p) => {
+    | segment? $segment => Path[$segment, p]
+    | [] ~> { :error InvalidSegment[$segment] }
+  }
+}
+
+// --- the `%path{ … }` dialect ----------------------------------------------------------
+// `%path{ /srv/uploads/{name}.txt }` is a path written as its text. The static text is parsed
+// and normalised at compile time, as `parse` would at runtime. A `{ … }` hole is a host
+// expression evaluating to a string, and the segment holding it (the hole's value with any
+// text glued to it) is checked to be exactly one name, so a hole can neither add segments nor
+// climb out — answering nil carrying `:error InvalidSegment[…]` instead.
+
+// A slash-separated segment as written: its offset, and its text runs and holes, in reverse.
+'part = Lit['bin] | Hole[offset: 'int, length: 'int]
+'raw = Raw[at: 'int, parts: '%list<'part>]
+
+// A segment after normalisation: known text, or one built from holes when the path runs.
+'seg = Static['bin] | Dynamic['part, '%list<'part>]
+'base = Root | Relative['int]
+
+// The end of a text run: the next `/` or `{`, or the end of the content.
+lit_end = #[(data): 'bin, (pos): 'int, (end): 'int] -> 'int {
+  | icmp [$pos, $end] ~> =(0 | 1) => $end
+  | %bin.get_byte [$data, $pos] ~> =(47 | 123) => $pos
+  | ^ [$data, iadd [$pos, 1], $end]
+}
+
+scan = #[
+  (data): 'bin,
+  (cb): '%meta.cb,
+  (pos): 'int,
+  (end): 'int,
+  (at): 'int,
+  (parts): '%list<'part>,
+  (raws): '%list<'raw>,
+] -> ('%list<'raw> | []) {
+  | icmp [$pos, $end] ~> =(0 | 1) => %list.reverse Cons[Raw[at: $at, parts: $parts], $raws]
+  | %bin.get_byte [$data, $pos] ~> =47 => {
+    next = iadd [$pos, 1]
+    ^ [$data, $cb, next, $end, next, Nil, Cons[Raw[at: $at, parts: $parts], $raws]]
+  }
+  | %bin.get_byte [$data, $pos] ~> =123 => $cb [$data, $pos] ~> {
+    | =('int & e) => {
+      hole = Hole[offset: $pos, length: isub [e, $pos]]
+      ^ [$data, $cb, e, $end, $at, Cons[hole, $parts], $raws]
+    }
+    | %parse.fail [$pos, "an expression"]
+  }
+  | {
+    e = lit_end [$data, $pos, $end]
+    ^ [$data, $cb, e, $end, $at, Cons[Lit[%bin.slice [$data, $pos, e]], $parts], $raws]
+  }
+}
+
+// Applies `.`, `..` and empty segments to the written segments, as `parse` does. The stack
+// holds the result's segments, last first.
+normalise = #[(raws): '%list<'raw>, (base): 'base, (stack): '%list<'seg>] -> (
+  | [base: 'base, stack: '%list<'seg>]
+  | []
+) {
+  $raws ~> {
+    | =Nil => [base: $base, stack: $stack]
+    | =Cons[Raw[at: at, parts: parts], rest] => parts ~> {
+      | =Nil => ^ [rest, $base, $stack]
+      | =Cons[Lit[<2e>], Nil] => ^ [rest, $base, $stack]
+      | =Cons[Lit[<2e2e>], Nil] => [$base, $stack] ~> {
+        | =[_, Cons[Static[_], s]] => ^ [rest, $base, s]
+        | =[_, Cons[Dynamic[_, _], _]] => %parse.fail [at, "no '..' cancelling a placeholder"]
+        | =[Relative[n], Nil] => ^ [rest, Relative[iadd [n, 1]], Nil]
+        | %parse.fail [at, "no '..' above the root"]
+      }
+      | =Cons[Lit[b], Nil] => {
+        | %bin.index [b, 0, 0] ~> =[] => ^ [rest, $base, Cons[Static[b], $stack]]
+        | %parse.fail [at, "no NUL byte"]
+      }
+      | %list.reverse parts ~> =Cons[p, ps] => ^ [rest, $base, Cons[Dynamic[p, ps], $stack]]
+    }
+  }
+}
+
+part_expr = #'part {
+  | =Lit[b] => Str[b]
+  | =Hole[offset: o, length: l] => Unquote[offset: o, length: l]
+}
+
+// A segment's text runs and holes, concatenated in order.
+concat_expr = #[(parts): '%list<'part>, (acc): '%meta.expr] -> '%meta.expr {
+  $parts ~> {
+    | =Nil => $acc
+    | =Cons[p, rest] => {
+      Call[module: "str", member: "concat", arg: %meta.pair2 [$acc, part_expr p]]
+      ~> ^ [rest, ~]
+    }
+  }
+}
+
+// Builds the path outward from its base. Segments before the first hole are constant; from
+// there each is a `push`, which checks it and passes on an earlier refusal.
+emit = #[(segs): '%list<'seg>, (expr): '%meta.expr, (dynamic?): (Ok | [])] -> '%meta.expr {
+  $segs ~> {
+    | =Nil => $expr
+    | =Cons[Static[b], rest]; $dynamic? ~> =[] => {
+      Tuple[
+        name: "Path",
+        fields: %list{ Str[b], $expr },
+      ]
+      ~> ^ [rest, ~, []]
+    }
+    | =Cons[Static[b], rest] => ^ [rest, %meta.call2 ["push", $expr, Str[b]], Ok]
+    | =Cons[Dynamic[p, ps], rest] => concat_expr [ps, part_expr p]
+      ~> %meta.call2 ["push", $expr, ~]
+      ~> ^ [rest, ~, Ok]
+  }
+}
+
+base_expr = #'base {
+  | =Root => Tuple[name: "Root", fields: Nil]
+  | =Relative[n] => Tuple[name: "Relative", fields: %list{ n }]
+}
+
+path_dialect = #(content: '%str, term: '%meta.cb) {
+  Str[data] = $content
+  // Leading whitespace is skipped rather than cut, so error offsets stay offsets into the
+  // content as written.
+  end = %str.trim_end $content ~> .0 ~> %bin.length
+  start = %str.trim_start $content ~> .0 ~> %bin.length ~> isub [%bin.length data, ~]
+  base = {
+    | icmp [start, end] ~> =-1; %bin.get_byte [data, start] ~> =47 => Root
+    | Relative[0]
+  }
+
+  scan [data, $term, start, end, start, Nil, Nil]
+  ~> =('%list<'raw> & raws)
+
+  normalise [raws, base, Nil] ~> =(base: b, stack: s)
+  %list.reverse s ~> emit [~, base_expr b, []]
+}
+
 [
   parse: #'%str {
     :doc "Parses a slash-separated string into a path, normalising . and .. segments."
@@ -99,4 +255,10 @@ parse = #[(segments): '%list<'%str>, (init): '] {
     :doc "Joins the second path onto the first; nil when the second is absolute or escapes the root."
     join [join, $path, $with]
   },
+
+  push: #[(path): (' | []), (segment): '%str] {
+    :doc "The path with one more segment, which must be a single name: nil carrying :error InvalidSegment when it is empty, `.` or `..`, or holds a `/` or NUL byte. A nil path is answered as itself."
+    push $
+  },
 ]
+~> { :dialect path_dialect }
