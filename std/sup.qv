@@ -119,7 +119,7 @@ loop = #'state {
                 table: %dict.put [$table, i, [id: i, pid: p, spec: r.spec, restarts: recent]],
               ]
             }
-            | __panic__ "%sup: restart intensity exceeded"
+            | %panic "%sup: restart intensity exceeded"
           }
         }
         // No restart wanted: the child is done — drop its row.

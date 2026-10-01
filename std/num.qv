@@ -671,7 +671,7 @@ budget = 65536
 // Order two unequal numbers by bounding both ever more tightly, from `k` bits. Always
 // terminates for a provably unequal pair; `capped` applies the budget where that isn't provable.
 refine = #[(x): ', (y): ', (k): 'int, (capped): 'int] -> 'int {
-  | $capped ~> =1; __integer_compare__ [$k, budget] ~> =1 => __panic__ "Cannot order values from different transcendental families (π, e, logarithms): they are indistinguishable at the precision budget"
+  | $capped ~> =1; __integer_compare__ [$k, budget] ~> =1 => %panic "Cannot order values from different transcendental families (π, e, logarithms): they are indistinguishable at the precision budget"
   | {
     bounds [$x, $k] ~> =[xlo, xhi]
     bounds [$y, $k] ~> =[ylo, yhi]
@@ -838,7 +838,7 @@ tx_size = #'tx -> (['int, 'int, 'int] | []) {
 // The sign of a `Tx`, refusing where no part of it outweighs the rest.
 tx_sign = #'tx -> 'int {
   | tx_size $ ~> =[s, _, _] => s
-  | __panic__ "Cannot order a sum of powers too far apart to bound, none of which outweighs the rest"
+  | %panic "Cannot order a sum of powers too far apart to bound, none of which outweighs the rest"
 }
 
 // Sign of a difference: exact for the algebraic kinds, and by refinement otherwise — which
@@ -869,7 +869,7 @@ mag_compare = #[(x): ('coeff | 'slow), (y): ('coeff | 'slow)] -> 'int {
           __integer_compare__ [xhi, ylo] ~> =-1 => __integer_multiply__ [sx, -1]
         | m ~> =[[xlo, _], [_, yhi]]
           __integer_compare__ [yhi, xlo] ~> =-1 => sx
-        | __panic__ "Cannot order a power too large to bound against a number of about the same magnitude"
+        | %panic "Cannot order a power too large to bound against a number of about the same magnitude"
       }
     }
   }

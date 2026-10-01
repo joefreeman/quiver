@@ -1,0 +1,7 @@
+// Unrecoverable aborts. Like `%ref`, this is a single function rather than a record:
+// `%panic "message"` aborts the current process. It imports nothing, so every other module
+// can use it, which is also why the message is typed as `Str['bin]` rather than `'%str`.
+#Str['bin] {
+  :doc "Aborts the current process with the message. A panic is a bug rather than a failure, so it never returns and can't be recovered from locally. A process awaiting this one answers nil with a `Panic[pid, message]` `:crash` payload."
+  __panic__ $
+}

@@ -1329,7 +1329,7 @@ round_to = #['int, 'int, 'rounding] {
 
 increment = #'duration {
   | icmp [$0, 0] ~> =1 => $0
-  | __panic__ "%time.round: the increment must be positive"
+  | %panic "%time.round: the increment must be positive"
 }
 
 'roundable =
@@ -2792,7 +2792,7 @@ time_dialect = #(content: '%str) {
   parse_zoned!: #'%str {
     :doc "`parse_zoned`, for text known to be good: a failure panics. The `%time\{ … }` dialect places a literal naming an IANA zone with it, so a literal whose zone the host lacks, or whose offset the zone doesn't have, fails fast when it runs."
     | parse_zoned $ ~> =('zoned & z) => z
-    | __panic__ "%time: can't place {$}: no such zone here, or an offset it doesn't have"
+    | %panic "%time: can't place {$}: no such zone here, or an offset it doesn't have"
   },
 ]
 ~> { :dialect time_dialect }

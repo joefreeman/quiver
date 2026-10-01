@@ -129,7 +129,7 @@ build_number = #[(sign): 'int, (int_b): 'bin, (frac_b): 'bin, (exp): 'int] {
   // The digits were scanned as a non-empty run of digits, so they always parse.
   mag = %bin.concat [$int_b, $frac_b] ~> %str.parse_int Str[~] ~> {
     | =('int & n) => n
-    | __panic__ "scanned number digits did not parse"
+    | %panic "scanned number digits did not parse"
   }
 
   m = __integer_multiply__ [$sign, mag]
@@ -145,7 +145,7 @@ build_number = #[(sign): 'int, (int_b): 'bin, (frac_b): 'bin, (exp): 'int] {
       // `den` is a positive power of ten, so the division is always a rational.
       %num.div [m, den] ~> {
         | =('%num.coeff & r) => lower_num r
-        | __panic__ "dividing by a power of ten failed"
+        | %panic "dividing by a power of ten failed"
       }
     }
   }
@@ -194,7 +194,7 @@ number = #'%parse {
         | {
           emag = ebb ~> %str.parse_int Str[~] ~> {
             | =('int & n) => n
-            | __panic__ "scanned exponent digits did not parse"
+            | %panic "scanned exponent digits did not parse"
           }
           [exponent: __integer_multiply__ [esign, emag], st: st4a]
         }

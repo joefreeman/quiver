@@ -102,7 +102,7 @@ split = #[(str): ', (sep): '] {
   :doc "Splits a string on a non-empty delimiter, yielding an iterator of the pieces."
   Str[haystack] = $str
   Str[delim] = $sep ~> {
-    | =Str[<>] => __panic__ "Cannot split on an empty separator"
+    | =Str[<>] => %panic "Cannot split on an empty separator"
     | ~
   }
   haystack_len = %bin.length haystack
@@ -164,7 +164,7 @@ pad = #[(str): ', (width): 'int, (fill): '] {
     // One byte is one character, which spares counting the usual ASCII fill.
     | %bin.length fill ~> =1
     | char_count fill ~> =1
-    | __panic__ "Padding must be a single character"
+    | %panic "Padding must be a single character"
   }
   __integer_subtract__ [$width, char_count $str.0] ~> {
     | %num.gt? [~, 0]; ~ => %bin.repeat [fill, ~]
@@ -361,7 +361,7 @@ radix = #'int {
   | __integer_compare__ [$, 2] ~> =(0 | 1)
     __integer_compare__ [$, 36] ~> =(-1 | 0)
     $
-  | __panic__ "Radix must be between 2 and 36"
+  | %panic "Radix must be between 2 and 36"
 }
 
 // The value of a digit byte — `0`–`9`, then `a`–`z` or `A`–`Z` for 10 to 35 — or nil when it
@@ -438,7 +438,7 @@ parse_digits = #[(str): ', (radix): 'int] {
   }
 }
 
-not_a_char = #'int { __panic__ "Not a Unicode code point: {int_text [$, 10]}" }
+not_a_char = #'int { %panic "Not a Unicode code point: {int_text [$, 10]}" }
 
 // Reassemble a Str from an iterator of codepoints, encoding each as UTF-8. A number that is
 // not a codepoint (negative, a UTF-16 surrogate, or past U+10FFFF) is a mistake in the program.
@@ -652,7 +652,7 @@ from_chars = #'%iter<'int> {
     :doc "Replaces every occurrence of a non-empty substring, scanning left to right without overlap."
     Str[data] = $str
     Str[from] = $from ~> {
-      | =Str[<>] => __panic__ "Cannot replace an empty string"
+      | =Str[<>] => %panic "Cannot replace an empty string"
       | ~
     }
     replace_from [data, from, $to.0, 0, <>] ~> Str[~]

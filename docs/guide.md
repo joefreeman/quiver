@@ -1201,7 +1201,7 @@ Awaiting is never lethal, so its result is fallible: `'r | []` for a process ret
 the error, so an ordinary branch recovers from it.
 
 ```quiver
-crashed = @[] { __panic__ "boom" } []
+crashed = @[] { %panic "boom" } []
 r = !crashed
 r ~> {
   | =('int & v) => v                                       // completed
@@ -1449,7 +1449,8 @@ result ~> :error<'%io> ~> =IoError(kind: ConnectionRefused) => retry
 
 Failures that are not the world's doing stay runtime errors, because no caller could act
 on them: an argument the operation rejects, an operation on a resource the process does
-not own, a host with no backend for the effect.
+not own, a host with no backend for the effect. Code raises one of its own with
+`%panic "message"`, for a state it should never be in, and the process aborts.
 
 "Found nothing" is a plain nil, as everywhere else, and `%fs.stat` on a missing path
 answers nil exactly as `%list.find` does. A *failed* lookup answers nil too, with the
@@ -1626,7 +1627,7 @@ compiler rejects, and rejected code cannot carry a compiled check. It is read by
 
 ```quiver
 5 ~> 99                        //! must use the value flowing into it
-__panic__ "boom"               //! boom
+%panic "boom"                  //! boom
 ```
 
 A `//` ends the expected text and starts a note, as after a `//=` pattern. The marker
@@ -1694,8 +1695,6 @@ __integer_add__ [3, 4]                       //= 7
 [add: __integer_add__] ~> .add ~> ~ [3, 4]   //= 7
 ```
 
-`__panic__` aborts the process with a message.
-
 ## Standard library
 
 | module | |
@@ -1710,6 +1709,7 @@ __integer_add__ [3, 4]                       //= 7
 | `%range` | integer ranges |
 | `%vec` | packed fixed-point numeric vectors |
 | `%ref` | mints unique opaque identifiers |
+| `%panic` | aborts the process with a message |
 | `%data` | Quiver data notation: `encode` and `decode<'t>` |
 | `%json` | JSON parsing, rendering, querying and editing, typed `decode<'t>`/`encode<'t>`, plus `%json{ … }` |
 | `%parse` | parser combinators over binary input |

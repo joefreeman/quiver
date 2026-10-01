@@ -1012,7 +1012,7 @@ assign_bounds = #[(bs): 'bounds, (kids): 'kids, (vid): '%str, (n): 'int, (acc): 
 assigned_vid = #[(items): 'assigns, (k): '%str] {
   %list.find [$items, #{ =(key: ^$$k) }] ~> {
     | =(vid: av) => Str[av ~> .0]
-    | __panic__ "boundary key missing from its assignment"
+    | %panic "boundary key missing from its assignment"
   }
 }
 
