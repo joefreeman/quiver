@@ -1492,7 +1492,7 @@ alife = #[
     | =Attached[conn] => {
       ![conn.sock, #(Frame['%str] | Route['%str, @'view_msg] | Unroute['%str])]
       ~> {
-        | =Data[sock: _, data: d] => {
+        | =Data[source: _, data: d] => {
           %http/websocket.on_data [conn, d] ~> =[msgs, c2]
           route_events [$req, msgs, $routes] ~> {
             | =Go => ^ [$req, Attached[c2], Nil, $token, reg, $routes]

@@ -71,8 +71,6 @@ fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
         ),
         // file_flush(File) -> Ok
         ("file_flush", file.clone(), ok.clone()),
-        // file_close(File) -> Ok
-        ("file_close", file, ok.clone()),
         // directory_read(path) -> Dir
         ("directory_read", bin.clone(), dir.clone()),
         // directory_next(Dir) -> [bin, kind] | nil  (entry name + kind tag)
@@ -84,8 +82,6 @@ fn file_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
                 nil.clone(),
             ]),
         ),
-        // directory_close(Dir) -> Ok
-        ("directory_close", dir, ok.clone()),
         // filesystem_stat([path, follow]) -> [kind, size, modified, perm] | nil
         // `follow` (`Ok` or nil) chooses stat or lstat. A path that is not there answers nil,
         // like any other lookup that finds nothing; `fallible` folds a *failed* lookup onto
@@ -163,39 +159,56 @@ fn network_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     let listener = TypeSpec::Resource("TcpListener".to_string());
     let bin = TypeSpec::Binary;
     let int = TypeSpec::Integer;
-    let ok = TypeSpec::Tuple(Some("Ok"), vec![]);
     let nil = TypeSpec::Tuple(None, vec![]);
     vec![
         ("dns_resolve", bin.clone(), dns.clone()),
-        (
-            "dns_next",
-            dns.clone(),
-            TypeSpec::Union(vec![bin.clone(), nil]),
-        ),
-        ("dns_close", dns, ok.clone()),
+        ("dns_next", dns, TypeSpec::Union(vec![bin.clone(), nil])),
         (
             "tcp_connect",
-            TypeSpec::Tuple(None, vec![(None, bin.clone()), (None, int.clone())]),
-            socket.clone(),
+            TypeSpec::Tuple(None, vec![(None, bin), (None, int.clone())]),
+            socket,
         ),
         (
             "tcp_listen",
-            TypeSpec::Tuple(None, vec![(None, int.clone()), (None, int.clone())]),
-            listener.clone(),
+            TypeSpec::Tuple(None, vec![(None, int.clone()), (None, int)]),
+            listener,
+        ),
+    ]
+}
+
+/// The byte-I/O builtins' contract: the operations every byte resource shares, whatever
+/// kind it is. Reading is a select (each readable kind declares `Data[source, data] |
+/// Closed[source]` as its stream vocabulary); writing is `io_write`, and `io_close` closes
+/// every resource kind, byte resource or not.
+///
+/// `io_write([writable, bin]) -> Ok` answers once *every* byte is written — a short write
+/// is the backend's to finish, not the caller's to notice. `io_close(resource) -> Ok`
+/// releases any resource, of every kind: an upgraded socket sends its close_notify first,
+/// and a response body closes the exchange beneath it.
+fn byte_io_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
+    let socket = TypeSpec::Resource("TcpSocket".to_string());
+    let listener = TypeSpec::Resource("TcpListener".to_string());
+    let source = TypeSpec::Resource("ByteSource".to_string());
+    let sink = TypeSpec::Resource("ByteSink".to_string());
+    let ok = TypeSpec::Tuple(Some("Ok"), vec![]);
+    let writable = TypeSpec::Union(vec![socket.clone(), sink.clone()]);
+    vec![
+        (
+            "io_write",
+            TypeSpec::Tuple(None, vec![(None, writable), (None, TypeSpec::Binary)]),
+            ok.clone(),
         ),
         (
-            "tcp_socket_read",
-            TypeSpec::Tuple(None, vec![(None, socket.clone()), (None, int.clone())]),
-            bin.clone(),
+            "io_close",
+            TypeSpec::Union(
+                ["File", "Dir", "DnsResolver"]
+                    .into_iter()
+                    .map(|kind| TypeSpec::Resource(kind.to_string()))
+                    .chain([socket, listener, source, sink])
+                    .collect(),
+            ),
+            ok,
         ),
-        (
-            "tcp_socket_write",
-            TypeSpec::Tuple(None, vec![(None, socket.clone()), (None, bin)]),
-            int,
-        ),
-        ("tcp_socket_close", socket.clone(), ok.clone()),
-        ("tcp_listener_accept", listener.clone(), socket),
-        ("tcp_listener_close", listener, ok),
     ]
 }
 
@@ -270,11 +283,11 @@ pub fn register_tls_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 /// Method and headers cross as bytes (a raw CRLF block) rather than as structured values: the
 /// backend has no type registry, so a `'%http.pairs` would mean plumbing tuple ids for `Cons`,
 /// `Nil` and `Str` through `set_type_ids` — while `%http` already has the header codec both
-/// ways. The response body is a `+ByteStream`.
+/// ways. The response body is a `+ByteSource`.
 fn http_request_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     let bin = TypeSpec::Binary;
     let int = TypeSpec::Integer;
-    let body = TypeSpec::Resource("ByteStream".to_string());
+    let body = TypeSpec::Resource("ByteSource".to_string());
     vec![(
         "http_request",
         TypeSpec::Tuple(
@@ -297,28 +310,36 @@ fn http_request_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
     )]
 }
 
-/// Register `+ByteStream`: the general verb-free stream of byte chunks. A socket is a
-/// stream *and* a bundle of operations, so it earns its own kind; a source that is
+/// Register `+ByteSource`: the general verb-free source of byte chunks. A socket is a
+/// source *and* a bundle of operations, so it earns its own kind; a source that is
 /// nothing but "chunks until a clean end" — an HTTP response body today; a streamed
-/// request body or a child process's output tomorrow — is a `+ByteStream`, whatever
-/// produced it. One kind is what lets one consumer drain them all. Every capability
-/// group whose operations mint one declares it (the registration is keyed by kind, so
-/// repeats agree harmlessly); which group *minted* a given handle is the operation's
-/// business, not the type's.
-pub fn register_byte_stream<E: Effect>(registry: &mut BuiltinRegistry<E>) {
-    let stream = TypeSpec::Resource("ByteStream".to_string());
+/// request body or a child process's output tomorrow — is a `+ByteSource`, whatever
+/// produced it. Its events are every readable kind's (`Data[source, data] |
+/// Closed[source]`), so one consumer drains them all. Every capability group whose
+/// operations mint one declares it (the registration is keyed by kind, so repeats agree
+/// harmlessly); which group *minted* a given handle is the operation's business, not the
+/// type's.
+pub fn register_byte_source<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    register_byte_stream_kind(registry, "ByteSource");
+}
+
+/// Declare a readable byte kind's stream vocabulary — `Data[source, data]` for a chunk and
+/// `Closed[source]` for the clean end — shared by every such kind, which is what lets a
+/// consumer generic over `'%io.readable` match one set of shapes.
+fn register_byte_stream_kind<E: Effect>(registry: &mut BuiltinRegistry<E>, kind: &str) {
+    let resource = TypeSpec::Resource(kind.to_string());
     registry.register_stream(
-        "ByteStream",
+        kind,
         crate::builtins::StreamSpec {
             data: Some(TypeSpec::Tuple(
                 Some("Data"),
                 vec![
-                    (Some("stream"), stream.clone()),
+                    (Some("source"), resource.clone()),
                     (Some("data"), TypeSpec::Binary),
                 ],
             )),
             resource: None,
-            end: TypeSpec::Tuple(Some("Closed"), vec![(Some("stream"), stream)]),
+            end: TypeSpec::Tuple(Some("Closed"), vec![(Some("source"), resource)]),
         },
     );
 }
@@ -328,7 +349,7 @@ pub fn register_http_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     for (name, param, result) in http_request_signatures() {
         registry.register_signature(name.to_string(), Purity::Effect, param, fallible(result));
     }
-    register_byte_stream(registry);
+    register_byte_source(registry);
     register_error_vocabulary(registry);
 }
 
@@ -365,20 +386,7 @@ fn system_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
 fn register_network_streams<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     let socket = TypeSpec::Resource("TcpSocket".to_string());
     let listener = TypeSpec::Resource("TcpListener".to_string());
-    registry.register_stream(
-        "TcpSocket",
-        crate::builtins::StreamSpec {
-            data: Some(TypeSpec::Tuple(
-                Some("Data"),
-                vec![
-                    (Some("sock"), socket.clone()),
-                    (Some("data"), TypeSpec::Binary),
-                ],
-            )),
-            resource: None,
-            end: TypeSpec::Tuple(Some("Closed"), vec![(Some("sock"), socket.clone())]),
-        },
-    );
+    register_byte_stream_kind(registry, "TcpSocket");
     registry.register_stream(
         "TcpListener",
         crate::builtins::StreamSpec {
@@ -386,11 +394,11 @@ fn register_network_streams<E: Effect>(registry: &mut BuiltinRegistry<E>) {
             resource: Some((
                 TypeSpec::Tuple(
                     Some("Accepted"),
-                    vec![(Some("listener"), listener.clone()), (Some("sock"), socket)],
+                    vec![(Some("source"), listener.clone()), (Some("sock"), socket)],
                 ),
                 "TcpSocket".to_string(),
             )),
-            end: TypeSpec::Tuple(Some("Closed"), vec![(Some("listener"), listener)]),
+            end: TypeSpec::Tuple(Some("Closed"), vec![(Some("source"), listener)]),
         },
     );
 }
@@ -399,10 +407,15 @@ fn register_network_streams<E: Effect>(registry: &mut BuiltinRegistry<E>) {
 /// `__file_read__`, `%file`, `%dns`, etc. type-checks in a host that doesn't run effects. These
 /// are all `Purity::Effect`: they park the calling process while the host's backend works.
 pub fn register_io_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
-    for (name, param, result) in file_signatures().into_iter().chain(network_signatures()) {
+    for (name, param, result) in file_signatures()
+        .into_iter()
+        .chain(network_signatures())
+        .chain(byte_io_signatures())
+    {
         registry.register_signature(name.to_string(), Purity::Effect, param, fallible(result));
     }
     register_network_streams(registry);
+    register_byte_source(registry);
     register_error_vocabulary(registry);
 }
 

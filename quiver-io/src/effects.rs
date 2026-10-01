@@ -24,9 +24,6 @@ pub enum NativeEffect {
     FileFlush {
         resource_id: ResourceId,
     },
-    FileClose {
-        resource_id: ResourceId,
-    },
 
     // Filesystem metadata
     Stat {
@@ -81,18 +78,12 @@ pub enum NativeEffect {
     ReadDirNext {
         resource_id: ResourceId,
     },
-    ReadDirClose {
-        resource_id: ResourceId,
-    },
 
     // DNS operations
     DnsResolve {
         hostname: Vec<u8>,
     },
     DnsNext {
-        resource_id: ResourceId,
-    },
-    DnsClose {
         resource_id: ResourceId,
     },
 
@@ -105,21 +96,16 @@ pub enum NativeEffect {
         port: u16,
         backlog: i32,
     },
-    TcpListenerAccept {
-        resource_id: ResourceId,
-    },
-    TcpListenerClose {
-        resource_id: ResourceId,
-    },
-    TcpSocketRead {
-        resource_id: ResourceId,
-        length: usize,
-    },
-    TcpSocketWrite {
+
+    // Byte I/O: the operations every byte resource shares (`__io_write__`, `__io_close__`),
+    // dispatched on the resource's kind by the backend.
+    /// Write every byte of `data`, finishing any short write before answering `Ok`.
+    Write {
         resource_id: ResourceId,
         data: Vec<u8>,
     },
-    TcpSocketClose {
+    /// Close any resource.
+    Close {
         resource_id: ResourceId,
     },
 
@@ -173,16 +159,10 @@ impl Effect for NativeEffect {
             NativeEffect::FileRead { resource_id, .. }
             | NativeEffect::FileWrite { resource_id, .. }
             | NativeEffect::FileFlush { resource_id }
-            | NativeEffect::FileClose { resource_id }
             | NativeEffect::ReadDirNext { resource_id }
-            | NativeEffect::ReadDirClose { resource_id }
             | NativeEffect::DnsNext { resource_id }
-            | NativeEffect::DnsClose { resource_id }
-            | NativeEffect::TcpListenerAccept { resource_id }
-            | NativeEffect::TcpListenerClose { resource_id }
-            | NativeEffect::TcpSocketRead { resource_id, .. }
-            | NativeEffect::TcpSocketWrite { resource_id, .. }
-            | NativeEffect::TcpSocketClose { resource_id }
+            | NativeEffect::Write { resource_id, .. }
+            | NativeEffect::Close { resource_id }
             | NativeEffect::TlsAttach { resource_id, .. }
             | NativeEffect::TlsAccept { resource_id, .. } => Some(*resource_id),
         }

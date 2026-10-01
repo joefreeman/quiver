@@ -17,11 +17,11 @@ fn test_file_write_and_read() {
 
             ["{}" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(+File & write_file);
             [write_file, 0, "Hello, World!" ~> .0] ~> __file_write__ ~;
-            write_file ~> __file_close__ ~;
+            write_file ~> __io_close__ ~;
 
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & read_file);
             [read_file, 0, 4096] ~> __file_read__ ~ ~> =('bin & data);
-            read_file ~> __file_close__ ~;
+            read_file ~> __io_close__ ~;
 
             Str[data]
         "#,
@@ -47,17 +47,17 @@ fn test_file_append() {
             // O_WRONLY | O_CREAT | O_TRUNC = 577
             ["{}" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(+File & write_file);
             [write_file, 0, "First line\n" ~> .0] ~> __file_write__ ~;
-            write_file ~> __file_close__ ~;
+            write_file ~> __io_close__ ~;
 
             // Write at offset 11 (length of "First line\n")
             ["{}" ~> .0, 1, 420] ~> __file_open__ ~ ~> =(+File & append_file);
             [append_file, 11, "Second line\n" ~> .0] ~> __file_write__ ~;
-            append_file ~> __file_close__ ~;
+            append_file ~> __io_close__ ~;
 
             // Read everything
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & read_file);
             [read_file, 0, 4096] ~> __file_read__ ~ ~> =('bin & data);
-            read_file ~> __file_close__ ~;
+            read_file ~> __io_close__ ~;
 
             Str[data]
         "#,
@@ -112,7 +112,7 @@ fn test_file_flush() {
             ["{}" ~> .0, 577, 420] ~> __file_open__ ~ ~> =(+File & file);
             [file, 0, "Flushed data" ~> .0] ~> __file_write__ ~;
             file ~> __file_flush__ ~;
-            file ~> __file_close__ ~;
+            file ~> __io_close__ ~;
             Ok
         "#,
             path_str
@@ -142,11 +142,11 @@ fn test_multiple_writes() {
             [file, 0, "Line 1\n" ~> .0] ~> __file_write__ ~;
             [file, 7, "Line 2\n" ~> .0] ~> __file_write__ ~;
             [file, 14, "Line 3\n" ~> .0] ~> __file_write__ ~;
-            file ~> __file_close__ ~;
+            file ~> __io_close__ ~;
 
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & read_file);
             [read_file, 0, 4096] ~> __file_read__ ~ ~> =('bin & data);
-            read_file ~> __file_close__ ~;
+            read_file ~> __io_close__ ~;
 
             Str[data]
         "#,
@@ -173,7 +173,7 @@ fn test_read_from_closed_file() {
         .evaluate(&format!(
             r#"
             ["{}" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & file);
-            file ~> __file_close__ ~;
+            file ~> __io_close__ ~;
             [file, 0, 1024] ~> __file_read__ ~
         "#,
             path_str
@@ -1230,7 +1230,7 @@ fn test_an_explicit_close_releases_ownership_in_a_live_process() {
         .evaluate(
             r#"
             ["/proc/self/stat" ~> .0, 0, 0] ~> __file_open__ ~ ~> =(+File & f)
-            __file_close__ f
+            __io_close__ f
             "#,
         )
         .expect("Ok")

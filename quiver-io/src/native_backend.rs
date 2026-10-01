@@ -106,7 +106,7 @@ pub enum Resource {
         /// Current position in the iterator
         position: usize,
     },
-    /// An `http_request` response body: the `+ByteStream` handed back in the result. It
+    /// An `http_request` response body: the `+ByteSource` handed back in the result. It
     /// reads through the exchange's own socket — internal to the backend, never handed to
     /// a process — and decodes the head's framing as the body is pulled.
     HttpBody {
@@ -120,6 +120,18 @@ pub enum Resource {
 }
 
 impl Resource {
+    /// The kind's name, as Quiver spells its type (`+TcpSocket`), for error messages.
+    fn kind_name(&self) -> &'static str {
+        match self {
+            Resource::TcpSocket { .. } => "+TcpSocket",
+            Resource::TcpListener { .. } => "+TcpListener",
+            Resource::File { .. } => "+File",
+            Resource::Dir { .. } => "+Dir",
+            Resource::DnsResolver { .. } => "+DnsResolver",
+            Resource::HttpBody { .. } => "+ByteSource",
+        }
+    }
+
     fn fd(&self) -> RawFd {
         match self {
             Resource::TcpSocket { socket, .. } => socket.as_raw_fd(),
@@ -151,13 +163,15 @@ pub enum IoOpType {
         resource_id: ResourceId,
         buffer: Vec<u8>, // Keep buffer alive for the duration of the async operation
     },
+    /// A byte-I/O write (`__io_write__`), which answers only once every byte is out: a
+    /// short completion resubmits the rest, from `written`, under a fresh completion id.
+    WriteAll {
+        resource_id: ResourceId,
+        buffer: Vec<u8>,
+        written: usize,
+    },
     Flush {
         /// The file being synced, so a close can cancel the in-flight fsync (see
-        /// `cancel_inflight`).
-        resource_id: ResourceId,
-    },
-    Accept {
-        /// The listener, so a close can cancel the in-flight accept (see
         /// `cancel_inflight`).
         resource_id: ResourceId,
     },
@@ -222,8 +236,11 @@ type Finish = Box<dyn FnOnce(&mut NativeEffectBackend) -> Result<EffectResult, E
 /// A select-armed stream read in flight: the next-event read of a socket or listener.
 #[derive(Debug)]
 enum ArmedOp {
+    /// A plain descriptor read, delivered as the event of the resource kind `kind` names
+    /// (its registered type, which the stream table is keyed by).
     Read {
         resource_id: ResourceId,
+        kind: &'static str,
         buffer: Vec<u8>,
     },
     Accept {
@@ -272,8 +289,10 @@ impl NativeEffectBackend {
             | IoOpType::Write {
                 resource_id: rid, ..
             }
+            | IoOpType::WriteAll {
+                resource_id: rid, ..
+            }
             | IoOpType::Flush { resource_id: rid }
-            | IoOpType::Accept { resource_id: rid }
             | IoOpType::Tls {
                 resource_id: rid, ..
             } if *rid == resource_id => Some(id),
@@ -376,6 +395,7 @@ impl NativeEffectBackend {
         match armed {
             ArmedOp::Read {
                 resource_id,
+                kind,
                 mut buffer,
             } => {
                 if matches!(
@@ -386,11 +406,11 @@ impl NativeEffectBackend {
                     return;
                 }
                 self.armed_resources.remove(&resource_id);
-                let socket_type = self.get_resource_type_id("TcpSocket");
+                let kind_type = self.get_resource_type_id(kind);
                 if result_code < 0 {
                     self.stream_events.push((
                         resource_id,
-                        socket_type,
+                        kind_type,
                         StreamEvent::Failed {
                             error: completion_error("read", result_code),
                         },
@@ -398,11 +418,11 @@ impl NativeEffectBackend {
                     ));
                 } else if result_code == 0 {
                     self.stream_events
-                        .push((resource_id, socket_type, StreamEvent::End, vec![]));
+                        .push((resource_id, kind_type, StreamEvent::End, vec![]));
                 } else {
                     buffer.truncate(result_code as usize);
                     self.stream_events
-                        .push((resource_id, socket_type, StreamEvent::Data, buffer));
+                        .push((resource_id, kind_type, StreamEvent::Data, buffer));
                 }
             }
             ArmedOp::HttpBody {
@@ -458,6 +478,7 @@ impl NativeEffectBackend {
     fn arm_submit_read(
         &mut self,
         resource_id: ResourceId,
+        kind: &'static str,
         fd: RawFd,
         mut buffer: Vec<u8>,
     ) -> Result<(), Error> {
@@ -479,6 +500,7 @@ impl NativeEffectBackend {
             completion_id,
             ArmedOp::Read {
                 resource_id,
+                kind,
                 buffer,
             },
         );
@@ -491,8 +513,7 @@ impl NativeEffectBackend {
     /// nothing — then the read is re-armed rather than delivering an empty event, invisibly
     /// to the selecting process. A read error or a broken record answers `Failed`; the end
     /// of the stream answers what rustls's reader says it was — `Closed` after a
-    /// close_notify, `Failed` after a bare TCP close — the same distinction the explicit
-    /// read path draws. Anything rustls queued to send back (a key-update reply) stays in
+    /// close_notify, `Failed` after a bare TCP close (see `eof_event`). Anything rustls queued to send back (a key-update reply) stays in
     /// `outgoing` and rides out with the next write or close — this path never writes.
     fn handle_armed_tls_read(
         &mut self,
@@ -540,7 +561,10 @@ impl NativeEffectBackend {
                 // Mid-record: nothing to deliver yet, so the select stays parked and the
                 // read is re-armed. A failed re-submit fails the stream — the alternative
                 // is a select that waits forever.
-                if self.arm_submit_read(resource_id, fd, buffer).is_err() {
+                if self
+                    .arm_submit_read(resource_id, "TcpSocket", fd, buffer)
+                    .is_err()
+                {
                     self.armed_resources.remove(&resource_id);
                     self.stream_events.push((
                         resource_id,
@@ -614,7 +638,6 @@ impl EffectBackend for NativeEffectBackend {
             NativeEffect::FileFlush { resource_id } => {
                 self.execute_file_flush(process_id, resource_id)
             }
-            NativeEffect::FileClose { resource_id } => self.execute_file_close(resource_id),
 
             // Filesystem metadata
             NativeEffect::Stat { path, follow } => self.execute_stat(process_id, path, follow),
@@ -640,28 +663,16 @@ impl EffectBackend for NativeEffectBackend {
             NativeEffect::ReadDirNext { resource_id } => {
                 self.execute_read_dir_next(process_id, resource_id)
             }
-            NativeEffect::ReadDirClose { resource_id } => self.execute_read_dir_close(resource_id),
 
             // DNS operations
             NativeEffect::DnsResolve { hostname } => self.execute_dns_resolve(process_id, hostname),
             NativeEffect::DnsNext { resource_id } => self.execute_dns_next(resource_id),
-            NativeEffect::DnsClose { resource_id } => self.execute_dns_close(resource_id),
 
             // TCP operations
             NativeEffect::TcpConnect { ip, port } => self.execute_tcp_connect(process_id, ip, port),
             NativeEffect::TcpListen { port, backlog } => self.execute_tcp_listen(port, backlog),
-            NativeEffect::TcpListenerAccept { resource_id } => {
-                self.execute_tcp_listener_accept(process_id, resource_id)
-            }
-            NativeEffect::TcpListenerClose { resource_id } => {
-                self.execute_tcp_listener_close(resource_id)
-            }
-            NativeEffect::TcpSocketRead {
-                resource_id,
-                length,
-            } => self.execute_tcp_socket_read(process_id, resource_id, length),
-            NativeEffect::TcpSocketWrite { resource_id, data } => {
-                self.execute_tcp_socket_write(process_id, resource_id, data)
+            NativeEffect::Write { resource_id, data } => {
+                self.execute_write(process_id, resource_id, data)
             }
             NativeEffect::TlsAttach {
                 resource_id,
@@ -673,9 +684,7 @@ impl EffectBackend for NativeEffectBackend {
                 cert,
                 key,
             } => self.execute_tls_accept(process_id, resource_id, cert, key),
-            NativeEffect::TcpSocketClose { resource_id } => {
-                self.execute_tcp_socket_close(process_id, resource_id)
-            }
+            NativeEffect::Close { resource_id } => self.execute_close(process_id, resource_id),
             NativeEffect::HttpRequest {
                 method,
                 url,
@@ -734,12 +743,24 @@ impl EffectBackend for NativeEffectBackend {
                         ));
                     }
 
-                    IoOpType::Flush { .. } => {
-                        completions.push((process_id, self.handle_flush_completion(result_code)));
+                    IoOpType::WriteAll {
+                        resource_id,
+                        buffer,
+                        written,
+                    } => {
+                        if let Some(result) = self.handle_write_all_completion(
+                            process_id,
+                            resource_id,
+                            buffer,
+                            written,
+                            result_code,
+                        ) {
+                            completions.push((process_id, result));
+                        }
                     }
 
-                    IoOpType::Accept { .. } => {
-                        completions.push((process_id, self.handle_accept_completion(result_code)));
+                    IoOpType::Flush { .. } => {
+                        completions.push((process_id, self.handle_flush_completion(result_code)));
                     }
 
                     IoOpType::Connect { socket, peer_addr } => {
@@ -797,7 +818,7 @@ impl EffectBackend for NativeEffectBackend {
         enum Arm {
             Data(Vec<u8>),
             End(StreamEvent),
-            Read(RawFd),
+            Read(RawFd, &'static str),
             Accept(RawFd),
         }
         let arm = match self.resources.get_mut(&resource_id) {
@@ -810,7 +831,7 @@ impl EffectBackend for NativeEffectBackend {
                     Arm::Data(std::mem::take(&mut state.plaintext))
                 }
                 Some(state) if state.eof => Arm::End(state.eof_event()),
-                _ => Arm::Read(socket.as_raw_fd()),
+                _ => Arm::Read(socket.as_raw_fd(), "TcpSocket"),
             },
             Some(Resource::TcpListener { socket, .. }) => Arm::Accept(socket.as_raw_fd()),
             // A response body decodes buffered bytes first and reads its socket only when
@@ -840,12 +861,15 @@ impl EffectBackend for NativeEffectBackend {
                 self.stream_events
                     .push((resource_id, socket_type, event, vec![]));
             }
-            Arm::Read(fd) => self.arm_submit_read(resource_id, fd, vec![0u8; 8192])?,
+            Arm::Read(fd, kind) => self.arm_submit_read(resource_id, kind, fd, vec![0u8; 8192])?,
             Arm::Accept(fd) => {
                 let completion_id = self.next_completion_id;
                 self.next_completion_id += 1;
                 let accept_op =
                     opcode::Accept::new(types::Fd(fd), std::ptr::null_mut(), std::ptr::null_mut())
+                        // Every descriptor the host holds is close-on-exec, so a spawned
+                        // program never inherits a connection.
+                        .flags(libc::SOCK_CLOEXEC)
                         .build()
                         .user_data(completion_id);
                 unsafe {
@@ -965,16 +989,6 @@ impl NativeEffectBackend {
             // No more addresses - return Nil
             Ok(Some(Ok(WireValue::nil())))
         }
-    }
-
-    fn execute_dns_close(
-        &mut self,
-        resource_id: ResourceId,
-    ) -> Result<Option<EffectResult>, Error> {
-        self.release(resource_id)
-            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
-
-        Ok(Some(Ok(WireValue::ok())))
     }
 
     fn execute_tcp_connect(
@@ -1140,66 +1154,6 @@ impl NativeEffectBackend {
         Ok(None)
     }
 
-    fn execute_tcp_socket_read(
-        &mut self,
-        process_id: ProcessId,
-        resource_id: ResourceId,
-        length: usize,
-    ) -> Result<Option<EffectResult>, Error> {
-        let resource = self
-            .resources
-            .get(&resource_id)
-            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
-
-        // An upgraded socket answers in plaintext, which may take several socket operations.
-        if matches!(resource, Resource::TcpSocket { tls: Some(_), .. }) {
-            return self.tls_drive(
-                process_id,
-                resource_id,
-                TlsGoal::Read { want: length },
-                None,
-            );
-        }
-
-        let fd = resource.fd();
-
-        // Allocate buffer for the read
-        let mut buffer = vec![0u8; length];
-
-        // Submit async read operation (no offset for sockets)
-        let completion_id = self.next_completion_id;
-        self.next_completion_id += 1;
-
-        let read_op = opcode::Read::new(types::Fd(fd), buffer.as_mut_ptr(), buffer.len() as u32)
-            .build()
-            .user_data(completion_id);
-
-        unsafe {
-            self.ring
-                .submission()
-                .push(&read_op)
-                .map_err(|e| Error::InvalidArgument(format!("Failed to submit read: {}", e)))?;
-        }
-        self.ring
-            .submit()
-            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
-
-        // Track the pending operation
-        self.pending.insert(
-            completion_id,
-            (
-                process_id,
-                IoOpType::Read {
-                    resource_id,
-                    buffer,
-                },
-            ),
-        );
-
-        // Async operation, no immediate completion
-        Ok(None)
-    }
-
     fn execute_file_write(
         &mut self,
         process_id: ProcessId,
@@ -1248,7 +1202,10 @@ impl NativeEffectBackend {
         Ok(None)
     }
 
-    fn execute_tcp_socket_write(
+    /// `__io_write__`: every byte of `data` to a writable byte resource. An upgraded socket
+    /// takes the bytes as plaintext — rustls has them all at once, and the goal drains the
+    /// ciphertext it produces; anything else is a plain descriptor, written until done.
+    fn execute_write(
         &mut self,
         process_id: ProcessId,
         resource_id: ResourceId,
@@ -1258,30 +1215,48 @@ impl NativeEffectBackend {
             .resources
             .get_mut(&resource_id)
             .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
-
-        // An upgraded socket takes the bytes as plaintext: hand them to rustls, then drain
-        // the ciphertext it produces.
-        if let Resource::TcpSocket {
-            tls: Some(state), ..
-        } = resource
-        {
-            let len = data.len();
-            if let Err(e) = std::io::Write::write_all(&mut state.connection.writer(), &data) {
-                return Ok(Some(Err(tls_error("tls write", e))));
+        match resource {
+            Resource::TcpSocket {
+                tls: Some(state), ..
+            } => {
+                if let Err(e) = std::io::Write::write_all(&mut state.connection.writer(), &data) {
+                    return Ok(Some(Err(tls_error("tls write", e))));
+                }
+                self.tls_drive(process_id, resource_id, TlsGoal::Write, None)
             }
-            return self.tls_drive(process_id, resource_id, TlsGoal::Write { len }, None);
+            Resource::TcpSocket { .. } => {
+                if data.is_empty() {
+                    return Ok(Some(Ok(WireValue::ok())));
+                }
+                self.submit_write_all(process_id, resource_id, data, 0)?;
+                Ok(None)
+            }
+            other => Err(Error::InvalidArgument(format!(
+                "{} is not writable",
+                other.kind_name()
+            ))),
         }
+    }
 
-        let fd = resource.fd();
-
-        // Submit async write operation (no offset for sockets)
+    /// Submit the unwritten tail of a `WriteAll`, from `written` on.
+    fn submit_write_all(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        buffer: Vec<u8>,
+        written: usize,
+    ) -> Result<(), Error> {
+        let fd = self
+            .resources
+            .get(&resource_id)
+            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?
+            .fd();
         let completion_id = self.next_completion_id;
         self.next_completion_id += 1;
-
-        let write_op = opcode::Write::new(types::Fd(fd), data.as_ptr(), data.len() as u32)
+        let rest = &buffer[written..];
+        let write_op = opcode::Write::new(types::Fd(fd), rest.as_ptr(), rest.len() as u32)
             .build()
             .user_data(completion_id);
-
         unsafe {
             self.ring
                 .submission()
@@ -1291,20 +1266,49 @@ impl NativeEffectBackend {
         self.ring
             .submit()
             .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
-
-        // Track the pending operation (keep buffer alive until completion)
+        // The buffer moves into `pending`, which keeps it alive (and its heap allocation
+        // where the kernel was told it is) until the completion.
         self.pending.insert(
             completion_id,
             (
                 process_id,
-                IoOpType::Write {
+                IoOpType::WriteAll {
                     resource_id,
-                    buffer: data,
+                    buffer,
+                    written,
                 },
             ),
         );
+        Ok(())
+    }
 
-        Ok(None)
+    /// A `WriteAll` completion: done once the last byte is out, otherwise the rest is
+    /// resubmitted and the process stays parked (`None`). A write that makes no progress
+    /// on a non-empty tail would never finish, so it fails instead.
+    fn handle_write_all_completion(
+        &mut self,
+        process_id: ProcessId,
+        resource_id: ResourceId,
+        buffer: Vec<u8>,
+        written: usize,
+        result_code: i32,
+    ) -> Option<EffectResult> {
+        if result_code < 0 {
+            return Some(Err(data_error("write failed", result_code)));
+        }
+        if result_code == 0 {
+            return Some(Err(EffectError::Other(
+                "write failed: no bytes accepted".to_string(),
+            )));
+        }
+        let written = written + result_code as usize;
+        if written == buffer.len() {
+            return Some(Ok(WireValue::ok()));
+        }
+        match self.submit_write_all(process_id, resource_id, buffer, written) {
+            Ok(()) => None,
+            Err(e) => Some(Err(EffectError::InvalidArgument(format!("{e:?}")))),
+        }
     }
 
     fn execute_file_flush(
@@ -1343,97 +1347,33 @@ impl NativeEffectBackend {
         Ok(None)
     }
 
-    fn execute_file_close(
-        &mut self,
-        resource_id: ResourceId,
-    ) -> Result<Option<EffectResult>, Error> {
-        // Remove the resource - File will be dropped and closed automatically
-        self.release(resource_id)
-            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
-
-        // Return immediate completion
-        Ok(Some(Ok(WireValue::ok())))
-    }
-
-    fn execute_tcp_listener_accept(
+    /// `__io_close__`: release a byte resource or a listener. An upgraded socket first
+    /// flushes a close_notify — what lets the peer tell a clean close from a truncated one.
+    /// Process teardown cannot send it (that path just drops the socket), so this is
+    /// best-effort on the explicit close only; `tls_finish` removes the resource when the
+    /// goal completes, usually at the flush write's completion. Anything else closes as
+    /// teardown would: in-flight operations cancelled, the resource dropped.
+    fn execute_close(
         &mut self,
         process_id: ProcessId,
         resource_id: ResourceId,
     ) -> Result<Option<EffectResult>, Error> {
-        let resource = self
-            .resources
-            .get(&resource_id)
-            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
-
-        let fd = resource.fd();
-
-        // Submit async accept operation
-        let completion_id = self.next_completion_id;
-        self.next_completion_id += 1;
-
-        let accept_op =
-            opcode::Accept::new(types::Fd(fd), std::ptr::null_mut(), std::ptr::null_mut())
-                .build()
-                .user_data(completion_id);
-
-        unsafe {
-            self.ring
-                .submission()
-                .push(&accept_op)
-                .map_err(|e| Error::InvalidArgument(format!("Failed to submit accept: {}", e)))?;
+        match self.resources.get_mut(&resource_id) {
+            None => Err(Error::InvalidArgument(format!(
+                "Resource {} not found",
+                resource_id
+            ))),
+            Some(Resource::TcpSocket {
+                tls: Some(state), ..
+            }) => {
+                state.connection.send_close_notify();
+                self.tls_drive(process_id, resource_id, TlsGoal::Close, None)
+            }
+            Some(_) => {
+                self.close_resource(resource_id);
+                Ok(Some(Ok(WireValue::ok())))
+            }
         }
-        self.ring
-            .submit()
-            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
-
-        self.pending.insert(
-            completion_id,
-            (process_id, IoOpType::Accept { resource_id }),
-        );
-
-        Ok(None)
-    }
-
-    fn execute_tcp_socket_close(
-        &mut self,
-        process_id: ProcessId,
-        resource_id: ResourceId,
-    ) -> Result<Option<EffectResult>, Error> {
-        // An upgraded socket first flushes a close_notify — what lets the peer tell a clean
-        // close from a truncated one. Process teardown cannot send it (that path just drops
-        // the socket), so this is best-effort on the explicit close only; `tls_finish`
-        // removes the resource when the goal completes, usually at the flush write's
-        // completion.
-        if let Some(Resource::TcpSocket {
-            tls: Some(state), ..
-        }) = self.resources.get_mut(&resource_id)
-        {
-            state.connection.send_close_notify();
-            return self.tls_drive(process_id, resource_id, TlsGoal::Close, None);
-        }
-
-        // Cancel any armed read (a select's timeout leaves one in flight), then remove
-        // the resource - Socket will be dropped and closed automatically
-        self.cancel_inflight(resource_id);
-        self.release(resource_id)
-            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
-
-        // Return immediate completion
-        Ok(Some(Ok(WireValue::ok())))
-    }
-
-    fn execute_tcp_listener_close(
-        &mut self,
-        resource_id: ResourceId,
-    ) -> Result<Option<EffectResult>, Error> {
-        // Cancel any armed accept (a select source's), then remove the resource — the
-        // Drop impl closes the fd, the cancel releases the kernel socket it pins.
-        self.cancel_inflight(resource_id);
-        self.release(resource_id)
-            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
-
-        // Return immediate completion
-        Ok(Some(Ok(WireValue::ok())))
     }
 
     fn handle_read_completion(&self, result_code: i32, mut buffer: Vec<u8>) -> EffectResult {
@@ -1464,46 +1404,6 @@ impl NativeEffectBackend {
         } else {
             Ok(WireValue::ok())
         }
-    }
-
-    fn handle_accept_completion(&mut self, result_code: i32) -> EffectResult {
-        if result_code < 0 {
-            return Err(match -result_code {
-                9 => EffectError::InvalidArgument("Bad file descriptor".to_string()),
-                22 => EffectError::InvalidArgument("Invalid argument".to_string()),
-                _ => EffectError::IO(format!("Accept error: {}", -result_code)),
-            });
-        }
-
-        // Accepted connection - result_code is the new FD
-        let new_fd = result_code;
-
-        // Create a Socket from the raw FD
-        let socket = unsafe { Socket::from_raw_fd(new_fd) };
-
-        // Get the actual peer address
-        let peer_addr = socket
-            .peer_addr()
-            .ok()
-            .and_then(|addr| addr.as_socket())
-            .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
-
-        // Allocate a new resource ID for the accepted socket
-        let new_resource_id = self.next_resource_id;
-        self.next_resource_id += 1;
-
-        // Register the new socket
-        self.resources.insert(
-            new_resource_id,
-            Resource::TcpSocket {
-                socket,
-                peer_addr,
-                tls: None,
-            },
-        );
-
-        let type_id = self.get_resource_type_id("TcpSocket");
-        Ok(WireValue::Resource(new_resource_id, type_id))
     }
 
     fn handle_connect_completion(
@@ -1633,8 +1533,9 @@ impl TlsState {
     /// The event an exhausted upgraded socket answers. Rustls's reader knows whether the
     /// EOF it saw was announced (a close_notify — a clean `End`) or bare (a peer that
     /// just vanished, which may be a stream cut short — `Failed`), because `ingest` fed
-    /// the EOF through; this is the same distinction the blocking read draws, so a
-    /// select and an explicit read tell the same story.
+    /// the EOF through. Only a close_notify proves the peer meant to stop; a bare TCP
+    /// close may be a response cut short (the classic truncation attack, when it isn't an
+    /// accident), which a close-delimited protocol cannot detect for itself.
     fn eof_event(&mut self) -> StreamEvent {
         match std::io::Read::read(&mut self.connection.reader(), &mut [0u8; 1]) {
             Ok(_) => StreamEvent::End,
@@ -1651,10 +1552,8 @@ impl TlsState {
 pub enum TlsGoal {
     /// Handshaking, on the way to answering with the socket itself.
     Attach,
-    /// Up to `want` bytes of plaintext.
-    Read { want: usize },
-    /// `len` bytes of plaintext, already handed to rustls; drain the ciphertext.
-    Write { len: usize },
+    /// Plaintext already handed to rustls; drain the ciphertext.
+    Write,
     /// A `close_notify`, then done.
     Close,
 }
@@ -1869,7 +1768,7 @@ impl NativeEffectBackend {
         let defunct = match goal {
             TlsGoal::Close => true,
             TlsGoal::Attach => result.is_err(),
-            TlsGoal::Read { .. } | TlsGoal::Write { .. } => false,
+            TlsGoal::Write => false,
         };
         if defunct {
             self.release(resource_id);
@@ -1928,10 +1827,7 @@ impl NativeEffectBackend {
         }
         let flushed = state.flushed();
         let TlsState {
-            connection,
-            plaintext,
-            eof,
-            ..
+            connection, eof, ..
         } = state;
 
         // A goal that still needs bytes from a peer that has hung up can never be met, and
@@ -1955,29 +1851,9 @@ impl NativeEffectBackend {
                     Step::Waiting
                 }
             }
-            TlsGoal::Read { want } => {
-                if !plaintext.is_empty() {
-                    let n = want.min(plaintext.len());
-                    let bytes: Vec<u8> = plaintext.drain(..n).collect();
-                    Step::Done(Ok(WireValue::Binary(bytes.into())))
-                } else if *eof {
-                    // End of stream — if it was a *clean* one. Only a close_notify proves the
-                    // peer meant to stop; a bare TCP close may be a response cut short (the
-                    // classic truncation attack, when it isn't an accident), which a
-                    // close-delimited protocol cannot detect for itself. rustls's reader
-                    // knows the difference once it has seen our EOF (fed in `tls_apply`):
-                    // `Ok(0)` after a close_notify, `UnexpectedEof` after a bare close.
-                    match std::io::Read::read(&mut connection.reader(), &mut [0u8; 1]) {
-                        Ok(_) => Step::Done(Ok(WireValue::Binary(Vec::new().into()))),
-                        Err(e) => Step::Done(Err(tls_error("tls read", e))),
-                    }
-                } else {
-                    Step::Waiting
-                }
-            }
-            TlsGoal::Write { len } => {
+            TlsGoal::Write => {
                 if flushed {
-                    Step::Done(Ok(WireValue::Int(len as i64)))
+                    Step::Done(Ok(WireValue::ok()))
                 } else if *eof {
                     truncated("mid-write")
                 } else {
@@ -2575,7 +2451,7 @@ impl NativeEffectBackend {
             }
         };
         let info = self.result_info("http_request")?.clone();
-        let body_type = self.get_resource_type_id("ByteStream");
+        let body_type = self.get_resource_type_id("ByteSource");
         // A body the head already delimits to nothing needs no socket: close it now
         // rather than holding the connection until the caller pulls the End.
         let socket = if framing.is_complete() {
@@ -2801,7 +2677,7 @@ impl NativeEffectBackend {
     /// Serve a select on a response body: decode what is buffered, and only touch the
     /// socket when it runs out. Pushes at most one stream event, or arms a socket read.
     fn http_body_pump(&mut self, body_id: ResourceId) -> Result<(), Error> {
-        let body_type = self.get_resource_type_id("ByteStream");
+        let body_type = self.get_resource_type_id("ByteSource");
         // The body and its socket both live in the resource map, so take the body's
         // fields out while the pump works and put them back before returning.
         let Some(Resource::HttpBody {
@@ -2944,7 +2820,7 @@ impl NativeEffectBackend {
     /// the socket is upgraded), then pump again — which delivers an event or re-arms.
     fn http_body_feed(&mut self, body_id: ResourceId, buffer: Vec<u8>, result_code: i32) {
         self.armed_resources.remove(&body_id);
-        let body_type = self.get_resource_type_id("ByteStream");
+        let body_type = self.get_resource_type_id("ByteSource");
         let fail = |backend: &mut Self, error: EffectError| {
             if let Some(Resource::HttpBody { socket, .. }) = backend.resources.get_mut(&body_id)
                 && let Some(socket_id) = socket.take()
@@ -3054,11 +2930,15 @@ mod tests {
                 resource_id: 1,
                 buffer: vec![0; 4],
             },
+            IoOpType::WriteAll {
+                resource_id: 1,
+                buffer: vec![0; 4],
+                written: 2,
+            },
             IoOpType::Flush { resource_id: 1 },
-            IoOpType::Accept { resource_id: 1 },
             IoOpType::Tls {
                 resource_id: 1,
-                goal: TlsGoal::Read { want: 4 },
+                goal: TlsGoal::Write,
                 io: TlsIo::Write,
             },
             // A second resource's operations, which the sweep must leave alone.
@@ -3082,7 +2962,7 @@ mod tests {
 
     #[test]
     fn closing_a_socket_cancels_an_inflight_read() {
-        // The reproduction: a process parked in a socket read whose owner goes away. The
+        // The reproduction: a socket with a select-armed read whose owner goes away. The
         // submitted read holds its own reference to the socket, so removing the resource —
         // which closes the fd — leaves the connection established and ownerless until the
         // read completes, and a peer that never sends means never. Only the cancel ends it.
@@ -3103,14 +2983,7 @@ mod tests {
         peer.set_nonblocking(true).expect("non-blocking peer");
         let resource_id = await_resource(&mut backend, "the connect never completed");
 
-        submit(
-            &mut backend,
-            process_id,
-            NativeEffect::TcpSocketRead {
-                resource_id,
-                length: 64,
-            },
-        );
+        backend.arm_stream(resource_id).expect("arm");
         assert!(backend.has_operations_in_flight());
 
         backend.close_resource(resource_id);
@@ -3136,6 +3009,65 @@ mod tests {
         assert!(
             !backend.has_operations_in_flight(),
             "the cancelled read was never reaped"
+        );
+    }
+
+    #[test]
+    fn accepted_sockets_are_close_on_exec() {
+        // A spawned program inherits every descriptor not marked close-on-exec, so an
+        // accepted connection must be marked.
+        let mut backend = NativeEffectBackend::new(8).expect("io_uring backend");
+        let process_id = 1;
+        let listener = match backend
+            .execute(
+                process_id,
+                NativeEffect::TcpListen {
+                    port: 0,
+                    backlog: 8,
+                },
+            )
+            .expect("listen")
+        {
+            Some(Ok(WireValue::Resource(resource_id, _))) => resource_id,
+            other => panic!("expected a listener, got {other:?}"),
+        };
+        let Some(Resource::TcpListener { socket, .. }) = backend.resources.get(&listener) else {
+            panic!("the listener was not registered");
+        };
+        let port = socket
+            .local_addr()
+            .ok()
+            .and_then(|addr| addr.as_socket())
+            .expect("a bound listener")
+            .port();
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let close_on_exec = |backend: &NativeEffectBackend, resource_id: ResourceId| {
+            let fd = backend.resources[&resource_id].fd();
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0, "fcntl failed");
+            flags & libc::FD_CLOEXEC != 0
+        };
+
+        backend.arm_stream(listener).expect("arm");
+        let _peer = std::net::TcpStream::connect(addr).expect("connect");
+        let deadline = Instant::now() + DEADLINE;
+        let selected = loop {
+            backend.process_completions();
+            if let Some((_, _, event, _)) = backend.take_stream_events().into_iter().next() {
+                match event {
+                    StreamEvent::Resource { resource_id } => break resource_id,
+                    other => panic!("expected an accepted socket, got {other:?}"),
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the armed accept never completed"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            close_on_exec(&backend, selected),
+            "a selected socket leaks into children"
         );
     }
 

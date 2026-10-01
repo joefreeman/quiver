@@ -14,7 +14,7 @@ lookup_step = #'lookup {
     }
     // Any terminator ends the lookup — exhaustion, or a failure carrying `:error`. Passing
     // it through unchanged is what lets `%list.try_collect` tell the two apart.
-    | =e => { __dns_close__ r; e }
+    | =e => { %io.close r; e }
   }
   | =e => e
 }

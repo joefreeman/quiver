@@ -293,3 +293,16 @@ fn test_pure_std_is_shared_by_both_hosts_unchanged() {
         assert_eq!(native, web, "hosts disagree on pure std for: {source}");
     }
 }
+
+#[test]
+fn test_a_response_body_closes_unread() {
+    // A body the caller does not want is closed like any other byte resource.
+    quiver()
+        .with_mock_io(serves("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nhi"))
+        .evaluate(
+            r#"__http_request__ [method: "GET" ~> .0, url: "http://e.com/" ~> .0, headers: <>, body: <>]
+               ~> =(body: b)
+               %io.close b"#,
+        )
+        .expect("Ok");
+}

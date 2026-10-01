@@ -41,18 +41,20 @@ pub enum MockIo {
 pub struct MockBackend {
     behaviour: MockIo,
     next_resource: ResourceId,
-    /// Read cursor per resource: into the scripted chunks for a socket, and a
-    /// yielded-yet flag for a resolver.
+    /// Read cursor per resolver: how many addresses it has yielded.
     cursors: std::collections::HashMap<ResourceId, usize>,
-    /// Queued events per mocked response body, delivered one per arm.
-    bodies:
-        std::collections::HashMap<ResourceId, std::collections::VecDeque<(StreamEvent, Vec<u8>)>>,
+    /// Each mocked stream — a socket or a response body — with its type id and its queued
+    /// events, delivered one per arm.
+    streams: std::collections::HashMap<
+        ResourceId,
+        (usize, std::collections::VecDeque<(StreamEvent, Vec<u8>)>),
+    >,
     events: Vec<(ResourceId, usize, StreamEvent, Vec<u8>)>,
     /// Resource type ids, as pushed by the environment. A handle carrying the wrong one fails
     /// the `=(+TcpSocket)` / `=(+DnsResolver)` checks in std and looks like an empty result.
     socket_type_id: usize,
     dns_type_id: usize,
-    byte_stream_type_id: usize,
+    byte_source_type_id: usize,
     http_result: Option<quiver_core::effects::ResultTupleInfo>,
     /// Resources closed since the last `take_released`.
     released: Vec<ResourceId>,
@@ -64,25 +66,36 @@ impl MockBackend {
             behaviour,
             next_resource: 1,
             cursors: std::collections::HashMap::new(),
-            bodies: std::collections::HashMap::new(),
+            streams: std::collections::HashMap::new(),
             events: Vec::new(),
             socket_type_id: 0,
             dns_type_id: 0,
-            byte_stream_type_id: 0,
+            byte_source_type_id: 0,
             http_result: None,
             released: Vec::new(),
         }
     }
 
+    /// A connected socket. Serving, it queues the scripted chunks and then a clean end; the
+    /// other behaviours queue nothing, and decide at the read.
     fn fresh_socket(&mut self) -> EffectResult {
         let id = self.next_resource;
         self.next_resource += 1;
-        self.cursors.insert(id, 0);
+        let mut queue = std::collections::VecDeque::new();
+        if let MockIo::Serves(chunks) = &self.behaviour {
+            queue.extend(
+                chunks
+                    .iter()
+                    .map(|chunk| (StreamEvent::Data, chunk.clone())),
+            );
+            queue.push_back((StreamEvent::End, Vec::new()));
+        }
+        self.streams.insert(id, (self.socket_type_id, queue));
         Ok(WireValue::Resource(id, self.socket_type_id))
     }
 
     /// A mocked `http_request` answer: the canned bytes through the real head parser and
-    /// framing decoder, the body queued as stream events behind a `+ByteStream` handle.
+    /// framing decoder, the body queued as stream events behind a `+ByteSource` handle.
     fn http_exchange(&mut self, method: &[u8]) -> EffectResult {
         let MockIo::Serves(chunks) = &self.behaviour else {
             unreachable!("only Serves reaches the exchange");
@@ -111,7 +124,7 @@ impl MockBackend {
         }
         let id = self.next_resource;
         self.next_resource += 1;
-        self.bodies.insert(id, queue);
+        self.streams.insert(id, (self.byte_source_type_id, queue));
         let info = self
             .http_result
             .as_ref()
@@ -121,7 +134,7 @@ impl MockBackend {
             vec![
                 WireValue::Int(head.status as i64),
                 WireValue::Binary(head.headers.into()),
-                WireValue::Resource(id, self.byte_stream_type_id),
+                WireValue::Resource(id, self.byte_source_type_id),
             ],
         ))
     }
@@ -156,12 +169,6 @@ impl EffectBackend for MockBackend {
                     None => Ok(WireValue::nil()),
                 }
             }
-            NativeEffect::DnsClose { resource_id } => {
-                self.cursors.remove(&resource_id);
-                self.released.push(resource_id);
-                Ok(WireValue::ok())
-            }
-
             NativeEffect::TcpConnect { ip, .. } => match self.behaviour {
                 MockIo::Refuses => Err(EffectError::ConnectionRefused(
                     "mock: connection refused".to_string(),
@@ -171,25 +178,9 @@ impl EffectBackend for MockBackend {
                 )),
                 _ => self.fresh_socket(),
             },
-            NativeEffect::TcpSocketWrite { data, .. } => Ok(WireValue::Int(data.len() as i64)),
-            NativeEffect::TcpSocketRead { resource_id, .. } => match &self.behaviour {
-                // Never completing is what a stalled peer looks like from here: the request
-                // process stays parked, and only the client's own timeout ends it.
-                MockIo::Stalls => return Ok(None),
-                MockIo::Aborts => {
-                    return Err(Error::Panic("mock: the read aborted".to_string()));
-                }
-                MockIo::Serves(chunks) => {
-                    let cursor = self.cursors.entry(resource_id).or_insert(0);
-                    let chunk = chunks.get(*cursor).cloned().unwrap_or_default();
-                    *cursor += 1;
-                    Ok(WireValue::Binary(chunk.into()))
-                }
-                MockIo::Refuses => Ok(WireValue::Binary(Vec::new().into())),
-            },
-            NativeEffect::TcpSocketClose { resource_id } => {
-                self.cursors.remove(&resource_id);
-                self.released.push(resource_id);
+            NativeEffect::Write { .. } => Ok(WireValue::ok()),
+            NativeEffect::Close { resource_id } => {
+                self.close_resource(resource_id);
                 Ok(WireValue::ok())
             }
 
@@ -223,7 +214,7 @@ impl EffectBackend for MockBackend {
 
     fn close_resource(&mut self, resource_id: ResourceId) {
         self.cursors.remove(&resource_id);
-        self.bodies.remove(&resource_id);
+        self.streams.remove(&resource_id);
         self.released.push(resource_id);
     }
 
@@ -232,15 +223,23 @@ impl EffectBackend for MockBackend {
     }
 
     fn arm_stream(&mut self, resource_id: ResourceId) -> Result<(), Error> {
-        let Some(queue) = self.bodies.get_mut(&resource_id) else {
+        let Some((type_id, queue)) = self.streams.get_mut(&resource_id) else {
             return Err(Error::InvalidArgument(format!(
                 "mock: resource {resource_id} is not a stream"
             )));
         };
-        // One queued event per arm; a drained body keeps answering End.
-        let (event, data) = queue.pop_front().unwrap_or((StreamEvent::End, Vec::new()));
-        self.events
-            .push((resource_id, self.byte_stream_type_id, event, data));
+        let event = match (&self.behaviour, queue.pop_front()) {
+            (_, Some(event)) => event,
+            // Never answering is what a stalled peer looks like from here: the reader stays
+            // parked, and only its own timeout ends it.
+            (MockIo::Stalls, None) => return Ok(()),
+            (MockIo::Aborts, None) => {
+                return Err(Error::Panic("mock: the read aborted".to_string()));
+            }
+            // A drained stream keeps answering its end.
+            (_, None) => (StreamEvent::End, Vec::new()),
+        };
+        self.events.push((resource_id, *type_id, event.0, event.1));
         Ok(())
     }
 
@@ -259,8 +258,8 @@ impl EffectBackend for MockBackend {
         if let Some(index) = resources.iter().position(|name| name == "DnsResolver") {
             self.dns_type_id = index;
         }
-        if let Some(index) = resources.iter().position(|name| name == "ByteStream") {
-            self.byte_stream_type_id = index;
+        if let Some(index) = resources.iter().position(|name| name == "ByteSource") {
+            self.byte_source_type_id = index;
         }
         if let Some((_, info)) = results.iter().find(|(name, _)| name == "http_request") {
             self.http_result = Some(info.clone());

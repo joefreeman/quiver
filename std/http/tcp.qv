@@ -10,12 +10,16 @@
 // It expects to run inside a caller's own process, so the socket it opens is owned there
 // and released by teardown even when a failure short-circuits past the explicit close.
 
-// Read until the buffer holds a whole response. An empty read is end-of-connection, which is
-// what terminates a response framed by neither Content-Length nor chunking — and, if the
-// response is still incomplete at that point, what makes it a truncation rather than a wait.
+// Read until the buffer holds a whole response. `Closed` is end-of-connection, which is what
+// terminates a response framed by neither Content-Length nor chunking — and, if the response
+// is still incomplete at that point, what makes it a truncation rather than a wait. A failed
+// read's nil matches neither event, and is the answer.
 read_loop = #[(sock): +TcpSocket, (buf): 'bin] {
-  %tcp.read [$sock, 8192] ~> =('bin & chunk)
-  eof = { %bin.length chunk ~> =0 => Ok | [] }
+  ![$sock] ~> {
+    | =Data[source: _, data: chunk] => [chunk, []]
+    | =Closed[source: _] => [<>, Ok]
+  }
+  ~> =[chunk, eof]
   buffer = %bin.concat [$buf, chunk]
   %http.parse_response [buffer, eof] ~> {
     | =[response, _] => response
@@ -49,14 +53,14 @@ exchange = #[(url): '%url, (request): '%http] {
     | %list.prepend [$request.headers, ["host", %url.authority $url]]
   }
   open $url ~> =(+TcpSocket & sock)
-  %tcp.write [sock, %http.serialize_request $request[..., headers: hs]]
+  %io.write [sock, %http.serialize_request $request[..., headers: hs]]
 
   // Bound with a bare binder rather than a narrowing one: a failed read must still reach the
   // close below, and the annotated nil is what this answers.
   response = read_loop [sock, <>]
   // Discard the close's own result — a close failure must not lose a response we already
   // have, and teardown is the backstop either way.
-  { %tcp.close sock; Ok | Ok }
+  { %io.close sock; Ok | Ok }
   response
 }
 

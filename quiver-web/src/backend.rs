@@ -5,7 +5,7 @@
 //! resolves; the completion is queued and the pump woken, because the main loop sleeps as soon
 //! as a tick reports no work and would otherwise never drain the queue.
 //!
-//! The body is a `+ByteStream` resource — the general chunks-until-a-clean-end stream — so
+//! The body is a `+ByteSource` resource — the general chunks-until-a-clean-end source — so
 //! `![body]` works on it and `%http/client` sees one vocabulary on both hosts. Only one read
 //! is armed at a time, which is what makes backpressure the browser's problem rather than
 //! ours.
@@ -41,7 +41,7 @@ pub struct WebEffectBackend {
     events: StreamEvents,
     bodies: Rc<RefCell<HashMap<ResourceId, Body>>>,
     next_resource: Rc<RefCell<ResourceId>>,
-    /// Type id of `+ByteStream`, and the tuple ids of `http_request`'s composite result. Both
+    /// Type id of `+ByteSource`, and the tuple ids of `http_request`'s composite result. Both
     /// are pushed by the environment — a backend has no type registry of its own.
     body_type_id: Rc<RefCell<usize>>,
     fetch_result: Rc<RefCell<Option<ResultTupleInfo>>>,
@@ -192,7 +192,7 @@ impl EffectBackend for WebEffectBackend {
     }
 
     fn set_type_ids(&mut self, resources: &[String], results: &[(String, ResultTupleInfo)]) {
-        if let Some(index) = resources.iter().position(|name| name == "ByteStream") {
+        if let Some(index) = resources.iter().position(|name| name == "ByteSource") {
             *self.body_type_id.borrow_mut() = index;
         }
         if let Some((_, info)) = results.iter().find(|(name, _)| name == "http_request") {

@@ -1422,7 +1422,7 @@ a = %ref []; b = %ref []
 
 Some operations produce **resources** — opaque handles to external state. A resource type
 is written `+Name`: `+File`, `+Dir`, `+TcpSocket`, `+TcpListener`, `+DnsResolver`,
-`+ByteStream`.
+`+ByteSource`, `+ByteSink`.
 
 Every resource is owned by exactly one process, and only its owner may operate on it.
 Ownership **moves** when the handle is sent in a message or captured by a spawn, and after
@@ -1466,10 +1466,12 @@ check; `%iter.try_fold` and `%list.try_collect` do.
 ### Streams
 
 Some resources are **streams**: their next event arrives when it arrives, so they can be
-select sources. A `+TcpSocket` yields `Data[sock, bytes] | Closed[sock]`, and a
-`+TcpListener` yields `Accepted[listener, sock] | Closed[listener]`. A source that is
-nothing but bytes-until-a-clean-end, such as an HTTP response body, is a `+ByteStream`,
-yielding `Data[stream, bytes] | Closed[stream]` whatever produced it.
+select sources. Byte resources share one protocol, whatever their kind. A readable one —
+a `+TcpSocket`, or a `+ByteSource` such as an HTTP response body — yields
+`Data[source, data] | Closed[source]`, and a writable one — a `+TcpSocket` or a
+`+ByteSink` — is written with `%io.write`. A `+TcpListener` is a stream too, yielding
+`Accepted[source, sock] | Closed[source]`. Selecting is the only way to read a stream or
+accept a connection, and `%io.close` closes any resource, of whatever kind.
 
 ```quiver ignore
 ![sock]                   // the next event: a plain blocking read
@@ -1482,6 +1484,14 @@ truncation — answers nil carrying `:error` in place of an event, so a select's
 `'event | []` and `Closed` alone means the stream arrived whole. An unhandled failure
 simply ends the sequence, and a consumer for whom a dead stream is a dead stream catches
 the nil and moves on.
+
+A select may also take a union of readable kinds, or a type parameter bounded by one, so
+a consumer is written once for all of them. `'%io.readable` is that union, and
+`%io.read_all` is such a consumer:
+
+```quiver ignore
+first_chunk = #<'r: '%io.readable>'r { ![$] ~> =Data[source: _, data: ~] }
+```
 
 Selecting is *pull*: a read is armed only while a select waits, so a busy process lets the
 kernel buffer and TCP flow control throttle the sender. Events are chunks of bytes rather
@@ -1717,7 +1727,7 @@ __integer_add__ [3, 4]                       //= 7
 | `%proc` | process management: `detach`, `kill`, `link`, `track`, and timers: `sleep`, `send_after`, `expire`, `race` |
 | `%registry` | the per-environment name registry: `register`, `unregister`, `lookup` |
 | `%sup` | supervision: restart strategies over `%proc` |
-| `%io` | the failure vocabulary every I/O operation shares |
+| `%io` | the failure vocabulary every I/O operation shares, and the byte protocol: `write`, `close`, `read_all` |
 | `%file` | files, via an owning process |
 | `%fs` | the file system: whole-file read and write, stat, list, create, copy, rename, remove, symlinks, permissions, temp dirs |
 | `%path` | path values and manipulation |

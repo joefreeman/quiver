@@ -164,8 +164,8 @@ wrap_message = #['int, 'bin] { $0 ~> =1 => Text[Str[$1]] | Binary[$1] }
 // Fail the connection (RFC 6455 §7.1.7): send a Close, drop the TCP socket, yield
 // the Close.
 fail = #[(conn): ', (code): 'int, (reason): '%str] {
-  __tcp_socket_write__ [$conn.sock, close_payload [$code, $reason] ~> encode_frame [8, ~]]
-  __tcp_socket_close__ $conn.sock
+  %io.write [$conn.sock, close_payload [$code, $reason] ~> encode_frame [8, ~]]
+  %io.close $conn.sock
   [Close($code, $reason), $conn[..., buf: <>, part: Nil]]
 }
 
@@ -174,27 +174,27 @@ recv = #' {
   // =Conn[sock: sock, buf: buf, part: part]
   parse_frame $buf ~> {
     | =Incomplete => {
-      // A read failure ends the connection: the nil short-circuits out of `recv`, the
-      // connection process finishes, and teardown closes the socket it still owns.
-      __tcp_socket_read__ [$sock, 8192] ~> =('bin & chunk)
-      {
-        | %bin.length chunk ~> =0 => {
+      // A read failure ends the connection: its nil matches no event, so it is `recv`'s
+      // answer, the connection process finishes, and teardown closes the socket it still
+      // owns.
+      ![$sock] ~> {
+        | =Data[source: _, data: chunk] => $ ~> ^ Conn[..., buf: %bin.concat [$buf, chunk]]
+        | =Closed[source: _] => {
           // The peer vanished without a Close: abnormal closure (1006 is never on
           // the wire — it names the absence of a close handshake).
-          __tcp_socket_close__ $sock
+          %io.close $sock
           [Close[code: 1006, reason: ""], $[..., buf: <>, part: Nil]]
         }
-        | $ ~> ^ Conn[..., buf: %bin.concat [$buf, chunk]]
       }
     }
     | =Bad[r] => fail [$ ~> Conn[..., buf: <>, part: Nil], 1002, r]
     | =[Frame[fin: fin, opcode: op, payload: p], rest] => {
-      | op ~> =9 => { __tcp_socket_write__ [$sock, encode_frame [10, p]]; ^ $[..., buf: rest] }
+      | op ~> =9 => { %io.write [$sock, encode_frame [10, p]]; ^ $[..., buf: rest] }
       | op ~> =10 => ^ $[..., buf: rest]
       | op ~> =8 => {
         close_info p ~> =(code, reason)
-        __tcp_socket_write__ [$sock, encode_frame [8, p]]
-        __tcp_socket_close__ $sock
+        %io.write [$sock, encode_frame [8, p]]
+        %io.close $sock
         [Close(code, reason), $[..., buf: rest, part: Nil]]
       }
       | op ~> =0 => $part ~> {
@@ -241,14 +241,14 @@ drain = #[', 'messages] {
     }
     | =[Frame[fin: fin, opcode: op, payload: p], rest] => {
       | op ~> =9 => {
-        __tcp_socket_write__ [sock, encode_frame [10, p]]
+        %io.write [sock, encode_frame [10, p]]
         ^ [Conn[sock: sock, buf: rest, part: part], acc]
       }
       | op ~> =10 => ^ [Conn[sock: sock, buf: rest, part: part], acc]
       | op ~> =8 => {
         close_info p ~> =(code, reason)
-        __tcp_socket_write__ [sock, encode_frame [8, p]]
-        __tcp_socket_close__ sock
+        %io.write [sock, encode_frame [8, p]]
+        %io.close sock
         [%list.reverse Cons[Close(code, reason), acc], Conn[sock: sock, buf: rest, part: Nil]]
       }
       | op ~> =0 => part ~> {
@@ -294,24 +294,24 @@ on_data = #[', 'bin] {
 
 send_text = #[', '%str] {
   :doc "Send a text message (one unfragmented frame)."
-  =[Conn(sock: sock), Str[b]]; __tcp_socket_write__ [sock, encode_frame [1, b]]; Ok
+  =[Conn(sock: sock), Str[b]]; %io.write [sock, encode_frame [1, b]]; Ok
 }
 
 send_binary = #[', 'bin] {
   :doc "Send a binary message (one unfragmented frame)."
-  =[Conn(sock: sock), b]; __tcp_socket_write__ [sock, encode_frame [2, b]]; Ok
+  =[Conn(sock: sock), b]; %io.write [sock, encode_frame [2, b]]; Ok
 }
 
 ping = #[', 'bin] {
   :doc "Send a ping with the given payload (125 bytes max); the peer's pong is consumed by `recv`."
-  =[Conn(sock: sock), b]; __tcp_socket_write__ [sock, encode_frame [9, b]]; Ok
+  =[Conn(sock: sock), b]; %io.write [sock, encode_frame [9, b]]; Ok
 }
 
 close = #[', 'int, '%str] {
   :doc "Close the connection: send a Close frame with the code and reason, then drop the TCP socket (a server may close immediately, RFC 6455 §5.5.1)."
   =[Conn(sock: sock), code, reason]
-  __tcp_socket_write__ [sock, close_payload [code, reason] ~> encode_frame [8, ~]]
-  __tcp_socket_close__ sock
+  %io.write [sock, close_payload [code, reason] ~> encode_frame [8, ~]]
+  %io.close sock
   Ok
 }
 

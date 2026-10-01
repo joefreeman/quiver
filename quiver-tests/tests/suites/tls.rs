@@ -28,9 +28,9 @@ fn test_a_locally_issued_certificate_is_trusted_via_roots() {
         r#"
         %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
-        %tcp.write [s, "ping" ~> .0]
-        %tcp.read [s, 4] ~> =('bin & reply)
-        %tcp.close s
+        %io.write [s, "ping" ~> .0]
+        ![s] ~> =Data[source: _, data: reply]
+        %io.close s
         Str[reply]
         "#,
     )
@@ -38,55 +38,19 @@ fn test_a_locally_issued_certificate_is_trusted_via_roots() {
 }
 
 #[test]
-fn test_a_close_notify_reads_as_a_clean_end_of_stream() {
-    let server = TlsServer::start(Behaviour::Echo);
-    tls(
-        &server,
-        r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
-        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
-        %tcp.write [s, "ping" ~> .0]
-        %tcp.read [s, 4] ~> =('bin & reply)
-        after = %tcp.read [s, 4]
-        [Str[reply], after]
-        "#,
-    )
-    .expect(r#"["ping", <>]"#);
-}
-
-#[test]
-fn test_a_bare_tcp_close_is_an_error_not_an_end() {
+fn test_a_bare_tcp_close_fails_a_select() {
     // The peer vanishes without a close_notify. For a close-delimited protocol that bare
     // close is indistinguishable from a response cut short — the classic truncation
-    // attack — so it must surface as an error, never as a clean end of stream.
+    // attack — so the read must answer the failure, nil carrying `:error`, rather than a
+    // clean `Closed` that would pass off a cut-short stream as complete.
     let server = TlsServer::start(Behaviour::EchoThenVanish);
     tls(
         &server,
         r#"
         %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
-        %tcp.write [s, "ping" ~> .0]
-        %tcp.read [s, 4] ~> =('bin & reply)
-        %tcp.read [s, 4] ~> :error<'%io> ~> =IoError(message: m)
-        %str.contains? [m, "close_notify"]
-        "#,
-    )
-    .expect("Ok");
-}
-
-#[test]
-fn test_a_bare_tcp_close_fails_a_select() {
-    // The select twin of the blocking case above: the peer vanishes without a
-    // close_notify, and the armed read must answer the failure — nil carrying `:error` —
-    // rather than a clean `Closed` that would pass off a cut-short stream as complete.
-    let server = TlsServer::start(Behaviour::EchoThenVanish);
-    tls(
-        &server,
-        r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
-        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
-        %tcp.write [s, "ping" ~> .0]
-        ![s] ~> =Data[sock: _, data: _]
+        %io.write [s, "ping" ~> .0]
+        ![s] ~> =Data[source: _, data: _]
         ![s] ~> :error<'%io> ~> =IoError(message: m)
         %str.contains? [m, "close_notify"]
         "#,
@@ -97,14 +61,14 @@ fn test_a_bare_tcp_close_fails_a_select() {
 #[test]
 fn test_a_record_split_across_socket_reads_is_reassembled() {
     // The server dribbles one record's ciphertext a few bytes at a time, so a single
-    // `%tcp.read` spans several socket reads before a whole record exists to decrypt.
+    // select spans several socket reads before a whole record exists to decrypt.
     let server = TlsServer::start(Behaviour::Dribble);
     tls(
         &server,
         r#"
         %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
-        %tcp.read [s, 16] ~> Str[~]
+        ![s] ~> =Data[source: _, data: ~] ~> Str[~]
         "#,
     )
     .expect(r#""drip""#);
@@ -118,16 +82,9 @@ fn test_records_spanning_read_boundaries_arrive_complete() {
     tls(
         &server,
         r#"
-        read_all = #[(sock): +TcpSocket, (buf): 'bin] {
-          %tcp.read [$sock, 65536] ~> =('bin & chunk)
-          {
-            | %bin.length chunk ~> =0 => $buf
-            | ^ [$sock, %bin.concat [$buf, chunk]]
-          }
-        }
         %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
-        read_all [s, <>] ~> =('bin & all)
+        %io.read_all s ~> =('bin & all)
         %bin.length all
         "#,
     )
@@ -183,7 +140,7 @@ fn test_a_failed_handshake_closes_the_socket() {
         p = @[] {
           %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
           { %tls.attach [socket: s, hostname: "localhost", roots: __DECOY__] => [] | Ok }
-          %tcp.read [s, 1]
+          ![s]
         } []
         !p ~> :crash<(message: Str['bin])> ~> =(message: m)
         %str.contains? [m, "not found"]
@@ -202,29 +159,10 @@ fn test_a_select_yields_decrypted_data_then_closed() {
         r#"
         %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
-        %tcp.write [s, "ping" ~> .0]
-        ![s] ~> =Data[sock: _, data: d]
-        ![s] ~> =Closed[sock: _]
+        %io.write [s, "ping" ~> .0]
+        ![s] ~> =Data[source: _, data: d]
+        ![s] ~> =Closed[source: _]
         Str[d]
-        "#,
-    )
-    .expect(r#""ping""#);
-}
-
-#[test]
-fn test_buffered_plaintext_answers_a_select() {
-    // A read that wanted less than a record carried leaves plaintext buffered; a select
-    // must be answerable from that buffer alone, without touching the socket.
-    let server = TlsServer::start(Behaviour::Echo);
-    tls(
-        &server,
-        r#"
-        %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
-        %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
-        %tcp.write [s, "ping" ~> .0]
-        %tcp.read [s, 2] ~> =('bin & first)
-        ![s] ~> =Data[sock: _, data: rest]
-        Str[%bin.concat [first, rest]]
         "#,
     )
     .expect(r#""ping""#);
@@ -259,11 +197,11 @@ fn test_tls_accept_serves_an_in_language_client() {
             r#"
             server = @[] {
               %tcp.listen [4381, 8] ~> =(+TcpListener & l)
-              %tcp.accept l ~> =(+TcpSocket & c)
+              ![l] ~> =Accepted[source: _, sock: c]
               %tls.accept [socket: c, cert: __CERT__, key: __KEY__]
-              %tcp.read [c, 4] ~> =('bin & msg)
-              %tcp.write [c, msg]
-              %tcp.close c
+              ![c] ~> =Data[source: _, data: msg]
+              %io.write [c, msg]
+              %io.close c
               Done
             } []
             // The server races the connect: retry (bounded) until its listener is up.
@@ -274,9 +212,9 @@ fn test_tls_accept_serves_an_in_language_client() {
             }
             connect 20 ~> =(+TcpSocket & s)
             %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
-            %tcp.write [s, "ping" ~> .0]
-            %tcp.read [s, 4] ~> =('bin & reply)
-            %tcp.close s
+            %io.write [s, "ping" ~> .0]
+            ![s] ~> =Data[source: _, data: reply]
+            %io.close s
             !server ~> =Done
             Str[reply]
             "#,
@@ -289,7 +227,7 @@ fn test_https_serves_via_http_server() {
     // The whole point of the in-place upgrade: `%http/server` speaks HTTPS through the
     // `tls:` option with its pump untouched. The client side is a raw `%tls.connect` plus
     // hand-written HTTP/1.1 — the server's `connection: close` answer ends in a
-    // close_notify (the pump's ordinary `%tcp.close`), so the read loop finishes cleanly.
+    // close_notify (the pump's ordinary `%io.close`), so the read loop finishes cleanly.
     let pki = TestPki::new();
     quiver()
         .with_io()
@@ -297,13 +235,6 @@ fn test_https_serves_via_http_server() {
         .with_timeout(Duration::from_secs(10))
         .evaluate(&pki.splice(
             r#"
-            read_all = #[(sock): +TcpSocket, (buf): 'bin] {
-              %tcp.read [$sock, 8192] ~> =('bin & chunk)
-              {
-                | %bin.length chunk ~> =0 => $buf
-                | ^ [$sock, %bin.concat [$buf, chunk]]
-              }
-            }
             handler = #'%http { %http/server.text "secure hello" }
             @[] {
               [port: 4382, handler: handler, tls: [cert: __CERT__, key: __KEY__]]
@@ -317,8 +248,8 @@ fn test_https_serves_via_http_server() {
               | { ![50] | Ok }; n = %num.sub [$, 1]; ^ n
             }
             connect 20 ~> =(+TcpSocket & s)
-            %tcp.write [s, "GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n" ~> .0]
-            read_all [s, <>] ~> =('bin & resp)
+            %io.write [s, "GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n" ~> .0]
+            %io.read_all s ~> =('bin & resp)
             [
               %str.contains? [Str[resp], "200"],
               %str.contains? [Str[resp], "secure hello"],
@@ -344,8 +275,8 @@ fn test_pem_roots_reach_a_tls_server() {
             %pem.certificates "__CA_PEM__" ~> =('bin & roots)
             %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
             %tls.attach [socket: s, hostname: "localhost", roots: roots]
-            %tcp.write [s, "ping" ~> .0]
-            %tcp.read [s, 4] ~> Str[~]
+            %io.write [s, "ping" ~> .0]
+            ![s] ~> =Data[source: _, data: ~] ~> Str[~]
             "#,
         ))
         .expect(r#""ping""#);

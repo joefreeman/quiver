@@ -32,7 +32,7 @@ list_step = #'listing {
     // Any terminator ends the listing — exhaustion, or a failure carrying `:error`. Passing it
     // through unchanged is what lets `%list.try_collect` tell the two apart; `%list.collect`
     // cannot, and answers a short list.
-    | =e => { __directory_close__ dir; e }
+    | =e => { %io.close dir; e }
   }
   | =e => e
 }
@@ -43,10 +43,10 @@ read_rest = #[+File, 'int, 'bin] {
   =[fd, offset, acc]
   __file_read__ [fd, offset, 65536] ~> {
     | =('bin & chunk) => %bin.length chunk ~> {
-      | =0 => { __file_close__ fd; acc }
+      | =0 => { %io.close fd; acc }
       | =n => ^ [fd, %num.add [offset, n], %bin.concat [acc, chunk]]
     }
-    | =e => { __file_close__ fd; e }
+    | =e => { %io.close fd; e }
   }
 }
 
@@ -55,10 +55,10 @@ read_rest = #[+File, 'int, 'bin] {
 write_rest = #[+File, 'int, 'bin] {
   =[fd, offset, data]
   %bin.length data ~> {
-    | =0 => __file_close__ fd
+    | =0 => %io.close fd
     | =len => __file_write__ [fd, offset, data] ~> {
       | =('int & n) => ^ [fd, %num.add [offset, n], %bin.slice [data, n, len]]
-      | =e => { __file_close__ fd; e }
+      | =e => { %io.close fd; e }
     }
   }
 }
@@ -93,7 +93,7 @@ canonical = #'%path { os_path $ ~> __filesystem_canonical__ ~> from_os }
 
 // Close every listing a walk still holds, when it ends on a failure.
 close_frames = #'%list<'frame> {
-  | =Cons[Frame(dir), rest] => { __directory_close__ dir; ^ rest }
+  | =Cons[Frame(dir), rest] => { %io.close dir; ^ rest }
   | Ok
 }
 
@@ -136,7 +136,7 @@ walk_step = #'walk {
         // The listing is finished: exhausted, or failed. A failure ends the walk, carrying
         // its `:error`; exhaustion returns to the directory above.
         | =e => {
-          __directory_close__ dir
+          %io.close dir
           e ~> {
             | ~:error<'%io> => { close_frames rest; e }
             | ^ Walk[frames: rest, enter: [], follow?: follow]

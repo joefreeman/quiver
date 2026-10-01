@@ -32,10 +32,10 @@ fn test_served_connection_end_to_end() {
             @[] { [port: 4181, handler: handler] ~> %http/server.serve ~ } [];
             { ![50] | Ok };
             [<7f000001>, 4181] ~> __tcp_connect__ ~ ~> =(+TcpSocket & sock);
-            [sock, "GET /n/one HTTP/1.1\r\n\r\nGET /n/two HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __tcp_socket_write__ ~;
-            [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin & r1);
-            [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin & r2);
-            sock ~> __tcp_socket_close__ ~;
+            [sock, "GET /n/one HTTP/1.1\r\n\r\nGET /n/two HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __io_write__ ~;
+            ![sock] ~> =Data[source: _, data: r1];
+            ![sock] ~> =Data[source: _, data: r2];
+            sock ~> __io_close__ ~;
             [Str[[r1, r2] ~> %bin.concat ~]]
             "#,
         )
@@ -62,10 +62,10 @@ fn test_crashed_handler_answers_500_and_connection_survives() {
             @[] { [port: 4182, handler: handler] ~> %http/server.serve ~ } [];
             { ![50] | Ok };
             [<7f000001>, 4182] ~> __tcp_connect__ ~ ~> =(+TcpSocket & sock);
-            [sock, "GET /boom HTTP/1.1\r\n\r\nGET /ok HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __tcp_socket_write__ ~;
-            [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin & r1);
-            [sock, 4096] ~> __tcp_socket_read__ ~ ~> =('bin & r2);
-            sock ~> __tcp_socket_close__ ~;
+            [sock, "GET /boom HTTP/1.1\r\n\r\nGET /ok HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __io_write__ ~;
+            ![sock] ~> =Data[source: _, data: r1];
+            ![sock] ~> =Data[source: _, data: r2];
+            sock ~> __io_close__ ~;
             [Str[[r1, r2] ~> %bin.concat ~]]
             "#,
         )

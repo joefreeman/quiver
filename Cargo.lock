@@ -1205,6 +1205,7 @@ version = "0.5.0"
 dependencies = [
  "getrandom 0.3.4",
  "io-uring",
+ "libc",
  "quiver-core",
  "rustls",
  "serde",

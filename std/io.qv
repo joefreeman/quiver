@@ -15,6 +15,19 @@
 // An ordinary nil — an exhausted iterator, a legitimate absence — carries no `:error`, so
 // a checked retrieval answers nil for it. That is how a consumer tells "nothing left" from
 // "it broke".
+//
+// It is also the byte protocol every byte resource shares. A readable resource is a select
+// source whose events are always `Data[source, data]` for a chunk and `Closed[source]` for
+// the clean end, whatever its kind, so one consumer reads them all:
+//
+//     ![sock] ~> {
+//       | =Data[source: _, data: d] => ...   // a chunk (up to 8 KiB)
+//       | =Closed[source: _] => ...          // the whole stream has arrived
+//     }
+//
+// A *failed* read answers nil carrying `:error` in place of an event, so `Closed` alone
+// means everything arrived. Writing is `write`, for every writable kind, and `close`
+// closes any resource at all.
 
 'kind =
   | NotFound
@@ -31,7 +44,37 @@
 
 ' = IoError[kind: 'kind, message: '%str]
 
+// The byte resources a select reads chunks from.
+'readable = +TcpSocket | +ByteSource
+
+// The byte resources `write` sends to.
+'writable = +TcpSocket | +ByteSink
+
+// What a select on a readable `'r` yields, besides the failure nil.
+'event<'r> = Data[source: 'r, data: 'bin] | Closed[source: 'r]
+
+// The select-and-accumulate loop. A failed read answers nil carrying `:error`, and the
+// binding gates on it — the failure propagates rather than passing off a truncated stream
+// as the whole one.
+read_rest = #<'r: 'readable>[(source): 'r, (acc): 'bin] {
+  event = !$source
+  event ~> {
+    | =Data[source: _, data: d] => ^ [$source, %bin.concat [$acc, d]]
+    | =Closed[source: _] => $acc
+  }
+}
+
 [
+  write: __io_write__ ~> {
+    :doc "Writes [writable, 'bin], answering Ok once every byte is written."
+  },
+  close: __io_close__ ~> {
+    :doc "Closes any resource. An upgraded socket sends its close_notify first."
+  },
+  read_all: #<'r: 'readable>'r {
+    :doc "Reads a readable resource to its clean end, answering every byte. A failed read answers nil carrying :error, never a truncated result."
+    read_rest [$, <>]
+  },
   describe: #' {
     :doc "An io failure rendered for a log, e.g. \"ConnectionRefused: connection refused to 127.0.0.1:9\"."
     =IoError(kind: k, message: m)

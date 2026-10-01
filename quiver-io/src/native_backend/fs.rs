@@ -435,14 +435,4 @@ impl NativeEffectBackend {
             })
         })
     }
-
-    pub(super) fn execute_read_dir_close(
-        &mut self,
-        resource_id: ResourceId,
-    ) -> Result<Option<EffectResult>, Error> {
-        self.release(resource_id)
-            .ok_or_else(|| Error::InvalidArgument(format!("Resource {} not found", resource_id)))?;
-
-        Ok(Some(Ok(WireValue::ok())))
-    }
 }

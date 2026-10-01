@@ -21,9 +21,9 @@ fn test_repeated_tls_sessions_hold_no_descriptors() {
             cycle = #[] {
               %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
               %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
-              %tcp.write [s, "ping" ~> .0]
-              %tcp.read [s, 4]
-              %tcp.close s
+              %io.write [s, "ping" ~> .0]
+              ![s] ~> =Data[source: _, data: _]
+              %io.close s
             }
 
             // A failed handshake must free the socket too: it consumed the handle, so

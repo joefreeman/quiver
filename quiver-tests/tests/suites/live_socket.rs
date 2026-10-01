@@ -48,7 +48,7 @@ fn test_socket_round_trip_with_parking() {
               {
                 | Str[acc] ~> %str.contains? [~, "</html>"] => acc
                 | {
-                  __tcp_socket_read__ [sock, 65536] ~> { | =('bin & v) => v | <> } ~> =d
+                  ![sock] ~> { | =Data[source: _, data: v] => v | <> } ~> =d
                   {
                     | __integer_compare__ [%bin.length d, 0] ~> =0 => acc
                     | ^ [sock, %bin.concat [acc, d]]
@@ -61,7 +61,7 @@ fn test_socket_round_trip_with_parking() {
               {
                 | __integer_compare__ [%bin.length acc, n] ~> =(0 | 1) => acc
                 | {
-                  __tcp_socket_read__ [sock, 8192] ~> { | =('bin & v) => v | <> } ~> =d
+                  ![sock] ~> { | =Data[source: _, data: v] => v | <> } ~> =d
                   {
                     | __integer_compare__ [%bin.length d, 0] ~> =0 => acc
                     | ^ [sock, %bin.concat [acc, d], n]
@@ -72,9 +72,9 @@ fn test_socket_round_trip_with_parking() {
 
             // GET: the dead render; the app parks behind the page's token.
             [<7f000001>, 4186] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s1)
-            __tcp_socket_write__ [s1, "GET / HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
+            __io_write__ [s1, "GET / HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
             page = read_page [s1, <>] ~> Str[~]
-            s1 ~> __tcp_socket_close__ ~
+            s1 ~> __io_close__ ~
             %str.index_of [page, "data-q-token=\""] ~> =('int & i)
             tok = %str.slice [page, %num.add [i, 14], %num.add [i, 46]]
 
@@ -86,16 +86,16 @@ fn test_socket_round_trip_with_parking() {
             // the patch frame 25; reading to exactly 154 asserts the attach's silence
             // (an "h" root-replace would arrive first and fail the byte compare).
             [<7f000001>, 4186] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s2)
-            __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf] ~> %bin.concat [~, evf]]
+            __io_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf] ~> %bin.concat [~, evf]]
             h1 = read_n [s2, <>, 154]
 
             // Abrupt drop (no ws Close): the app re-parks. Reconnect, same token.
-            s2 ~> __tcp_socket_close__ ~
+            s2 ~> __io_close__ ~
             { ![100] | Ok }
             [<7f000001>, 4186] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s3)
-            __tcp_socket_write__ [s3, up ~> .0 ~> %bin.concat [~, tokf] ~> %bin.concat [~, evf]]
+            __io_write__ [s3, up ~> .0 ~> %bin.concat [~, tokf] ~> %bin.concat [~, evf]]
             h2 = read_n [s3, <>, 154]
-            s3 ~> __tcp_socket_close__ ~
+            s3 ~> __io_close__ ~
 
             [
               Str[%bin.slice [h1, 0, 12]],
@@ -161,7 +161,7 @@ fn test_nested_child_view_over_socket() {
               {
                 | Str[acc] ~> %str.contains? [~, needle] => acc
                 | {
-                  __tcp_socket_read__ [sock, 65536] ~> { | =('bin & v) => v | <> } ~> =d
+                  ![sock] ~> { | =Data[source: _, data: v] => v | <> } ~> =d
                   {
                     | __integer_compare__ [%bin.length d, 0] ~> =0 => acc
                     | ^ [sock, %bin.concat [acc, d], needle]
@@ -171,38 +171,38 @@ fn test_nested_child_view_over_socket() {
             }
 
             [<7f000001>, 4187] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s1)
-            __tcp_socket_write__ [s1, "GET / HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
+            __io_write__ [s1, "GET / HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
             page = read_to [s1, <>, "</html>"] ~> Str[~]
-            s1 ~> __tcp_socket_close__ ~
+            s1 ~> __io_close__ ~
             %str.index_of [page, "data-q-token=\""] ~> =('int & i)
             tok = %str.slice [page, %num.add [i, 14], %num.add [i, 46]]
 
             up = "GET / HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
             tokf = %http/websocket.encode_masked_frame [1, tok ~> .0, <00000000>]
             [<7f000001>, 4187] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s2)
-            __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
+            __io_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
 
             // The colliding payload routes by vid: the child's Bump bumps 100 -> 101…
             ev_child = %http/websocket.encode_masked_frame [1, "[\"0.1\",\"Ev[Bump]\",[\"click\",0,0,0,[false,false,false,false]]]" ~> .0, <00000000>]
-            __tcp_socket_write__ [s2, ev_child]
+            __io_write__ [s2, ev_child]
             r1 = read_to [s2, <>, "[1,\"0.1\",[[\"t\",[0],\"101\"]]]"] ~> Str[~]
 
             // …and the parent's Bump bumps its own 0 -> 1, untouched by the child's.
             ev_parent = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Bump]\",[\"click\",0,0,0,[false,false,false,false]]]" ~> .0, <00000000>]
-            __tcp_socket_write__ [s2, ev_parent]
+            __io_write__ [s2, ev_parent]
             r2 = read_to [s2, <>, "[1,\"0\",[[\"t\",[0],\"1\"]]]"] ~> Str[~]
 
             // Dropping the key kills the child; the parent's removal patch lands…
             ev_drop = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Drop]\",[\"click\",0,0,0,[false,false,false,false]]]" ~> .0, <00000000>]
-            __tcp_socket_write__ [s2, ev_drop]
+            __io_write__ [s2, ev_drop]
             r3 = read_to [s2, <>, "[1,\"0\",[[\"h\",[1],\"\"]]]"] ~> Str[~]
 
             // …and a late event to the dead vid is dropped: the NEXT frame on the
             // wire is the parent's, with no "0.1" frame in front of it.
-            __tcp_socket_write__ [s2, ev_child]
-            __tcp_socket_write__ [s2, ev_parent]
+            __io_write__ [s2, ev_child]
+            __io_write__ [s2, ev_parent]
             r4 = read_to [s2, <>, "[1,\"0\",[[\"t\",[0],\"2\"]]]"] ~> Str[~]
-            s2 ~> __tcp_socket_close__ ~
+            s2 ~> __io_close__ ~
 
             [
               page ~> %str.contains? [~, "<!--v:0.1--><em><!--q:0-->100<!--/q:0--></em><!--/v:0.1-->"] ~> { =Ok => Composed | NotComposed },
@@ -261,7 +261,7 @@ fn test_child_crash_restart_and_budget() {
               {
                 | Str[acc] ~> %str.contains? [~, needle] => acc
                 | {
-                  __tcp_socket_read__ [sock, 65536] ~> { | =('bin & v) => v | <> } ~> =d
+                  ![sock] ~> { | =Data[source: _, data: v] => v | <> } ~> =d
                   {
                     | __integer_compare__ [%bin.length d, 0] ~> =0 => acc
                     | ^ [sock, %bin.concat [acc, d], needle]
@@ -271,9 +271,9 @@ fn test_child_crash_restart_and_budget() {
             }
 
             [<7f000001>, 4188] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s1)
-            __tcp_socket_write__ [s1, "GET / HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
+            __io_write__ [s1, "GET / HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
             page = read_to [s1, <>, "</html>"] ~> Str[~]
-            s1 ~> __tcp_socket_close__ ~
+            s1 ~> __io_close__ ~
             %str.index_of [page, "data-q-token=\""] ~> =('int & i)
             tok = %str.slice [page, %num.add [i, 14], %num.add [i, 46]]
 
@@ -284,29 +284,29 @@ fn test_child_crash_restart_and_budget() {
             ev_parent = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Bump]\",[\"click\",0,0,0,[false,false,false,false]]]" ~> .0, <00000000>]
 
             [<7f000001>, 4188] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s2)
-            __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
+            __io_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
 
-            __tcp_socket_write__ [s2, ev_bump]
+            __io_write__ [s2, ev_bump]
             r1 = read_to [s2, <>, "[1,\"0.1\",[[\"t\",[0],\"101\"]]]"] ~> Str[~]
 
             // Crash 1..3: each within budget — the restart frame shows the INIT (100).
             restart_needle = "[1,\"0.1\",[[\"h\",[],\"<em><!--q:0-->100<!--/q:0--></em>\"]]]"
-            __tcp_socket_write__ [s2, ev_boom]
+            __io_write__ [s2, ev_boom]
             r2 = read_to [s2, <>, restart_needle] ~> Str[~]
-            __tcp_socket_write__ [s2, ev_boom]
+            __io_write__ [s2, ev_boom]
             r3 = read_to [s2, <>, restart_needle] ~> Str[~]
-            __tcp_socket_write__ [s2, ev_boom]
+            __io_write__ [s2, ev_boom]
             r4 = read_to [s2, <>, restart_needle] ~> Str[~]
 
             // Crash 4: budget exhausted — the fallback lands and the view stays down.
-            __tcp_socket_write__ [s2, ev_boom]
+            __io_write__ [s2, ev_boom]
             r5 = read_to [s2, <>, "view crashed"] ~> Str[~]
 
             // Events to the dead vid are dropped; the next frame is the parent's.
-            __tcp_socket_write__ [s2, ev_bump]
-            __tcp_socket_write__ [s2, ev_parent]
+            __io_write__ [s2, ev_bump]
+            __io_write__ [s2, ev_parent]
             r6 = read_to [s2, <>, "[1,\"0\",[[\"t\",[0],\"1\"]]]"] ~> Str[~]
-            s2 ~> __tcp_socket_close__ ~
+            s2 ~> __io_close__ ~
 
             [
               r1 ~> %str.contains? [~, "[1,\"0.1\",[[\"t\",[0],\"101\"]]]"] ~> { =Ok => Bumped | NoBump },
@@ -350,7 +350,7 @@ fn test_live_navigation_patches_root() {
               {
                 | Str[acc] ~> %str.contains? [~, needle] => acc
                 | {
-                  __tcp_socket_read__ [sock, 65536] ~> { | =('bin & v) => v | <> } ~> =d
+                  ![sock] ~> { | =Data[source: _, data: v] => v | <> } ~> =d
                   {
                     | __integer_compare__ [%bin.length d, 0] ~> =0 => acc
                     | ^ [sock, %bin.concat [acc, d], needle]
@@ -360,22 +360,22 @@ fn test_live_navigation_patches_root() {
             }
 
             [<7f000001>, 4189] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s1)
-            __tcp_socket_write__ [s1, "GET /home HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
+            __io_write__ [s1, "GET /home HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
             page = read_to [s1, <>, "</html>"] ~> Str[~]
-            s1 ~> __tcp_socket_close__ ~
+            s1 ~> __io_close__ ~
             %str.index_of [page, "data-q-token=\""] ~> =('int & i)
             tok = %str.slice [page, %num.add [i, 14], %num.add [i, 46]]
 
             up = "GET /home HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
             tokf = %http/websocket.encode_masked_frame [1, tok ~> .0, <00000000>]
             [<7f000001>, 4189] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s2)
-            __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
+            __io_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
 
             // Navigate to /posts: the root re-derives from the new path and patches "home" -> "posts".
             ev_nav = %http/websocket.encode_masked_frame [1, "[\"nav\",\"/posts\"]" ~> .0, <00000000>]
-            __tcp_socket_write__ [s2, ev_nav]
+            __io_write__ [s2, ev_nav]
             r1 = read_to [s2, <>, "[1,\"0\",[[\"t\",[0],\"posts\"]]]"] ~> Str[~]
-            s2 ~> __tcp_socket_close__ ~
+            s2 ~> __io_close__ ~
 
             [
               page ~> %str.contains? [~, "<p><!--q:0-->home<!--/q:0--></p>"] ~> { =Ok => MountedHome | NoHome },
@@ -418,7 +418,7 @@ fn test_server_redirect_syncs_url() {
               {
                 | Str[acc] ~> %str.contains? [~, needle] => acc
                 | {
-                  __tcp_socket_read__ [sock, 65536] ~> { | =('bin & v) => v | <> } ~> =d
+                  ![sock] ~> { | =Data[source: _, data: v] => v | <> } ~> =d
                   {
                     | __integer_compare__ [%bin.length d, 0] ~> =0 => acc
                     | ^ [sock, %bin.concat [acc, d], needle]
@@ -428,22 +428,22 @@ fn test_server_redirect_syncs_url() {
             }
 
             [<7f000001>, 4190] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s1)
-            __tcp_socket_write__ [s1, "GET / HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
+            __io_write__ [s1, "GET / HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
             page = read_to [s1, <>, "</html>"] ~> Str[~]
-            s1 ~> __tcp_socket_close__ ~
+            s1 ~> __io_close__ ~
             %str.index_of [page, "data-q-token=\""] ~> =('int & i)
             tok = %str.slice [page, %num.add [i, 14], %num.add [i, 46]]
 
             up = "GET / HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
             tokf = %http/websocket.encode_masked_frame [1, tok ~> .0, <00000000>]
             [<7f000001>, 4190] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s2)
-            __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
+            __io_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
 
             // The jump event: the server sends a URL-sync frame and patches the view.
             ev_jump = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Jump]\",[\"click\",0,0,0,[false,false,false,false]]]" ~> .0, <00000000>]
-            __tcp_socket_write__ [s2, ev_jump]
+            __io_write__ [s2, ev_jump]
             r1 = read_to [s2, <>, "[1,\"0\",[[\"t\",[0],\"seven\"]]]"] ~> Str[~]
-            s2 ~> __tcp_socket_close__ ~
+            s2 ~> __io_close__ ~
 
             [
               r1 ~> %str.contains? [~, "[2,\"/posts/7\"]"] ~> { =Ok => UrlSynced | NoSync },
@@ -496,7 +496,7 @@ fn test_stale_redirect_mark_is_not_resynced() {
               {
                 | Str[acc] ~> %str.contains? [~, needle] => acc
                 | {
-                  __tcp_socket_read__ [sock, 65536] ~> { | =('bin & v) => v | <> } ~> =d
+                  ![sock] ~> { | =Data[source: _, data: v] => v | <> } ~> =d
                   {
                     | __integer_compare__ [%bin.length d, 0] ~> =0 => acc
                     | ^ [sock, %bin.concat [acc, d], needle]
@@ -514,29 +514,29 @@ fn test_stale_redirect_mark_is_not_resynced() {
             }
 
             [<7f000001>, 4191] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s1)
-            __tcp_socket_write__ [s1, "GET / HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
+            __io_write__ [s1, "GET / HTTP/1.1\r\nHost: t\r\n\r\n" ~> .0]
             page = read_to [s1, <>, "</html>"] ~> Str[~]
-            s1 ~> __tcp_socket_close__ ~
+            s1 ~> __io_close__ ~
             %str.index_of [page, "data-q-token=\""] ~> =('int & i)
             tok = %str.slice [page, %num.add [i, 14], %num.add [i, 46]]
 
             up = "GET / HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
             tokf = %http/websocket.encode_masked_frame [1, tok ~> .0, <00000000>]
             [<7f000001>, 4191] ~> __tcp_connect__ ~ ~> =(+TcpSocket & s2)
-            __tcp_socket_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
+            __io_write__ [s2, up ~> .0 ~> %bin.concat [~, tokf]]
 
             ev_jump = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Jump]\",[\"click\",0,0,0,[false,false,false,false]]]" ~> .0, <00000000>]
             ev_noop = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Noop]\",[\"click\",0,0,0,[false,false,false,false]]]" ~> .0, <00000000>]
             ev_two = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Two]\",[\"click\",0,0,0,[false,false,false,false]]]" ~> .0, <00000000>]
             ev_fin = %http/websocket.encode_masked_frame [1, "[\"0\",\"Ev[Fin]\",[\"click\",0,0,0,[false,false,false,false]]]" ~> .0, <00000000>]
-            __tcp_socket_write__ [s2, ev_jump]
-            __tcp_socket_write__ [s2, ev_noop]
-            __tcp_socket_write__ [s2, ev_two]
-            __tcp_socket_write__ [s2, ev_jump]
-            __tcp_socket_write__ [s2, ev_fin]
+            __io_write__ [s2, ev_jump]
+            __io_write__ [s2, ev_noop]
+            __io_write__ [s2, ev_two]
+            __io_write__ [s2, ev_jump]
+            __io_write__ [s2, ev_fin]
 
             stream = read_to [s2, <>, "[1,\"0\",[[\"t\",[0],\"fin\"]]]"] ~> Str[~]
-            s2 ~> __tcp_socket_close__ ~
+            s2 ~> __io_close__ ~
 
             Syncs[count [stream, "[2,\"/posts/7\"]"]]
             "#,

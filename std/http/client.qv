@@ -40,18 +40,6 @@ redirect_of = #[(status): 'int, (method): '%http.method] {
   | NoFollow
 }
 
-// Drain the response body: the ordinary select-and-accumulate loop over a `+ByteStream`.
-// A failed read answers nil carrying `:error`, and the binding gates on it — the failure
-// propagates out of the exchange rather than passing off a truncated body as the whole
-// one. Only a clean `Closed` means the accumulator holds everything.
-drain = #[(stream): +ByteStream, (acc): 'bin] {
-  event = !$stream
-  event ~> {
-    | =Data[stream: _, data: d] => ^ [$stream, %bin.concat [$acc, d]]
-    | =Closed[stream: _] => $acc
-  }
-}
-
 // One exchange, put back into the shared shape. The Host header is the mediator's: native
 // adds the URL's authority when the caller supplied none, and a browser sets its own and
 // forbids overriding it.
@@ -73,7 +61,7 @@ exchange = #[(url): '%url, (method): '%http.method, (headers): '%http.pairs, (bo
   }
   ~> =('%http.pairs & hs)
 
-  drain [body, <>] ~> =('bin & content)
+  %io.read_all body ~> =('bin & content)
   Response[status: status, headers: hs, body: content]
 }
 

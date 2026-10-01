@@ -160,18 +160,6 @@ pub fn builtin_file_flush(
     Ok(Completion::Effect(NativeEffect::FileFlush { resource_id }))
 }
 
-/// file_close(file) -> Ok
-/// Close a file (async)
-pub fn builtin_file_close(
-    value: &Value,
-    _ctx: &mut BuiltinContext<NativeEffect>,
-) -> Result<Completion<NativeEffect>, Error> {
-    let resource_id = expect_resource(value)?;
-
-    // Return Action to request close operation from Environment
-    Ok(Completion::Effect(NativeEffect::FileClose { resource_id }))
-}
-
 /// directory_read(path: bin) -> Dir
 /// Open a directory for iteration, returning a resource that yields one entry per `directory_next`.
 pub fn builtin_directory_read(
@@ -338,32 +326,17 @@ pub fn builtin_directory_next(
     }))
 }
 
-/// directory_close(dir: Dir) -> Ok
-/// Close a directory resource.
-pub fn builtin_directory_close(
-    value: &Value,
-    _ctx: &mut BuiltinContext<NativeEffect>,
-) -> Result<Completion<NativeEffect>, Error> {
-    let resource_id = expect_resource(value)?;
-
-    Ok(Completion::Effect(NativeEffect::ReadDirClose {
-        resource_id,
-    }))
-}
-
 /// Attach the native (io-uring) implementations of the file builtins. Their signatures are part
 /// of the universal contract (registered everywhere via `core_modules`); this backs them with a
 /// real runtime for an executing host.
 pub fn attach_file_builtins(registry: &mut BuiltinRegistry<NativeEffect>) {
-    let implementations: [(&str, BuiltinFn<NativeEffect>); 19] = [
+    let implementations: [(&str, BuiltinFn<NativeEffect>); 17] = [
         ("file_open", builtin_file_open),
         ("file_read", builtin_file_read),
         ("file_write", builtin_file_write),
         ("file_flush", builtin_file_flush),
-        ("file_close", builtin_file_close),
         ("directory_read", builtin_directory_read),
         ("directory_next", builtin_directory_next),
-        ("directory_close", builtin_directory_close),
         ("filesystem_stat", builtin_filesystem_stat),
         ("filesystem_create_dir", builtin_filesystem_create_dir),
         ("filesystem_remove", builtin_filesystem_remove),

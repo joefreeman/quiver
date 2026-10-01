@@ -16,14 +16,14 @@ fn test_listener_and_socket_as_select_sources() {
             %tcp.listen [4293, 8] ~> =(+TcpListener & l)
             c = @[] {
               %tcp.connect [<7f000001>, 4293] ~> =(+TcpSocket & s)
-              %tcp.write [s, "ping" ~> .0]
+              %io.write [s, "ping" ~> .0]
               !'int
             } []
             ![l] ~> =('%tcp.listener_event & ev)
-            ev ~> =Accepted[listener: _, sock: conn]
+            ev ~> =Accepted[source: _, sock: conn]
             ![conn] ~> {
-              | =Data[sock: _, data: d] => Str[d]
-              | =Closed[sock: _] => WasClosed
+              | =Data[source: _, data: d] => Str[d]
+              | =Closed[source: _] => WasClosed
             }
             "#,
         )
@@ -39,7 +39,7 @@ fn test_stream_select_is_fallible() {
         .with_io()
         .evaluate(r#"#+TcpSocket { ![$] }"#)
         .expect_type(
-            "#+TcpSocket -> (Closed[sock: +TcpSocket] | Data[sock: +TcpSocket, data: 'bin] | [])",
+            "#+TcpSocket -> (Closed[source: +TcpSocket] | Data[source: +TcpSocket, data: 'bin] | [])",
         );
 }
 
@@ -52,10 +52,10 @@ fn test_socket_select_races_timeout() {
             r#"
             %tcp.listen [4294, 8] ~> =(+TcpListener & l)
             c = @[] { %tcp.connect [<7f000001>, 4294] ~> =(+TcpSocket & s); !'int } []
-            ![l] ~> =Accepted[listener: _, sock: conn]
+            ![l] ~> =Accepted[source: _, sock: conn]
             ![conn, 50] ~> {
-              | =Data[sock: _, data: _] => GotData
-              | =Closed[sock: _] => GotClosed
+              | =Data[source: _, data: _] => GotData
+              | =Closed[source: _] => GotClosed
               | TimedOut
             }
             "#,
@@ -75,20 +75,20 @@ fn test_socket_select_races_mailbox() {
             c = @[] {
               %tcp.connect [<7f000001>, 4295] ~> =(+TcpSocket & s)
               !'int ~> =1
-              %tcp.write [s, "later" ~> .0]
+              %io.write [s, "later" ~> .0]
               Ok
             } []
-            ![l] ~> =Accepted[listener: _, sock: conn]
+            ![l] ~> =Accepted[source: _, sock: conn]
             me = @
             me Hello
             first = ![conn, #Hello] ~> {
               | =Hello => MailboxFirst
-              | =Data[sock: _, data: _] => SocketFirst
+              | =Data[source: _, data: _] => SocketFirst
               | Neither
             }
             c 1
             second = ![conn, 2000] ~> {
-              | =Data[sock: _, data: d] => Str[d]
+              | =Data[source: _, data: d] => Str[d]
               | Other
             }
             [first, second]
@@ -107,14 +107,14 @@ fn test_socket_closed_event() {
             %tcp.listen [4296, 8] ~> =(+TcpListener & l)
             c = @[] {
               %tcp.connect [<7f000001>, 4296] ~> =(+TcpSocket & s)
-              %tcp.close s
+              %io.close s
               Done
             } []
-            ![l] ~> =Accepted[listener: _, sock: conn]
+            ![l] ~> =Accepted[source: _, sock: conn]
             !c
             ![conn, 2000] ~> {
-              | =Data[sock: _, data: _] => GotData
-              | =Closed[sock: _] => GotClosed
+              | =Data[source: _, data: _] => GotData
+              | =Closed[source: _] => GotClosed
               | TimedOut
             }
             "#,
@@ -123,9 +123,9 @@ fn test_socket_closed_event() {
 }
 
 #[test]
-fn test_plain_read_consumes_stashed_event() {
-    // Read/select interop: an event that arrived after its select was won by a
-    // message is consumed by a subsequent plain read, in order.
+fn test_a_stashed_event_answers_the_next_select() {
+    // An event that arrived after its select was won by a message is kept, and answers
+    // the next select on that resource, in order.
     quiver()
         .with_io()
         .evaluate(
@@ -134,10 +134,10 @@ fn test_plain_read_consumes_stashed_event() {
             c = @[] {
               %tcp.connect [<7f000001>, 4297] ~> =(+TcpSocket & s)
               !'int ~> =1
-              %tcp.write [s, "stash me" ~> .0]
+              %io.write [s, "stash me" ~> .0]
               !'int
             } []
-            ![l] ~> =Accepted[listener: _, sock: conn]
+            ![l] ~> =Accepted[source: _, sock: conn]
             // Arm the socket (no bytes exist yet), and let a queued message win.
             me = @
             me Hi
@@ -145,8 +145,8 @@ fn test_plain_read_consumes_stashed_event() {
             // Release the write; the armed read completes into the stash.
             c 1
             { ![150] | Ok }
-            // The pull-read consumes the stashed event, in order.
-            %tcp.read [conn, 8192] ~> Str[~]
+            // The next select answers from the stash.
+            ![conn] ~> =Data[source: _, data: ~] ~> Str[~]
             "#,
         )
         .expect(r#""stash me""#);
@@ -228,4 +228,75 @@ fn test_system_only_host_still_rejects_file_and_network() {
         .expect_runtime_error(quiver_core::error::Error::InvalidArgument(
             "builtin __filesystem_stat__ is not available on this host".to_string(),
         ));
+}
+
+#[test]
+fn test_select_on_a_bounded_type_parameter() {
+    // A consumer generic over `'%io.readable` selects on its parameter: the events are the
+    // bound's, so one function reads every byte kind.
+    quiver()
+        .with_io()
+        .evaluate(
+            r#"
+            first = #<'r: '%io.readable>'r { ![$] ~> =Data[source: _, data: ~] }
+            %tcp.listen [4300, 8] ~> =(+TcpListener & l)
+            c = @[] {
+              %tcp.connect [<7f000001>, 4300] ~> =(+TcpSocket & s)
+              %io.write [s, "generic" ~> .0]
+              !'int
+            } []
+            ![l] ~> =Accepted[source: _, sock: conn]
+            first conn ~> Str[~]
+            "#,
+        )
+        .expect(r#""generic""#);
+}
+
+#[test]
+fn test_select_on_a_union_of_stream_kinds() {
+    // A union of readable kinds yields every member's events, which share their shapes (the
+    // nil is the match's, which fails on `Closed`).
+    quiver()
+        .with_io()
+        .evaluate(r#"#'%io.readable { ![$] ~> =Data[source: _, data: ~] }"#)
+        .expect_type("#(+ByteSource | +TcpSocket) -> ('bin | [])");
+}
+
+#[test]
+fn test_select_on_an_unbounded_type_parameter_is_rejected() {
+    // Nothing is known of an unbounded `'t`, so it has no next event to wait for.
+    quiver()
+        .with_io()
+        .evaluate(r#"#<'t>'t { ![$] }"#)
+        .expect_error_containing("not bounded by a stream resource");
+}
+
+#[test]
+fn test_write_delivers_every_byte_and_read_all_collects_them() {
+    // A write far larger than a socket buffer finishes every short write before answering,
+    // and `%io.read_all` drains the other end to its clean close.
+    quiver()
+        .with_io()
+        .evaluate(
+            r#"
+            %tcp.listen [4301, 8] ~> =(+TcpListener & l)
+            c = @[] {
+              %tcp.connect [<7f000001>, 4301] ~> =(+TcpSocket & s)
+              %io.write [s, %bin.new 2097152] ~> =Ok
+              %io.close s
+            } []
+            ![l] ~> =Accepted[source: _, sock: conn]
+            %io.read_all conn ~> =('bin & all)
+            %bin.length all
+            "#,
+        )
+        .expect("2097152");
+}
+
+#[test]
+fn test_listener_closes_through_io_close() {
+    quiver()
+        .with_io()
+        .evaluate(r#"%tcp.listen [4302, 8] ~> =(+TcpListener & l); %io.close l"#)
+        .expect("Ok");
 }

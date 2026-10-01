@@ -1,17 +1,15 @@
-// TCP stream events: the values a selected socket or listener yields. A stream
-// resource is a select source — `![sock, recv, 1000]` races the socket's next
-// event against messages and timeouts; `![sock]` alone is a plain blocking read.
-//
-// The aliases here are content-addressed twins of the runtime-delivered tuples
-// (like `'%proc.changed`), so pattern-matching a select's result works:
+// A socket is a `'%io.readable` and `'%io.writable` byte resource: select on it for its
+// next chunk, and write and close it with `%io.write` and `%io.close`. A select races the
+// socket's next event against messages and timeouts — `![sock, recv, 1000]` — and
+// `![sock]` alone is a plain blocking read. Selecting is the only way to read:
 //
 //   ![sock, handle] ~> {
-//     | =Data[sock: s, data: d] => ...      // bytes arrived (up to 8 KiB per event)
-//     | =Closed[sock: s] => ...             // clean end of stream: nothing more is coming
+//     | =Data[source: s, data: d] => ...    // bytes arrived (up to 8 KiB per event)
+//     | =Closed[source: s] => ...           // clean end of stream: nothing more is coming
 //     | ...                                  // a mailbox message
 //   }
 //
-// Selecting on a stream is fallible, like every other I/O operation: a *failed* read (a
+// Selecting on a socket is fallible, like every other I/O operation: a *failed* read (a
 // reset, a truncation) answers nil carrying `:error IoError[...]` rather than an event,
 // so `Closed` alone means "you saw the whole stream". An unhandled failure simply ends
 // the sequence; a consumer that recovers on purpose catches the nil.
@@ -22,14 +20,15 @@
 //
 // A socket upgraded with `%tls` reads, writes and selects the same way, in plaintext:
 // `Data` events carry decrypted bytes, a close_notify ends the stream as `Closed`, and a
-// peer that vanished without one fails it — the same distinction the blocking read draws.
+// peer that vanished without one fails it.
+//
+// A listener is a select source too, and selecting is how a connection is accepted:
+// `![listener]` yields `Accepted[source, sock]`. Close it with `%io.close`.
 
-'data = Data[sock: +TcpSocket, data: 'bin]
-'closed = Closed[sock: +TcpSocket]
-'event = 'data | 'closed
+'event = '%io.event<+TcpSocket>
 
-'accepted = Accepted[listener: +TcpListener, sock: +TcpSocket]
-'listener_closed = Closed[listener: +TcpListener]
+'accepted = Accepted[source: +TcpListener, sock: +TcpSocket]
+'listener_closed = Closed[source: +TcpListener]
 'listener_event = 'accepted | 'listener_closed
 
 // Where a connection goes: a raw IP address (4 or 16 bytes), or a hostname to resolve.
@@ -72,13 +71,4 @@ try_each = #[(addrs): '%list<'%dns.ip>, (port): 'int, (last): []] {
   listen: __tcp_listen__ ~> {
     :doc "Listens on [port: 'int, backlog: 'int], yielding a +TcpListener."
   },
-  read: __tcp_socket_read__ ~> {
-    :doc "Reads up to [sock, n] bytes, blocking until some arrive; empty at EOF. For racing a read against messages or a timeout, select on the socket instead."
-  },
-  write: __tcp_socket_write__ ~> { :doc "Writes [sock, 'bin], yielding the byte count." },
-  close: __tcp_socket_close__ ~> { :doc "Closes a socket." },
-  accept: __tcp_listener_accept__ ~> {
-    :doc "Accepts one connection, blocking. For racing an accept against messages, select on the listener instead."
-  },
-  close_listener: __tcp_listener_close__ ~> { :doc "Closes a listener." },
 ]

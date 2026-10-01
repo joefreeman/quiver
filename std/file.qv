@@ -27,7 +27,7 @@ serve = #+File {
       ^ $
     }
     | =Flush[reply, id] => { __file_flush__ $ ~> reply Reply[id, ~]; ^ $ }
-    | =Close => __file_close__ $
+    | =Close => %io.close $
   }
 }
 

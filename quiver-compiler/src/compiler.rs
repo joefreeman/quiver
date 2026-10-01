@@ -7370,39 +7370,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // hence the exact row here too).
                     result_types.push(annotations::closed_nil(self.program));
                 }
-                Type::Resource(name) => {
-                    // A stream resource yields its registry-declared event type (a
-                    // socket: `Data[sock, data] | Closed[sock]`; a listener:
-                    // `Accepted[...] | Closed[...]`) — or nil, stamped `:error`, when
-                    // the read fails: only a clean end is an event, so reading a
-                    // stream is fallible like every other I/O operation. Resource
-                    // kinds without a stream declaration have no externally-timed
-                    // next event and are not selectable. Resolution registers the
-                    // event tuples on demand — content-addressed, so they match the
-                    // runtime's stream table and any source-level twins
-                    // (`std/tcp.qv`).
-                    let name = name.clone();
-                    match self.builtins.stream_spec(&name).cloned() {
-                        Some(spec) => {
-                            let mut members = Vec::new();
-                            if let Some(data) = &spec.data {
-                                members.push(data.resolve_to_id(self.program));
-                            }
-                            if let Some((resource, _)) = &spec.resource {
-                                members.push(resource.resolve_to_id(self.program));
-                            }
-                            members.push(spec.end.resolve_to_id(self.program));
-                            members.push(annotations::closed_nil(self.program));
-                            result_types.push(typing::union_type_ids(self.program, members));
-                        }
-                        None => {
-                            return Err(Error::TypeMismatch {
-                                expected: "a stream resource (one with a declared next event)"
-                                    .to_string(),
-                                found: format!("\\{name} (not a stream — no next event)"),
-                            });
-                        }
-                    }
+                // A stream resource, a union of them, or a type parameter bounded by
+                // either — a consumer generic over `'%io.readable`.
+                Type::Resource(_) | Type::Union(_) | Type::Variable(_) => {
+                    result_types.extend(self.stream_events(source_type_id)?);
+                    // Reading a stream is fallible like every other I/O operation: only a
+                    // clean end is an event, and a failed read answers nil, stamped
+                    // `:error`.
+                    result_types.push(annotations::closed_nil(self.program));
                 }
                 _ => {
                     return Err(Error::TypeMismatch {
@@ -7423,6 +7398,65 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
 
         Ok(typing::union_type_ids(self.program, result_types))
+    }
+
+    /// The events a select on a stream source yields: a stream resource's registry-declared
+    /// event tuples (a socket: `Data[source, data] | Closed[source]`; a listener:
+    /// `Accepted[...] | Closed[...]`), every member's for a union of them, and its bound's
+    /// for a rigid type parameter. Resource kinds without a stream declaration have no
+    /// externally-timed next event and are not selectable. Resolution registers the event
+    /// tuples on demand — content-addressed, so they match the runtime's stream table and
+    /// any source-level twins (`std/io.qv`).
+    fn stream_events(&mut self, source_type_id: usize) -> Result<Vec<usize>, Error> {
+        let not_a_stream = |found: String| Error::TypeMismatch {
+            expected: "a stream resource (one with a declared next event)".to_string(),
+            found,
+        };
+        let source_type = self
+            .program
+            .lookup_base(source_type_id)
+            .ok_or_else(|| Error::InternalError {
+                message: format!("Type ID {} not found", source_type_id),
+            })?
+            .clone();
+        match source_type {
+            Type::Resource(name) => {
+                let spec = self.builtins.stream_spec(&name).cloned().ok_or_else(|| {
+                    not_a_stream(format!("+{name} (not a stream — no next event)"))
+                })?;
+                let mut events = Vec::new();
+                if let Some(data) = &spec.data {
+                    events.push(data.resolve_to_id(self.program));
+                }
+                if let Some((resource, _)) = &spec.resource {
+                    events.push(resource.resolve_to_id(self.program));
+                }
+                events.push(spec.end.resolve_to_id(self.program));
+                Ok(events)
+            }
+            Type::Union(members) => {
+                let mut events = Vec::new();
+                for member in members {
+                    events.extend(self.stream_events(member)?);
+                }
+                Ok(events)
+            }
+            // An unbounded parameter's bound is the top type, which has no next event.
+            Type::Variable(name) => self
+                .program
+                .rigid_bound(&name)
+                .ok_or(())
+                .and_then(|bound| self.stream_events(bound).map_err(|_| ()))
+                .map_err(|()| {
+                    not_a_stream(format!(
+                        "'{name} (a type parameter not bounded by a stream resource)"
+                    ))
+                }),
+            _ => Err(not_a_stream(quiver_core::format::format_type_by_id(
+                &*self.program,
+                source_type_id,
+            ))),
+        }
     }
 
     /// Lower a string literal to a `Str` wrapping the concatenation of each segment's bytes. Text

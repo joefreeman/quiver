@@ -54,18 +54,18 @@ keep_alive? = #'request {
 conn_loop = #[(sock): +TcpSocket, (handler): 'handler, (buf): 'bin] {
   %http.parse_request $buf ~> {
     | =Incomplete => {
-      // A read failure ends the connection: the nil short-circuits out of the pump, the
-      // connection process finishes, and teardown closes the socket it still owns.
-      __tcp_socket_read__ [$sock, 8192] ~> =('bin & chunk)
-      {
-        | %bin.length chunk ~> =0 => __tcp_socket_close__ $sock
-        | ^ [$sock, $handler, %bin.concat [$buf, chunk]]
+      // A read failure ends the connection: its nil matches no event, so it is the pump's
+      // answer, the connection process finishes, and teardown closes the socket it still
+      // owns.
+      ![$sock] ~> {
+        | =Data[source: _, data: chunk] => ^ [$sock, $handler, %bin.concat [$buf, chunk]]
+        | =Closed[source: _] => %io.close $sock
       }
     }
     | =Bad[status: s, reason: r] => {
       out = plain [s, r] ~> %http.serialize_response
-      __tcp_socket_write__ [$sock, out]
-      __tcp_socket_close__ $sock
+      %io.write [$sock, out]
+      %io.close $sock
     }
     | =[req, rest] => {
       // Run the handler in its own process: a crash surfaces here as a stamped nil,
@@ -79,14 +79,14 @@ conn_loop = #[(sock): +TcpSocket, (handler): 'handler, (buf): 'bin] {
           // with the upgrade handler, auto-closing a socket it leaves open. Any
           // bytes already read past the request seed the connection's buffer.
           | %http.header [req.headers, "sec-websocket-key"] ~> =Str[k] => {
-            __tcp_socket_write__ [$sock, %http/websocket.handshake_response Str[k]]
+            %io.write [$sock, %http/websocket.handshake_response Str[k]]
             %http/websocket.conn [$sock, rest] ~> wh
           }
           | {
             out = plain [400, "Bad Request"] ~> %http.serialize_response
 
-            __tcp_socket_write__ [$sock, out]
-            __tcp_socket_close__ $sock
+            %io.write [$sock, out]
+            %io.close $sock
           }
         }
         | {
@@ -105,10 +105,10 @@ conn_loop = #[(sock): +TcpSocket, (handler): 'handler, (buf): 'bin] {
               ]
             | resp
           }
-          __tcp_socket_write__ [$sock, %http.serialize_response resp2]
+          %io.write [$sock, %http.serialize_response resp2]
           {
             | keep_alive? req => ^ [$sock, $handler, rest]
-            | __tcp_socket_close__ $sock
+            | %io.close $sock
           }
         }
       }
@@ -132,9 +132,9 @@ conn = #[(sock): +TcpSocket, (handler): 'handler, (tls): ('tls | [])] {
 }
 
 // A failed accept ends the loop rather than spinning on a broken listener; the nil carries
-// its `:error` out to `serve`'s caller.
+// its `:error` out to `serve`'s caller. So does a closed listener, which ends it cleanly.
 accept_loop = #[(listener): +TcpListener, (handler): 'handler, (tls): ('tls | [])] {
-  __tcp_listener_accept__ $listener ~> =(+TcpSocket & sock)
+  ![$listener] ~> =Accepted[source: _, sock: sock]
   @conn [sock, $handler, $tls]
   ^ [$listener, $handler, $tls]
 }

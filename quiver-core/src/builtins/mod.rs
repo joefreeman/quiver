@@ -6,7 +6,6 @@ use crate::labels::LabelTable;
 use crate::process::{Action, Process, ProcessId, RegistryRequest, TrackingState, Watcher};
 use crate::program::Program;
 use crate::types::Type;
-use crate::value::ResourceId;
 use crate::value::{Payload, Value};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
@@ -295,34 +294,6 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
         Ok(())
     }
 
-    /// Consume a stashed stream event for `resource_id`, yielding its byte payload —
-    /// the pull-read half of read/select interop on one socket. A stashed `Data`
-    /// answers its chunk; a stashed `Closed` answers the empty binary (the read-EOF
-    /// convention). `None` when nothing is stashed.
-    pub fn take_stream_bytes(&mut self, resource_id: ResourceId) -> Result<Option<Value>, Error> {
-        let Some(event) = self.process.resource_events.remove(&resource_id) else {
-            return Ok(None);
-        };
-        let bytes = match &event {
-            Value::Tuple(_, payload) => payload.get(1).cloned(),
-            _ => None,
-        };
-        let bytes = match bytes {
-            Some(b) => b,
-            None => Value::Binary(self.executor.allocate_binary(Vec::new())?),
-        };
-        // Deferred reclamation makes the ordering safe: releasing the event may zero
-        // the chunk's refcount, but the dispatch site re-retains it (push) within the
-        // same step, before any reclamation point.
-        Ok(Some(bytes))
-    }
-
-    /// Whether `resource_id` has a select-armed read in flight (its event has not
-    /// arrived yet). A plain read would race it out of order — reject instead.
-    pub fn stream_armed(&self, resource_id: ResourceId) -> bool {
-        self.process.armed_resources.contains(&resource_id)
-    }
-
     /// Route a `%registry` operation to the environment, which owns the name table.
     /// The caller parks (the accompanying completion is [`Completion::Suspend`]) until
     /// the environment answers with a value push. Both reads and writes are refused in
@@ -515,10 +486,10 @@ macro_rules! register_builtin {
 /// the produced resource (whose kind is named alongside).
 #[derive(Clone, Debug)]
 pub struct StreamSpec {
-    /// The bytes event (e.g. `Data[sock: +TcpSocket, data: 'bin]`), or None for
+    /// The bytes event (e.g. `Data[source: +TcpSocket, data: 'bin]`), or None for
     /// streams that never yield bytes.
     pub data: Option<TypeSpec>,
-    /// The fresh-resource event (e.g. `Accepted[listener, sock]`) and the produced
+    /// The fresh-resource event (e.g. `Accepted[source, sock]`) and the produced
     /// resource's type name, or None for byte-only streams.
     pub resource: Option<(TypeSpec, String)>,
     /// The end-of-stream event (e.g. `Closed[sock]`).

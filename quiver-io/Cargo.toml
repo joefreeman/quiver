@@ -7,6 +7,7 @@ edition.workspace = true
 quiver-core = { path = "../quiver-core" }
 io-uring = "0.6"
 socket2 = "0.5"
+libc = "0.2"
 getrandom = "0.3"
 # `ring` rather than the default aws-lc-rs: it builds without cmake/nasm, which keeps the
 # toolchain requirement to a Rust compiler. `logging` off — rustls would otherwise pull `log`
