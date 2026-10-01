@@ -1,5 +1,6 @@
 mod blocking;
 pub mod effects;
+pub mod exec;
 pub mod file;
 pub mod http;
 pub mod native_backend;
@@ -9,6 +10,7 @@ mod util;
 
 pub use blocking::Notify;
 pub use effects::NativeEffect;
+pub use exec::attach_exec_builtins;
 pub use file::attach_file_builtins;
 pub use http::attach_http_builtins;
 pub use native_backend::NativeEffectBackend;

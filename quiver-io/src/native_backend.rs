@@ -57,6 +57,8 @@ fn data_error(context: &str, result_code: i32) -> EffectError {
     }
 }
 
+mod exec;
+pub use exec::ChildProcess;
 mod fs;
 
 /// A path as the OS takes it: the bytes as they are. A `Str` is bytes rather than validated
@@ -106,6 +108,14 @@ pub enum Resource {
         /// Current position in the iterator
         position: usize,
     },
+    /// An operating-system child (`+Child`), watched through its pidfd.
+    Child(exec::ChildProcess),
+    /// One end of a pipe: a child's stdin (`kind` `ByteSink`), or its stdout or stderr
+    /// (`ByteSource`).
+    Pipe {
+        fd: std::os::fd::OwnedFd,
+        kind: &'static str,
+    },
     /// An `http_request` response body: the `+ByteSource` handed back in the result. It
     /// reads through the exchange's own socket — internal to the backend, never handed to
     /// a process — and decodes the head's framing as the body is pulled.
@@ -129,6 +139,11 @@ impl Resource {
             Resource::Dir { .. } => "+Dir",
             Resource::DnsResolver { .. } => "+DnsResolver",
             Resource::HttpBody { .. } => "+ByteSource",
+            Resource::Child(_) => "+Child",
+            Resource::Pipe {
+                kind: "ByteSink", ..
+            } => "+ByteSink",
+            Resource::Pipe { .. } => "+ByteSource",
         }
     }
 
@@ -144,6 +159,8 @@ impl Resource {
             Resource::HttpBody { .. } => {
                 panic!("HttpBody reads through its socket, not a descriptor of its own")
             }
+            Resource::Child(child) => child.pidfd().as_raw_fd(),
+            Resource::Pipe { fd, .. } => fd.as_raw_fd(),
         }
     }
 }
@@ -246,6 +263,10 @@ enum ArmedOp {
     Accept {
         resource_id: ResourceId,
     },
+    /// A poll of a child's pidfd, readable once the child has exited.
+    Exit {
+        resource_id: ResourceId,
+    },
     /// A read of an `HttpBody`'s underlying socket, delivered as the *body's* event once
     /// decoded through its framing.
     HttpBody {
@@ -276,6 +297,7 @@ impl NativeEffectBackend {
                     resource_id: rid, ..
                 }
                 | ArmedOp::Accept { resource_id: rid }
+                | ArmedOp::Exit { resource_id: rid }
                 | ArmedOp::HttpBody {
                     resource_id: rid, ..
                 } => *rid == resource_id,
@@ -417,8 +439,12 @@ impl NativeEffectBackend {
                         vec![],
                     ));
                 } else if result_code == 0 {
-                    self.stream_events
-                        .push((resource_id, kind_type, StreamEvent::End, vec![]));
+                    self.stream_events.push((
+                        resource_id,
+                        kind_type,
+                        StreamEvent::closed(),
+                        vec![],
+                    ));
                 } else {
                     buffer.truncate(result_code as usize);
                     self.stream_events
@@ -430,6 +456,43 @@ impl NativeEffectBackend {
                 buffer,
             } => {
                 self.http_body_feed(resource_id, buffer, result_code);
+            }
+            ArmedOp::Exit { resource_id } => {
+                self.armed_resources.remove(&resource_id);
+                let event = if result_code < 0 {
+                    Some(StreamEvent::Failed {
+                        error: completion_error("cannot wait for child", result_code),
+                    })
+                } else {
+                    self.child_end(resource_id)
+                };
+                match event {
+                    Some(event) => {
+                        let child_type = self.get_resource_type_id("Child");
+                        self.stream_events
+                            .push((resource_id, child_type, event, vec![]));
+                    }
+                    // Readable but not yet waitable: poll again.
+                    None => {
+                        let pidfd = self.resources.get(&resource_id).map(Resource::fd);
+                        let rearmed = pidfd
+                            .ok_or(())
+                            .and_then(|fd| self.arm_submit_exit(resource_id, fd).map_err(|_| ()));
+                        if rearmed.is_err() {
+                            let child_type = self.get_resource_type_id("Child");
+                            self.stream_events.push((
+                                resource_id,
+                                child_type,
+                                StreamEvent::Failed {
+                                    error: EffectError::IO(
+                                        "could not re-arm the child's exit poll".to_string(),
+                                    ),
+                                },
+                                vec![],
+                            ));
+                        }
+                    }
+                }
             }
             ArmedOp::Accept { resource_id } => {
                 self.armed_resources.remove(&resource_id);
@@ -508,6 +571,28 @@ impl NativeEffectBackend {
         Ok(())
     }
 
+    /// Submit the poll that waits for a child's exit, marking it armed.
+    fn arm_submit_exit(&mut self, resource_id: ResourceId, pidfd: RawFd) -> Result<(), Error> {
+        let completion_id = self.next_completion_id;
+        self.next_completion_id += 1;
+        let poll_op = opcode::PollAdd::new(types::Fd(pidfd), libc::POLLIN as u32)
+            .build()
+            .user_data(completion_id);
+        unsafe {
+            self.ring
+                .submission()
+                .push(&poll_op)
+                .map_err(|e| Error::InvalidArgument(format!("Failed to submit poll: {}", e)))?;
+        }
+        self.ring
+            .submit()
+            .map_err(|e| Error::InvalidArgument(format!("Failed to submit: {}", e)))?;
+        self.armed
+            .insert(completion_id, ArmedOp::Exit { resource_id });
+        self.armed_resources.insert(resource_id);
+        Ok(())
+    }
+
     /// A completed armed read on a TLS-upgraded socket: the buffer holds ciphertext, and the
     /// event may carry only what it decrypts to. A chunk that ends mid-record decrypts to
     /// nothing — then the read is re-armed rather than delivering an empty event, invisibly
@@ -533,7 +618,7 @@ impl NativeEffectBackend {
                 // owner is gone too.
                 self.armed_resources.remove(&resource_id);
                 self.stream_events
-                    .push((resource_id, socket_type, StreamEvent::End, vec![]));
+                    .push((resource_id, socket_type, StreamEvent::closed(), vec![]));
                 return;
             };
             let ingested = if result_code < 0 {
@@ -691,6 +776,17 @@ impl EffectBackend for NativeEffectBackend {
                 headers,
                 body,
             } => self.execute_http_request(process_id, method, url, headers, body),
+            NativeEffect::ExecSpawn {
+                cmd,
+                args,
+                cwd,
+                env,
+                clear_env,
+            } => self.execute_exec_spawn(process_id, cmd, args, cwd, env, clear_env),
+            NativeEffect::ExecKill {
+                resource_id,
+                signal,
+            } => self.execute_exec_kill(resource_id, signal),
         }
     }
 
@@ -817,9 +913,10 @@ impl EffectBackend for NativeEffectBackend {
         // io each needs `self` back.
         enum Arm {
             Data(Vec<u8>),
-            End(StreamEvent),
+            End(StreamEvent, &'static str),
             Read(RawFd, &'static str),
             Accept(RawFd),
+            Exit(RawFd),
         }
         let arm = match self.resources.get_mut(&resource_id) {
             // An upgraded socket may already hold decrypted bytes (a read wanted less than
@@ -830,10 +927,26 @@ impl EffectBackend for NativeEffectBackend {
                 Some(state) if !state.plaintext.is_empty() => {
                     Arm::Data(std::mem::take(&mut state.plaintext))
                 }
-                Some(state) if state.eof => Arm::End(state.eof_event()),
+                Some(state) if state.eof => Arm::End(state.eof_event(), "TcpSocket"),
                 _ => Arm::Read(socket.as_raw_fd(), "TcpSocket"),
             },
             Some(Resource::TcpListener { socket, .. }) => Arm::Accept(socket.as_raw_fd()),
+            Some(Resource::Pipe {
+                fd,
+                kind: "ByteSource",
+            }) => Arm::Read(fd.as_raw_fd(), "ByteSource"),
+            // A child that has already ended answers that end again, as a drained socket
+            // keeps answering `Closed`.
+            Some(Resource::Child(child)) => match child.end() {
+                Ok(Some(end)) => Arm::End(end, "Child"),
+                Ok(None) => Arm::Exit(child.pidfd().as_raw_fd()),
+                Err(error) => Arm::End(
+                    StreamEvent::Failed {
+                        error: effect_error("cannot wait for child", &error),
+                    },
+                    "Child",
+                ),
+            },
             // A response body decodes buffered bytes first and reads its socket only when
             // they run out; its pump owns that dance.
             Some(Resource::HttpBody { .. }) => return self.http_body_pump(resource_id),
@@ -856,11 +969,12 @@ impl EffectBackend for NativeEffectBackend {
                 self.stream_events
                     .push((resource_id, socket_type, StreamEvent::Data, data));
             }
-            Arm::End(event) => {
-                let socket_type = self.get_resource_type_id("TcpSocket");
+            Arm::End(event, kind) => {
+                let kind_type = self.get_resource_type_id(kind);
                 self.stream_events
-                    .push((resource_id, socket_type, event, vec![]));
+                    .push((resource_id, kind_type, event, vec![]));
             }
+            Arm::Exit(pidfd) => self.arm_submit_exit(resource_id, pidfd)?,
             Arm::Read(fd, kind) => self.arm_submit_read(resource_id, kind, fd, vec![0u8; 8192])?,
             Arm::Accept(fd) => {
                 let completion_id = self.next_completion_id;
@@ -1224,7 +1338,10 @@ impl NativeEffectBackend {
                 }
                 self.tls_drive(process_id, resource_id, TlsGoal::Write, None)
             }
-            Resource::TcpSocket { .. } => {
+            Resource::TcpSocket { .. }
+            | Resource::Pipe {
+                kind: "ByteSink", ..
+            } => {
                 if data.is_empty() {
                     return Ok(Some(Ok(WireValue::ok())));
                 }
@@ -1538,7 +1655,7 @@ impl TlsState {
     /// accident), which a close-delimited protocol cannot detect for itself.
     fn eof_event(&mut self) -> StreamEvent {
         match std::io::Read::read(&mut self.connection.reader(), &mut [0u8; 1]) {
-            Ok(_) => StreamEvent::End,
+            Ok(_) => StreamEvent::closed(),
             Err(e) => StreamEvent::Failed {
                 error: tls_error("tls read", e),
             },
@@ -2716,7 +2833,7 @@ impl NativeEffectBackend {
                         break match framing.on_eof() {
                             Err(e) => Pump::Fail(EffectError::Other(e)),
                             Ok(()) => match state.eof_event() {
-                                StreamEvent::End => Pump::End,
+                                StreamEvent::End { .. } => Pump::End,
                                 StreamEvent::Failed { error } => Pump::Fail(error),
                                 _ => unreachable!("eof_event answers End or Failed"),
                             },
@@ -2753,7 +2870,7 @@ impl NativeEffectBackend {
                     },
                 );
                 self.stream_events
-                    .push((body_id, body_type, StreamEvent::End, vec![]));
+                    .push((body_id, body_type, StreamEvent::closed(), vec![]));
             }
             Pump::Fail(error) => {
                 if let Some(socket_id) = socket.take() {
@@ -2876,8 +2993,12 @@ impl NativeEffectBackend {
                         {
                             self.close_resource(socket_id);
                         }
-                        self.stream_events
-                            .push((body_id, body_type, StreamEvent::End, vec![]));
+                        self.stream_events.push((
+                            body_id,
+                            body_type,
+                            StreamEvent::closed(),
+                            vec![],
+                        ));
                     }
                     Err(e) => fail(self, EffectError::Other(e)),
                 }

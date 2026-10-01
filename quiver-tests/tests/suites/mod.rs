@@ -25,6 +25,7 @@ mod dialects;
 mod dispatch;
 mod elision;
 mod equality;
+mod exec;
 mod exhaustiveness;
 mod files;
 mod flow_fields;

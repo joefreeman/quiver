@@ -1422,7 +1422,7 @@ a = %ref []; b = %ref []
 
 Some operations produce **resources** — opaque handles to external state. A resource type
 is written `+Name`: `+File`, `+Dir`, `+TcpSocket`, `+TcpListener`, `+DnsResolver`,
-`+ByteSource`, `+ByteSink`.
+`+ByteSource`, `+ByteSink`, `+Child`.
 
 Every resource is owned by exactly one process, and only its owner may operate on it.
 Ownership **moves** when the handle is sent in a message or captured by a spawn, and after
@@ -1470,8 +1470,10 @@ select sources. Byte resources share one protocol, whatever their kind. A readab
 a `+TcpSocket`, or a `+ByteSource` such as an HTTP response body — yields
 `Data[source, data] | Closed[source]`, and a writable one — a `+TcpSocket` or a
 `+ByteSink` — is written with `%io.write`. A `+TcpListener` is a stream too, yielding
-`Accepted[source, sock] | Closed[source]`. Selecting is the only way to read a stream or
-accept a connection, and `%io.close` closes any resource, of whatever kind.
+`Accepted[source, sock] | Closed[source]`, and a `+Child` — an operating-system program
+started with `%exec.spawn` — ends with `Exited[source, code] | Signalled[source, signal]`.
+Selecting is the only way to read a stream or accept a connection, and `%io.close` closes
+any resource, of whatever kind.
 
 ```quiver ignore
 ![sock]                   // the next event: a plain blocking read
@@ -1727,11 +1729,12 @@ __integer_add__ [3, 4]                       //= 7
 | `%proc` | process management: `detach`, `kill`, `link`, `track`, and timers: `sleep`, `send_after`, `expire`, `race` |
 | `%registry` | the per-environment name registry: `register`, `unregister`, `lookup` |
 | `%sup` | supervision: restart strategies over `%proc` |
-| `%io` | the failure vocabulary every I/O operation shares, and the byte protocol: `write`, `close`, `read_all` |
+| `%io` | the failure vocabulary every I/O operation shares, and the byte protocol: `write`, `close`, `read_all`, `read_both` |
 | `%file` | files, via an owning process |
 | `%fs` | the file system: whole-file read and write, stat, list, create, copy, rename, remove, symlinks, permissions, temp dirs |
 | `%path` | path values and manipulation |
 | `%tcp` | TCP sockets and listeners, and their stream events |
+| `%exec` | operating-system programs: `run` one to completion, or `spawn` one and talk to it |
 | `%tls` | TLS as an in-place upgrade of a connected socket |
 | `%pem` | PEM text to the DER bytes `%tls` takes |
 | `%dns` | name resolution |

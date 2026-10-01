@@ -123,6 +123,22 @@ pub enum NativeEffect {
         key: Vec<u8>,
     },
 
+    /// Start an operating-system program (`__exec_spawn__`): `args` are its arguments,
+    /// `cwd` its directory (empty: the host's), and each `env` entry `NAME=value` to set or
+    /// `NAME` to unset over the host's environment, or over none when `clear_env`.
+    ExecSpawn {
+        cmd: Vec<u8>,
+        args: Vec<Vec<u8>>,
+        cwd: Vec<u8>,
+        env: Vec<Vec<u8>>,
+        clear_env: bool,
+    },
+    /// Signal a child's process group (`__exec_kill__`).
+    ExecKill {
+        resource_id: ResourceId,
+        signal: i32,
+    },
+
     /// A whole HTTP exchange as one effect — the native backing of `__http_request__`,
     /// driven by the backend over its own socket (see `native_backend`'s HTTP section).
     HttpRequest {
@@ -153,7 +169,8 @@ impl Effect for NativeEffect {
             | NativeEffect::DnsResolve { .. }
             | NativeEffect::TcpConnect { .. }
             | NativeEffect::TcpListen { .. }
-            | NativeEffect::HttpRequest { .. } => None,
+            | NativeEffect::HttpRequest { .. }
+            | NativeEffect::ExecSpawn { .. } => None,
 
             // Resource-using effects
             NativeEffect::FileRead { resource_id, .. }
@@ -163,6 +180,7 @@ impl Effect for NativeEffect {
             | NativeEffect::DnsNext { resource_id }
             | NativeEffect::Write { resource_id, .. }
             | NativeEffect::Close { resource_id }
+            | NativeEffect::ExecKill { resource_id, .. }
             | NativeEffect::TlsAttach { resource_id, .. }
             | NativeEffect::TlsAccept { resource_id, .. } => Some(*resource_id),
         }

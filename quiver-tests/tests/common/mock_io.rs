@@ -38,6 +38,9 @@ pub enum MockIo {
     Aborts,
 }
 
+/// A mocked stream's queued events, each with its byte payload.
+type EventQueue = std::collections::VecDeque<(StreamEvent, Vec<u8>)>;
+
 pub struct MockBackend {
     behaviour: MockIo,
     next_resource: ResourceId,
@@ -45,10 +48,7 @@ pub struct MockBackend {
     cursors: std::collections::HashMap<ResourceId, usize>,
     /// Each mocked stream — a socket or a response body — with its type id and its queued
     /// events, delivered one per arm.
-    streams: std::collections::HashMap<
-        ResourceId,
-        (usize, std::collections::VecDeque<(StreamEvent, Vec<u8>)>),
-    >,
+    streams: std::collections::HashMap<ResourceId, (usize, EventQueue)>,
     events: Vec<(ResourceId, usize, StreamEvent, Vec<u8>)>,
     /// Resource type ids, as pushed by the environment. A handle carrying the wrong one fails
     /// the `=(+TcpSocket)` / `=(+DnsResolver)` checks in std and looks like an empty result.
@@ -88,7 +88,7 @@ impl MockBackend {
                     .iter()
                     .map(|chunk| (StreamEvent::Data, chunk.clone())),
             );
-            queue.push_back((StreamEvent::End, Vec::new()));
+            queue.push_back((StreamEvent::closed(), Vec::new()));
         }
         self.streams.insert(id, (self.socket_type_id, queue));
         Ok(WireValue::Resource(id, self.socket_type_id))
@@ -114,7 +114,7 @@ impl MockBackend {
         }
         // The canned bytes are the whole connection, so their end is the connection's.
         match framing.on_eof() {
-            Ok(()) => queue.push_back((StreamEvent::End, Vec::new())),
+            Ok(()) => queue.push_back((StreamEvent::closed(), Vec::new())),
             Err(e) => queue.push_back((
                 StreamEvent::Failed {
                     error: EffectError::Other(e),
@@ -237,7 +237,7 @@ impl EffectBackend for MockBackend {
                 return Err(Error::Panic("mock: the read aborted".to_string()));
             }
             // A drained stream keeps answering its end.
-            (_, None) => (StreamEvent::End, Vec::new()),
+            (_, None) => (StreamEvent::closed(), Vec::new()),
         };
         self.events.push((resource_id, *type_id, event.0, event.1));
         Ok(())

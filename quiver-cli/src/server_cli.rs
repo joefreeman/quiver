@@ -223,6 +223,18 @@ pub fn server_command(
     let runtime = tokio::runtime::Runtime::new()?;
     let served = runtime.block_on(async {
         tokio::spawn(reap_expired_roots(Arc::clone(&state)));
+        // SIGTERM stops the server as `/shutdown` does, so the environment winds down and
+        // what its processes hold is released — the programs they started killed with it —
+        // rather than the process simply vanishing.
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                terminate.recv().await;
+                state.shutdown.notify_waiters();
+            }
+        });
         listener.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(listener)?;
         let socket_server = axum::serve(listener, router.clone()).with_graceful_shutdown({

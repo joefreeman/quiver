@@ -223,7 +223,7 @@ impl EffectBackend for WebEffectBackend {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(true);
                     if done {
-                        (StreamEvent::End, Vec::new())
+                        (StreamEvent::closed(), Vec::new())
                     } else {
                         let chunk = js_sys::Reflect::get(&result, &"value".into())
                             .ok()

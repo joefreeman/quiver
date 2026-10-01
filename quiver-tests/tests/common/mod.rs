@@ -125,6 +125,7 @@ fn build_builtins(shape: HostShape) -> quiver_core::builtins::BuiltinRegistry<Na
         quiver_io::attach_system_builtins(&mut builtins);
         quiver_io::attach_tls_builtins(&mut builtins);
         quiver_io::attach_http_builtins(&mut builtins);
+        quiver_io::attach_exec_builtins(&mut builtins);
     }
     builtins
 }

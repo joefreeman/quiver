@@ -300,3 +300,19 @@ fn test_listener_closes_through_io_close() {
         .evaluate(r#"%tcp.listen [4302, 8] ~> =(+TcpListener & l); %io.close l"#)
         .expect("Ok");
 }
+
+#[test]
+fn test_a_resource_pins_by_identity() {
+    // A resource is equal to itself and to nothing else, which is what tells one source's
+    // events from another's in a select over several.
+    quiver()
+        .with_io()
+        .evaluate(
+            r#"
+            %tcp.listen [4303, 8] ~> =(+TcpListener & a)
+            %tcp.listen [4304, 8] ~> =(+TcpListener & b)
+            [{ a ~> =^a; Same | Different }, { a ~> =^b; Same | Different }]
+            "#,
+        )
+        .expect("[Same, Different]");
+}

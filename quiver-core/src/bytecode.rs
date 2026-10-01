@@ -340,8 +340,9 @@ pub struct StreamInfo {
     /// The fresh-resource event's tuple (`[source, produced]`-shaped) and the
     /// produced resource's type id, when the kind yields resources.
     pub resource_tuple: Option<(usize, usize)>,
-    /// The end-of-stream event's tuple (`[source]`-shaped).
-    pub end_tuple: usize,
+    /// The end-of-stream events' tuples (`[source, ...]`-shaped), indexed by an
+    /// `End` event's variant.
+    pub end_tuples: Vec<usize>,
 }
 
 /// Stream event vocabulary for the whole program, indexed by resource type id

@@ -220,14 +220,31 @@ pub enum StreamEvent {
     /// The stream produced a fresh resource (e.g. an accepted connection). The
     /// environment has already recorded the receiving process as its owner.
     Resource { resource_id: ResourceId },
-    /// The stream ended cleanly: EOF, a FIN, a close_notify. Nothing more will
-    /// arrive, and everything that did arrive is the whole of it.
-    End,
+    /// The stream ended cleanly: EOF, a FIN, a close_notify, a child's exit. Nothing
+    /// more will arrive, and everything that did arrive is the whole of it. `variant`
+    /// picks which of the kind's declared end events this is, and `fields` are that
+    /// event's values after its source — what the end has to say, such as an exit code.
+    /// A plain end is [`StreamEvent::closed`].
+    End {
+        variant: usize,
+        fields: Vec<crate::wire::WireValue>,
+    },
     /// The stream failed: a reset, a truncation, an aborted transfer. The select
     /// answers the same `:error IoError[…]`-stamped nil every failed I/O operation
     /// does, so a consumer that would recover must first look — completeness is
     /// exactly what a failure no longer promises.
     Failed { error: crate::effects::EffectError },
+}
+
+impl StreamEvent {
+    /// The plain end: a kind's first end event, saying nothing beyond its source (the
+    /// `Closed[source]` every byte stream ends with).
+    pub fn closed() -> Self {
+        StreamEvent::End {
+            variant: 0,
+            fields: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

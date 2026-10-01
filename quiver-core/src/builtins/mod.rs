@@ -492,8 +492,12 @@ pub struct StreamSpec {
     /// The fresh-resource event (e.g. `Accepted[source, sock]`) and the produced
     /// resource's type name, or None for byte-only streams.
     pub resource: Option<(TypeSpec, String)>,
-    /// The end-of-stream event (e.g. `Closed[sock]`).
-    pub end: TypeSpec,
+    /// The end-of-stream events, of which a stream yields exactly one, last (e.g.
+    /// `Closed[source]`, or a child's `Exited[source, code] | Signalled[source, signal]`).
+    /// Each is a tuple whose first field is the source; the backend supplies the rest
+    /// (see `StreamEvent::End`), so they are primitive — integers and binaries — which
+    /// it can build without knowing the program's tuple ids.
+    pub ends: Vec<TypeSpec>,
 }
 
 /// The crash-delivery vocabulary: the shapes the runtime synthesizes when a process
@@ -1367,6 +1371,12 @@ pub fn http_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
     vec![io::register_http_signatures]
 }
 
+/// The exec builtins: operating-system programs as children of the host. Their own group,
+/// being the strongest capability a host can grant.
+pub fn exec_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
+    vec![io::register_exec_signatures]
+}
+
 /// Every builtin module — the full signature contract, independent of any host. This is
 /// what a *compiling* registry registers, whatever host it runs on: signatures are
 /// universal, so a program (and its content-keyed module artifacts) compiles identically
@@ -1377,5 +1387,6 @@ pub fn universal_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
     modules.extend(io_modules());
     modules.extend(tls_modules());
     modules.extend(http_modules());
+    modules.extend(exec_modules());
     modules
 }

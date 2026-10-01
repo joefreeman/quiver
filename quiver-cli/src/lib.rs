@@ -17,6 +17,7 @@ pub fn build_builtin_registry() -> quiver_core::builtins::BuiltinRegistry<quiver
     quiver_io::attach_system_builtins(&mut registry);
     quiver_io::attach_tls_builtins(&mut registry);
     quiver_io::attach_http_builtins(&mut registry);
+    quiver_io::attach_exec_builtins(&mut registry);
     registry
 }
 

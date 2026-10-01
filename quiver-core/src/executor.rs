@@ -1134,7 +1134,24 @@ impl<E: Effect> Executor<E> {
                     vec![source, Value::Resource(produced, produced_type)],
                 )
             }
-            StreamEvent::End => Value::tuple(info.end_tuple, vec![source]),
+            StreamEvent::End { variant, fields } => {
+                let tuple = *info.end_tuples.get(variant).ok_or_else(|| {
+                    Error::InvalidArgument(format!("stream kind has no end event {variant}"))
+                })?;
+                let arity = self.tuples.get(tuple).copied().unwrap_or_default();
+                if arity != fields.len() + 1 {
+                    return Err(Error::InvalidArgument(format!(
+                        "end event {variant} takes {} fields after its source, got {}",
+                        arity.saturating_sub(1),
+                        fields.len()
+                    )));
+                }
+                let mut elements = vec![source];
+                for field in fields {
+                    elements.push(self.from_wire(field)?);
+                }
+                Value::tuple(tuple, elements)
+            }
             // A failed read answers what any failed I/O operation answers: an
             // `:error`-stamped nil. The select completes with it, the step boundary
             // short-circuits, and the payload rides out — while a clean `Closed`
@@ -3433,6 +3450,9 @@ impl<E: Effect> Executor<E> {
                     a == b && func_a == func_b
                 }
                 (Value::Reference(a), Value::Reference(b)) => a == b,
+                // A resource is its identity: ids are never reused, so two handles are the
+                // same resource exactly when their ids agree.
+                (Value::Resource(a, _), Value::Resource(b, _)) => a == b,
                 _ => false,
             };
             if !equal {

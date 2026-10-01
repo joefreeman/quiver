@@ -7431,7 +7431,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 if let Some((resource, _)) = &spec.resource {
                     events.push(resource.resolve_to_id(self.program));
                 }
-                events.push(spec.end.resolve_to_id(self.program));
+                events.extend(spec.ends.iter().map(|end| end.resolve_to_id(self.program)));
                 Ok(events)
             }
             Type::Union(members) => {

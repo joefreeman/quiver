@@ -1,0 +1,136 @@
+// Operating-system programs, run as children of the host.
+//
+// `spawn` starts a program with its arguments — never through a shell; a caller who wants
+// one runs `sh -c` — and answers the child with its three standard streams:
+//
+//     %exec.spawn ["git", %list{ "status" }] ~> =(child: c, stdin: i, stdout: o, stderr: e)
+//
+// The pipes are ordinary byte resources: write to stdin with `%io.write`, close it with
+// `%io.close` (the child then reads end-of-file), and select on stdout and stderr for their
+// `Data[source, data] | Closed[source]` events. The child is a select source too, which
+// ends — once — with how the program ended:
+//
+//     ![o, e, c, 5000] ~> {
+//       | =Data[source: _, data: d] => ...
+//       | =Closed[source: _] => ...
+//       | =Exited[source: _, code: n] => ...       // exited with status n
+//       | =Signalled[source: _, signal: s] => ...  // killed by signal s
+//       | ...                                       // the timeout
+//     }
+//
+// A program's exit and the end of its output are separate events, in no fixed order, and a
+// program that writes more to a pipe than the pipe holds waits until it is read: read both
+// stdout and stderr while waiting for the exit, or the child may never get there.
+//
+// A child belongs to the process that spawned it, like any resource, and moves with it.
+// When its owner ends — or `%io.close` closes it — the child is killed, along with
+// everything it started (it runs in a process group of its own), and reaped. A program is
+// found on the PATH the child will see, through absolute entries only, so a relative or
+// empty entry never runs something from the working directory; a name containing `/` is a
+// path. Starting one that is not there answers nil carrying `:error`.
+
+// How a program ended: the last event a select on its child yields.
+'exit = Exited[source: +Child, code: 'int] | Signalled[source: +Child, signal: 'int]
+
+// The signals `kill` sends.
+'signal = Hup | Int | Quit | Kill | Usr1 | Usr2 | Term
+
+// A change to the environment the child inherits: a variable set, or removed.
+'change = Set['%str, '%str] | Unset['%str]
+
+// What `spawn` answers.
+'spawned = [child: +Child, stdin: +ByteSink, stdout: +ByteSource, stderr: +ByteSource]
+
+// What `run` answers.
+'output = [stdout: 'bin, stderr: 'bin]
+
+// Why `run` failed, under `:error`, when the program ran but did not succeed. (A program
+// that could not be started answers the `'%io` failure `spawn` does.)
+'failure =
+  | Failed[code: 'int, stdout: 'bin, stderr: 'bin]
+  | Killed[signal: 'int, stdout: 'bin, stderr: 'bin]
+
+// A string as the operating system takes it, which cannot hold a NUL: that is the entry
+// terminator of the encoding below.
+os_bytes = #'%str {
+  =Str[b]
+  {
+    | __binary_index__ [b, 0, 0] ~> ='int => %panic "an argument or environment entry cannot contain a NUL byte"
+    | b
+  }
+}
+
+// List-shaped arguments cross to the host as NUL-terminated entries in one binary.
+entries = #'%list<'bin> { %list.fold [$, <>, #{ %bin.concat [$0, %bin.concat [$1, <00>]] }] }
+
+change_bytes = #'change {
+  | =Set[name, value] => %bin.concat [os_bytes name, %bin.concat [<3d>, os_bytes value]]
+  | =Unset[name] => os_bytes name
+}
+
+signal_number = #'signal {
+  | =Hup => 1
+  | =Int => 2
+  | =Quit => 3
+  | =Kill => 9
+  | =Usr1 => 10
+  | =Usr2 => 12
+  | =Term => 15
+}
+
+spawn = #[
+  (cmd): '%str,
+  (args): '%list<'%str> = Nil,
+  cwd: ('%path | []) = [],
+  env: '%list<'change> = Nil,
+  clear_env: (Ok | []) = [],
+] -> ('spawned | []) {
+  :doc "Starts a program with [cmd, args], answering [child, stdin, stdout, stderr]. `cwd:` sets its directory, and `env:` (Set[name, value] or Unset[name] changes) its environment, over the host's — or over none, with `clear_env: Ok`. Nil (carrying :error) when the program cannot be started."
+  __exec_spawn__ [
+    cmd: os_bytes $cmd,
+    args: %list.map [$args, os_bytes] ~> entries,
+    cwd: $cwd ~> {
+      | =('%path & p) => %path.to_string p ~> .0
+      | <>
+    },
+    env: %list.map [$env, change_bytes] ~> entries,
+    clear_env: $clear_env,
+  ]
+}
+
+// Write a program's whole input, then close it so the program sees its end. A program that
+// stops reading early leaves the write failed, which is no concern of `run`'s: its exit
+// says whether it succeeded.
+feed = #[+ByteSink, 'bin] { %io.write [$0, $1]; %io.close $0 }
+
+run = #[
+  (cmd): '%str,
+  (args): '%list<'%str> = Nil,
+  cwd: ('%path | []) = [],
+  env: '%list<'change> = Nil,
+  clear_env: (Ok | []) = [],
+  stdin: 'bin = <>,
+] -> ('output | []) {
+  :doc "Runs a program to completion with [cmd, args], feeding it `stdin:` (none by default), and answers [stdout, stderr] — when it exits with status 0. Otherwise nil, carrying :error Failed[code, stdout, stderr] or Killed[signal, stdout, stderr], or the :error IoError of a program that could not be started. `cwd:`, `env:` and `clear_env:` are as for `spawn`."
+  spawn [$cmd, $args, cwd: $cwd, env: $env, clear_env: $clear_env]
+  ~> =(child: c, stdin: i, stdout: o, stderr: e)
+
+  // Input is written from a process of its own, and both outputs read together, so a
+  // program that writes as it reads never waits on a pipe nobody is draining.
+  @feed [i, $stdin]
+  %io.read_both [o, e] ~> =[out, err]
+  !c ~> {
+    | =Exited[source: _, code: 0] => [stdout: out, stderr: err]
+    | =Exited[source: _, code: n] => [] ~> { :error Failed[code: n, stdout: out, stderr: err] }
+    | =Signalled[source: _, signal: s] => [] ~> {
+      :error Killed[signal: s, stdout: out, stderr: err]
+    }
+  }
+}
+
+kill = #[(child): +Child, (signal): 'signal = Term] {
+  :doc "Sends a signal (Term by default) to the child and everything it started. Answers Ok, whether or not anything was left to receive it."
+  __exec_kill__ [$child, signal_number $signal]
+}
+
+(spawn, run, kill)

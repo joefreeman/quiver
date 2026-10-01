@@ -957,8 +957,8 @@ impl Program {
         // (a listener's spec names the socket kind it produces), so resolve first,
         // then index against the final name order — the same order `Value::Resource`
         // type ids use.
-        // (data tuple, resource tuple + produced kind, end tuple) per stream name.
-        type ResolvedSpec = (Option<usize>, Option<(usize, String)>, usize);
+        // (data tuple, resource tuple + produced kind, end tuples) per stream name.
+        type ResolvedSpec = (Option<usize>, Option<(usize, String)>, Vec<usize>);
         let initial = self.collect_resource_names();
         let mut resolved: std::collections::HashMap<String, ResolvedSpec> =
             std::collections::HashMap::new();
@@ -974,13 +974,17 @@ impl Program {
                 Some((s, produced)) => Some((self.stream_event_tuple(s)?, produced.clone())),
                 None => None,
             };
-            let end_tuple = self.stream_event_tuple(&spec.end)?;
-            resolved.insert(name.clone(), (data_tuple, resource_tuple, end_tuple));
+            let end_tuples = spec
+                .ends
+                .iter()
+                .map(|end| self.stream_event_tuple(end))
+                .collect::<Result<Vec<_>, _>>()?;
+            resolved.insert(name.clone(), (data_tuple, resource_tuple, end_tuples));
         }
         let names = self.collect_resource_names();
         let mut streams = Vec::with_capacity(names.len());
         for name in &names {
-            let Some((data_tuple, resource_tuple, end_tuple)) = resolved.get(name) else {
+            let Some((data_tuple, resource_tuple, end_tuples)) = resolved.get(name) else {
                 streams.push(None);
                 continue;
             };
@@ -999,7 +1003,7 @@ impl Program {
             streams.push(Some(crate::bytecode::StreamInfo {
                 data_tuple: *data_tuple,
                 resource_tuple,
-                end_tuple: *end_tuple,
+                end_tuples: end_tuples.clone(),
             }));
         }
         Ok(crate::bytecode::StreamTable { streams })

@@ -446,6 +446,56 @@ fn shutdown_stops_the_server() {
     wait_for_exit(&mut server.child);
 }
 
+#[test]
+fn shutdown_kills_the_programs_its_processes_started() {
+    assert_stopping_kills_programs(|server| server.client().shutdown().expect("shutdown failed"));
+}
+
+#[test]
+fn sigterm_kills_the_programs_its_processes_started() {
+    assert_stopping_kills_programs(|server| unsafe {
+        libc::kill(server.child.id() as i32, libc::SIGTERM);
+    });
+}
+
+/// A session spawns a program that starts one of its own in the background, and reports
+/// both pids. Stopping the server with `stop` must take both with it: a child program never
+/// outlives the host that owned it.
+fn assert_stopping_kills_programs(stop: impl FnOnce(&Server)) {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut server = Server::start(&[]);
+    let mut session = Session::open(&server);
+    let pids = session.evaluate_value(
+        r#"%exec.spawn ["sh", %list{ "-c", "sleep 300 & echo $$ $!; exec sleep 300" }]
+           ~> =(stdout: o)
+           ![o] ~> =Data[source: _, data: ~] ~> Str[~]"#,
+    );
+    let pids: Vec<u32> = pids
+        .trim_matches(|c: char| !c.is_ascii_digit())
+        .split(' ')
+        .map(|pid| {
+            pid.trim_matches(|c: char| !c.is_ascii_digit())
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(pids.len(), 2, "expected the child's and grandchild's pids");
+    let alive = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
+    assert!(pids.iter().all(|&pid| alive(pid)));
+
+    stop(&server);
+    wait_for_exit(&mut server.child);
+    // Reaping is asynchronous, so the /proc entries may linger for a moment.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pids.iter().any(|&pid| alive(pid)) {
+        assert!(
+            Instant::now() < deadline,
+            "programs outlived the server: {pids:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn wait_for_exit(child: &mut Child) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {

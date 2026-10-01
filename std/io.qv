@@ -64,6 +64,18 @@ read_rest = #<'r: 'readable>[(source): 'r, (acc): 'bin] {
   }
 }
 
+// Two sources read together, so neither stalls behind the other: whichever has a chunk
+// ready is read, and once one ends the other is read on alone.
+read_both_rest = #<'r: 'readable>[(first): 'r, (second): 'r, (a): 'bin, (b): 'bin] {
+  event = ![$first, $second]
+  event ~> {
+    | =Data[source: ^$first, data: d] => ^ [$first, $second, %bin.concat [$a, d], $b]
+    | =Data[source: _, data: d] => ^ [$first, $second, $a, %bin.concat [$b, d]]
+    | =Closed[source: ^$first] => { read_rest [$second, $b] ~> =('bin & rest); [$a, rest] }
+    | =Closed[source: _] => { read_rest [$first, $a] ~> =('bin & rest); [rest, $b] }
+  }
+}
+
 [
   write: __io_write__ ~> {
     :doc "Writes [writable, 'bin], answering Ok once every byte is written."
@@ -74,6 +86,10 @@ read_rest = #<'r: 'readable>[(source): 'r, (acc): 'bin] {
   read_all: #<'r: 'readable>'r {
     :doc "Reads a readable resource to its clean end, answering every byte. A failed read answers nil carrying :error, never a truncated result."
     read_rest [$, <>]
+  },
+  read_both: #<'r: 'readable>[(first): 'r, (second): 'r] {
+    :doc "Reads two readable resources to their clean ends at once, answering [first's bytes, second's bytes]. Reading them one after the other can deadlock — a writer blocked on the full second while the first is awaited — which this cannot. A failed read of either answers nil carrying :error."
+    read_both_rest [$first, $second, <>, <>]
   },
   describe: #' {
     :doc "An io failure rendered for a log, e.g. \"ConnectionRefused: connection refused to 127.0.0.1:9\"."

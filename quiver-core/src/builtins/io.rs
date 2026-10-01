@@ -201,7 +201,7 @@ fn byte_io_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
         (
             "io_close",
             TypeSpec::Union(
-                ["File", "Dir", "DnsResolver"]
+                ["File", "Dir", "DnsResolver", "Child"]
                     .into_iter()
                     .map(|kind| TypeSpec::Resource(kind.to_string()))
                     .chain([socket, listener, source, sink])
@@ -339,7 +339,10 @@ fn register_byte_stream_kind<E: Effect>(registry: &mut BuiltinRegistry<E>, kind:
                 ],
             )),
             resource: None,
-            end: TypeSpec::Tuple(Some("Closed"), vec![(Some("source"), resource)]),
+            ends: vec![TypeSpec::Tuple(
+                Some("Closed"),
+                vec![(Some("source"), resource)],
+            )],
         },
     );
 }
@@ -349,6 +352,89 @@ pub fn register_http_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     for (name, param, result) in http_request_signatures() {
         registry.register_signature(name.to_string(), Purity::Effect, param, fallible(result));
     }
+    register_byte_source(registry);
+    register_error_vocabulary(registry);
+}
+
+/// The exec builtins' contract: operating-system programs run as children of the host.
+///
+/// `exec_spawn` starts `cmd` (a program name, looked up on `PATH`, or a path) with `args`
+/// as its arguments — never through a shell — in `cwd` (empty: the host's), and answers
+/// the child with its three standard streams as pipes. List-shaped arguments cross as
+/// NUL-terminated entries in one binary (a NUL can appear in no argument or environment
+/// entry, which is the operating system's own encoding): each `args` entry is an argument,
+/// and each `env` entry is `NAME=value` to set or `NAME` to unset, applied over the host's
+/// environment — or over none, when `clear_env` is `Ok`.
+///
+/// The child is a select source that ends, once, with `Exited[source, code]` or
+/// `Signalled[source, signal]`; its stdout and stderr are `+ByteSource`s and its stdin a
+/// `+ByteSink`, all three byte resources like any other. `exec_kill([child, signal])`
+/// signals the child's process group, so whatever it started goes too.
+fn exec_signatures() -> Vec<(&'static str, TypeSpec, TypeSpec)> {
+    let child = TypeSpec::Resource("Child".to_string());
+    let bin = TypeSpec::Binary;
+    let flag = TypeSpec::Union(vec![
+        TypeSpec::Tuple(Some("Ok"), vec![]),
+        TypeSpec::Tuple(None, vec![]),
+    ]);
+    vec![
+        (
+            "exec_spawn",
+            TypeSpec::Tuple(
+                None,
+                vec![
+                    (Some("cmd"), bin.clone()),
+                    (Some("args"), bin.clone()),
+                    (Some("cwd"), bin.clone()),
+                    (Some("env"), bin),
+                    (Some("clear_env"), flag),
+                ],
+            ),
+            TypeSpec::Tuple(
+                None,
+                vec![
+                    (Some("child"), child.clone()),
+                    (Some("stdin"), TypeSpec::Resource("ByteSink".to_string())),
+                    (Some("stdout"), TypeSpec::Resource("ByteSource".to_string())),
+                    (Some("stderr"), TypeSpec::Resource("ByteSource".to_string())),
+                ],
+            ),
+        ),
+        (
+            "exec_kill",
+            TypeSpec::Tuple(None, vec![(None, child), (None, TypeSpec::Integer)]),
+            TypeSpec::Tuple(Some("Ok"), vec![]),
+        ),
+    ]
+}
+
+/// Register the exec builtins' signatures and `+Child`'s stream declaration: no bytes and
+/// no produced resources, just the one end event saying how the child ended.
+pub fn register_exec_signatures<E: Effect>(registry: &mut BuiltinRegistry<E>) {
+    for (name, param, result) in exec_signatures() {
+        registry.register_signature(name.to_string(), Purity::Effect, param, fallible(result));
+    }
+    let child = TypeSpec::Resource("Child".to_string());
+    registry.register_stream(
+        "Child",
+        crate::builtins::StreamSpec {
+            data: None,
+            resource: None,
+            ends: vec![
+                TypeSpec::Tuple(
+                    Some("Exited"),
+                    vec![
+                        (Some("source"), child.clone()),
+                        (Some("code"), TypeSpec::Integer),
+                    ],
+                ),
+                TypeSpec::Tuple(
+                    Some("Signalled"),
+                    vec![(Some("source"), child), (Some("signal"), TypeSpec::Integer)],
+                ),
+            ],
+        },
+    );
     register_byte_source(registry);
     register_error_vocabulary(registry);
 }
@@ -398,7 +484,10 @@ fn register_network_streams<E: Effect>(registry: &mut BuiltinRegistry<E>) {
                 ),
                 "TcpSocket".to_string(),
             )),
-            end: TypeSpec::Tuple(Some("Closed"), vec![(Some("source"), listener)]),
+            ends: vec![TypeSpec::Tuple(
+                Some("Closed"),
+                vec![(Some("source"), listener)],
+            )],
         },
     );
 }
