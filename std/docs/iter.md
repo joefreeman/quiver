@@ -18,7 +18,7 @@ endless as long as something downstream stops.
 
 ```quiver
 %list.iter %list{ 1, 2, 3, 4 }
-~> %iter.filter [~, #{ %num.gt? [$, 1]; $ }]
+~> %iter.filter [~, #{ %num.gt? [$, 1] }]
 ~> %iter.map [~, #{ %num.mul [$, 10] }]
 ~> %list.collect ~            //= Cons[20, Cons[30, Cons[40, Nil]]]
 ```
@@ -115,11 +115,11 @@ xs = %range.to 4 ~> %range.iter ~
 ```
 
 A **predicate** — what `filter`, `find`, `find_index`, `any?`, `all?`, `take_while` and
-`drop_while` take — is a function from an element to that element or to nil. That is why the
-body below ends with `$`: the test gates the step, and the element itself is what flows out.
+`drop_while` take — is a function from an element to any value, of which only whether it is
+nil counts. A test such as a match or `%num.gt?` is already one, as it answers nil when it fails.
 
 ```quiver
-even? = #'int { %int.mod [$, 2] ~> =0; $ }
+even? = #'int { %int.mod [$, 2] ~> =0 }
 %list.iter %list{ 1, 2, 3, 4 } ~> %iter.filter [~, even?] ~> %list.collect ~
 //= Cons[2, Cons[4, Nil]]
 ```
@@ -169,7 +169,7 @@ The cut is at the *first* rejection, not at every one: `drop_while` stops testin
 started yielding.
 
 ```quiver
-%list.iter %list{ 1, 5, 2 } ~> %iter.drop_while [~, #{ %num.lt? [$, 3]; $ }] ~> %list.collect ~
+%list.iter %list{ 1, 5, 2 } ~> %iter.drop_while [~, #{ %num.lt? [$, 3] }] ~> %list.collect ~
 //= Cons[5, Cons[2, Nil]]
 ```
 
@@ -210,12 +210,12 @@ is unchanged and none stays none.
 
 ```quiver
 xs = %list.iter %list{ 10, 20, 30 }
-%iter.find [xs, #{ %num.gt? [$, 15]; $ }]   //= 20
-%iter.find [xs, #{ %num.gt? [$, 99]; $ }]   //= []
+%iter.find [xs, #{ %num.gt? [$, 15] }]   //= 20
+%iter.find [xs, #{ %num.gt? [$, 99] }]   //= []
 ```
 
 ```quiver
-even? = #'int { %int.mod [$, 2] ~> =0; $ }
+even? = #'int { %int.mod [$, 2] ~> =0 }
 %list.iter %list{ 1, 2, 3 } ~> %iter.find_index [~, even?]   //= 1
 %list.iter %list{ 1, 3 } ~> %iter.find_index [~, even?]      //= []
 %list.iter %list{ 1, 2, 3 } ~> %iter.any? [~, even?]         //= Ok
@@ -228,7 +228,7 @@ Over an empty iterator they take the usual vacuous readings: nothing satisfies t
 and everything does.
 
 ```quiver
-even? = #'int { %int.mod [$, 2] ~> =0; $ }
+even? = #'int { %int.mod [$, 2] ~> =0 }
 %list.iter %list{ } ~> %iter.any? [~, even?]   //= []
 %list.iter %list{ } ~> %iter.all? [~, even?]   //= Ok
 ```
@@ -238,8 +238,8 @@ hit, `all?` at the first miss — so none pulls further than it must, and each c
 an endless source.
 
 ```quiver
-%range.from 2 ~> %range.iter ~ ~> %iter.find [~, #{ %num.gt? [$, 5]; $ }]   //= 6
-%iter.repeat 7 ~> %iter.any? [~, #{ =7; $ }]                                //= Ok
+%range.from 2 ~> %range.iter ~ ~> %iter.find [~, #{ %num.gt? [$, 5] }]   //= 6
+%iter.repeat 7 ~> %iter.any? [~, #{ =7 }]                                //= Ok
 ```
 
 ## Laziness
@@ -260,7 +260,7 @@ elements tail-calls its way forward rather than nesting.
 
 ```quiver
 %range.to 2000 ~> %range.iter ~
-~> %iter.filter [~, #{ =1999; $ }]
+~> %iter.filter [~, #{ =1999 }]
 ~> %iter.nth [~, 0]           //= 1999
 ```
 

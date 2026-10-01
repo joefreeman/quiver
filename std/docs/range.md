@@ -126,7 +126,7 @@ Nothing but the elements demanded is ever computed, so an unbounded range in fro
 short-circuiting consumer costs only the steps it takes to answer:
 
 ```quiver
-%range.from 2 ~> %range.iter ~ ~> %iter.find [~, #{ %num.gt? [$, 5]; $ }]   //= 6
+%range.from 2 ~> %range.iter ~ ~> %iter.find [~, #{ %num.gt? [$, 5] }]   //= 6
 ```
 
 Zipped against another iterator, an unbounded range is how an index gets attached to something

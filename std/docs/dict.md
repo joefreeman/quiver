@@ -207,14 +207,13 @@ d = %dict{ "a" => 1, "b" => 2, "c" => 3 }
 %dict.map [d, #{ [$0, %num.mul [$1, 10]] }] ~> %dict.count ~        //= 3
 ```
 
-`filter` keeps the entries its predicate answers non-nil for — the idiom is to test, then
-hand back `$`.
+`filter` keeps the entries its predicate answers non-nil for.
 
 ```quiver
 d = %dict{ "a" => 1, "b" => 2, "c" => 3 }
-%dict.filter [d, #{ %num.le? [$1, 2]; $ }] ~> %dict.count ~         //= 2
-%dict.filter [d, #{ %num.le? [$1, 2]; $ }] ~> %dict.get [~, "a"]    //= 1
-%dict.filter [d, #{ %num.le? [$1, 2]; $ }] ~> %dict.get [~, "c"]    //= []
+%dict.filter [d, #{ %num.le? [$1, 2] }] ~> %dict.count ~         //= 2
+%dict.filter [d, #{ %num.le? [$1, 2] }] ~> %dict.get [~, "a"]    //= 1
+%dict.filter [d, #{ %num.le? [$1, 2] }] ~> %dict.get [~, "c"]    //= []
 ```
 
 `fold` reduces to a single value, the accumulator first and the entry second.
@@ -227,12 +226,12 @@ d = %dict{ "a" => 1, "b" => 2, "c" => 3 }
 
 ```quiver
 d = %dict{ "a" => 1, "b" => 2, "c" => 3 }
-%dict.find [d, #{ $1 ~> =2; $ }]              //= ["b", 2]
-%dict.find [d, #{ $1 ~> =99; $ }]             //= []
-%dict.any? [d, #{ $1 ~> =3; $ }]              //= Ok
-%dict.any? [d, #{ $1 ~> =99; $ }]             //= []
-%dict.all? [d, #{ %num.gt? [$1, 0]; $ }]      //= Ok
-%dict.all? [d, #{ %num.gt? [$1, 1]; $ }]      //= []
+%dict.find [d, #{ $1 ~> =2 }]              //= ["b", 2]
+%dict.find [d, #{ $1 ~> =99 }]             //= []
+%dict.any? [d, #{ $1 ~> =3 }]              //= Ok
+%dict.any? [d, #{ $1 ~> =99 }]             //= []
+%dict.all? [d, #{ %num.gt? [$1, 0] }]      //= Ok
+%dict.all? [d, #{ %num.gt? [$1, 1] }]      //= []
 ```
 
 ## Deeper tries

@@ -115,11 +115,11 @@ Matching the cells directly is often simpler than either, and needs nothing from
 ```
 
 A **predicate** — what `filter`, `find`, `any?` and the rest take — is a function from an
-element to that element or to nil. That is why the body below ends with `$`: `%num.gt?`
-answers `Ok`, which gates the step, and the element itself is what flows out.
+element to any value, of which only whether it is nil counts. `%num.gt?` below answers `Ok`
+or nil, so it is a predicate as it stands.
 
 ```quiver
-%list.filter [%list{ 1, 2, 3 }, #{ %num.gt? [$, 1]; $ }]   //= Cons[2, Cons[3, Nil]]
+%list.filter [%list{ 1, 2, 3 }, #{ %num.gt? [$, 1] }]   //= Cons[2, Cons[3, Nil]]
 ```
 
 `flat_map` maps each element to a *list* and concatenates the results:
@@ -150,15 +150,15 @@ halves of one split, so what one keeps the other discards.
 
 ```quiver
 xs = %list{ 1, 2, 3 }
-%list.take_while [xs, #{ %num.lt? [$, 3]; $ }]   //= Cons[1, Cons[2, Nil]]
-%list.drop_while [xs, #{ %num.lt? [$, 3]; $ }]   //= Cons[3, Nil]
+%list.take_while [xs, #{ %num.lt? [$, 3] }]   //= Cons[1, Cons[2, Nil]]
+%list.drop_while [xs, #{ %num.lt? [$, 3] }]   //= Cons[3, Nil]
 ```
 
 The cut is at the *first* rejection, not at every one: `drop_while` stops testing once it has
 started yielding.
 
 ```quiver
-%list.drop_while [%list{ 1, 5, 2 }, #{ %num.lt? [$, 3]; $ }]   //= Cons[5, Cons[2, Nil]]
+%list.drop_while [%list{ 1, 5, 2 }, #{ %num.lt? [$, 3] }]   //= Cons[5, Cons[2, Nil]]
 ```
 
 ## Combining
@@ -228,18 +228,18 @@ xs = %list{ 1, 2, 3 }
 
 ```quiver
 xs = %list{ 1, 2, 3 }
-%list.find [xs, #{ %num.gt? [$, 1]; $ }]         //= 2
-%list.find [xs, #{ %num.gt? [$, 9]; $ }]         //= []
-%list.find_index [xs, #{ %num.gt? [$, 1]; $ }]   //= 1
-%list.find_index [xs, #{ %num.gt? [$, 9]; $ }]   //= []
+%list.find [xs, #{ %num.gt? [$, 1] }]         //= 2
+%list.find [xs, #{ %num.gt? [$, 9] }]         //= []
+%list.find_index [xs, #{ %num.gt? [$, 1] }]   //= 1
+%list.find_index [xs, #{ %num.gt? [$, 9] }]   //= []
 ```
 
 ```quiver
 xs = %list{ 1, 2, 3 }
-%list.any? [xs, #{ %num.gt? [$, 2]; $ }]   //= Ok
-%list.any? [xs, #{ %num.gt? [$, 9]; $ }]   //= []
-%list.all? [xs, #{ %num.gt? [$, 0]; $ }]   //= Ok
-%list.all? [xs, #{ %num.gt? [$, 1]; $ }]   //= []
+%list.any? [xs, #{ %num.gt? [$, 2] }]   //= Ok
+%list.any? [xs, #{ %num.gt? [$, 9] }]   //= []
+%list.all? [xs, #{ %num.gt? [$, 0] }]   //= Ok
+%list.all? [xs, #{ %num.gt? [$, 1] }]   //= []
 ```
 
 Over an empty list they take the usual vacuous readings: nothing satisfies the predicate, and
@@ -247,9 +247,9 @@ everything does. The predicate needs its parameter type written out here, becaus
 says nothing about what the elements would have been for `#{ … }` to infer from.
 
 ```quiver
-%list.any? [Nil, #'int { %num.gt? [$, 0]; $ }]   //= []
-%list.all? [Nil, #'int { %num.gt? [$, 0]; $ }]   //= Ok
-%list.find [Nil, #'int { %num.gt? [$, 0]; $ }]   //= []
+%list.any? [Nil, #'int { %num.gt? [$, 0] }]   //= []
+%list.all? [Nil, #'int { %num.gt? [$, 0] }]   //= Ok
+%list.find [Nil, #'int { %num.gt? [$, 0] }]   //= []
 ```
 
 `find` and `any?` stop at the first hit and `all?` at the first miss, so none of them walks
@@ -268,7 +268,7 @@ each:
 
 ```quiver
 %list.iter %list{ 1, 2, 3, 4 }
-~> %iter.filter [~, #{ %num.gt? [$, 1]; $ }]
+~> %iter.filter [~, #{ %num.gt? [$, 1] }]
 ~> %iter.map [~, #{ %num.mul [$, 10] }]
 ~> %list.collect ~            //= Cons[20, Cons[30, Cons[40, Nil]]]
 ```
