@@ -81,7 +81,11 @@ lines_step = #[', 'int, 'bin, 'int] {
   // ignored. Flags are the OS open(2) bits: W = 577 (O_WRONLY|O_CREAT|O_TRUNC), A = 1089
   // (O_WRONLY|O_CREAT|O_APPEND), RW = 66 (O_RDWR|O_CREAT), New = 193 (O_WRONLY|O_CREAT|O_EXCL).
   open: #[(path): '%path, mode: (R | W | A | RW | New) = R] {
-    :doc "Opens a file: R reads (the default); W writes, creating or truncating; A appends, creating; RW reads and writes, creating but not truncating; New writes a file that must not already exist, failing with AlreadyExists."
+    :doc """
+      Opens a file: R reads (the default); W writes, creating or truncating; A appends, creating; RW
+      reads and writes, creating but not truncating; New writes a file that must not already exist,
+      failing with AlreadyExists.
+      """
     flags = $mode ~> {
       | =R => 0
       | =W => 577

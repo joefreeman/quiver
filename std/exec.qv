@@ -85,7 +85,13 @@ spawn = #[
   env: '%list<'change> = Nil,
   clear_env: (Ok | []) = [],
 ] -> ('spawned | []) {
-  :doc "Starts a program with [cmd, args], answering [child, stdin, stdout, stderr]. `cwd:` sets its directory, and `env:` (Set[name, value] or Unset[name] changes) its environment, over the host's — or over none, with `clear_env: Ok`. Nil (carrying :error) when the program cannot be started."
+  :doc """
+    Starts a program with [cmd, args], answering [child, stdin, stdout, stderr]. `cwd:` sets its
+    directory, and `env:` (Set[name, value] or Unset[name] changes) its environment, over the host's
+    — or over none, with `clear_env: Ok`.
+
+    Nil (carrying :error) when the program cannot be started.
+    """
   __exec_spawn__ [
     cmd: os_bytes $cmd,
     args: %list.map [$args, os_bytes] ~> entries,
@@ -111,7 +117,14 @@ run = #[
   clear_env: (Ok | []) = [],
   stdin: 'bin = <>,
 ] -> ('output | []) {
-  :doc "Runs a program to completion with [cmd, args], feeding it `stdin:` (none by default), and answers [stdout, stderr] — when it exits with status 0. Otherwise nil, carrying :error Failed[code, stdout, stderr] or Killed[signal, stdout, stderr], or the :error IoError of a program that could not be started. `cwd:`, `env:` and `clear_env:` are as for `spawn`."
+  :doc """
+    Runs a program to completion with [cmd, args], feeding it `stdin:` (none by default), and
+    answers [stdout, stderr] — when it exits with status 0. Otherwise nil, carrying :error
+    Failed[code, stdout, stderr] or Killed[signal, stdout, stderr], or the :error IoError of a
+    program that could not be started.
+
+    `cwd:`, `env:` and `clear_env:` are as for `spawn`.
+    """
   spawn [$cmd, $args, cwd: $cwd, env: $env, clear_env: $clear_env]
   ~> =(child: c, stdin: i, stdout: o, stderr: e)
 
@@ -129,7 +142,10 @@ run = #[
 }
 
 kill = #[(child): +Child, (signal): 'signal = Term] {
-  :doc "Sends a signal (Term by default) to the child and everything it started. Answers Ok, whether or not anything was left to receive it."
+  :doc """
+    Sends a signal (Term by default) to the child and everything it started. Answers Ok, whether or
+    not anything was left to receive it.
+    """
   __exec_kill__ [$child, signal_number $signal]
 }
 

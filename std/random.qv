@@ -40,7 +40,10 @@ draw_loop = #[(n): 'int, (k): 'int, (limit): 'int] {
 }
 
 below = #'int {
-  :doc "A uniform random integer in [0, n) — cryptographically sourced, unbiased (rejection sampling); nil when n < 1."
+  :doc """
+    A uniform random integer in [0, n) — cryptographically sourced, unbiased (rejection sampling);
+    nil when n < 1.
+    """
   =n
   __integer_compare__ [n, 0] ~> =1
   klen_loop [n, 1, 256] ~> =(count, power)

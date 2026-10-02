@@ -69,7 +69,10 @@ further = #[(a): ('perr | []), (b): ('perr | [])] {
 // A failure at the state's position, merged against the state's stashed failure — the
 // deeper of the two surfaces (the fresh one on a tie).
 fail_in = #[(st): ', (msg): Str['bin]] {
-  :doc "A failure at the state's position, merged against the state's stashed (backtracked-over) failure; the deeper one surfaces."
+  :doc """
+    A failure at the state's position, merged against the state's stashed (backtracked-over)
+    failure; the deeper one surfaces.
+    """
   e = further [Expected[offset: $st.pos, message: $msg], $st.err]
 
   [] ~> { :error e }
@@ -119,7 +122,9 @@ tw_end = #[(data): 'bin, (pos): 'int, (len): 'int, (pred): 'pred<_>] {
 
 // The longest (possibly empty) run of bytes satisfying `pred`, as a slice.
 take_while = #'pred<_> {
-  :doc "A parser for the longest (possibly empty) run of bytes satisfying the predicate, as a slice."
+  :doc """
+    A parser for the longest (possibly empty) run of bytes satisfying the predicate, as a slice.
+    """
   =pred
   #' { end = tw_end [$data, $pos, $len, pred]; [%bin.slice [$data, $pos, end], $[..., pos: end]] }
 }
@@ -179,7 +184,10 @@ opt_byte_end = #[(data): 'bin, (pos): 'int, (len): 'int, (b): 'int] {
 // An identifier (lowercase start, then letters, digits, or underscores, with optional
 // `?` then `!` suffixes — the host language's identifier grammar), as a Str.
 ident = #' {
-  :doc "An identifier (lowercase start; letters, digits, underscores; optional `?` then `!` suffixes), as a Str."
+  :doc """
+    An identifier (lowercase start; letters, digits, underscores; optional `?` then `!` suffixes),
+    as a Str.
+    """
   | peek $ ~> =('int & b)
     __integer_compare__ [b, 97] ~> =(0 | 1)
     __integer_compare__ [b, 122] ~> =(-1 | 0) => {
@@ -357,7 +365,10 @@ sep_run = #<'t>[(p): 'p<'t>, (sep): 'p<_>, (st): ', (acc): 'items<'t>] {
 // `sep` not followed by a `p` is left unconsumed (so a trailing separator can be handled
 // with `opt` afterwards).
 sep_by = #<'t>[(p): 'p<'t>, (sep): 'p<_>] {
-  :doc "Zero or more of a parser separated by another, as a list of values; a trailing separator is left unconsumed."
+  :doc """
+    Zero or more of a parser separated by another, as a list of values; a trailing separator is left
+    unconsumed.
+    """
   #' {
     r = $$p $
     {
@@ -383,7 +394,10 @@ opt = #<'t>'p<'t> {
 // Zero or more of `p` separated by `sep`, tolerating a single optional trailing `sep`, as
 // a list of `p`'s values. `sep_by` leaves a trailing separator unconsumed; this consumes it.
 sep_end_by = #<'t>[(p): 'p<'t>, (sep): 'p<_>] {
-  :doc "Zero or more of a parser separated by another, tolerating an optional trailing separator, as a list of values."
+  :doc """
+    Zero or more of a parser separated by another, tolerating an optional trailing separator, as a
+    list of values.
+    """
   body = sep_by [$p, $sep]; left [body, opt $sep]
 }
 
@@ -422,7 +436,10 @@ chain_run = #<'t>[(p): 'p<'t>, (op): 'p<#['t, 't] -> 't>, (st): ', (lhs): 't] {
 // One or more of `p` separated by `op`, folded left-associatively: `op` yields the
 // combining function for each pair — the classic precedence-level combinator.
 chainl = #<'t>[(p): 'p<'t>, (op): 'p<#['t, 't] -> 't>] {
-  :doc "One or more of a parser separated by an operator parser yielding combining functions, folded left-associatively."
+  :doc """
+    One or more of a parser separated by an operator parser yielding combining functions, folded
+    left-associatively.
+    """
   #' { $$p $ ~> =[v, st]; chain_run [$$p, $$op, st, v] }
 }
 
@@ -432,14 +449,20 @@ rec_run = #<'t>[(self): ^, (builder): 'builder<'t>, (st): '] -> (['t, '] | []) {
 
 // Tie a recursive grammar's knot: `rec` turns a builder into the parser it describes.
 rec = #<'t>'builder<'t> {
-  :doc "Ties a recursive grammar's knot: turns a builder (which receives the grammar's own parser and the state) into the parser it describes."
+  :doc """
+    Ties a recursive grammar's knot: turns a builder (which receives the grammar's own parser and
+    the state) into the parser it describes.
+    """
   =builder; #' { rec_run [rec_run, builder, $] }
 }
 
 // Apply a parser to a whole string: the value, or nil with a positioned `:error` — the
 // dialect contract, so a `:dialect` function can be `#Str['bin] { %parse.run [~, grammar] }`.
 run = #<'t>[(s): Str['bin], (p): 'p<'t>] {
-  :doc "Applies a parser to a whole string: the value, or nil with a positioned `:error` payload — the dialect failure contract."
+  :doc """
+    Applies a parser to a whole string: the value, or nil with a positioned `:error` payload — the
+    dialect failure contract.
+    """
   $s ~> =Str[data]
   $p P[data: data, pos: 0, len: %bin.length data, err: []] ~> =[v, st]
   {

@@ -17,10 +17,17 @@
 
 [
   encode: #' {
-    :doc "Encodes a data value (integers, binaries, and tuples of data — `'%data`) as Quiver data notation. `decode` reads it back."
+    :doc """
+      Encodes a data value (integers, binaries, and tuples of data — `'%data`) as Quiver data
+      notation. `decode` reads it back.
+      """
     __data_encode__ $ ~> Str[~]
   },
   decode: __data_decode__ ~> {
-    :doc "Decodes Quiver data notation as the explicitly-given expected type — `%data.decode<'event> text` answers `'event | []`, nil for anything malformed, mismatched, or trailing. The expected type must be concrete at the naming site."
+    :doc """
+      Decodes Quiver data notation as the explicitly-given expected type —
+      `%data.decode<'event> text` answers `'event | []`, nil for anything malformed, mismatched, or
+      trailing. The expected type must be concrete at the naming site.
+      """
   },
 ]

@@ -238,7 +238,10 @@ blocks1 = #[(data): 'bin, (off): 'int, (st): 'state1] {
 }
 
 sha1 = #'bin {
-  :doc "The SHA-1 digest of the bytes, as a 20-byte binary. Legacy — for protocol compatibility (e.g. the WebSocket handshake), not new designs."
+  :doc """
+    The SHA-1 digest of the bytes, as a 20-byte binary. Legacy — for protocol compatibility (e.g.
+    the WebSocket handshake), not new designs.
+    """
   init = [w_at [h1, 0], w_at [h1, 1], w_at [h1, 2], w_at [h1, 3], w_at [h1, 4]]
   blocks1 [pad $, 0, init] ~> =[a, b, c, d, e]
 

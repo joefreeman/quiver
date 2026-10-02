@@ -49,7 +49,10 @@ from_hex_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 }
 
 from_hex = #Str['bin] {
-  :doc "The bytes of a hex string (case-insensitive), or nil when it is odd-length or has a non-hex character."
+  :doc """
+    The bytes of a hex string (case-insensitive), or nil when it is odd-length or has a non-hex
+    character.
+    """
   =Str[data]
 
   __integer_compare__ [__integer_modulo__ [__binary_length__ data, 2], 0]
@@ -230,7 +233,10 @@ from_base64_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 }
 
 from_base64 = #Str['bin] {
-  :doc "The bytes of a base64 string (RFC 4648 standard alphabet, padding required), or nil when malformed."
+  :doc """
+    The bytes of a base64 string (RFC 4648 standard alphabet, padding required), or nil when
+    malformed.
+    """
   =Str[data]
   len = __binary_length__ data
   {
@@ -252,7 +258,10 @@ from_base64 = #Str['bin] {
   repeat: __binary_repeat__ ~> { :doc "A binary repeated the given number of times." },
 
   append: __binary_append__ ~> {
-    :doc "The binary with a non-negative integer appended as the given number of big-endian bytes (1 to 8)."
+    :doc """
+      The binary with a non-negative integer appended as the given number of big-endian bytes (1 to
+      8).
+      """
   },
 
   and: __binary_and__ ~> {
@@ -272,7 +281,10 @@ from_base64 = #Str['bin] {
   popcount: __binary_popcount__ ~> { :doc "The number of set bits (population count)." },
 
   shift: __binary_shift__ ~> {
-    :doc "The binary shifted by a number of bits — left when positive, right when negative — with zeros shifted in; the length is preserved."
+    :doc """
+      The binary shifted by a number of bits — left when positive, right when negative — with zeros
+      shifted in; the length is preserved.
+      """
   },
 
   slice: __binary_slice__ ~> {
@@ -280,7 +292,9 @@ from_base64 = #Str['bin] {
   },
 
   index: __binary_index__ ~> {
-    :doc "The index of the first occurrence of a byte at or after the given offset, or nil when absent."
+    :doc """
+      The index of the first occurrence of a byte at or after the given offset, or nil when absent.
+      """
   },
 
   get_byte: #[(bin): 'bin, (index): 'int] {

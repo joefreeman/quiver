@@ -421,7 +421,10 @@ dict_dialect = #(content: '%str, chain: '%meta.cb) {
   },
 
   put: #<'k: '%data, 'v>[(dict): '<'k, 'v>, (key): 'k, (value): 'v] {
-    :doc "A dict with the key mapped to the value, replacing any existing mapping. Keys are data values (`'%data`: integers, binaries, and tuples of data)."
+    :doc """
+      A dict with the key mapped to the value, replacing any existing mapping. Keys are data values
+      (`'%data`: integers, binaries, and tuples of data).
+      """
     put [put, $dict, $key, $value, hash $key, 0]
   },
 
@@ -475,12 +478,16 @@ dict_dialect = #(content: '%str, chain: '%meta.cb) {
   },
 
   fold: #<'k: '%data, 'v, 'acc>[(dict): '<'k, 'v>, (init): 'acc, (f): #['acc, ['k, 'v]] -> 'acc] {
-    :doc "Reduces a dict by folding each [key, value] entry into an accumulator, in unspecified order."
+    :doc """
+      Reduces a dict by folding each [key, value] entry into an accumulator, in unspecified order.
+      """
     to_iter $dict ~> %iter.fold [~, $init, $f]
   },
 
   find: #<'k: '%data, 'v>[(dict): '<'k, 'v>, (pred): #['k, 'v] -> _] {
-    :doc "An entry for which the predicate is non-nil, or nil when none matches (unspecified order)."
+    :doc """
+      An entry for which the predicate is non-nil, or nil when none matches (unspecified order).
+      """
     to_iter $dict ~> %iter.find [~, $pred]
   },
 

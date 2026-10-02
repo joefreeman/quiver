@@ -47,7 +47,12 @@
 'state = [table: 'table, max: 'int, window: '%time.duration]
 
 watch = #[(id): '%str, (child): @!_, (sup): @'down] {
-  :doc "Spawns a watcher for a child: awaits it, classifies the outcome (Done, or Crashed with the '%proc.crash payload), and reports Down[id, pid, outcome] to the supervisor — the pid identifies WHICH incarnation went down, so a late report for a reused id is harmless. Call from a start closure, passing the child and supervisor by reference."
+  :doc """
+    Spawns a watcher for a child: awaits it, classifies the outcome (Done, or Crashed with the
+    '%proc.crash payload), and reports Down[id, pid, outcome] to the supervisor — the pid identifies
+    WHICH incarnation went down, so a late report for a reused id is harmless. Call from a start
+    closure, passing the child and supervisor by reference.
+    """
   // The spawned watcher closes over these (an inner `$` would be its own
   // parameter), so bind the fields locally.
   id = $id
@@ -154,17 +159,32 @@ run = #[specs: 'specs, max: 'int, window: '%time.duration] {
 }
 
 start = #[children: 'specs, max_restarts: 'int = 3, window: '%time.duration = %time{ 5s }] {
-  :doc "Starts a supervisor over the child specs (one_for_one): each child is restarted per its spec's restart type, at most max_restarts times (default 3) within the window (default 5s) — beyond that the supervisor gives up and crashes, tearing down its subtree. The child set is dynamic: `add` a child, `drop` one. Answers the supervisor's pid, owned by the caller."
+  :doc """
+    Starts a supervisor over the child specs (one_for_one): each child is restarted per its spec's
+    restart type, at most max_restarts times (default 3) within the window (default 5s) — beyond
+    that the supervisor gives up and crashes, tearing down its subtree.
+
+    The child set is dynamic: `add` a child, `drop` one. Answers the supervisor's pid, owned by the
+    caller.
+    """
   @run [specs: $children, max: $max_restarts, window: $window]
 }
 
 add = #[(sup): @'msg, (spec): 'spec] {
-  :doc "Adds a child to a running supervisor and awaits the verdict: Started[pid] (widened to an inert `(@)`), or Duplicate for an id the table already holds. The child is spawned in the supervisor's process — owned by it, supervised like any startup spec."
+  :doc """
+    Adds a child to a running supervisor and awaits the verdict: Started[pid] (widened to an inert
+    `(@)`), or Duplicate for an id the table already holds. The child is spawned in the supervisor's
+    process — owned by it, supervised like any startup spec.
+    """
   $sup Add[$spec, @]; !'started
 }
 
 drop = #[(sup): @'msg, (id): '%str] {
-  :doc "Drops a supervised child: kills it (tearing down its owned subtree) and forgets its row — its watcher's report is disregarded, and the id may be supervised again. Asynchronous: the supervisor applies it in mailbox order."
+  :doc """
+    Drops a supervised child: kills it (tearing down its owned subtree) and forgets its row — its
+    watcher's report is disregarded, and the id may be supervised again. Asynchronous: the
+    supervisor applies it in mailbox order.
+    """
   $sup Drop[$id]; Ok
 }
 

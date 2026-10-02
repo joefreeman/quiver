@@ -67,11 +67,19 @@ parse = #'%str {
 
 [
   blocks: parse ~> {
-    :doc "Every PEM block in the text as [label, der], in order; nil when malformed (a mismatched END, an unterminated block, a body that is not base64). Text outside blocks is ignored."
+    :doc """
+      Every PEM block in the text as [label, der], in order; nil when malformed (a mismatched END,
+      an unterminated block, a body that is not base64).
+
+      Text outside blocks is ignored.
+      """
   },
 
   certificates: #'%str {
-    :doc "The text's CERTIFICATE blocks as concatenated DER — a fullchain.pem in the form %tls.accept's cert (or %tls.attach's roots) takes. Nil when the text is malformed or holds no certificate."
+    :doc """
+      The text's CERTIFICATE blocks as concatenated DER — a fullchain.pem in the form %tls.accept's
+      cert (or %tls.attach's roots) takes. Nil when the text is malformed or holds no certificate.
+      """
     parse $ ~> =('%list<'block> & bs)
     certs = %list.filter [bs, #{ $label ~> ="CERTIFICATE"; $ }]
     certs ~> =Cons[_, _]
@@ -79,7 +87,13 @@ parse = #'%str {
   },
 
   key: #'%str {
-    :doc "The text's first PRIVATE KEY block as PKCS#8 DER — a privkey.pem in the form %tls.accept's key takes. Nil when malformed or absent; a legacy 'EC PRIVATE KEY'/'RSA PRIVATE KEY' block is deliberately not answered — convert it with `openssl pkcs8 -topk8 -nocrypt`."
+    :doc """
+      The text's first PRIVATE KEY block as PKCS#8 DER — a privkey.pem in the form %tls.accept's key
+      takes.
+
+      Nil when malformed or absent; a legacy 'EC PRIVATE KEY'/'RSA PRIVATE KEY' block is
+      deliberately not answered — convert it with `openssl pkcs8 -topk8 -nocrypt`.
+      """
     parse $ ~> =('%list<'block> & bs)
     %list.find [bs, #{ $label ~> ="PRIVATE KEY"; $ }] ~> =('block & b)
     b.der

@@ -173,12 +173,18 @@ qp_loop = #[(data): 'bin, (start): 'int, (pos): 'int, (len): 'int, (acc): 'pairs
 }
 
 form_decode = #'bin {
-  :doc "Decodes an application/x-www-form-urlencoded body (or query string) into ordered [name, value] pairs."
+  :doc """
+    Decodes an application/x-www-form-urlencoded body (or query string) into ordered [name, value]
+    pairs.
+    """
   qp_loop [$, 0, 0, %bin.length $, Nil]
 }
 
 form = #' {
-  :doc "The request body decoded as an application/x-www-form-urlencoded form, as ordered [name, value] pairs."
+  :doc """
+    The request body decoded as an application/x-www-form-urlencoded form, as ordered [name, value]
+    pairs.
+    """
   form_decode $body
 }
 
@@ -264,7 +270,10 @@ parse_request_line = #'bin {
 
 // The request-target split into decoded path segments and query pairs.
 split_target = #'%str {
-  :doc "Splits a request target into `[path segments, query pairs]` — the same split `parse_request` applies, exposed for deriving a request from a new URL (live navigation)."
+  :doc """
+    Splits a request target into `[path segments, query pairs]` — the same split `parse_request`
+    applies, exposed for deriving a request from a new URL (live navigation).
+    """
   | %str.split_once [~, "?"] ~> =[Str[path], Str[query]] => [
       path_segments path,
       qp_loop [query, 0, 0, %bin.length query, Nil],
@@ -284,7 +293,10 @@ content_length = #'pairs {
 }
 
 parse_request_with = #[(data): 'bin, (max_head): 'int, (max_body): 'int] {
-  :doc "Parses one request from a byte buffer with explicit head/body size caps: Incomplete (read more), Bad[status, reason], or the request plus the leftover bytes."
+  :doc """
+    Parses one request from a byte buffer with explicit head/body size caps: Incomplete (read more),
+    Bad[status, reason], or the request plus the leftover bytes.
+    """
   len = %bin.length $data
   he = head_end [$data, 0, len]
   {
@@ -357,7 +369,10 @@ parse_request_with = #[(data): 'bin, (max_head): 'int, (max_body): 'int] {
 }
 
 parse_request = #'bin {
-  :doc "Parses one request from a byte buffer with default size caps (8 KiB head, 1 MiB body): Incomplete, Bad[status, reason], or the request plus the leftover bytes."
+  :doc """
+    Parses one request from a byte buffer with default size caps (8 KiB head, 1 MiB body):
+    Incomplete, Bad[status, reason], or the request plus the leftover bytes.
+    """
   parse_request_with [$, 8192, 1048576]
 }
 
@@ -458,7 +473,12 @@ bodyless? = #'int {
 }
 
 parse_response_with = #[(data): 'bin, (eof): (Ok | []), (max_head): 'int, (max_body): 'int] {
-  :doc "Parses one response from a byte buffer with explicit head/body caps. `eof` says the connection has closed, which is what terminates a response framed by neither Content-Length nor chunked encoding."
+  :doc """
+    Parses one response from a byte buffer with explicit head/body caps.
+
+    `eof` says the connection has closed, which is what terminates a response framed by neither
+    Content-Length nor chunked encoding.
+    """
   len = %bin.length $data
   head_end [$data, 0, len] ~> {
     | =('int & h) => {
@@ -536,7 +556,10 @@ parse_response_with = #[(data): 'bin, (eof): (Ok | []), (max_head): 'int, (max_b
 }
 
 parse_response = #[(data): 'bin, (eof): (Ok | [])] {
-  :doc "Parses one response from a byte buffer with default caps (8 KiB head, 8 MiB body): Incomplete (read more), Bad[reason], or the response plus the leftover bytes."
+  :doc """
+    Parses one response from a byte buffer with default caps (8 KiB head, 8 MiB body): Incomplete
+    (read more), Bad[reason], or the response plus the leftover bytes.
+    """
   parse_response_with [$data, $eof, 8192, 8388608]
 }
 
@@ -589,7 +612,12 @@ method_name = #'method {
 }
 
 serialize_request = #' {
-  :doc "The request as HTTP/1.1 bytes; a Content-Length header is added when a body is present and none is stated. Host is the caller's to supply — this module never sees the authority."
+  :doc """
+    The request as HTTP/1.1 bytes; a Content-Length header is added when a body is present and none
+    is stated.
+
+    Host is the caller's to supply — this module never sees the authority.
+    """
   =Request(method: m, target: t, version: v, headers: hs, body: b)
   request_line = "{method_name m} {t} {v}\r\n"
   hs2 = {
@@ -602,7 +630,10 @@ serialize_request = #' {
 }
 
 request = #[(method): 'method, (target): '%str, headers: 'pairs = Nil, body: 'bin = <>] {
-  :doc "Builds an HTTP/1.1 request, deriving `path` and `query` from the target the way the server's parser would — so a client-built request and a parsed one are the same value."
+  :doc """
+    Builds an HTTP/1.1 request, deriving `path` and `query` from the target the way the server's
+    parser would — so a client-built request and a parsed one are the same value.
+    """
   [path, query] = split_target $target
   Request[
     method: $method,
@@ -656,7 +687,10 @@ pct_enc_loop = #[(data): 'bin, (pos): 'int, (len): 'int, (acc): 'bin] {
 pct_encode = #'bin { pct_enc_loop [$, 0, %bin.length $, <>] }
 
 form_encode = #'pairs {
-  :doc "Ordered [name, value] pairs as an application/x-www-form-urlencoded body — the inverse of form_decode."
+  :doc """
+    Ordered [name, value] pairs as an application/x-www-form-urlencoded body — the inverse of
+    form_decode.
+    """
   %list.iter ~
   ~> %iter.map [
     ~,
@@ -674,7 +708,10 @@ cookie_seg = #['pairs, '%str] {
 }
 
 cookies = #' {
-  :doc "The cookies sent with the request (its Cookie headers), as ordered [name, value] pairs; values are verbatim bytes."
+  :doc """
+    The cookies sent with the request (its Cookie headers), as ordered [name, value] pairs; values
+    are verbatim bytes.
+    """
   %list.fold [
     $headers,
     Nil,
@@ -694,7 +731,10 @@ cookies = #' {
 attrs_join = #[(attrs): 'attrs, (acc): '%str] { %list.fold [$attrs, $acc, #{ "{$0}; {$1}" }] }
 
 set_cookie = #[(name): '%str, (value): '%str, (attrs): 'attrs = Nil] {
-  :doc "A Set-Cookie header pair for the name and value, with the given attribute strings (e.g. \"Path=/\", \"HttpOnly\"); none by default."
+  :doc """
+    A Set-Cookie header pair for the name and value, with the given attribute strings (e.g.
+    "Path=/", "HttpOnly"); none by default.
+    """
   ["set-cookie", attrs_join [$attrs, "{$name}={$value}"]]
 }
 
@@ -702,12 +742,18 @@ set_cookie = #[(name): '%str, (value): '%str, (attrs): 'attrs = Nil] {
 // browser's fetch answers parsed headers, which the web transport re-emits as CRLF text so
 // this module — the one place that knows the grammar — turns it back into pairs.
 headers_of = #'bin {
-  :doc "Parses a CRLF-separated header block into ordered [name, value] pairs, or Bad on a malformed line."
+  :doc """
+    Parses a CRLF-separated header block into ordered [name, value] pairs, or Bad on a malformed
+    line.
+    """
   parse_headers [$, 0, %bin.length $, Nil]
 }
 
 headers_to_bytes = #'pairs {
-  :doc "Ordered [name, value] pairs as a CRLF-separated block, each line terminated (no blank line follows)."
+  :doc """
+    Ordered [name, value] pairs as a CRLF-separated block, each line terminated (no blank line
+    follows).
+    """
   serialize_headers [$, ""] ~> .0
 }
 

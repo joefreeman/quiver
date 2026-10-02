@@ -15,7 +15,14 @@
 'changed = Changed
 
 kill = #[(pid): @, reason: '%data = []] {
-  :doc "Kills the process — always effective (there is no trapping). Its awaiters observe the Killed[reason] crash kind, with the given reason (nil when none is given, as for a link or teardown kill); its owned subtree is torn down, and its link peers are killed. The reason outlives the killer, so it must be data (`'%data`). A no-op on an already-terminated process."
+  :doc """
+    Kills the process — always effective (there is no trapping). Its awaiters observe the
+    Killed[reason] crash kind, with the given reason (nil when none is given, as for a link or
+    teardown kill); its owned subtree is torn down, and its link peers are killed.
+
+    The reason outlives the killer, so it must be data (`'%data`). A no-op on an already-terminated
+    process.
+    """
   __process_kill__ [$pid, $reason]
 }
 
@@ -28,7 +35,10 @@ wait_ms = #'%time.duration {
 
 // A timeout's nil would end the sequence, so the block recovers it: a sleep succeeds.
 sleep = #'%time.duration {
-  :doc "Suspends the calling process for the duration (to the millisecond, rounded up), answering Ok. Its mailbox is untouched: messages arriving meanwhile stay queued."
+  :doc """
+    Suspends the calling process for the duration (to the millisecond, rounded up), answering Ok.
+    Its mailbox is untouched: messages arriving meanwhile stay queued.
+    """
   { wait_ms $ ~> ![~] | Ok }
 }
 
@@ -36,14 +46,28 @@ sleep = #'%time.duration {
 // with the sender, killing it cancels the send, and a resource in the message moves
 // into it (closed if it never fires).
 send_after = #<'m>[(to): @'m, (message): 'm, (after): '%time.duration] -> (@!Ok) {
-  :doc "Sends a message to a process after a delay, answering the timer: a process owned by the caller, which ends once it has sent. Kill it to cancel the send; it is also cancelled if the caller terminates first. The message is checked against the target's send grant now, and a resource in it moves to the timer at once."
+  :doc """
+    Sends a message to a process after a delay, answering the timer: a process owned by the caller,
+    which ends once it has sent. Kill it to cancel the send; it is also cancelled if the caller
+    terminates first.
+
+    The message is checked against the target's send grant now, and a resource in it moves to the
+    timer at once.
+    """
   to = $to; message = $message; after = $after; @[] { sleep after; to message } []
 }
 
 // A watchdog races the process's completion against the deadline, so it ends as soon as
 // the process does rather than outliving it.
 expire = #[(pid): @!_, (after): '%time.duration] -> (@!Ok) {
-  :doc "Gives a process a deadline: if it has not terminated within the duration, it is killed with reason Timeout[duration], which its awaiters observe as Killed[reason: Timeout[duration]]. Answers the watchdog, a process owned by the caller; kill it to lift the deadline. The deadline is lifted too if the caller terminates first, so a detached process outliving its spawner outlives the deadline as well."
+  :doc """
+    Gives a process a deadline: if it has not terminated within the duration, it is killed with
+    reason Timeout[duration], which its awaiters observe as Killed[reason: Timeout[duration]].
+    Answers the watchdog, a process owned by the caller; kill it to lift the deadline.
+
+    The deadline is lifted too if the caller terminates first, so a detached process outliving its
+    spawner outlives the deadline as well.
+    """
   pid = $pid
   after = $after
   ms = wait_ms after
@@ -62,7 +86,14 @@ expire = #[(pid): @!_, (after): '%time.duration] -> (@!Ok) {
 // than as silence. The collector is spawned before the racers because they are handed its
 // pid, which a spawn types from the collector's receive.
 race = #<'r>[(racers): '%list<#[] -> 'r>, timeout: ('%time.duration | []) = []] {
-  :doc "Runs each thunk in its own process and answers the first non-nil result; nil and crashed results count as failures, and the race answers nil once every racer has failed (at once, for no racers). The losers are killed as soon as it is decided. With a timeout, a race still undecided after that duration is abandoned, answering nil carrying :crash Killed[reason: Timeout[duration]]."
+  :doc """
+    Runs each thunk in its own process and answers the first non-nil result; nil and crashed results
+    count as failures, and the race answers nil once every racer has failed (at once, for no
+    racers). The losers are killed as soon as it is decided.
+
+    With a timeout, a race still undecided after that duration is abandoned, answering nil carrying
+    :crash Killed[reason: Timeout[duration]].
+    """
   racers = $racers
   count = %list.count racers
   collect = #'int {
@@ -86,14 +117,28 @@ race = #<'r>[(racers): '%list<#[] -> 'r>, timeout: ('%time.duration | []) = []] 
 
 [
   detach: __process_detach__ ~> {
-    :doc "Detaches an owned child from the calling process, so it survives the caller's termination. Parent-only: errors unless the argument is a process the caller currently owns."
+    :doc """
+      Detaches an owned child from the calling process, so it survives the caller's termination.
+      Parent-only: errors unless the argument is a process the caller currently owns.
+      """
   },
   kill: kill,
   link: __process_link__ ~> {
-    :doc "Links the calling process and the target for symmetric fate-sharing: if either terminates abnormally (crash or kill), the other is killed. Normal completion never propagates; linking an already-crashed process kills the caller immediately. Idempotent; self-link is a no-op."
+    :doc """
+      Links the calling process and the target for symmetric fate-sharing: if either terminates
+      abnormally (crash or kill), the other is killed. Normal completion never propagates; linking
+      an already-crashed process kills the caller immediately. Idempotent; self-link is a no-op.
+      """
   },
   track: __track__ ~> {
-    :doc "Runs a nilary thunk with reactive dependency tracking, returning its result. Each process the thunk samples with `?` becomes a dependency: when any of them next changes state, the calling process is sent a `'%proc.changed` wakeup. Subscriptions are reconciled on each call, so a dependency no longer sampled is dropped. The thunk must be pure (no spawns, sends, effects, or selects)."
+    :doc """
+      Runs a nilary thunk with reactive dependency tracking, returning its result. Each process the
+      thunk samples with `?` becomes a dependency: when any of them next changes state, the calling
+      process is sent a `'%proc.changed` wakeup. Subscriptions are reconciled on each call, so a
+      dependency no longer sampled is dropped.
+
+      The thunk must be pure (no spawns, sends, effects, or selects).
+      """
   },
   sleep: sleep,
   send_after: send_after,

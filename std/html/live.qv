@@ -213,7 +213,12 @@ opts_text = #[(debounce): ('int | []), (throttle): ('int | []), (keys): ('keys |
 }
 
 rate_opts = #[(debounce): ('int | []) = [], (throttle): ('int | []) = []] {
-  :doc "The options an ordinary binding takes, as `on:click[…]`'s bracket: `debounce` (ms — fire once the events stop) and `throttle` (ms — fire the first of each window, drop the rest). Both are omittable and positional-first, so `on:input[300]` debounces by 300ms. Rate limiting is per binding and per element, and the server never sees it."
+  :doc """
+    The options an ordinary binding takes, as `on:click[…]`'s bracket: `debounce` (ms — fire once
+    the events stop) and `throttle` (ms — fire the first of each window, drop the rest). Both are
+    omittable and positional-first, so `on:input[300]` debounces by 300ms. Rate limiting is per
+    binding and per element, and the server never sees it.
+    """
   opts_text [debounce: $debounce, throttle: $throttle, keys: []]
 }
 
@@ -222,7 +227,12 @@ key_opts = #[
   (debounce): ('int | []) = [],
   (throttle): ('int | []) = [],
 ] {
-  :doc "The options a key binding takes, as `on:keydown[…]`'s bracket: `keys` (one key, or a list — only these reach the server, matched against the browser's key name) plus `rate_opts`' `debounce` and `throttle`. Positional-first, so `on:keydown[\"Enter\"]` sends only Enter, and `on:keydown[%list\{ \"Enter\", \"Escape\" }]` those two."
+  :doc """
+    The options a key binding takes, as `on:keydown[…]`'s bracket: `keys` (one key, or a list — only
+    these reach the server, matched against the browser's key name) plus `rate_opts`' `debounce` and
+    `throttle`. Positional-first, so `on:keydown["Enter"]` sends only Enter, and
+    `on:keydown[%list\{ "Enter", "Escape" }]` those two.
+    """
   opts_text ($debounce, $throttle, $keys)
 }
 
@@ -333,7 +343,11 @@ frame_of = #[(self): ^, (node): '%html<'%data>] -> 'frame {
 }
 
 frame = #'%html<'%data> {
-  :doc "Derives a node tree's frame — the diffable shape of one render — from the :template provenance %html expansions attach. Un-annotated subtrees become Opaque (compared and replaced whole); event attribute values are encoded to their %data notation, so frames are event-type-erased."
+  :doc """
+    Derives a node tree's frame — the diffable shape of one render — from the :template provenance
+    %html expansions attach. Un-annotated subtrees become Opaque (compared and replaced whole);
+    event attribute values are encoded to their %data notation, so frames are event-type-erased.
+    """
   frame_of [frame_of, $]
 }
 
@@ -405,7 +419,10 @@ render_of = #[(self): ^, (f): 'frame, (acc): 'bin] -> 'bin {
 }
 
 render = #'frame {
-  :doc "Renders a frame to instrumented HTML — statics interleaved with slot values, child-hole markers and data-q anchors included — for the initial region render and SetHtml patch payloads."
+  :doc """
+    Renders a frame to instrumented HTML — statics interleaved with slot values, child-hole markers
+    and data-q anchors included — for the initial region render and SetHtml patch payloads.
+    """
   render_of [render_of, $, <>] ~> Str[~]
 }
 
@@ -629,7 +646,11 @@ diff_of = #[
 }
 
 diff = #[(prev): 'frame, (next): 'frame] {
-  :doc "The patch list turning the first frame into the second, in document order: recursing where statics match, and emitting one subsuming patch where a slot's kind, template, or opaque content changed. Equal frames answer Nil. A Nil path addresses the root."
+  :doc """
+    The patch list turning the first frame into the second, in document order: recursing where
+    statics match, and emitting one subsuming patch where a slot's kind, template, or opaque content
+    changed. Equal frames answer Nil. A Nil path addresses the root.
+    """
   diff_of [diff_of, $prev, $next, Nil, Nil] ~> %list.reverse
 }
 
@@ -673,7 +694,11 @@ enc_patch = #'patch {
 enc_patches = #'patches { %list.map [~, enc_patch] }
 
 encode = #[(vid): '%str, (ps): 'patches] {
-  :doc "A frame message: one view's patches for one render as JSON text, `[1, vid, [patch, …]]`. Vids are hierarchical strings — the root view is \"0\", its children \"0.1\", \"0.2\", … — minted locally by each view, so no allocation is coordinated."
+  :doc """
+    A frame message: one view's patches for one render as JSON text, `[1, vid, [patch, …]]`. Vids
+    are hierarchical strings — the root view is "0", its children "0.1", "0.2", … — minted locally
+    by each view, so no allocation is coordinated.
+    """
   %json.stringify Array[Cons[1, Cons[$vid, Cons[Array[enc_patches $ps], Nil]]]]
 }
 
@@ -874,7 +899,16 @@ fold_event = #<'i, 's, 'e: '%data>[
 // matching, and equality are all unchanged — so `redirect` is an identity function that
 // happens to leave a note for the loop.
 redirect = #<'s>[(state): 's, (to): '%str] {
-  :doc "Marks the state an `update` is returning to ask the client to move its address bar to `to` — server-initiated navigation, patched and synced with no page reload. Set the page for that URL in the same `update`, so view and address bar move together. The mark rides the state's value invisibly (it survives being returned through `update`'s declared type, and matching and equality ignore it), and is emitted once per change: re-asserting the same path after an unmarked state redirects again, but an update that merely answers a still-marked state unchanged does not."
+  :doc """
+    Marks the state an `update` is returning to ask the client to move its address bar to `to` —
+    server-initiated navigation, patched and synced with no page reload. Set the page for that URL
+    in the same `update`, so view and address bar move together.
+
+    The mark rides the state's value invisibly (it survives being returned through `update`'s
+    declared type, and matching and equality ignore it), and is emitted once per change:
+    re-asserting the same path after an unmarked state redirects again, but an update that merely
+    answers a still-marked state unchanged does not.
+    """
   $state ~> { :redirect $to }
 }
 
@@ -1270,7 +1304,26 @@ view_run = #<'i, 's, 'e: '%data>[
 // re-declares `<'i>`: a nested signature reaches the enclosing type parameters by
 // re-declaration — suffix inheritance makes it the same variable.)
 component = #<'e: '%data, 'i, 's>('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>) {
-  :doc "Defines a component from its `[mount, update, view, decode]` record — `decode` reads the `on:*` payload the client echoes back, %data notation in the `Ev` envelope, so the field is the instantiated codec itself, `decode: %data.decode<Ev['ev]>` (add a `nav: #[(state): 's, (request): '%http] -> 's` field to re-derive state on live navigation — root only: URL changes are only ever sent to the root view): answers the placeable component, a function called `[init: …, key: …]` in markup. Pin the event type — `component<'ev> [...]` — to compile-check the view's `on:*` payloads against it (unpinned, a stray payload widens the inferred union and is only dropped at decode). What the browser knows and the payload cannot carry — a click's coordinates, a submit's fields, an input's value — rides the event as the `:event` annotation, read in `update` with a checked retrieval (`e:event<Submit(fields: '%http.pairs)>`). The placed view mounts from `init` in its own process, spawned and owned by the placing view; its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the view across renders; a dropped key kills it (and its owned processes). The app's root is the same shape."
+  :doc """
+    Defines a component from its `[mount, update, view, decode]` record — `decode` reads the `on:*`
+    payload the client echoes back, %data notation in the `Ev` envelope, so the field is the
+    instantiated codec itself, `decode: %data.decode<Ev['ev]>` (add a
+    `nav: #[(state): 's, (request): '%http] -> 's` field to re-derive state on live navigation —
+    root only: URL changes are only ever sent to the root view): answers the placeable component, a
+    function called `[init: …, key: …]` in markup.
+
+    Pin the event type — `component<'ev> [...]` — to compile-check the view's `on:*` payloads
+    against it (unpinned, a stray payload widens the inferred union and is only dropped at decode).
+
+    What the browser knows and the payload cannot carry — a click's coordinates, a submit's fields,
+    an input's value — rides the event as the `:event` annotation, read in `update` with a checked
+    retrieval (`e:event<Submit(fields: '%http.pairs)>`).
+
+    The placed view mounts from `init` in its own process, spawned and owned by the placing view;
+    its events decode with its OWN decode, and it patches its own interior. A stable `key` keeps the
+    view across renders; a dropped key kills it (and its owned processes). The app's root is the
+    same shape.
+    """
   comp = with_nav $
   #<'i>'place<'i> {
     i = $init
@@ -1365,7 +1418,15 @@ registry = #[] { @registry_loop Nil }
 'root_mapped<'i> = [root: #'place<'i> -> '%html<[]>, init: #'%http -> 'i]
 
 app = #<'i>('root_free | 'root_mapped<'i>) {
-  :doc "Declares an app — the unit `handle` serves. `[root: comp]` names the root view (a placeable component from `component`), which mounts from nil; add `init: #'%http -> 'i` to derive the root's mount init from the request instead (`init: #'%http \{ $ }` passes the request itself). Further views are placed in view markup, not declared here. Spawns the app's parking registry, so create once at startup — the calling process owns it — and share the record with every `handle` call."
+  :doc """
+    Declares an app — the unit `handle` serves. `[root: comp]` names the root view (a placeable
+    component from `component`), which mounts from nil; add `init: #'%http -> 'i` to derive the
+    root's mount init from the request instead (`init: #'%http \{ $ }` passes the request itself).
+    Further views are placed in view markup, not declared here.
+
+    Spawns the app's parking registry, so create once at startup — the calling process owns it — and
+    share the record with every `handle` call.
+    """
   | =(init: f, root: r) => {
     rooted = #'place<'%http> { k = $key; r [init: f $init, key: k] }
     [root: rooted, reg: registry []]
@@ -1773,14 +1834,23 @@ sim = #<'e: '%data, 'i, 's>[
   (init): 'i,
   (cfg): ('component_base<'i, 's, 'e> | 'component<'i, 's, 'e>),
 ] {
-  :doc "Mounts a component with no socket, for tests: answers a sim holding the mounted state and frame 0. Step it with `sim_text` / `sim_event` / `sim_changed`; read its region HTML with `sim_html`. Pin the wire-event type — `sim<'ev> [...]` — to compile-check the view's `on:*` payloads."
+  :doc """
+    Mounts a component with no socket, for tests: answers a sim holding the mounted state and
+    frame 0. Step it with `sim_text` / `sim_event` / `sim_changed`; read its region HTML with `sim_html`.
+    Pin the wire-event type — `sim<'ev> [...]` — to compile-check the view's `on:*` payloads.
+    """
   comp = with_nav $cfg
   state = comp.mount $init
   Sim[comp: comp, state: state, frame: render_view [state, comp]]
 }
 
 sim_text = #<'i, 's, 'e: '%data>[(s): 'sim<'i, 's, 'e>, (text): '%str] {
-  :doc "Feeds a sim one wire envelope — the JSON a socket Text frame carries, `[vid, payload, metadata]` — through the session's own parse → decode → update seam. Answers `[sim2, patches]`; a malformed envelope drops silently (the sim unchanged, `Nil` patches) and a decode answering nil leaves the state untouched, exactly as the live path drops them."
+  :doc """
+    Feeds a sim one wire envelope — the JSON a socket Text frame carries, `[vid, payload, metadata]`
+    — through the session's own parse → decode → update seam. Answers `[sim2, patches]`; a malformed
+    envelope drops silently (the sim unchanged, `Nil` patches) and a decode answering nil leaves the
+    state untouched, exactly as the live path drops them.
+    """
   $s ~> =Sim(comp: comp, state: state, frame: prev)
   {
     | env_of $text ~> =[_, payload, ev] => {
@@ -1793,7 +1863,11 @@ sim_text = #<'i, 's, 'e: '%data>[(s): 'sim<'i, 's, 'e>, (text): '%str] {
 }
 
 sim_event = #<'i, 's, 'e: '%data>[(s): 'sim<'i, 's, 'e>, (ev): 'e] {
-  :doc "Feeds a sim one already-decoded event, straight to `update` — the app-level step, for asserting `update`/`view` behavior without wire shapes. Answers `[sim2, patches]` (`Nil` when the render's diff is empty — the empty-frame suppression seam)."
+  :doc """
+    Feeds a sim one already-decoded event, straight to `update` — the app-level step, for asserting
+    `update`/`view` behavior without wire shapes. Answers `[sim2, patches]` (`Nil` when the render's
+    diff is empty — the empty-frame suppression seam).
+    """
   $s ~> =Sim(comp: comp, state: state, frame: prev)
   s2 = comp.update [state: state, event: $ev]
   f2 = render_view [s2, comp]
@@ -1801,7 +1875,12 @@ sim_event = #<'i, 's, 'e: '%data>[(s): 'sim<'i, 's, 'e>, (ev): 'e] {
 }
 
 sim_changed = #<'i, 's, 'e: '%data>'sim<'i, 's, 'e> {
-  :doc "The wakeup path: re-render and diff against the sim's frame, as the loop does after a `'%proc.changed` wakeup from a sampled store. Answers `[sim2, patches]`. The wakeup itself is the caller's to receive (`!'%proc.changed`) — the sim's tracked renders subscribed the calling process."
+  :doc """
+    The wakeup path: re-render and diff against the sim's frame, as the loop does after a
+    `'%proc.changed` wakeup from a sampled store. Answers `[sim2, patches]`. The wakeup itself is
+    the caller's to receive (`!'%proc.changed`) — the sim's tracked renders subscribed the calling
+    process.
+    """
   =Sim(comp: comp, state: state, frame: prev)
   f2 = render_view [state, comp]
   [Sim[comp: comp, state: state, frame: f2], diff [prev, f2]]
@@ -1817,353 +1896,353 @@ sim_html = #<'i, 's, 'e: '%data>'sim<'i, 's, 'e> {
 // (a token the server still holds re-attaches silently; otherwise the cold join
 // replaces the region). (`\{` is a literal brace in a Quiver string.)
 client_js = """
-<script>
-(() => \{
-  const root = document.getElementById('q-root');
-  const token = root.getAttribute('data-q-token') || '';
-  const nextNode = (n) => \{
-    if (n.firstChild) return n.firstChild;
-    while (n && n !== root) \{
-      if (n.nextSibling) return n.nextSibling;
-      n = n.parentNode;
-    }
-    return null;
-  };
-  const scan = (a, b, visit) => \{
-    let n = a ? nextNode(a) : root.firstChild;
-    while (n && n !== b) \{
-      if (visit(n)) return;
-      n = nextNode(n);
-    }
-  };
-  const mopen = (n) => \{
-    if (n.nodeType !== 8) return null;
-    if (n.data.startsWith('q:')) return \{ slot: parseInt(n.data.slice(2)) };
-    if (n.data === 'r') return \{ row: true };
-    if (n.data.startsWith('v:')) return \{ bnd: n.data.slice(2) };
-    return null;
-  };
-  const mclose = (n) =>
-    n.nodeType === 8 &&
-    (n.data.startsWith('/q:') || n.data === '/r' || n.data.startsWith('/v:'));
-  // A view's boundary range: the root view (\"0\") is the whole region; a child's is
-  // its v: marker pair (ids are unique, so no depth counting is needed).
-  const boundary = (vid) => \{
-    if (vid === '0') return \{ open: null, close: null };
-    let open = null, close = null;
-    scan(null, null, (n) => \{
-      if (n.nodeType !== 8) return false;
-      if (n.data === 'v:' + vid) open = n;
-      else if (n.data === '/v:' + vid) \{ close = n; return true; }
-      return false;
-    });
-    return open && close ? \{ open: open, close: close } : null;
-  };
-  const resolve = (path, from) => \{
-    let open = from.open, close = from.close;
-    for (const idx of path) \{
-      // A segment indexes whatever the range holds: numbered slot markers (q:idx) or
-      // anonymous row markers (the idx-th r) — the two never mix at one level.
-      let found = null, depth = 0, rows = 0;
-      scan(open, close, (n) => \{
-        const o = mopen(n);
-        if (o) \{
-          if (depth === 0) \{
-            if (o.row) \{
-              if (rows === idx) \{ found = n; return true; }
-              rows++;
-            } else if (o.slot === idx) \{ found = n; return true; }
+  <script>
+  (() => \{
+    const root = document.getElementById('q-root');
+    const token = root.getAttribute('data-q-token') || '';
+    const nextNode = (n) => \{
+      if (n.firstChild) return n.firstChild;
+      while (n && n !== root) \{
+        if (n.nextSibling) return n.nextSibling;
+        n = n.parentNode;
+      }
+      return null;
+    };
+    const scan = (a, b, visit) => \{
+      let n = a ? nextNode(a) : root.firstChild;
+      while (n && n !== b) \{
+        if (visit(n)) return;
+        n = nextNode(n);
+      }
+    };
+    const mopen = (n) => \{
+      if (n.nodeType !== 8) return null;
+      if (n.data.startsWith('q:')) return \{ slot: parseInt(n.data.slice(2)) };
+      if (n.data === 'r') return \{ row: true };
+      if (n.data.startsWith('v:')) return \{ bnd: n.data.slice(2) };
+      return null;
+    };
+    const mclose = (n) =>
+      n.nodeType === 8 &&
+      (n.data.startsWith('/q:') || n.data === '/r' || n.data.startsWith('/v:'));
+    // A view's boundary range: the root view ("0") is the whole region; a child's is
+    // its v: marker pair (ids are unique, so no depth counting is needed).
+    const boundary = (vid) => \{
+      if (vid === '0') return \{ open: null, close: null };
+      let open = null, close = null;
+      scan(null, null, (n) => \{
+        if (n.nodeType !== 8) return false;
+        if (n.data === 'v:' + vid) open = n;
+        else if (n.data === '/v:' + vid) \{ close = n; return true; }
+        return false;
+      });
+      return open && close ? \{ open: open, close: close } : null;
+    };
+    const resolve = (path, from) => \{
+      let open = from.open, close = from.close;
+      for (const idx of path) \{
+        // A segment indexes whatever the range holds: numbered slot markers (q:idx) or
+        // anonymous row markers (the idx-th r) — the two never mix at one level.
+        let found = null, depth = 0, rows = 0;
+        scan(open, close, (n) => \{
+          const o = mopen(n);
+          if (o) \{
+            if (depth === 0) \{
+              if (o.row) \{
+                if (rows === idx) \{ found = n; return true; }
+                rows++;
+              } else if (o.slot === idx) \{ found = n; return true; }
+            }
+            depth++;
+          } else if (mclose(n)) depth--;
+          return false;
+        });
+        if (!found) return null;
+        let end = null, d = 0;
+        scan(found, close, (n) => \{
+          if (mopen(n)) d++;
+          else if (mclose(n)) \{
+            if (d === 0) \{ end = n; return true; }
+            d--;
           }
-          depth++;
-        } else if (mclose(n)) depth--;
-        return false;
-      });
-      if (!found) return null;
-      let end = null, d = 0;
-      scan(found, close, (n) => \{
-        if (mopen(n)) d++;
-        else if (mclose(n)) \{
-          if (d === 0) \{ end = n; return true; }
-          d--;
+          return false;
+        });
+        if (!end) return null;
+        open = found;
+        close = end;
+      }
+      return \{ open: open, close: close };
+    };
+    const setNodes = (r, frag) => \{
+      if (!r.open) \{ root.replaceChildren(frag); return; }
+      while (r.open.nextSibling && r.open.nextSibling !== r.close) r.open.nextSibling.remove();
+      r.close.parentNode.insertBefore(frag, r.close);
+    };
+    // Patch markup is parsed **in the context of the element it lands in**, so a fragment
+    // going into an <svg> is parsed as SVG. A detached <template> would parse everything as
+    // HTML, which puts a patched-in <circle> in the wrong namespace — present in the DOM,
+    // and invisible.
+    const parseHtml = (h, ctx) => \{
+      const range = document.createRange();
+      range.selectNodeContents(ctx && ctx.nodeType === 1 ? ctx : root);
+      return range.createContextualFragment(h);
+    };
+    const apply = (b, p) => \{
+      if (p[0] === 'a') \{
+        const r = resolve(p[1].slice(0, -1), b);
+        if (!r) return;
+        const elem = String(p[2]), name = p[3], v = p[4];
+        let target = null, depth = 0;
+        scan(r.open, r.close, (n) => \{
+          if (mopen(n)) depth++;
+          else if (mclose(n)) depth--;
+          else if (n.nodeType === 1 && depth === 0 && n.getAttribute('data-q') === elem) \{
+            target = n;
+            return true;
+          }
+          return false;
+        });
+        if (!target) return;
+        if (v === null) target.removeAttribute(name);
+        else if (v === true) target.setAttribute(name, '');
+        else target.setAttribute(name, v);
+        if (name === 'value' && 'value' in target) target.value = v === null ? '' : v;
+        if (name === 'checked' && 'checked' in target) target.checked = v !== null;
+      } else if (p[0] === 'r-') \{
+        const r = resolve(p[1].concat([p[2]]), b);
+        if (!r || !r.open) return;
+        while (r.open.nextSibling && r.open.nextSibling !== r.close) r.open.nextSibling.remove();
+        r.close.remove();
+        r.open.remove();
+      } else if (p[0] === 'r>') \{
+        const src = resolve(p[1].concat([p[2]]), b);
+        if (!src || !src.open) return;
+        const frag = document.createDocumentFragment();
+        const stop = src.close.nextSibling;
+        let n = src.open;
+        while (n && n !== stop) \{
+          const nx = n.nextSibling;
+          frag.appendChild(n);
+          n = nx;
         }
-        return false;
-      });
-      if (!end) return null;
-      open = found;
-      close = end;
-    }
-    return \{ open: open, close: close };
-  };
-  const setNodes = (r, frag) => \{
-    if (!r.open) \{ root.replaceChildren(frag); return; }
-    while (r.open.nextSibling && r.open.nextSibling !== r.close) r.open.nextSibling.remove();
-    r.close.parentNode.insertBefore(frag, r.close);
-  };
-  // Patch markup is parsed **in the context of the element it lands in**, so a fragment
-  // going into an <svg> is parsed as SVG. A detached <template> would parse everything as
-  // HTML, which puts a patched-in <circle> in the wrong namespace — present in the DOM,
-  // and invisible.
-  const parseHtml = (h, ctx) => \{
-    const range = document.createRange();
-    range.selectNodeContents(ctx && ctx.nodeType === 1 ? ctx : root);
-    return range.createContextualFragment(h);
-  };
-  const apply = (b, p) => \{
-    if (p[0] === 'a') \{
-      const r = resolve(p[1].slice(0, -1), b);
-      if (!r) return;
-      const elem = String(p[2]), name = p[3], v = p[4];
-      let target = null, depth = 0;
-      scan(r.open, r.close, (n) => \{
-        if (mopen(n)) depth++;
-        else if (mclose(n)) depth--;
-        else if (n.nodeType === 1 && depth === 0 && n.getAttribute('data-q') === elem) \{
-          target = n;
+        const dst = resolve(p[1].concat([p[3]]), b);
+        if (dst && dst.open) dst.open.parentNode.insertBefore(frag, dst.open);
+        else \{
+          const r = resolve(p[1], b);
+          if (r && r.close) r.close.parentNode.insertBefore(frag, r.close);
+          else root.appendChild(frag);
+        }
+      } else if (p[0] === 'r+') \{
+        const r = resolve(p[1], b);
+        if (!r) return;
+        let before = null, depth = 0, rows = 0;
+        scan(r.open, r.close, (n) => \{
+          const o = mopen(n);
+          if (o) \{
+            if (depth === 0 && o.row) \{
+              if (rows === p[2]) \{ before = n; return true; }
+              rows++;
+            }
+            depth++;
+          } else if (mclose(n)) depth--;
+          return false;
+        });
+        const frag = parseHtml(p[3], (before || r.close || root).parentNode);
+        if (before) before.parentNode.insertBefore(frag, before);
+        else if (r.close) r.close.parentNode.insertBefore(frag, r.close);
+        else root.appendChild(frag);
+      } else \{
+        const r = resolve(p[1], b);
+        if (!r) return;
+        const ctx = r.close ? r.close.parentNode : root;
+        setNodes(r, p[0] === 't' ? document.createTextNode(p[2]) : parseHtml(p[2], ctx));
+      }
+    };
+    let ws = null, delay = 500;
+    const connect = () => \{
+      const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+      ws = new WebSocket(proto + location.host + location.pathname + location.search);
+      ws.onopen = () => \{
+        delay = 500;
+        ws.send(token);
+      };
+      ws.onmessage = (e) => \{
+        const m = JSON.parse(e.data);
+        // A `[2, path]` frame is a server-initiated URL change: sync the address bar to
+        // match the view the server already patched, without a full navigation.
+        if (m[0] === 2) \{ history.pushState(\{}, '', new URL(m[1], location.href).href); return; }
+        if (m[0] !== 1) \{ location.reload(); return; }
+        // m[1] is the frame's view id; a vid whose markers are gone (a just-removed
+        // child) drops the whole frame.
+        const b = boundary(m[1]);
+        if (b) for (const p of m[2]) apply(b, p);
+      };
+      ws.onclose = () => \{
+        setTimeout(connect, delay);
+        delay = Math.min(delay * 2, 15000);
+      };
+    };
+    connect();
+    // On navigation the browser may keep this document alive (back/forward cache) —
+    // WITH its socket, leaving a zombie connection attached server-side. Close it on
+    // pagehide (which also makes the page bfcache-eligible), without triggering the
+    // reconnect; a restore from the cache reconnects, and the server treats the join
+    // as any other (a fresh mount — a clean close ends the server-side app).
+    addEventListener('pagehide', () => \{
+      if (ws) \{
+        ws.onclose = null;
+        ws.close();
+      }
+    });
+    addEventListener('pageshow', (e) => \{
+      if (e.persisted) connect();
+    });
+    // The live element for an event, or null.
+    const live = (e, attr) => \{
+      const el = e.target.closest && e.target.closest('[' + attr + ']');
+      if (!el || !root.contains(el)) return null;
+      return ws && ws.readyState === 1 ? el : null;
+    };
+    // The event's view: the nearest enclosing v: boundary, or the root ("0").
+    const vidOf = (el) => \{
+      let stack = [], found = '0';
+      scan(null, null, (n) => \{
+        if (n.nodeType === 8) \{
+          if (n.data.startsWith('v:')) stack.push(n.data.slice(2));
+          else if (n.data.startsWith('/v:')) stack.pop();
+        }
+        if (n === el) \{
+          if (stack.length) found = stack[stack.length - 1];
           return true;
         }
         return false;
       });
-      if (!target) return;
-      if (v === null) target.removeAttribute(name);
-      else if (v === true) target.setAttribute(name, '');
-      else target.setAttribute(name, v);
-      if (name === 'value' && 'value' in target) target.value = v === null ? '' : v;
-      if (name === 'checked' && 'checked' in target) target.checked = v !== null;
-    } else if (p[0] === 'r-') \{
-      const r = resolve(p[1].concat([p[2]]), b);
-      if (!r || !r.open) return;
-      while (r.open.nextSibling && r.open.nextSibling !== r.close) r.open.nextSibling.remove();
-      r.close.remove();
-      r.open.remove();
-    } else if (p[0] === 'r>') \{
-      const src = resolve(p[1].concat([p[2]]), b);
-      if (!src || !src.open) return;
-      const frag = document.createDocumentFragment();
-      const stop = src.close.nextSibling;
-      let n = src.open;
-      while (n && n !== stop) \{
-        const nx = n.nextSibling;
-        frag.appendChild(n);
-        n = nx;
-      }
-      const dst = resolve(p[1].concat([p[3]]), b);
-      if (dst && dst.open) dst.open.parentNode.insertBefore(frag, dst.open);
-      else \{
-        const r = resolve(p[1], b);
-        if (r && r.close) r.close.parentNode.insertBefore(frag, r.close);
-        else root.appendChild(frag);
-      }
-    } else if (p[0] === 'r+') \{
-      const r = resolve(p[1], b);
-      if (!r) return;
-      let before = null, depth = 0, rows = 0;
-      scan(r.open, r.close, (n) => \{
-        const o = mopen(n);
-        if (o) \{
-          if (depth === 0 && o.row) \{
-            if (rows === p[2]) \{ before = n; return true; }
-            rows++;
-          }
-          depth++;
-        } else if (mclose(n)) depth--;
-        return false;
+      return found;
+    };
+    // One event envelope: the view id, the payload (the attribute text echoed verbatim —
+    // %data notation, not JSON, so it rides as a JSON string), and this event's metadata,
+    // a tagged array the server reads as its `'event` union. The payload is what the
+    // server rendered; the metadata is everything only the browser knows. Built at event
+    // time, so a rate-limited send still carries what the DOM held when it fired.
+    const envelope = (el, attr, meta) =>
+      '[' + JSON.stringify(vidOf(el)) + ',' + JSON.stringify(el.getAttribute(attr)) + ',' + JSON.stringify(meta) + ']';
+    const mods = (e) => [!!e.altKey, !!e.ctrlKey, !!e.shiftKey, !!e.metaKey];
+    // A mouse event's position in the BOUND element's box, not the viewport: a surface
+    // reads coordinates in its own space wherever it sits on the page.
+    const pointer = (e, el) => \{
+      const r = el.getBoundingClientRect();
+      return [Math.round(e.clientX - r.left), Math.round(e.clientY - r.top), e.button | 0, mods(e)];
+    };
+    // Read from the control that actually changed, not the bound element — a binding on a
+    // <form> reports the field the user touched.
+    const fieldOf = (t) => [
+      String(t.value == null ? '' : t.value),
+      !!(t.type === 'checkbox' || t.type === 'radio') && !!t.checked,
+    ];
+    const formPairs = (el) => \{
+      const pairs = [];
+      new FormData(el).forEach((v, k) => \{
+        if (typeof v === 'string') pairs.push([k, v]);
       });
-      const frag = parseHtml(p[3], (before || r.close || root).parentNode);
-      if (before) before.parentNode.insertBefore(frag, before);
-      else if (r.close) r.close.parentNode.insertBefore(frag, r.close);
-      else root.appendChild(frag);
-    } else \{
-      const r = resolve(p[1], b);
-      if (!r) return;
-      const ctx = r.close ? r.close.parentNode : root;
-      setNodes(r, p[0] === 't' ? document.createTextNode(p[2]) : parseHtml(p[2], ctx));
-    }
-  };
-  let ws = null, delay = 500;
-  const connect = () => \{
-    const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    ws = new WebSocket(proto + location.host + location.pathname + location.search);
-    ws.onopen = () => \{
-      delay = 500;
-      ws.send(token);
+      return pairs;
     };
-    ws.onmessage = (e) => \{
-      const m = JSON.parse(e.data);
-      // A `[2, path]` frame is a server-initiated URL change: sync the address bar to
-      // match the view the server already patched, without a full navigation.
-      if (m[0] === 2) \{ history.pushState(\{}, '', new URL(m[1], location.href).href); return; }
-      if (m[0] !== 1) \{ location.reload(); return; }
-      // m[1] is the frame's view id; a vid whose markers are gone (a just-removed
-      // child) drops the whole frame.
-      const b = boundary(m[1]);
-      if (b) for (const p of m[2]) apply(b, p);
-    };
-    ws.onclose = () => \{
-      setTimeout(connect, delay);
-      delay = Math.min(delay * 2, 15000);
-    };
-  };
-  connect();
-  // On navigation the browser may keep this document alive (back/forward cache) —
-  // WITH its socket, leaving a zombie connection attached server-side. Close it on
-  // pagehide (which also makes the page bfcache-eligible), without triggering the
-  // reconnect; a restore from the cache reconnects, and the server treats the join
-  // as any other (a fresh mount — a clean close ends the server-side app).
-  addEventListener('pagehide', () => \{
-    if (ws) \{
-      ws.onclose = null;
-      ws.close();
-    }
-  });
-  addEventListener('pageshow', (e) => \{
-    if (e.persisted) connect();
-  });
-  // The live element for an event, or null.
-  const live = (e, attr) => \{
-    const el = e.target.closest && e.target.closest('[' + attr + ']');
-    if (!el || !root.contains(el)) return null;
-    return ws && ws.readyState === 1 ? el : null;
-  };
-  // The event's view: the nearest enclosing v: boundary, or the root (\"0\").
-  const vidOf = (el) => \{
-    let stack = [], found = '0';
-    scan(null, null, (n) => \{
-      if (n.nodeType === 8) \{
-        if (n.data.startsWith('v:')) stack.push(n.data.slice(2));
-        else if (n.data.startsWith('/v:')) stack.pop();
+    // The event table: DOM event name, whether to suppress the browser's default, and this
+    // event's metadata. `cancel` is the policy question each entry answers — a navigation
+    // or form submission is ours to take over, while typing, selecting and key presses are
+    // the user's own and must go through untouched.
+    const EVENTS = [
+      ['click', true, (e, el) => ['click'].concat(pointer(e, el))],
+      ['mousedown', false, (e, el) => ['mousedown'].concat(pointer(e, el))],
+      ['mouseup', false, (e, el) => ['mouseup'].concat(pointer(e, el))],
+      ['mousemove', false, (e, el) => ['mousemove'].concat(pointer(e, el))],
+      ['submit', true, (e, el) => ['submit', formPairs(el)]],
+      ['input', false, (e, el) => ['input'].concat(fieldOf(e.target))],
+      ['change', false, (e, el) => ['change'].concat(fieldOf(e.target))],
+      ['keydown', false, (e, el) => ['keydown', String(e.key == null ? '' : e.key), mods(e)]],
+    ];
+    // Per-element, per-event rate-limit state. Keyed weakly: a patch that replaces the
+    // element drops its pending timer with it, which is what we want — a debounce for a
+    // node that no longer exists has nothing to report.
+    const limits = new WeakMap();
+    const limitState = (el, name) => \{
+      let m = limits.get(el);
+      if (!m) \{
+        m = \{};
+        limits.set(el, m);
       }
-      if (n === el) \{
-        if (stack.length) found = stack[stack.length - 1];
-        return true;
+      if (!m[name]) m[name] = \{ timer: 0, last: 0 };
+      return m[name];
+    };
+    // A binding's options, from the `data-q-NAME-opts` its `[ … ]` bracket emitted:
+    // [debounce, throttle, keys]. A binding without a bracket carries no attribute, and
+    // takes the defaults — no rate limit, any key.
+    const NO_OPTS = [0, 0, []];
+    const optsOf = (el, name) => \{
+      const raw = el.getAttribute('data-q-' + name + '-opts');
+      return raw ? JSON.parse(raw) : NO_OPTS;
+    };
+    // Deliver, or not, per the binding's rate limits (ms). Debounce waits for the events to
+    // stop and sends the newest envelope; throttle sends the first of each window and drops
+    // the rest. Neither is visible to the server.
+    const deliver = (el, name, opts, text) => \{
+      const st = limitState(el, name);
+      if (opts[0] > 0) \{
+        clearTimeout(st.timer);
+        st.timer = setTimeout(() => ws.send(text), opts[0]);
+        return;
       }
-      return false;
+      if (opts[1] > 0) \{
+        const now = Date.now();
+        if (now - st.last < opts[1]) return;
+        st.last = now;
+      }
+      ws.send(text);
+    };
+    // A key filter drops the other keys client-side: they never reach the server at all.
+    const keyAllowed = (e, keys) =>
+      keys.length === 0 || e.key == null || keys.indexOf(e.key) >= 0;
+    EVENTS.forEach((entry) => \{
+      const name = entry[0], cancel = entry[1], meta = entry[2];
+      const attr = 'data-q-' + name;
+      document.addEventListener(name, (e) => \{
+        const el = live(e, attr);
+        if (!el) return;
+        const opts = optsOf(el, name);
+        if (!keyAllowed(e, opts[2])) return;
+        if (cancel) e.preventDefault();
+        const text = envelope(el, attr, meta(e, el));
+        deliver(el, name, opts, text);
+        if (name === 'submit') el.reset();
+      });
     });
-    return found;
-  };
-  // One event envelope: the view id, the payload (the attribute text echoed verbatim —
-  // %data notation, not JSON, so it rides as a JSON string), and this event's metadata,
-  // a tagged array the server reads as its `'event` union. The payload is what the
-  // server rendered; the metadata is everything only the browser knows. Built at event
-  // time, so a rate-limited send still carries what the DOM held when it fired.
-  const envelope = (el, attr, meta) =>
-    '[' + JSON.stringify(vidOf(el)) + ',' + JSON.stringify(el.getAttribute(attr)) + ',' + JSON.stringify(meta) + ']';
-  const mods = (e) => [!!e.altKey, !!e.ctrlKey, !!e.shiftKey, !!e.metaKey];
-  // A mouse event's position in the BOUND element's box, not the viewport: a surface
-  // reads coordinates in its own space wherever it sits on the page.
-  const pointer = (e, el) => \{
-    const r = el.getBoundingClientRect();
-    return [Math.round(e.clientX - r.left), Math.round(e.clientY - r.top), e.button | 0, mods(e)];
-  };
-  // Read from the control that actually changed, not the bound element — a binding on a
-  // <form> reports the field the user touched.
-  const fieldOf = (t) => [
-    String(t.value == null ? '' : t.value),
-    !!(t.type === 'checkbox' || t.type === 'radio') && !!t.checked,
-  ];
-  const formPairs = (el) => \{
-    const pairs = [];
-    new FormData(el).forEach((v, k) => \{
-      if (typeof v === 'string') pairs.push([k, v]);
+    // Live navigation: a plain left-click on a `data-q-nav` link is sent as a nav
+    // message and the URL is updated in place, instead of a full page load. Modified
+    // clicks, cross-origin links, and (as a fallback) a closed socket keep the
+    // browser's default navigation, so a live link degrades to an ordinary one.
+    const navTo = (href, push) => \{
+      const url = new URL(href, location.href);
+      if (url.origin !== location.origin || !(ws && ws.readyState === 1)) return false;
+      if (push) history.pushState(\{}, '', url.href);
+      ws.send('["nav",' + JSON.stringify(url.pathname + url.search) + ']');
+      return true;
+    };
+    document.addEventListener('click', (e) => \{
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const a = e.target.closest && e.target.closest('a[data-q-nav]');
+      if (!a || !root.contains(a) || a.target || a.hasAttribute('download')) return;
+      const href = a.getAttribute('href');
+      if (href && navTo(href, true)) e.preventDefault();
     });
-    return pairs;
-  };
-  // The event table: DOM event name, whether to suppress the browser's default, and this
-  // event's metadata. `cancel` is the policy question each entry answers — a navigation
-  // or form submission is ours to take over, while typing, selecting and key presses are
-  // the user's own and must go through untouched.
-  const EVENTS = [
-    ['click', true, (e, el) => ['click'].concat(pointer(e, el))],
-    ['mousedown', false, (e, el) => ['mousedown'].concat(pointer(e, el))],
-    ['mouseup', false, (e, el) => ['mouseup'].concat(pointer(e, el))],
-    ['mousemove', false, (e, el) => ['mousemove'].concat(pointer(e, el))],
-    ['submit', true, (e, el) => ['submit', formPairs(el)]],
-    ['input', false, (e, el) => ['input'].concat(fieldOf(e.target))],
-    ['change', false, (e, el) => ['change'].concat(fieldOf(e.target))],
-    ['keydown', false, (e, el) => ['keydown', String(e.key == null ? '' : e.key), mods(e)]],
-  ];
-  // Per-element, per-event rate-limit state. Keyed weakly: a patch that replaces the
-  // element drops its pending timer with it, which is what we want — a debounce for a
-  // node that no longer exists has nothing to report.
-  const limits = new WeakMap();
-  const limitState = (el, name) => \{
-    let m = limits.get(el);
-    if (!m) \{
-      m = \{};
-      limits.set(el, m);
-    }
-    if (!m[name]) m[name] = \{ timer: 0, last: 0 };
-    return m[name];
-  };
-  // A binding's options, from the `data-q-NAME-opts` its `[ … ]` bracket emitted:
-  // [debounce, throttle, keys]. A binding without a bracket carries no attribute, and
-  // takes the defaults — no rate limit, any key.
-  const NO_OPTS = [0, 0, []];
-  const optsOf = (el, name) => \{
-    const raw = el.getAttribute('data-q-' + name + '-opts');
-    return raw ? JSON.parse(raw) : NO_OPTS;
-  };
-  // Deliver, or not, per the binding's rate limits (ms). Debounce waits for the events to
-  // stop and sends the newest envelope; throttle sends the first of each window and drops
-  // the rest. Neither is visible to the server.
-  const deliver = (el, name, opts, text) => \{
-    const st = limitState(el, name);
-    if (opts[0] > 0) \{
-      clearTimeout(st.timer);
-      st.timer = setTimeout(() => ws.send(text), opts[0]);
-      return;
-    }
-    if (opts[1] > 0) \{
-      const now = Date.now();
-      if (now - st.last < opts[1]) return;
-      st.last = now;
-    }
-    ws.send(text);
-  };
-  // A key filter drops the other keys client-side: they never reach the server at all.
-  const keyAllowed = (e, keys) =>
-    keys.length === 0 || e.key == null || keys.indexOf(e.key) >= 0;
-  EVENTS.forEach((entry) => \{
-    const name = entry[0], cancel = entry[1], meta = entry[2];
-    const attr = 'data-q-' + name;
-    document.addEventListener(name, (e) => \{
-      const el = live(e, attr);
-      if (!el) return;
-      const opts = optsOf(el, name);
-      if (!keyAllowed(e, opts[2])) return;
-      if (cancel) e.preventDefault();
-      const text = envelope(el, attr, meta(e, el));
-      deliver(el, name, opts, text);
-      if (name === 'submit') el.reset();
+    // Back/forward: replay the URL the browser restored to the server (no pushState —
+    // the history entry already exists). Unlike a link click there is no default
+    // navigation to fall through to — the browser has already moved the URL — so a
+    // dead socket reloads, keeping the page and the address bar in step.
+    addEventListener('popstate', () => \{
+      if (!navTo(location.pathname + location.search, false)) location.reload();
     });
-  });
-  // Live navigation: a plain left-click on a `data-q-nav` link is sent as a nav
-  // message and the URL is updated in place, instead of a full page load. Modified
-  // clicks, cross-origin links, and (as a fallback) a closed socket keep the
-  // browser's default navigation, so a live link degrades to an ordinary one.
-  const navTo = (href, push) => \{
-    const url = new URL(href, location.href);
-    if (url.origin !== location.origin || !(ws && ws.readyState === 1)) return false;
-    if (push) history.pushState(\{}, '', url.href);
-    ws.send('[\"nav\",' + JSON.stringify(url.pathname + url.search) + ']');
-    return true;
-  };
-  document.addEventListener('click', (e) => \{
-    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-    const a = e.target.closest && e.target.closest('a[data-q-nav]');
-    if (!a || !root.contains(a) || a.target || a.hasAttribute('download')) return;
-    const href = a.getAttribute('href');
-    if (href && navTo(href, true)) e.preventDefault();
-  });
-  // Back/forward: replay the URL the browser restored to the server (no pushState —
-  // the history entry already exists). Unlike a link click there is no default
-  // navigation to fall through to — the browser has already moved the URL — so a
-  // dead socket reloads, keeping the page and the address bar in step.
-  addEventListener('popstate', () => \{
-    if (!navTo(location.pathname + location.search, false)) location.reload();
-  });
-})();
-</script>
-"""
+  })();
+  </script>
+  """
 
 // The dead render's page shell: the instrumented region in a container the client owns,
 // plus the client script. Whole-page concerns (title, head) are the caller's, later.
@@ -2178,7 +2257,15 @@ page_shell = #[(region): '%str, (token): '%str] {
 }
 
 handle = #[(req): '%http, (app): 'app] {
-  :doc "The app's HTTP handler body. A plain GET spawns a detached app process whose root view mounts once; the view answers the region HTML and the app parks behind the page's claim token. A websocket-upgrade request reads the token from the client's first frame and hands the claimed app the socket (an unknown token falls back to a cold fresh mount). Wire it as `#'%http \{ %html/live.handle [$, app] }` with an `%html/live.app [root: comp]` created once at startup."
+  :doc """
+    The app's HTTP handler body. A plain GET spawns a detached app process whose root view mounts
+    once; the view answers the region HTML and the app parks behind the page's claim token. A
+    websocket-upgrade request reads the token from the client's first frame and hands the claimed
+    app the socket (an unknown token falls back to a cold fresh mount).
+
+    Wire it as `#'%http \{ %html/live.handle [$, app] }` with an `%html/live.app [root: comp]`
+    created once at startup.
+    """
   // The upgrade handler closes over `req` (an inner `$` would be its own
   // parameter), so bind the field locally.
   req = $req

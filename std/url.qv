@@ -111,7 +111,10 @@ directory = #'%str {
 
 [
   parse: parse ~> {
-    :doc "Parses an absolute URL, or nil when it is malformed. The port is filled from the scheme when absent; query and fragment are empty when absent."
+    :doc """
+      Parses an absolute URL, or nil when it is malformed. The port is filled from the scheme when
+      absent; query and fragment are empty when absent.
+      """
   },
 
   format: #' {
@@ -123,16 +126,27 @@ directory = #'%str {
   },
 
   authority: authority ~> {
-    :doc "The `host` or `host:port` of a URL — what a Host header carries. The port is omitted when it is the scheme's default."
+    :doc """
+      The `host` or `host:port` of a URL — what a Host header carries. The port is omitted when it
+      is the scheme's default.
+      """
   },
 
   target: #' {
-    :doc "The request-target for this URL — path and query, without scheme, host or fragment. This is what goes in an HTTP request line."
+    :doc """
+      The request-target for this URL — path and query, without scheme, host or fragment. This is
+      what goes in an HTTP request line.
+      """
     =Url(path, query); { query ~> =""; path | "{path}?{query}" }
   },
 
   resolve: #[(base): ', (ref): '%str] {
-    :doc "Resolves a reference against a base URL — absolute, scheme-relative (//host/p), absolute-path (/p), fragment-only (#f) or relative (p) — as a redirect's Location is resolved. Nil when the result is not a well-formed URL."
+    :doc """
+      Resolves a reference against a base URL — absolute, scheme-relative (//host/p), absolute-path
+      (/p), fragment-only (#f) or relative (p) — as a redirect's Location is resolved.
+
+      Nil when the result is not a well-formed URL.
+      """
     {
       // An absolute reference stands alone.
       | parse $ref

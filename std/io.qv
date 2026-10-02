@@ -84,15 +84,25 @@ read_both_rest = #<'r: 'readable>[(first): 'r, (second): 'r, (a): 'bin, (b): 'bi
     :doc "Closes any resource. An upgraded socket sends its close_notify first."
   },
   read_all: #<'r: 'readable>'r {
-    :doc "Reads a readable resource to its clean end, answering every byte. A failed read answers nil carrying :error, never a truncated result."
+    :doc """
+      Reads a readable resource to its clean end, answering every byte. A failed read answers nil
+      carrying :error, never a truncated result.
+      """
     read_rest [$, <>]
   },
   read_both: #<'r: 'readable>[(first): 'r, (second): 'r] {
-    :doc "Reads two readable resources to their clean ends at once, answering [first's bytes, second's bytes]. Reading them one after the other can deadlock — a writer blocked on the full second while the first is awaited — which this cannot. A failed read of either answers nil carrying :error."
+    :doc """
+      Reads two readable resources to their clean ends at once, answering [first's bytes, second's
+      bytes]. Reading them one after the other can deadlock — a writer blocked on the full second
+      while the first is awaited — which this cannot. A failed read of either answers nil carrying
+      :error.
+      """
     read_both_rest [$first, $second, <>, <>]
   },
   describe: #' {
-    :doc "An io failure rendered for a log, e.g. \"ConnectionRefused: connection refused to 127.0.0.1:9\"."
+    :doc """
+      An io failure rendered for a log, e.g. "ConnectionRefused: connection refused to 127.0.0.1:9".
+      """
     =IoError(kind: k, message: m)
     name = k ~> {
       | =NotFound => "NotFound"

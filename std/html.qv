@@ -657,7 +657,14 @@ rewrite_list = #[(self): ^, (items): 'pnodes, (f): 'apolicy, (acc): 'pnodes] -> 
 }
 
 rewrite_attrs = #[(nodes): 'pnodes, (policy): 'apolicy] {
-  :doc "Applies an attribute policy to a parse tree: every attribute of every element becomes the attributes `policy` answers for it (none, one, or several), children included. Answers the rewritten tree, or the policy's own nil — a `%parse.fail` value, which fails the expansion at the position it names. This is how a dialect layered on %html gives attribute names meaning without %html knowing them."
+  :doc """
+    Applies an attribute policy to a parse tree: every attribute of every element becomes the
+    attributes `policy` answers for it (none, one, or several), children included. Answers the
+    rewritten tree, or the policy's own nil — a `%parse.fail` value, which fails the expansion at
+    the position it names.
+
+    This is how a dialect layered on %html gives attribute names meaning without %html knowing them.
+    """
   rewrite_list [rewrite_list, $nodes, $policy, Nil]
 }
 
@@ -672,7 +679,12 @@ plain_policy = #'pattr {
 }
 
 parse = #[(content): '%str, (term): '%meta.cb] {
-  :doc "Parses HTML dialect content into its node tree, with the host `term` callback locating `\{ … }` holes and `[ … ]` modifier brackets. Answers the root nodes (whitespace-only text trimmed at the edges), or nil with a positioned `:error` payload — the dialect failure contract, so a dialect can return it as-is."
+  :doc """
+    Parses HTML dialect content into its node tree, with the host `term` callback locating `\{ … }`
+    holes and `[ … ]` modifier brackets. Answers the root nodes (whitespace-only text trimmed at the
+    edges), or nil with a positioned `:error` payload — the dialect failure contract, so a dialect
+    can return it as-is.
+    """
   cb = $term
   full = #'%parse {
     nodes_loop [nodes_loop, cb, $, Nil] ~> =[items, st]
@@ -685,7 +697,11 @@ parse = #[(content): '%str, (term): '%meta.cb] {
 }
 
 expand = #'pnodes {
-  :doc "Emits a parse tree as the expression a dialect returns: the node-tree construction, with the template provenance (instrumented statics and hole values) attached. Emitted calls name %html explicitly, so the expression stays valid returned from another module's dialect."
+  :doc """
+    Emits a parse tree as the expression a dialect returns: the node-tree construction, with the
+    template provenance (instrumented statics and hole values) attached. Emitted calls name %html
+    explicitly, so the expression stays valid returned from another module's dialect.
+    """
   roots = $
   ist = instrument_list [instrument_list, roots, [cur: <>, runs: Nil, holes: Nil, ci: 0, ei: 0]]
   Call[
@@ -778,7 +794,11 @@ render_list = #[(self): ^, (items): 'nodes<'%data>, (acc): 'bin] -> 'bin {
 }
 
 render = #'<'%data> {
-  :doc "Renders a node tree to its HTML string: Text nodes and attribute values are escaped, Raw nodes are emitted verbatim, nil-valued attributes are omitted, Ok-valued attributes render bare, and event values render as their %data notation."
+  :doc """
+    Renders a node tree to its HTML string: Text nodes and attribute values are escaped, Raw nodes
+    are emitted verbatim, nil-valued attributes are omitted, Ok-valued attributes render bare, and
+    event values render as their %data notation.
+    """
   render_list [render_list, Cons[$, Nil], <>] ~> Str[~]
 }
 

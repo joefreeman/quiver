@@ -151,24 +151,43 @@ walk_step = #'walk {
   // Entries come in the order the filesystem returns them (unsorted, excluding `.` and `..`).
   // The underlying directory handle is closed automatically once the iterator is exhausted.
   list: #[(path): '%path] {
-    :doc "Lazily iterates the entries of a directory, yielding an Entry (name, path and kind) each. A failure ends the iteration carrying its :error — collect with %list.try_collect to see it rather than a short list."
+    :doc """
+      Lazily iterates the entries of a directory, yielding an Entry (name, path and kind) each.
+
+      A failure ends the iteration carrying its :error — collect with %list.try_collect to see it
+      rather than a short list.
+      """
     state = os_path $path ~> __directory_read__ ~> { =(+Dir & dir) => [dir, $path] | =e => e }
     %iter.unfold [state, list_step]
   },
 
   walk: #[(path): '%path, follow?: (Ok | []) = []] {
-    :doc "Lazily iterates every entry under a directory, depth-first, each directory's entry coming before its contents. Symlinks are yielded but not entered unless follow? is set, when one leading back to an ancestor is still not entered. A failure anywhere ends the iteration carrying its :error — collect with %list.try_collect to see it."
+    :doc """
+      Lazily iterates every entry under a directory, depth-first, each directory's entry coming
+      before its contents. Symlinks are yielded but not entered unless follow? is set, when one
+      leading back to an ancestor is still not entered.
+
+      A failure anywhere ends the iteration carrying its :error — collect with %list.try_collect to
+      see it.
+      """
     real = $follow? ~> { =Ok => canonical $path }
     %iter.unfold [Walk[frames: Nil, enter: [path: $path, real: real], follow?: $follow?], walk_step]
   },
 
   stat: #[(path): '%path, follow?: (Ok | []) = Ok] {
-    :doc "Metadata for a path, or nil when it does not exist — or when the lookup failed, which the nil's :error payload distinguishes. A final symlink is followed unless follow? is nil, when the link itself is described."
+    :doc """
+      Metadata for a path, or nil when it does not exist — or when the lookup failed, which the
+      nil's :error payload distinguishes. A final symlink is followed unless follow? is nil, when
+      the link itself is described.
+      """
     stat ~
   },
 
   exists?: #[(path): '%path, follow?: (Ok | []) = Ok] {
-    :doc "Whether a path exists; with follow? nil, a dangling symlink counts. Nil both when it does not and when the lookup failed; probe the :error payload to tell them apart."
+    :doc """
+      Whether a path exists; with follow? nil, a dangling symlink counts. Nil both when it does not
+      and when the lookup failed; probe the :error payload to tell them apart.
+      """
     stat ~ => Ok
   },
 
@@ -188,12 +207,17 @@ walk_step = #'walk {
   },
 
   read_link: #[(path): '%path] {
-    :doc "The target a symlink points to, as it was written — possibly relative to the link's directory."
+    :doc """
+      The target a symlink points to, as it was written — possibly relative to the link's directory.
+      """
     os_path $path ~> __filesystem_read_link__ ~> from_os
   },
 
   canonical: #[(path): '%path] {
-    :doc "The absolute path the kernel resolves a path to, with every symlink followed (realpath). The path must exist."
+    :doc """
+      The absolute path the kernel resolves a path to, with every symlink followed (realpath). The
+      path must exist.
+      """
     canonical $path
   },
 
@@ -203,13 +227,19 @@ walk_step = #'walk {
   },
 
   read: #[(path): '%path] {
-    :doc "Reads a whole file's contents. For a file read piecemeal or shared between processes, see %file."
+    :doc """
+      Reads a whole file's contents. For a file read piecemeal or shared between processes, see
+      %file.
+      """
     __file_open__ [os_path $path, 0, 0] ~> =(+File & fd)
     read_rest [fd, 0, <>]
   },
 
   write: #[(path): '%path, (data): 'bin, mode: (W | A | New) = W] {
-    :doc "Writes a whole file: W replaces its contents, creating it if needed; A appends, creating it; New creates it, failing with AlreadyExists if it is there."
+    :doc """
+      Writes a whole file: W replaces its contents, creating it if needed; A appends, creating it;
+      New creates it, failing with AlreadyExists if it is there.
+      """
     // The open(2) flags, as %file.open's: O_WRONLY|O_CREAT with O_TRUNC, O_APPEND or O_EXCL.
     flags = $mode ~> { =W => 577 | =A => 1089 | =New => 193 }
     __file_open__ [os_path $path, flags, 420] ~> =(+File & fd)
@@ -217,27 +247,43 @@ walk_step = #'walk {
   },
 
   create_dir: #[(path): '%path, all?: (Ok | []) = []] {
-    :doc "Creates a directory. With all?, missing parents are created too and an existing directory is fine (mkdir -p)."
+    :doc """
+      Creates a directory. With all?, missing parents are created too and an existing directory is
+      fine (mkdir -p).
+      """
     __filesystem_create_dir__ [os_path $path, $all?]
   },
 
   remove: #[(path): '%path, recursive?: (Ok | []) = []] {
-    :doc "Removes a file, symlink or empty directory; with recursive?, a directory and everything under it. A symlink is removed, never followed. Wrap in a block (\{ %fs.remove [p] }) to ignore a missing path."
+    :doc """
+      Removes a file, symlink or empty directory; with recursive?, a directory and everything under
+      it. A symlink is removed, never followed. Wrap in a block (\{ %fs.remove [p] }) to ignore a
+      missing path.
+      """
     __filesystem_remove__ [os_path $path, $recursive?]
   },
 
   rename: #[(from): '%path, (to): '%path] {
-    :doc "Atomically renames a path, replacing a destination file. Fails with CrossesDevices across filesystems, where copy and remove is the fallback."
+    :doc """
+      Atomically renames a path, replacing a destination file. Fails with CrossesDevices across
+      filesystems, where copy and remove is the fallback.
+      """
     __filesystem_rename__ [os_path $from, os_path $to]
   },
 
   copy: #[(from): '%path, (to): '%path, replace?: (Ok | []) = []] {
-    :doc "Copies a regular file's contents and permissions. An existing destination fails with AlreadyExists unless replace? is set."
+    :doc """
+      Copies a regular file's contents and permissions. An existing destination fails with
+      AlreadyExists unless replace? is set.
+      """
     __filesystem_copy__ [os_path $from, os_path $to, $replace?]
   },
 
   symlink: #[link: '%path, target: '%path] {
-    :doc "Creates a symlink at link pointing to target. A relative target is resolved from the link's directory when followed."
+    :doc """
+      Creates a symlink at link pointing to target. A relative target is resolved from the link's
+      directory when followed.
+      """
     __filesystem_symlink__ [os_path $link, os_path $target]
   },
 
@@ -247,7 +293,10 @@ walk_step = #'walk {
   },
 
   temp: #[] {
-    :doc "Creates a fresh, empty directory under the host's temp dir, readable only by its owner, and answers its path. The caller removes it."
+    :doc """
+      Creates a fresh, empty directory under the host's temp dir, readable only by its owner, and
+      answers its path. The caller removes it.
+      """
     __filesystem_temp__ [] ~> from_os
   },
 ]

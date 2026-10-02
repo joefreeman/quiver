@@ -256,7 +256,9 @@ parse_value = #['%parse.p<'>, '%parse] {
 parse_p = %parse.rec parse_value
 
 parse = #'%str {
-  :doc "Parses a JSON string into a '%json value, or nil with a positioned :error on malformed input."
+  :doc """
+    Parses a JSON string into a '%json value, or nil with a positioned :error on malformed input.
+    """
   full = %parse.left [parse_p, %parse.ws]; %parse.run [$, full]
 }
 
@@ -429,7 +431,10 @@ get_path = #[(value): 'opt, (path): '%list<('%str | 'int)>] -> 'opt {
 }
 
 get = #[(value): 'opt, (key): 'key] -> 'opt {
-  :doc "The value at a key — an object key, a 0-based array index, or a path list of either. Nil when absent or the kind mismatches."
+  :doc """
+    The value at a key — an object key, a 0-based array index, or a path list of either. Nil when
+    absent or the kind mismatches.
+    """
   $key ~> {
     | =(('%str | 'int) & k) => get1 [$value, k]
     | =('%list<('%str | 'int)> & path) => get_path [$value, path]
@@ -483,7 +488,11 @@ set_step = #[(self): ^, (value): 'opt, (path): '%list<('%str | 'int)>, (new): ']
 }
 
 set = #[(value): 'opt, (key): 'key, (new): 'opt] -> 'opt {
-  :doc "The value with `new` at a key or path: replaced in place when present, appended when an object key is absent. Nil when a container along the path is missing, the kind mismatches, or an index is out of range."
+  :doc """
+    The value with `new` at a key or path: replaced in place when present, appended when an object
+    key is absent. Nil when a container along the path is missing, the kind mismatches, or an index
+    is out of range.
+    """
   $new ~> =(' & j)
   $key ~> {
     | =(('%str | 'int) & k) => set1 [$value, k, j]
@@ -492,7 +501,10 @@ set = #[(value): 'opt, (key): 'key, (new): 'opt] -> 'opt {
 }
 
 update = #[(value): 'opt, (key): 'key, (f): #' -> 'opt] -> 'opt {
-  :doc "The value with `f` applied to what a key or path names. Nil when the target is absent, or when `f` answers nil."
+  :doc """
+    The value with `f` applied to what a key or path names. Nil when the target is absent, or when
+    `f` answers nil.
+    """
   set [$value, $key, get [$value, $key] ~> =' ~> $f]
 }
 
@@ -540,7 +552,10 @@ delete_step = #[(self): ^, (value): 'opt, (path): '%list<('%str | 'int)>] -> 'op
 }
 
 delete = #[(value): 'opt, (key): 'key] -> 'opt {
-  :doc "The value without what a key or path names; unchanged when already absent (the empty path deletes the whole value: nil). Nil when the kind mismatches."
+  :doc """
+    The value without what a key or path names; unchanged when already absent (the empty path
+    deletes the whole value: nil). Nil when the kind mismatches.
+    """
   $key ~> {
     | =(('%str | 'int) & k) => delete1 [$value, k]
     | =('%list<('%str | 'int)> & path) => delete_step [delete_step, $value, path]
@@ -548,7 +563,10 @@ delete = #[(value): 'opt, (key): 'key] -> 'opt {
 }
 
 merge = #[(value): 'opt, (with): 'opt] -> 'opt {
-  :doc "A shallow merge of two objects: the first's pairs in their order with the second's values winning per key, then the second's remaining pairs in its order. Nil unless both are objects."
+  :doc """
+    A shallow merge of two objects: the first's pairs in their order with the second's values
+    winning per key, then the second's remaining pairs in its order. Nil unless both are objects.
+    """
   $value ~> =' ~> =Object[a]
   $with ~> =' ~> =Object[b]
   merged = %list.map [a, #{ obj_get [b, $0, []] ~> { =(' & bv) => [$0, bv] | [$0, $1] } }]
@@ -557,12 +575,18 @@ merge = #[(value): 'opt, (with): 'opt] -> 'opt {
 }
 
 to_dict = #'opt {
-  :doc "An object's pairs as a %dict (later duplicates win, matching `get`); order is not preserved. Nil for anything but an object."
+  :doc """
+    An object's pairs as a %dict (later duplicates win, matching `get`); order is not preserved. Nil
+    for anything but an object.
+    """
   =' ~> =Object[~] ~> %dict.from
 }
 
 object = #('%dict<'%str, '> | 'pairs) -> ' {
-  :doc "An Object from a %dict or a [key, value] pair list. A dict's entries arrive in its own (hash) order."
+  :doc """
+    An Object from a %dict or a [key, value] pair list. A dict's entries arrive in its own (hash)
+    order.
+    """
   | =('pairs & pairs) => Object[pairs]
   | =('%dict<'%str, '> & d) => Object[%dict.entries d]
 }
@@ -581,11 +605,21 @@ array = #'%list<'> -> ' {
 // is omitted on encode. A `'%json`-typed part passes the raw subtree through verbatim.
 
 decode = __json_decode__ ~> {
-  :doc "Decodes a '%json value (or nil, which passes through) as the explicitly-given expected type: `%json.decode<'user> doc` answers `'user | []` — nil for any mismatch. Unions decode by ordered choice, like %data.decode. The expected type must be concrete at the naming site; `parse ~> decode<'t>` covers text."
+  :doc """
+    Decodes a '%json value (or nil, which passes through) as the explicitly-given expected type:
+    `%json.decode<'user> doc` answers `'user | []` — nil for any mismatch. Unions decode by ordered
+    choice, like %data.decode.
+
+    The expected type must be concrete at the naming site; `parse ~> decode<'t>` covers text.
+    """
 }
 
 encode = __json_encode__ ~> {
-  :doc "Encodes a value of the explicitly-given type as a '%json document: `%json.encode<'user> u ~> %json.stringify` — the inverse of `decode`. Values with no JSON form (functions, processes, refs, resources, binaries, dicts, unlabelled tuples) are a runtime error."
+  :doc """
+    Encodes a value of the explicitly-given type as a '%json document:
+    `%json.encode<'user> u ~> %json.stringify` — the inverse of `decode`. Values with no JSON form
+    (functions, processes, refs, resources, binaries, dicts, unlabelled tuples) are a runtime error.
+    """
 }
 
 {

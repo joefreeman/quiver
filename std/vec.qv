@@ -42,7 +42,10 @@ norm = #'%num {
 // op here, the opening field matches double as the nil guard: a nil field fails its match,
 // which short-circuits to nil — no separate nil arm needed.
 push = #[(vec): 'opt, (value): ('int | [])] {
-  :doc "Appends an integer to the end of a vector, preserving its dtype and scale; nil operands propagate."
+  :doc """
+    Appends an integer to the end of a vector, preserving its dtype and scale; nil operands
+    propagate.
+    """
   $vec ~> =Vec[dtype: d, scale: s, data: data]
   $value ~> =('int & n)
 
@@ -136,7 +139,10 @@ align = #['vec, 'vec] {
   // Build from a dtype, scale, and a list of *stored* integer lanes. Each lane's logical
   // value is `stored × scale`. Nil if any value overflows the dtype.
   of: #[(dtype): 'dtype, (scale): ('%num | []), (lanes): ('%list<'int> | [])] {
-    :doc "A vector built from stored integer lanes; nil when a lane overflows the dtype, or on a nil operand."
+    :doc """
+      A vector built from stored integer lanes; nil when a lane overflows the dtype, or on a nil
+      operand.
+      """
     $scale ~> =('%num & scale)
     $lanes ~> =('%list<'int> & xs)
     of [Vec[dtype: $dtype, scale: norm scale, data: <>], xs]
@@ -168,7 +174,10 @@ align = #['vec, 'vec] {
   // denominators) that represents every value exactly. Nil on overflow (a very fine inferred
   // scale can make a lane exceed the dtype), or for an irrational value, which has no scale.
   of_values: #[(dtype): 'dtype, (values): ('%list<'%num> | [])] {
-    :doc "A vector built from values, inferring the finest exact scale; nil on overflow, or (carrying :error) for an irrational value."
+    :doc """
+      A vector built from values, inferring the finest exact scale; nil on overflow, or (carrying
+      :error) for an irrational value.
+      """
     $values ~> =('%list<'%num> & values)
     lcm_denoms [1, values] ~> =('int & cap)
     norm Rational[1, cap] ~> =s

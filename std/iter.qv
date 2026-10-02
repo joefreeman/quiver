@@ -272,7 +272,10 @@ intersperse = #<'t>[(self): ^, (it): 'thunk<'t>, (sep): 't] -> 'thunk<'t> {
   },
 
   try_fold: #<'t, 'acc>[(iter): '<'t>, (init): 'acc, (f): #['acc, 't] -> 'acc] {
-    :doc "Folds an iterator that may fail (one backed by io), answering the accumulator on exhaustion and nil — carrying the failure's :error — if the source broke part-way."
+    :doc """
+      Folds an iterator that may fail (one backed by io), answering the accumulator on exhaustion
+      and nil — carrying the failure's :error — if the source broke part-way.
+      """
     $iter ~> =Iter[~] ~> try_fold [~, $init, $f]
   },
 
@@ -302,7 +305,10 @@ intersperse = #<'t>[(self): ^, (it): 'thunk<'t>, (sep): 't] -> 'thunk<'t> {
   },
 
   nth: #<'t>[(iter): '<'t>, (n): 'int] {
-    :doc "The element at the given zero-based index, or nil when the iterator is too short or the index is negative."
+    :doc """
+      The element at the given zero-based index, or nil when the iterator is too short or the index
+      is negative.
+      """
     $iter ~> =Iter[~] ~> nth [~, $n]
   },
 

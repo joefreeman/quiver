@@ -55,7 +55,13 @@ try_each = #[(addrs): '%list<'%dns.ip>, (port): 'int, (last): []] {
 
 [
   connect: #[(to): 'address, (port): 'int] {
-    :doc "Connects to [to, port], yielding a +TcpSocket. A raw IP ('bin, 4 or 16 bytes) is connected in one step; a hostname ('%str) is resolved and each address tried until one accepts. Nil (carrying :error) on failure — for a hostname, also when resolution fails or the name has no addresses."
+    :doc """
+      Connects to [to, port], yielding a +TcpSocket. A raw IP ('bin, 4 or 16 bytes) is connected in
+      one step; a hostname ('%str) is resolved and each address tried until one accepts.
+
+      Nil (carrying :error) on failure — for a hostname, also when resolution fails or the name has
+      no addresses.
+      """
     $to ~> {
       | =('bin & ip) => __tcp_connect__ [ip, $port]
       | =('%str & host) => {

@@ -908,8 +908,8 @@ fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
     )
 }
 
-/// Render a multi-line string as a triple-quoted block. Each line is emitted as a `hardline` so the
-/// renderer indents it to the ambient column — that indentation becomes the closing delimiter's
+/// Render a multi-line string as a triple-quoted block. The content and closing delimiter are
+/// nested one level under the opening line; that indentation becomes the closing delimiter's
 /// *margin*, which the parser strips back off, so the value round-trips at any nesting depth.
 /// Interpolation holes sit inline on their line as `{…}`; a newline inside a text segment starts a
 /// new line.
@@ -946,26 +946,30 @@ fn multiline_string_doc(trivia: &Trivia, segments: &[StrSegment]) -> Doc {
         }
     }
 
-    let mut docs = vec![pretty::text("\"\"\"")];
+    let mut body = Vec::new();
     for line in lines {
-        docs.push(pretty::hardline());
-        docs.push(pretty::text(protect_trailing_spaces(line)));
+        body.push(pretty::hardline());
+        body.push(pretty::text(protect_trailing_spaces(line)));
     }
-    docs.push(pretty::hardline());
-    docs.push(pretty::text("\"\"\""));
-    pretty::concat(docs)
+    body.push(pretty::hardline());
+    body.push(pretty::text("\"\"\""));
+    pretty::concat(vec![
+        pretty::text("\"\"\""),
+        pretty::nest(2, pretty::concat(body)),
+    ])
 }
 
 /// Escape one text fragment of a multi-line string (no trailing-space handling — that is applied per
 /// line). Tabs and carriage returns are escaped (a literal `\r` would be normalised to `\n`, a
-/// trailing tab would be stripped), every `"` is escaped so a run can't form a closing `"""`, and a
-/// literal `{` becomes `\{` (a bare `{` opens an interpolation hole).
+/// trailing tab would be stripped), a `"` that starts a `"""` run is escaped so it can't close the
+/// string, and a literal `{` becomes `\{` (a bare `{` opens an interpolation hole). Fragments are
+/// bounded by newlines and holes, neither of which can continue a run of quotes.
 fn escape_multiline_text(text: &str) -> String {
     let mut out = String::new();
-    for ch in text.chars() {
+    for (index, ch) in text.char_indices() {
         match ch {
             '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
+            '"' if text[index + 1..].starts_with("\"\"") => out.push_str("\\\""),
             '{' => out.push_str("\\{"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
@@ -2680,7 +2684,7 @@ mod tests {
         // A hole has no lines to give: steps written apart in one rejoin with `;`.
         assert_formats(
             "s = \"\"\"\n  pick {a = 1\n  a} done\n  \"\"\"\n",
-            "s = \"\"\"\npick {a = 1; a} done\n\"\"\"\n",
+            "s = \"\"\"\n  pick {a = 1; a} done\n  \"\"\"\n",
         );
     }
 
@@ -3095,7 +3099,7 @@ mod tests {
         // `\n`), rather than being rewritten as a `"""` block.
         assert_formats("x = \"a\\nb\"", "x = \"a\\nb\"\n");
         // A multi-line string keeps its style even when its value has no newline.
-        assert_formats("x = \"\"\"\n  hi\n  \"\"\"", "x = \"\"\"\nhi\n\"\"\"\n");
+        assert_formats("x = \"\"\"\n  hi\n  \"\"\"", "x = \"\"\"\n  hi\n  \"\"\"\n");
     }
 
     #[test]
@@ -3171,6 +3175,16 @@ mod tests {
             let printed = format_program(&ast, source);
             assert_idempotent(&printed, &printed);
         }
+    }
+
+    #[test]
+    fn multiline_string_layout() {
+        // Content and the closing delimiter nest one level under the opening line, and only a `"`
+        // that would start a `"""` run is escaped.
+        assert_formats(
+            "f = #'int {\n:doc \"\"\"\nSay \\\"hi\\\", \"\" or \\\"\\\"\"\".\n\"\"\"\n$\n}",
+            "f = #'int {\n  :doc \"\"\"\n    Say \"hi\", \"\" or \\\"\\\"\"\".\n    \"\"\"\n  $\n}\n",
+        );
     }
 
     #[test]

@@ -15,11 +15,12 @@
 // is still incomplete at that point, what makes it a truncation rather than a wait. A failed
 // read's nil matches neither event, and is the answer.
 read_loop = #[(sock): +TcpSocket, (buf): 'bin] {
-  ![$sock] ~> {
+  !$sock ~> {
     | =Data[source: _, data: chunk] => [chunk, []]
     | =Closed[source: _] => [<>, Ok]
   }
   ~> =[chunk, eof]
+
   buffer = %bin.concat [$buf, chunk]
   %http.parse_response [buffer, eof] ~> {
     | =[response, _] => response
@@ -66,6 +67,12 @@ exchange = #[(url): '%url, (request): '%http] {
 
 [
   request: exchange ~> {
-    :doc "Performs one HTTP/1.1 exchange over TCP: resolve, connect, send, read the response, close. https:// upgrades the socket via %tls, verifying against the host's default anchors. A request lacking a Host header gains the URL's authority. Nil (carrying :error) on any failure."
+    :doc """
+      Performs one HTTP/1.1 exchange over TCP: resolve, connect, send, read the response, close.
+      https:// upgrades the socket via %tls, verifying against the host's default anchors.
+
+      A request lacking a Host header gains the URL's authority. Nil (carrying :error) on any
+      failure.
+      """
   },
 ]

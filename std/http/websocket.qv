@@ -75,7 +75,10 @@ encode_frame = #[(opcode): 'int, (payload): 'bin] {
 }
 
 encode_masked_frame = #[(opcode): 'int, (payload): 'bin, (key): 'bin] {
-  :doc "One unfragmented client-to-server frame, masked with the 4-byte key — the client half of the codec."
+  :doc """
+    One unfragmented client-to-server frame, masked with the 4-byte key — the client half of the
+    codec.
+    """
   frame_head [$opcode, %bin.length $payload, 128]
   ~> %bin.concat [~, $key]
   ~> %bin.concat [~, apply_mask [$payload, $key]]
@@ -108,7 +111,10 @@ frame_tail = #[(buf): 'bin, (fin): 'int, (opcode): 'int, (plen): 'int, (moff): '
 }
 
 parse_frame = #'bin {
-  :doc "One client frame off the front of the buffer, unmasked: [frame, rest], Incomplete (read more), or Bad (a protocol violation — fail the connection)."
+  :doc """
+    One client frame off the front of the buffer, unmasked: [frame, rest], Incomplete (read more),
+    or Bad (a protocol violation — fail the connection).
+    """
   have = %bin.length $
   {
     | __integer_compare__ [have, 2] ~> =-1 => Incomplete
@@ -154,7 +160,9 @@ close_payload = #[(code): 'int, (reason): '%str] {
 }
 
 conn = #[(sock): +TcpSocket, (buf): 'bin] {
-  :doc "A connection over an upgraded socket, seeded with any bytes already read past the handshake."
+  :doc """
+    A connection over an upgraded socket, seeded with any bytes already read past the handshake.
+    """
   Conn[sock: $sock, buf: $buf, part: Nil]
 }
 
@@ -170,14 +178,17 @@ fail = #[(conn): ', (code): 'int, (reason): '%str] {
 }
 
 recv = #' {
-  :doc "The next message as [message, conn]: Text or Binary — pings answered, pongs skipped, fragments assembled — or Close (echoed, and the socket closed); stop on Close."
+  :doc """
+    The next message as [message, conn]: Text or Binary — pings answered, pongs skipped, fragments
+    assembled — or Close (echoed, and the socket closed); stop on Close.
+    """
   // =Conn[sock: sock, buf: buf, part: part]
   parse_frame $buf ~> {
     | =Incomplete => {
       // A read failure ends the connection: its nil matches no event, so it is `recv`'s
       // answer, the connection process finishes, and teardown closes the socket it still
       // owns.
-      ![$sock] ~> {
+      !$sock ~> {
         | =Data[source: _, data: chunk] => $ ~> ^ Conn[..., buf: %bin.concat [$buf, chunk]]
         | =Closed[source: _] => {
           // The peer vanished without a Close: abnormal closure (1006 is never on
@@ -287,7 +298,13 @@ drain = #[', 'messages] {
 }
 
 on_data = #[', 'bin] {
-  :doc "Select-mode: feed bytes from a `Data` event, yielding [messages, conn] — whole messages only (oldest first; pings answered, pongs skipped, fragments assembled; a Close — received or a protocol failure — is echoed, the socket dropped, and final). For a socket that is a select source, this replaces `recv`."
+  :doc """
+    Select-mode: feed bytes from a `Data` event, yielding [messages, conn] — whole messages only
+    (oldest first; pings answered, pongs skipped, fragments assembled; a Close — received or a
+    protocol failure — is echoed, the socket dropped, and final).
+
+    For a socket that is a select source, this replaces `recv`.
+    """
   =[Conn[sock: sock, buf: buf, part: part], bytes]
   drain [Conn[sock: sock, buf: %bin.concat [buf, bytes], part: part], Nil]
 }
@@ -308,7 +325,10 @@ ping = #[', 'bin] {
 }
 
 close = #[', 'int, '%str] {
-  :doc "Close the connection: send a Close frame with the code and reason, then drop the TCP socket (a server may close immediately, RFC 6455 §5.5.1)."
+  :doc """
+    Close the connection: send a Close frame with the code and reason, then drop the TCP socket (a
+    server may close immediately, RFC 6455 §5.5.1).
+    """
   =[Conn(sock: sock), code, reason]
   %io.write [sock, close_payload [code, reason] ~> encode_frame [8, ~]]
   %io.close sock

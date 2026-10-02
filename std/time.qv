@@ -219,7 +219,10 @@ day_of_year = #'civil {
 }
 
 iso_week = #'civil {
-  :doc "The ISO 8601 week-numbering year and week (1 to 53) of a date: weeks start on Monday, and week 1 is the one holding the year's first Thursday."
+  :doc """
+    The ISO 8601 week-numbering year and week (1 to 53) of a date: weeks start on Monday, and week 1
+    is the one holding the year's first Thursday.
+    """
   d = days_of $
   thursday = iadd [d, isub [4, iso_day d]]
   Date(year) = civil thursday
@@ -326,12 +329,17 @@ valid_time = #'clock {
 }
 
 date = #[(year): 'int, (month): 'int, (day): 'int] {
-  :doc "The civil date, or nil carrying :error OutOfRange[field] when the month or day doesn't exist."
+  :doc """
+    The civil date, or nil carrying :error OutOfRange[field] when the month or day doesn't exist.
+    """
   valid_date $; Date[year: $year, month: $month, day: $day]
 }
 
 time = #[(hour): 'int, (minute): 'int = 0, (second): 'int = 0, (nano): 'int = 0] {
-  :doc "The time of day, or nil carrying :error OutOfRange[field] when a field is out of range. Minutes, seconds and nanoseconds default to zero."
+  :doc """
+    The time of day, or nil carrying :error OutOfRange[field] when a field is out of range. Minutes,
+    seconds and nanoseconds default to zero.
+    """
   valid_time $; Time[hour: $hour, minute: $minute, second: $second, nano: $nano]
 }
 
@@ -344,7 +352,10 @@ datetime = #[
   (second): 'int = 0,
   (nano): 'int = 0,
 ] {
-  :doc "The civil date and time, or nil carrying :error OutOfRange[field] when a field is out of range. The time fields default to midnight."
+  :doc """
+    The civil date and time, or nil carrying :error OutOfRange[field] when a field is out of range.
+    The time fields default to midnight.
+    """
   valid_date $; valid_time $; DateTime[...$]
 }
 
@@ -367,7 +378,9 @@ to_date = #'civil {
 }
 
 to_time = #'clock {
-  :doc "The time-of-day part of a date-time (or of anything with hour, minute, second and nano fields)."
+  :doc """
+    The time-of-day part of a date-time (or of anything with hour, minute, second and nano fields).
+    """
   Time[hour: $hour, minute: $minute, second: $second, nano: $nano]
 }
 
@@ -789,7 +802,14 @@ check_types = #['bin, 'layout, 'int] {
 }
 
 from_tzif = #[(name): '%str, (data): 'bin] {
-  :doc "A zone from TZif data (RFC 8536), under the given name; nil carrying :error Expected[offset, message] when the data isn't well-formed. `zone` reads the host's database; this takes the data from anywhere. A zone holds its rules as a function, so it has no data notation: write a zoned value with `format`, and read it with `parse_zoned`."
+  :doc """
+    A zone from TZif data (RFC 8536), under the given name; nil carrying :error
+    Expected[offset, message] when the data isn't well-formed. `zone` reads the host's database;
+    this takes the data from anywhere.
+
+    A zone holds its rules as a function, so it has no data notation: write a zoned value with
+    `format`, and read it with `parse_zoned`.
+    """
   data = $data
   check_layout data
   l = layout_of data
@@ -832,7 +852,9 @@ ltt_at = #['zone, 'int] -> 'ltt {
 }
 
 zone_name = #'zone {
-  :doc "The zone's name: \"UTC\", an offset such as \"+05:30\", or an IANA name such as \"Europe/London\"."
+  :doc """
+    The zone's name: "UTC", an offset such as "+05:30", or an IANA name such as "Europe/London".
+    """
   | =Utc => "UTC"
   | =Fixed[o] => offset_text o
   | =Tz(name) => name
@@ -887,7 +909,10 @@ exact = #'candidates {
 }
 
 fixed_zone = #'duration {
-  :doc "A zone at a fixed offset from UTC, of whole seconds and less than a day either way; nil carrying :error OutOfRange[Offset] otherwise."
+  :doc """
+    A zone at a fixed offset from UTC, of whole seconds and less than a day either way; nil carrying
+    :error OutOfRange[Offset] otherwise.
+    """
   =Duration[n]
   {
     | imod [n, ns_s] ~> =0
@@ -899,14 +924,22 @@ fixed_zone = #'duration {
 }
 
 zone = #'%str {
-  :doc "The named zone from the host's time zone database (IANA names such as \"Europe/London\"), or UTC for \"UTC\"; nil carrying :error UnknownZone[name] when the host has no such zone. It reads host state, so a module can't call it at compile time."
+  :doc """
+    The named zone from the host's time zone database (IANA names such as "Europe/London"), or UTC
+    for "UTC"; nil carrying :error UnknownZone[name] when the host has no such zone.
+
+    It reads host state, so a module can't call it at compile time.
+    """
   | ="UTC" => Utc
   | __time_zone__ $0 ~> =('bin & data) => from_tzif [$, data]
   | [] ~> { :error UnknownZone[$] }
 }
 
 local_zone = #[] {
-  :doc "The host's own zone, or UTC when the host doesn't name one. Nil carrying :error UnknownZone[name] when the host names a zone its database doesn't have."
+  :doc """
+    The host's own zone, or UTC when the host doesn't name one. Nil carrying :error
+    UnknownZone[name] when the host names a zone its database doesn't have.
+    """
   | __time_zone_local__ [] ~> =('bin & name) => zone Str[name]
   | Utc
 }
@@ -917,7 +950,14 @@ local_zone = #[] {
   | ['datetime, 'zone, disambiguation: 'disambiguation]
 
 zoned = #'zoning {
-  :doc "An instant in a zone, or a civil date-time placed in one. A date-time the zone's clocks skip or repeat (at a daylight saving transition) is resolved by `disambiguation`: Earlier or Later picks one side, Compatible (the default) takes the earlier of a repeated time and moves a skipped one forward by the gap, and Reject answers nil carrying :error Skipped or Repeated."
+  :doc """
+    An instant in a zone, or a civil date-time placed in one.
+
+    A date-time the zone's clocks skip or repeat (at a daylight saving transition) is resolved by
+    `disambiguation`: Earlier or Later picks one side, Compatible (the default) takes the earlier of
+    a repeated time and moves a skipped one forward by the gap, and Reject answers nil carrying
+    :error Skipped or Repeated.
+    """
   | =[('instant & i), ('zone & z)] => Zoned[i, z]
   | =[('datetime & d), ('zone & z)] => Zoned[pick [candidates [z, epoch_nanos d], Compatible], z]
   | =[('datetime & d), ('zone & z), disambiguation: Reject] => candidates [z, epoch_nanos d]
@@ -1019,7 +1059,14 @@ fits = #['civil, 'period, 'overflow] {
   | ['zoned, 'period, overflow: 'overflow]
 
 add = #'addable {
-  :doc "Adds a span: a duration to an instant, monotonic reading, time of day (wrapping at midnight) or date-time, or to another duration; a period to a date or date-time, or to another period. A period moves the month first, clamping the day into a shorter month (Jan 31 + 1 month is Feb 28 or 29), then the days; `overflow: Reject` answers nil carrying :error OutOfRange[Day] instead of clamping."
+  :doc """
+    Adds a span: a duration to an instant, monotonic reading, time of day (wrapping at midnight) or
+    date-time, or to another duration; a period to a date or date-time, or to another period.
+
+    A period moves the month first, clamping the day into a shorter month (Jan 31 + 1 month is Feb
+    28 or 29), then the days; `overflow: Reject` answers nil carrying :error OutOfRange[Day] instead
+    of clamping.
+    """
   | =[Instant[a], Duration[b]] => Instant[iadd [a, b]]
   | =[Mono[a], Duration[b]] => Mono[iadd [a, b]]
   | =[Duration[a], Duration[b]] => Duration[iadd [a, b]]
@@ -1082,12 +1129,21 @@ diff = #(
   | ['time, 'time]
   | ['zoned, 'zoned]
 ) {
-  :doc "The exact duration from the second value to the first (first minus second): between instants, monotonic readings, zoned values, civil date-times (as if both were UTC), or times of day."
+  :doc """
+    The exact duration from the second value to the first (first minus second): between instants,
+    monotonic readings, zoned values, civil date-times (as if both were UTC), or times of day.
+    """
   Duration[isub [key $0, key $1]]
 }
 
 between = #[(from): 'civil, (to): 'civil] {
-  :doc "The calendar period from one date to another, in months and days, such that adding it to `from` gives `to` whenever `to` is later. Backwards it is the forward period negated, which adding doesn't always undo: month lengths differ, and a clamped day can't be recovered."
+  :doc """
+    The calendar period from one date to another, in months and days, such that adding it to `from`
+    gives `to` whenever `to` is later.
+
+    Backwards it is the forward period negated, which adding doesn't always undo: month lengths
+    differ, and a clamped day can't be recovered.
+    """
   total = isub [month_count $to, month_count $from]
   days = isub [$to.day, $from.day]
   {
@@ -1126,7 +1182,10 @@ since = #'mono {
   | ['zoned, 'zoned]
 
 compare = #'comparable {
-  :doc "Compares two values of the same kind: -1 if the first is earlier (or shorter), 0 if equal, 1 if later. Periods have no order (a month is not a fixed number of days)."
+  :doc """
+    Compares two values of the same kind: -1 if the first is earlier (or shorter), 0 if equal, 1 if
+    later. Periods have no order (a month is not a fixed number of days).
+    """
   icmp [key $0, key $1]
 }
 
@@ -1177,7 +1236,12 @@ truncate = #(
   | ['date, 'date_unit]
   | ['zoned, ('date_unit | 'day_unit)]
 ) {
-  :doc "The value truncated to a unit: the start of its day, hour, minute, second, millisecond or microsecond, or — for dates and date-times — of its week (Monday), month or year. Instants truncate on the UTC day; durations truncate toward zero."
+  :doc """
+    The value truncated to a unit: the start of its day, hour, minute, second, millisecond or
+    microsecond, or — for dates and date-times — of its week (Monday), month or year.
+
+    Instants truncate on the UTC day; durations truncate toward zero.
+    """
   | =[Instant[n], ('day_unit & u)] => Instant[isub [n, fmod [n, unit_nanos u]]]
   | =[Duration[n], ('clock_unit & u)] => Duration[isub [n, imod [n, unit_nanos u]]]
   | =[('time & t), ('clock_unit & u)] => nanos_of t ~> isub [~, imod [~, unit_nanos u]] ~> clock
@@ -1242,7 +1306,14 @@ walk = #<'t>[(nth): #'int -> 't, (key): #'t -> 'int, (until): (Until['int, 'int]
   | ['zoned, 'period, until: 'zoned]
 
 series = #'seriesable {
-  :doc "A lazy `%iter` of values from a start by a step — the start, then the start plus one step, two steps, and so on — forever, or up to (not including) the first value at or past `until`, in the direction the step goes (for a period, by its average length). Each value is computed from the start, so a month step from Jan 31 gives Feb 29, then Mar 31. A start already at or past `until` gives nothing; a zero step repeats the start."
+  :doc """
+    A lazy `%iter` of values from a start by a step — the start, then the start plus one step, two
+    steps, and so on — forever, or up to (not including) the first value at or past `until`, in the
+    direction the step goes (for a period, by its average length).
+
+    Each value is computed from the start, so a month step from Jan 31 gives Feb 29, then Mar 31. A
+    start already at or past `until` gives nothing; a zero step repeats the start.
+    """
   | =[('instant & a), ('duration & s)] => walk [
       #'int { add [a, mul [s, $]] },
       #'instant { key $ },
@@ -1356,7 +1427,15 @@ round_zoned = #['zoned, 'int, 'rounding] {
 }
 
 round = #'roundable {
-  :doc "The value rounded to a multiple of a positive increment — a unit's length such as `%time.hours 1`, or any duration such as `%time\{ 15m }` — to the nearest by default (halves away from zero), or with `mode:` Floor, Ceil or Trunc (toward zero). Instants round on the UTC timeline; times, date-times and zoned values on their own clocks, with a grid that starts each midnight when the increment divides a day. A time wraps at midnight, and a zoned value in a repeated hour keeps its offset."
+  :doc """
+    The value rounded to a multiple of a positive increment — a unit's length such as
+    `%time.hours 1`, or any duration such as `%time\{ 15m }` — to the nearest by default (halves
+    away from zero), or with `mode:` Floor, Ceil or Trunc (toward zero).
+
+    Instants round on the UTC timeline; times, date-times and zoned values on their own clocks, with
+    a grid that starts each midnight when the increment divides a day. A time wraps at midnight, and
+    a zoned value in a repeated hour keeps its offset.
+    """
   | =[Instant[n], ('duration & i)] => Instant[round_to [n, increment i, HalfExpand]]
   | =[Instant[n], ('duration & i), mode: m] => Instant[round_to [n, increment i, m]]
   | =[Duration[n], ('duration & i)] => Duration[round_to [n, increment i, HalfExpand]]
@@ -1690,7 +1769,20 @@ format = #(
   | 'zoned
   | [('instant | 'date | 'time | 'datetime | 'zoned), pattern: '%str]
 ) {
-  :doc "The value as text, in the form `parse` (`parse_zoned`, for a zoned value) and `%time\{ … }` read back: ISO 8601 for instants (RFC 3339, in UTC: \"2024-03-10T09:30:00Z\"), dates (\"2024-03-10\"), times (\"09:30:00.5\" gives \"09:30:00.500\") and date-times (\"2024-03-10T09:30:00\"); unit notation for durations (\"1h30m\", \"-250ms\") and periods (\"1y2mo\", \"3d\", \"1mo-3d\"); RFC 9557 for zoned values (\"2024-03-10T09:30:00+00:00[Europe/London]\"). Fractional seconds print as three, six or nine digits, the fewest that are exact. With a `pattern:`, writes the value as the pattern's `%` directives say — dates: %Y %y %m %d %e %j %a %A %b %B %u %w %V %G %F %D; times: %H %k %I %l %p %M %S %f %.f %3f %6f %9f %T %R; instants and zoned values: %z %:z %Z %Q %s; and %% %n %t. A flag after the `%` sets the padding: `-` none, `_` spaces, `0` zeros. A directive the value doesn't have answers nil carrying :error InvalidPattern[offset, message]."
+  :doc """
+    The value as text, in the form `parse` (`parse_zoned`, for a zoned value) and `%time\{ … }` read
+    back: ISO 8601 for instants (RFC 3339, in UTC: "2024-03-10T09:30:00Z"), dates ("2024-03-10"),
+    times ("09:30:00.5" gives "09:30:00.500") and date-times ("2024-03-10T09:30:00"); unit notation
+    for durations ("1h30m", "-250ms") and periods ("1y2mo", "3d", "1mo-3d"); RFC 9557 for zoned
+    values ("2024-03-10T09:30:00+00:00[Europe/London]"). Fractional seconds print as three, six or
+    nine digits, the fewest that are exact.
+
+    With a `pattern:`, writes the value as the pattern's `%` directives say — dates: %Y %y %m %d %e
+    %j %a %A %b %B %u %w %V %G %F %D; times: %H %k %I %l %p %M %S %f %.f %3f %6f %9f %T %R; instants
+    and zoned values: %z %:z %Z %Q %s; and %% %n %t. A flag after the `%` sets the padding: `-`
+    none, `_` spaces, `0` zeros. A directive the value doesn't have answers nil carrying :error
+    InvalidPattern[offset, message].
+    """
   | =Instant[n] => civil_of_nanos n ~> "{date_text ~}T{clock_text ~}Z"
   | =('datetime & t) => "{date_text t}T{clock_text t}"
   | =('date & d) => date_text d
@@ -1706,7 +1798,10 @@ format = #(
 }
 
 http_date = #'instant {
-  :doc "The instant as an HTTP date (IMF-fixdate, RFC 9110), to the second: \"Sun, 06 Nov 1994 08:49:37 GMT\"."
+  :doc """
+    The instant as an HTTP date (IMF-fixdate, RFC 9110), to the second:
+    "Sun, 06 Nov 1994 08:49:37 GMT".
+    """
   t = civil_of_nanos $0
   wd = weekday t ~> day_name
   mn = month_name t.month
@@ -2325,7 +2420,18 @@ pattern_parse = #['%str, '%str] {
 }
 
 parse = #('%str | ['%str, pattern: '%str]) {
-  :doc "Reads a value from text in the forms `format` writes: an instant (a date-time with `Z` or a `+HH:MM`/`-HH:MM` offset, converted to UTC), a date, a date-time, a time (seconds optional), a duration or a period (unit notation: ns, us, ms, s, m, h for durations; d, w, mo, y for periods). A `T`, `t` or space separates date from time. With a `pattern:`, reads the text as the pattern's directives describe (see `format`), answering an instant when the fields give an offset or `%s`, else a date-time, a date or a time. Answers nil carrying :error Expected[offset, message] for malformed text or a date or time that doesn't exist, and InvalidPattern[offset, message] for a pattern it can't read with."
+  :doc """
+    Reads a value from text in the forms `format` writes: an instant (a date-time with `Z` or a
+    `+HH:MM`/`-HH:MM` offset, converted to UTC), a date, a date-time, a time (seconds optional), a
+    duration or a period (unit notation: ns, us, ms, s, m, h for durations; d, w, mo, y for
+    periods). A `T`, `t` or space separates date from time.
+
+    With a `pattern:`, reads the text as the pattern's directives describe (see `format`), answering
+    an instant when the fields give an offset or `%s`, else a date-time, a date or a time.
+
+    Answers nil carrying :error Expected[offset, message] for malformed text or a date or time that
+    doesn't exist, and InvalidPattern[offset, message] for a pattern it can't read with.
+    """
   | =Str[data] => parse_from [data, 0]
   | =[text, pattern: pat] => pattern_parse [text, pat]
 }
@@ -2411,7 +2517,13 @@ settle = #['zoned_parts, 'zone] {
 }
 
 parse_zoned = #'%str {
-  :doc "Reads a zoned value from RFC 9557 text, as `format` writes it: a date-time, an optional offset (`Z` for an exact instant, or `+HH:MM`, which must be the zone's offset then), and a zone in brackets — \"UTC\", a fixed offset, or an IANA name, looked up with `zone`. Without an offset, a skipped or repeated time resolves as Compatible. Answers nil carrying :error Expected[offset, message] or UnknownZone[name]."
+  :doc """
+    Reads a zoned value from RFC 9557 text, as `format` writes it: a date-time, an optional offset
+    (`Z` for an exact instant, or `+HH:MM`, which must be the zone's offset then), and a zone in
+    brackets — "UTC", a fixed offset, or an IANA name, looked up with `zone`. Without an offset, a
+    skipped or repeated time resolves as Compatible. Answers nil carrying :error
+    Expected[offset, message] or UnknownZone[name].
+    """
   =Str[data]
   zoned_parts_at [data, 0] ~> =[parts, e]
   {
@@ -2528,7 +2640,13 @@ asctime_at = #'bin {
 }
 
 parse_http_date = #'%str {
-  :doc "Reads an HTTP date as an instant, in any of the three forms RFC 9110 has recipients accept: IMF-fixdate (\"Sun, 06 Nov 1994 08:49:37 GMT\"), the obsolete RFC 850 form (\"Sunday, 06-Nov-94 08:49:37 GMT\", its two-digit year read as 1970 to 2069), and asctime (\"Sun Nov  6 08:49:37 1994\"). The day of the week must be the date's. Nil carrying :error Expected[offset, message] otherwise."
+  :doc """
+    Reads an HTTP date as an instant, in any of the three forms RFC 9110 has recipients accept:
+    IMF-fixdate ("Sun, 06 Nov 1994 08:49:37 GMT"), the obsolete RFC 850 form
+    ("Sunday, 06-Nov-94 08:49:37 GMT", its two-digit year read as 1970 to 2069), and asctime
+    ("Sun Nov  6 08:49:37 1994"). The day of the week must be the date's. Nil carrying :error
+    Expected[offset, message] otherwise.
+    """
   =Str[data]
 
   {
@@ -2639,7 +2757,13 @@ time_dialect = #(content: '%str) {
     Instant[__time_now__ []]
   },
   monotonic: #[] {
-    :doc "A reading of the monotonic clock the calling process runs on: steady, for measuring elapsed time with `since` or `diff`, and unrelated to the wall clock. It is the clock select timeouts and `%proc.sleep` are measured on, so timing a sleep gives the sleep's own length — in real time, or the virtual time a test harness drives."
+    :doc """
+      A reading of the monotonic clock the calling process runs on: steady, for measuring elapsed
+      time with `since` or `diff`, and unrelated to the wall clock.
+
+      It is the clock select timeouts and `%proc.sleep` are measured on, so timing a sleep gives the
+      sleep's own length — in real time, or the virtual time a test harness drives.
+      """
     Mono[__time_monotonic__ []]
   },
   since: since,
@@ -2790,7 +2914,12 @@ time_dialect = #(content: '%str) {
   },
   parse_zoned: parse_zoned,
   parse_zoned!: #'%str {
-    :doc "`parse_zoned`, for text known to be good: a failure panics. The `%time\{ … }` dialect places a literal naming an IANA zone with it, so a literal whose zone the host lacks, or whose offset the zone doesn't have, fails fast when it runs."
+    :doc """
+      `parse_zoned`, for text known to be good: a failure panics.
+
+      The `%time\{ … }` dialect places a literal naming an IANA zone with it, so a literal whose
+      zone the host lacks, or whose offset the zone doesn't have, fails fast when it runs.
+      """
     | parse_zoned $ ~> =('zoned & z) => z
     | %panic "%time: can't place {$}: no such zone here, or an offset it doesn't have"
   },

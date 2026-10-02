@@ -252,12 +252,18 @@ path_dialect = #(content: '%str, term: '%meta.cb) {
   },
 
   join: #[(path): ', (with): '] {
-    :doc "Joins the second path onto the first; nil when the second is absolute or escapes the root."
+    :doc """
+      Joins the second path onto the first; nil when the second is absolute or escapes the root.
+      """
     join [join, $path, $with]
   },
 
   push: #[(path): (' | []), (segment): '%str] {
-    :doc "The path with one more segment, which must be a single name: nil carrying :error InvalidSegment when it is empty, `.` or `..`, or holds a `/` or NUL byte. A nil path is answered as itself."
+    :doc """
+      The path with one more segment, which must be a single name: nil carrying :error
+      InvalidSegment when it is empty, `.` or `..`, or holds a `/` or NUL byte. A nil path is
+      answered as itself.
+      """
     push $
   },
 ]

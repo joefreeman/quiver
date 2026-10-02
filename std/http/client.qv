@@ -128,7 +128,12 @@ bounded = #[
     timeout: '%time.duration = default_timeout,
     redirects: 'int = 5,
   ] {
-    :doc "Performs a request, following redirects. The timeout is a deadline for the whole request, redirects included. Nil on failure, carrying :error (exchange), :timeout (deadline) or :crash (the exchange died)."
+    :doc """
+      Performs a request, following redirects. The timeout is a deadline for the whole request,
+      redirects included.
+
+      Nil on failure, carrying :error (exchange), :timeout (deadline) or :crash (the exchange died).
+      """
     %url.parse $url ~> =('%url & u); bounded [u, $method, $headers, $body, $timeout, $redirects]
   },
 

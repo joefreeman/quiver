@@ -108,7 +108,10 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
   // carrying the failure's `:error`, short-circuiting the caller's sequence like any other
   // failure. Over a pure source it is `collect` with a wider result type.
   try_collect: #<'t>'%iter<'t> {
-    :doc "Collects an iterator that may fail into a list, or nil (carrying :error) if the source broke part-way."
+    :doc """
+      Collects an iterator that may fail into a list, or nil (carrying :error) if the source broke
+      part-way.
+      """
     %iter.try_fold [$, Nil, #<'t>['<'t>, 't] { Cons[$1, $0] }]
     ~> =('<'t> & xs)
 
@@ -126,7 +129,9 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
   },
 
   take: #<'t>[(list): '<'t>, (n): 'int] {
-    :doc "The first n elements, or the whole list when it is shorter (none when n is zero or negative)."
+    :doc """
+      The first n elements, or the whole list when it is shorter (none when n is zero or negative).
+      """
     to_iter $list ~> %iter.take [~, $n] ~> from_iter
   },
 
@@ -185,7 +190,10 @@ list_dialect = #(content: '%str, chain: '%meta.cb) {
   },
 
   nth: #<'t>[(list): '<'t>, (n): 'int] {
-    :doc "The element at the given zero-based index, or nil when the list is too short or the index is negative."
+    :doc """
+      The element at the given zero-based index, or nil when the list is too short or the index is
+      negative.
+      """
     to_iter $list ~> %iter.nth [~, $n]
   },
 

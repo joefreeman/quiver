@@ -472,13 +472,20 @@ from_chars = #'%iter<'int> {
   },
 
   parse_int: #(' | [', radix: 'int]) {
-    :doc "Parses a string as an optionally signed integer — decimal, or in a radix from 2 to 36 given as `[str, radix: r]`, whose digits past 9 are letters of either case; nil unless the whole string is one."
+    :doc """
+      Parses a string as an optionally signed integer — decimal, or in a radix from 2 to 36 given as
+      `[str, radix: r]`, whose digits past 9 are letters of either case; nil unless the whole string
+      is one.
+      """
     | =[str, radix: r] => parse_digits [str, radix r]
     | parse_digits [~, 10]
   },
 
   from_int: #('int | ['int, radix: 'int]) {
-    :doc "The representation of an integer — in decimal, or in a radix from 2 to 36 given as `[n, radix: r]`, with lowercase letters for digits past 9."
+    :doc """
+      The representation of an integer — in decimal, or in a radix from 2 to 36 given as
+      `[n, radix: r]`, with lowercase letters for digits past 9.
+      """
     | =[n, radix: r] => int_text [n, radix r]
     | int_text [~, 10]
   },
@@ -596,7 +603,10 @@ from_chars = #'%iter<'int> {
   },
 
   split_once: #[(str): ', (sep): '] {
-    :doc "Splits a string at the first occurrence of a separator, answering the pieces before and after it, or nil when absent."
+    :doc """
+      Splits a string at the first occurrence of a separator, answering the pieces before and after
+      it, or nil when absent.
+      """
     Str[haystack] = $str
     Str[delim] = $sep
     haystack_len = %bin.length haystack
@@ -614,7 +624,10 @@ from_chars = #'%iter<'int> {
   },
 
   split_last: #[(str): ', (sep): '] {
-    :doc "Splits a string at the last occurrence of a separator, answering the pieces before and after it, or nil when absent."
+    :doc """
+      Splits a string at the last occurrence of a separator, answering the pieces before and after
+      it, or nil when absent.
+      """
     Str[haystack] = $str
     Str[delim] = $sep
     last_find_index [haystack, delim] ~> =('int & index)
@@ -627,7 +640,10 @@ from_chars = #'%iter<'int> {
   },
 
   lines: #' {
-    :doc "An iterator over a string's lines, split on line feeds, with a trailing carriage return dropped from each. A final line feed ends the last line rather than starting an empty one."
+    :doc """
+      An iterator over a string's lines, split on line feeds, with a trailing carriage return
+      dropped from each. A final line feed ends the last line rather than starting an empty one.
+      """
     Str[data] = $
     len = %bin.length data
     %iter.unfold [
@@ -649,7 +665,9 @@ from_chars = #'%iter<'int> {
   },
 
   replace: #[(str): ', (from): ', (to): '] {
-    :doc "Replaces every occurrence of a non-empty substring, scanning left to right without overlap."
+    :doc """
+      Replaces every occurrence of a non-empty substring, scanning left to right without overlap.
+      """
     Str[data] = $str
     Str[from] = $from ~> {
       | =Str[<>] => %panic "Cannot replace an empty string"
@@ -708,12 +726,18 @@ from_chars = #'%iter<'int> {
   },
 
   pad_start: #[(str): ', (width): 'int, fill: ' = " "] {
-    :doc "The string padded at the start with a one-character fill (a space by default) to at least the given width in characters."
+    :doc """
+      The string padded at the start with a one-character fill (a space by default) to at least the
+      given width in characters.
+      """
     pad [$str, $width, $fill] ~> %bin.concat [~, $str.0] ~> Str[~]
   },
 
   pad_end: #[(str): ', (width): 'int, fill: ' = " "] {
-    :doc "The string padded at the end with a one-character fill (a space by default) to at least the given width in characters."
+    :doc """
+      The string padded at the end with a one-character fill (a space by default) to at least the
+      given width in characters.
+      """
     pad [$str, $width, $fill] ~> %bin.concat [$str.0, ~] ~> Str[~]
   },
 

@@ -957,7 +957,10 @@ compare = #['opt, 'opt] {
 // and floor-divide that bound by `D` — then reapply the sign. Exact, with one integer √. Lives
 // at the top level (rather than only in the record) so `floor`/`ceil`/`round` can reuse it.
 to_int = #'opt {
-  :doc "Truncates a number toward zero to an integer; nil for a nil operand, and for a power of e or π beyond the precision budget that is not below 1."
+  :doc """
+    Truncates a number toward zero to an integer; nil for a nil operand, and for a power of e or π
+    beyond the precision budget that is not below 1.
+    """
   // A bulky power is only truncated when it is provably below 1.
   | =('tx & x); bulky x => {
     | tx_size x ~> =[_, _, hi]
@@ -1046,7 +1049,10 @@ clamp = #[(value): 'opt, (min): 'opt, (max): 'opt] {
 // nudging by one when the truncation sits on the wrong side of x. The nudge is only reached
 // for a non-nil operand, so nil flows straight through.
 floor = #'opt {
-  :doc "The largest integer not greater than the number; nil for a nil operand, or one too large to truncate."
+  :doc """
+    The largest integer not greater than the number; nil for a nil operand, or one too large to
+    truncate.
+    """
   to_int $ ~> {
     | =('int & t) => {
       | compare [$, t] ~> =-1 => __integer_subtract__ [t, 1]
@@ -1056,7 +1062,10 @@ floor = #'opt {
   }
 }
 ceil = #'opt {
-  :doc "The smallest integer not less than the number; nil for a nil operand, or one too large to truncate."
+  :doc """
+    The smallest integer not less than the number; nil for a nil operand, or one too large to
+    truncate.
+    """
   to_int $ ~> {
     | =('int & t) => {
       | compare [$, t] ~> =1 => __integer_add__ [t, 1]
@@ -1070,7 +1079,10 @@ ceil = #'opt {
 // the midpoint `floor(x) + 1/2` (an exact rational), so no tower arithmetic is needed; a tie
 // (only possible for a rational x) breaks away from zero by the sign of the floor.
 round = #'opt {
-  :doc "Rounds to the nearest integer, halves away from zero; nil for a nil operand, or one too large to truncate."
+  :doc """
+    Rounds to the nearest integer, halves away from zero; nil for a nil operand, or one too large to
+    truncate.
+    """
   floor $ ~> {
     | =('int & f) => {
       mid = f ~> __integer_multiply__ [~, 2] ~> __integer_add__ [~, 1] ~> Rational[~, 2]
@@ -1443,7 +1455,11 @@ exp_logs = #['terms, 'rational, 'int] -> (['rational, 'int] | []) {
 }
 
 exp = #'opt {
-  :doc "e raised to a number: exact for a rational power, and for a logarithmic form whose log coefficients are integers or halves — halves only with no rational term, since e·√2 mixes fields; nil otherwise."
+  :doc """
+    e raised to a number: exact for a rational power, and for a logarithmic form whose log
+    coefficients are integers or halves — halves only with no rational term, since e·√2 mixes
+    fields; nil otherwise.
+    """
   | =([] & n) => n
   | =('coeff & r) => exp_rational r
   | =Log[a, ts]; exp_logs [ts, Rational[1, 1], 1] ~> =[f, m] => {
@@ -1490,7 +1506,11 @@ ln_coeff = #'coeff {
 }
 
 ln = #'opt {
-  :doc "The natural logarithm: exact for a positive rational, a positive rational times a power of e, and a surd b√n with b > 0; nil otherwise, and where a numerator or denominator has a prime factor too large to find."
+  :doc """
+    The natural logarithm: exact for a positive rational, a positive rational times a power of e,
+    and a surd b√n with b > 0; nil otherwise, and where a numerator or denominator has a prime
+    factor too large to find.
+    """
   | =([] & n) => n
   | sign $ ~> =(-1 | 0) => [] ~> { :error OutOfDomain }
   | =('coeff & c) => ln_coeff c
@@ -1551,7 +1571,12 @@ qpow = #[', 'int, 'int] {
 }
 
 pow = #['opt, 'opt] {
-  :doc "Raises a number to a power: exact for an integer power of any number whose products stay representable; for a rational power of a rational, or of a monomial in π or e, where the result is rational or a single surd (a negative base needs an odd denominator); and for any power of e that `exp` takes. Nil otherwise, and for zero to a negative power."
+  :doc """
+    Raises a number to a power: exact for an integer power of any number whose products stay
+    representable; for a rational power of a rational, or of a monomial in π or e, where the result
+    is rational or a single surd (a negative base needs an odd denominator); and for any power of e
+    that `exp` takes. Nil otherwise, and for zero to a negative power.
+    """
   // Coefficients to integer powers first, the hot case.
   | =[('coeff & x), ('int & n)] => cpow [x, n]
   | =[[], _] => $0
@@ -1704,21 +1729,30 @@ inverse = #[(v): ', (table): #' -> ('rational | [])] {
 }
 
 sin = #'opt {
-  :doc "The sine, exact at rational multiples of π where the value is rational or a single surd; nil otherwise."
+  :doc """
+    The sine, exact at rational multiples of π where the value is rational or a single surd; nil
+    otherwise.
+    """
   | =([] & n) => n
   | pi_ratio $ ~> ='rational => sin_r ~
   | [] ~> { :error Unrepresentable }
 }
 
 cos = #'opt {
-  :doc "The cosine, exact at rational multiples of π where the value is rational or a single surd; nil otherwise."
+  :doc """
+    The cosine, exact at rational multiples of π where the value is rational or a single surd; nil
+    otherwise.
+    """
   | =([] & n) => n
   | pi_ratio $ ~> ='rational => rsub [Rational[1, 2], ~] ~> sin_r
   | [] ~> { :error Unrepresentable }
 }
 
 tan = #'opt {
-  :doc "The tangent, exact at rational multiples of π where the value is rational or a single surd; nil otherwise, and at the poles."
+  :doc """
+    The tangent, exact at rational multiples of π where the value is rational or a single surd; nil
+    otherwise, and at the poles.
+    """
   | =([] & n) => n
   | pi_ratio $ ~> ='rational => tan_r ~
   | [] ~> { :error Unrepresentable }
@@ -1748,7 +1782,10 @@ atan = #'opt {
 }
 
 atan2 = #[(y): 'opt, (x): 'opt] {
-  :doc "The angle of the point (x, y), in (−π, π]: exact where the tangent table has |y/x|; nil otherwise, and at the origin."
+  :doc """
+    The angle of the point (x, y), in (−π, π]: exact where the tangent table has |y/x|; nil
+    otherwise, and at the origin.
+    """
   $y ~> =(('coeff | 'slow) & y)
   $x ~> =(('coeff | 'slow) & x)
   sy = compare [y, 0]
@@ -1823,7 +1860,10 @@ approx_step = #[(x): ', (eps): 'rational, (k): 'int] {
 }
 
 approx = #[(value): 'opt, within: 'opt] {
-  :doc "The simplest rational within the given positive distance of a number, rational or not (an integer when one is close enough); nil for a nil operand or a non-positive distance."
+  :doc """
+    The simplest rational within the given positive distance of a number, rational or not (an
+    integer when one is close enough); nil for a nil operand or a non-positive distance.
+    """
   $within ~> =('coeff & eps)
   e = to_rational eps
   rsign e ~> { =1 => Ok | [] ~> { :error OutOfDomain } }
