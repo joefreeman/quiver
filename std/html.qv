@@ -442,10 +442,10 @@ nodes_loop = #[
 
 // === Emission ===========================================================================
 
-// A hole's span applied to one of this module's normalizers. Emitted `Call`s name their
-// module explicitly, so the IR stays valid when a dialect in *another* module returns it.
+// A hole's span applied to one of this module's normalizers. Emitted calls name their module
+// explicitly, so the IR stays valid when a dialect in *another* module returns it.
 emit_hole = #[(member): Str['bin], (span): 'span] {
-  Call[module: "html", member: $member, arg: Unquote[offset: $span.offset, length: $span.length]]
+  %meta.call ["html", $member, Unquote[offset: $span.offset, length: $span.length]]
 }
 
 // An attribute value's construction expression.
@@ -704,11 +704,11 @@ expand = #'pnodes {
     """
   roots = $
   ist = instrument_list [instrument_list, roots, [cur: <>, runs: Nil, holes: Nil, ci: 0, ei: 0]]
-  Call[
-    module: "html",
-    member: "with_template",
-    arg: Tuple[
-      name: Nil,
+  %meta.call [
+    "html",
+    "with_template",
+    Tuple[
+      name: [],
       fields: Cons[
         emit_list [emit_list, roots, Nil] ~> root_expr,
         Cons[

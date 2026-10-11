@@ -39,11 +39,11 @@ pub struct CachedModule {
     pub warnings: Vec<(super::Warning, crate::parser::SourceSpan)>,
 }
 
-/// A module-compile recording frame (see [`ModuleCache::recording`]): tracks which
-/// modules this compile was *declared* to reference (per [`collect_module_references`],
-/// the same set its artifact key hashes) so any other reference discovered mid-compile
-/// — an import surfacing only inside a dialect expansion — marks the module hidden:
-/// its key would not cover the hidden dependency, so it must not be stored.
+/// A module-compile recording frame (see [`ModuleCache::recording`]): tracks which modules
+/// this compile's artifact key covers (its [`collect_module_references`], and their key
+/// closures) so any other reference discovered mid-compile — an import surfacing only inside
+/// an expansion — marks the module hidden: its key would not cover the hidden dependency, so
+/// it must not be stored.
 #[derive(Clone)]
 pub struct RecordingFrame {
     pub id: ModuleId,
@@ -88,6 +88,10 @@ pub struct ModuleCache {
     pub recording: Vec<RecordingFrame>,
     /// Memoised artifact keys (see `crate::artifact::module_key`).
     pub key_cache: HashMap<ModuleId, u64>,
+    /// Per keyed module, every module its key covers: the modules its source references, and
+    /// theirs, transitively. A reference only an expansion surfaces is no hidden dependency of
+    /// a module whose declared references' keys already cover it.
+    pub key_closures: HashMap<ModuleId, std::collections::HashSet<ModuleId>>,
     /// Modules whose keys are currently being computed, for cycle detection.
     pub key_stack: Vec<ModuleId>,
     /// Modules whose *value* a compile read, attributed to the innermost in-progress
@@ -128,6 +132,7 @@ impl ModuleCache {
             value_closures: HashMap::new(),
             recording: Vec::new(),
             key_cache: HashMap::new(),
+            key_closures: HashMap::new(),
             key_stack: Vec::new(),
             module_reads: HashMap::new(),
             warned: std::collections::HashSet::new(),
@@ -486,6 +491,7 @@ impl Collector {
             // Pin roots are variables and parameters, so a pattern holds no value
             // imports — but its type ascriptions may reference module types.
             ast::Term::Literal(_) | ast::Term::Process(_) => {}
+            ast::Term::Hole(chain) => self.chain(chain),
             ast::Term::Match(pattern) => self.pattern(pattern),
             ast::Term::Tuple(tuple) => {
                 for field in &tuple.fields {
@@ -538,7 +544,7 @@ impl Collector {
     }
 
     fn access(&mut self, access: &ast::Access) {
-        if let Some(ast::AccessSource::Import(path)) = &access.source {
+        if let Some(ast::AccessSource::Import(path, None)) = &access.source {
             self.found.push((path.clone(), access.base_span));
         }
         if self.types {
@@ -555,6 +561,7 @@ impl Collector {
 
     fn pattern(&mut self, pattern: &ast::Match) {
         match pattern {
+            ast::Match::Hole(chain) => self.chain(chain),
             ast::Match::Identifier(..)
             | ast::Match::Literal(_)
             | ast::Match::String(..)
@@ -589,6 +596,7 @@ impl Collector {
             return;
         }
         match type_def {
+            ast::Type::Hole(chain) => self.chain(chain),
             ast::Type::Primitive(_)
             | ast::Type::Cycle(_)
             | ast::Type::Resource(_)
@@ -651,11 +659,17 @@ impl Collector {
                 }
             }
             ast::Type::ModuleType {
-                module, arguments, ..
+                module,
+                arguments,
+                package,
+                ..
             } => {
                 // The span is not tracked for type references; the compiler reports
-                // resolution errors at the use site itself.
-                self.found.push((module.clone(), ast::Spanned::default()));
+                // resolution errors at the use site itself. A module an expansion names
+                // resolves in another package, so it is not one of this unit's references.
+                if package.is_none() {
+                    self.found.push((module.clone(), ast::Spanned::default()));
+                }
                 for argument in arguments {
                     self.type_def(argument);
                 }

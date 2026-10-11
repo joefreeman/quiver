@@ -1700,8 +1700,23 @@ name = "world"
 The standard library ships `%num{ … }`, `%list{ … }`, `%dict{ … }`, `%json{ … }`,
 `%time{ … }`, `%path{ … }`, `%html{ … }` and `%html/live{ … }`. A dialect is an ordinary exported
 function, usually built from `%parse` combinators, returning the code IR that `%meta`
-defines. `%html` exports its grammar seam so other modules can layer their own attribute
-policies over it.
+defines. `%html` exports its grammar seam so other modules can layer their own attribute policies
+over it.
+
+A dialect writes the code it returns as a quote. `%meta{ … }` is Quiver code as the
+`'%meta.expr` that builds it, and a **hole** in it (`` `name `` or `` `(…) ``, standing for an
+expression, a pattern or a type) is code computed where the quote is written:
+
+```quiver
+n = 3
+%meta{ %num.add [`n, 1] }
+//= Apply[callee: Member[module: "num", member: "add", arguments: Nil], arg: Tuple[name: [], fields: Cons[3, Cons[1, Nil]]]]
+```
+
+Generated code is hygienic. Its own names can neither capture nor be captured by the caller's,
+and it reaches the caller's code only through the holes in the dialect's content. The modules it
+names are found in the dialect's own package, so a caller's module of the same name can't stand
+in for one of them.
 
 ## Built-ins
 
@@ -1732,7 +1747,7 @@ __integer_add__ [3, 4]                       //= 7
 | `%data` | Quiver data notation: `encode` and `decode<'t>` |
 | `%json` | JSON parsing, rendering, querying and editing, typed `decode<'t>`/`encode<'t>`, plus `%json{ … }` |
 | `%parse` | parser combinators over binary input |
-| `%meta` | the expression IR a dialect returns |
+| `%meta` | the code a dialect returns, and data as data |
 | `%proc` | process management: `detach`, `kill`, `link`, `track`, and timers: `sleep`, `send_after`, `expire`, `race` |
 | `%registry` | the per-environment name registry: `register`, `unregister`, `lookup` |
 | `%sup` | supervision: restart strategies over `%proc` |

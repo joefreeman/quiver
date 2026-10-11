@@ -82,6 +82,9 @@ pub enum ErrorKind {
     // Nesting
     NestingTooDeep,
 
+    // A quote's hole (`` `x ``) outside quoted code
+    HoleOutsideQuote,
+
     // Generic parser errors
     ParseError(String),
     UnexpectedToken { expected: String, found: String },
@@ -131,6 +134,10 @@ impl std::fmt::Display for ErrorKind {
                 )
             }
 
+            ErrorKind::HoleOutsideQuote => {
+                write!(f, "A hole (`x or `(…)) stands only in quoted code")
+            }
+
             ErrorKind::ParseError(msg) => write!(f, "Parse error: {}", msg),
             ErrorKind::UnexpectedToken { expected, found } => {
                 write!(f, "Expected {}, found '{}'", expected, found)
@@ -178,6 +185,9 @@ impl ErrorKind {
             }
             ErrorKind::NestingTooDeep => {
                 "Break the expression up — bind an inner part to a name and refer to it"
+            }
+            ErrorKind::HoleOutsideQuote => {
+                "A hole is code computed where a quote is written, so it is written inside %meta{ … }"
             }
             ErrorKind::HexMalformed(_) => {
                 "Binary literals are an even number of hexadecimal digits between angle brackets: <0a1b>"
@@ -277,6 +287,14 @@ fn detect_error_kind(source: &str, _span: Option<&SourceSpan>) -> ErrorKind {
     }
 }
 
+/// Parse quoted code: as [`parse`], but holes (`` `x ``, `` `(…) ``) may stand in its terms,
+/// patterns and types. Only a quote's content is parsed this way; anywhere else a hole is a
+/// parse error.
+pub fn parse_quoted(source: &str) -> Result<Sequence, Error> {
+    let _quoted = QuotedGuard::set(true);
+    parse(source)
+}
+
 pub fn parse(source: &str) -> Result<Sequence, Error> {
     let span = Span::new(source);
     match program(span) {
@@ -344,6 +362,11 @@ pub fn parse(source: &str) -> Result<Sequence, Error> {
                     if is_failure && e.code == nom::error::ErrorKind::TooLarge {
                         return Err(Error::new(ErrorKind::NestingTooDeep, span));
                     }
+                    // `hole` smuggles a hole outside quoted code out as a hard failure with
+                    // the (otherwise unused) `Fix` code.
+                    if is_failure && e.code == nom::error::ErrorKind::Fix {
+                        return Err(Error::new(ErrorKind::HoleOutsideQuote, span));
+                    }
 
                     let kind = match e.code {
                         nom::error::ErrorKind::Eof => detect_error_kind(source, span.as_ref()),
@@ -396,6 +419,9 @@ pub fn parse_chain_exact(source: &str) -> Result<Chain, Error> {
                     let span = Some(SourceSpan::from_span(e.input));
                     if e.code == nom::error::ErrorKind::TooLarge {
                         return Err(Error::new(ErrorKind::NestingTooDeep, span));
+                    }
+                    if e.code == nom::error::ErrorKind::Fix {
+                        return Err(Error::new(ErrorKind::HoleOutsideQuote, span));
                     }
                     let found = e.input.fragment().chars().take(10).collect::<String>();
                     (
@@ -1805,6 +1831,7 @@ fn module_type(input: Span) -> IResult<Span, Type> {
             module,
             member,
             arguments: arguments.unwrap_or_default(),
+            package: None,
         },
     )(input)
 }
@@ -1926,6 +1953,7 @@ fn function_input_type(input: Span) -> IResult<Span, Type> {
         module_type, // Must come before type_identifier to match '% before trying identifier
         type_identifier,
         self_default_type, // Bare `'`; after type_identifier/module_type so `'int`/`'%mod` win
+        map(hole, Type::Hole),
     ))(input)
 }
 
@@ -1942,6 +1970,7 @@ fn function_output_type(input: Span) -> IResult<Span, Type> {
         module_type, // Must come before type_identifier to match '% before trying identifier
         type_identifier,
         self_default_type, // Bare `'`; after type_identifier/module_type so `'int`/`'%mod` win
+        map(hole, Type::Hole),
     ))(input)
 }
 
@@ -1958,6 +1987,7 @@ fn base_type(input: Span) -> IResult<Span, Type> {
         delimited(pair(char('('), ws0), type_definition, pair(ws0, char(')'))),
         type_identifier,
         self_default_type, // Bare `'`; after type_identifier/module_type so `'int`/`'%mod` win
+        map(hole, Type::Hole),
     ))(input)
 }
 
@@ -2058,7 +2088,7 @@ fn access(input: Span) -> IResult<Span, Access> {
         // what `~` is to the flowing value and `$` to the parameter.
         map(char('@'), |_| AccessSource::Self_),
         // Import: %module or %module/submodule
-        map(import, AccessSource::Import),
+        map(import, |path| AccessSource::Import(path, None)),
         // Builtin: __name__ (before identifier; the `__` lexical form is unambiguous)
         map(builtin_name, AccessSource::Builtin),
         map(identifier, AccessSource::Identifier),
@@ -2389,7 +2419,7 @@ fn dialect_term(input: Span) -> IResult<Span, Term> {
 fn pun_label(path: &Access) -> Option<String> {
     match path.source {
         Some(
-            AccessSource::Identifier(_) | AccessSource::Parameter { .. } | AccessSource::Import(_),
+            AccessSource::Identifier(_) | AccessSource::Parameter { .. } | AccessSource::Import(..),
         ) => {}
         _ => return None,
     }
@@ -2398,7 +2428,7 @@ fn pun_label(path: &Access) -> Option<String> {
         Some(AccessPath::Index(_) | AccessPath::Annotation(..)) => None,
         None => match &path.source {
             Some(AccessSource::Identifier(name)) => Some(name.clone()),
-            Some(AccessSource::Import(segments)) => segments.last().cloned(),
+            Some(AccessSource::Import(segments, _)) => segments.last().cloned(),
             // A bare `$`/`$$` names the whole parameter, which has no label of its own.
             _ => None,
         },
@@ -2980,6 +3010,7 @@ fn match_pattern(input: Span) -> IResult<Span, Match> {
         )));
     };
     alt((
+        map(hole, Match::Hole),
         negated_pattern,
         // Pin with ^ prefix: a variable- or `$`-rooted access path to check the value against.
         pin_pattern,
@@ -3107,6 +3138,62 @@ impl Drop for NestingGuard {
     }
 }
 
+thread_local! {
+    static QUOTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Sets whether the parse in progress is of quoted code, where holes may stand (see
+/// [`parse_quoted`]), restoring the outer setting when dropped. A hole's own code is the
+/// quoting code's, so it is not quoted (a quote nested in it is dialect content, parsed on its
+/// own later).
+struct QuotedGuard {
+    outer: bool,
+}
+
+impl QuotedGuard {
+    fn set(quoted: bool) -> Self {
+        QuotedGuard {
+            outer: QUOTED.with(|cell| cell.replace(quoted)),
+        }
+    }
+}
+
+impl Drop for QuotedGuard {
+    fn drop(&mut self) {
+        QUOTED.with(|quoted| quoted.set(self.outer));
+    }
+}
+
+/// A quote's hole: `` `name `` (an access) or `` `(chain) `` — code computed where the quote is
+/// written, standing in its term, pattern or type (see [`Term::Hole`]). The chain's span is
+/// exactly the code inside the hole, which a quote splices by its position. Outside quoted code
+/// a backtick is a hard failure, smuggled out with the (otherwise unused) `Fix` code.
+fn hole(input: Span) -> IResult<Span, Box<Chain>> {
+    if input.fragment().starts_with('`') && !QUOTED.with(std::cell::Cell::get) {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fix,
+        )));
+    }
+    let (input, _) = char('`')(input)?;
+    let _unquoted = QuotedGuard::set(false);
+    alt((
+        delimited(pair(char('('), wsc), spanned(chain), pair(wsc, char(')'))),
+        spanned(map(access, |access| Chain {
+            binding: None,
+            binding_span: Spanned::default(),
+            span: Spanned::default(),
+            terms: vec![Term::Access(access)],
+            continuations: Vec::new(),
+            assertions: Vec::new(),
+        })),
+    ))(input)
+    .map(|(rest, (span, mut chain))| {
+        chain.span = Spanned(Some(span));
+        (rest, Box::new(chain))
+    })
+}
+
 fn primary(input: Span) -> IResult<Span, Term> {
     // Smuggled out as a hard failure with the (otherwise unused) `TooLarge` code, so it
     // survives the surrounding `alt`s rather than reading as "this branch did not match".
@@ -3117,6 +3204,7 @@ fn primary(input: Span) -> IResult<Span, Term> {
         )));
     };
     alt((
+        map(hole, Term::Hole),
         // String terms (before literals to handle quotes)
         string_term,
         // Process operations (process_ref_term must come before spawn_term to match @N first)

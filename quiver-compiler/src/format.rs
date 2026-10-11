@@ -770,6 +770,7 @@ fn render_term_atom(term: &Term) -> String {
         Term::Match(pattern) => format!("={}", render_match(pattern)),
         Term::Access(access) => render_access(access),
         Term::Process(index) => format!("@{}", index),
+        Term::Hole(chain) => render_hole(chain),
         Term::State(access, _) => format!("?{}", render_access(access)),
         // Dialect content is opaque raw text and is preserved verbatim (including newlines):
         // re-indenting it would change what the dialect function receives.
@@ -781,6 +782,17 @@ fn render_term_atom(term: &Term) -> String {
         | Term::Spawn(..)
         | Term::Select(..)
         | Term::Apply(..) => unreachable!("container terms are rendered by term_doc"),
+    }
+}
+
+/// A quote's hole: `` `name `` for an access, `` `(chain) `` for anything else.
+fn render_hole(chain: &Chain) -> String {
+    match &chain.terms[..] {
+        [Term::Access(access)] if chain.binding.is_none() => format!("`{}", render_access(access)),
+        _ => format!(
+            "`({})",
+            pretty::flatten(&chain_doc(&Trivia::default(), chain))
+        ),
     }
 }
 
@@ -1237,7 +1249,7 @@ fn select_shorthand(chains: &[Chain]) -> Option<String> {
                 Some(
                     AccessSource::Identifier(_)
                         | AccessSource::Parameter { .. }
-                        | AccessSource::Import(_)
+                        | AccessSource::Import(..)
                 )
             ) =>
         {
@@ -1792,7 +1804,7 @@ fn render_access(access: &Access) -> String {
         Some(AccessSource::Identifier(name)) => out.push_str(name),
         Some(AccessSource::Parameter { depth }) => out.push_str(&parameter_sigils(*depth)),
         Some(AccessSource::Ripple) => out.push('~'),
-        Some(AccessSource::Import(parts)) => {
+        Some(AccessSource::Import(parts, _)) => {
             out.push('%');
             out.push_str(&parts.join("/"));
         }
@@ -1868,6 +1880,7 @@ fn match_doc(trivia: &Trivia, pattern: &Match) -> Doc {
 
 fn render_match_flat(pattern: &Match) -> String {
     match pattern {
+        Match::Hole(chain) => render_hole(chain),
         Match::Identifier(name, _) => name.clone(),
         Match::Literal(literal) => render_literal(literal),
         // A string pattern renders as a single-line `"…"` regardless of how it was written: the
@@ -2040,6 +2053,7 @@ fn parenthesised(inner: Doc) -> Doc {
 /// application wraps by way of its parts.
 fn type_doc(trivia: &Trivia, type_def: &Type) -> Doc {
     match type_def {
+        Type::Hole(chain) => pretty::text(render_hole(chain)),
         Type::Primitive(PrimitiveType::Int) => pretty::text("'int"),
         Type::Primitive(PrimitiveType::Bin) => pretty::text("'bin"),
         Type::Primitive(PrimitiveType::Ref) => pretty::text("'ref"),
@@ -2084,6 +2098,7 @@ fn type_doc(trivia: &Trivia, type_def: &Type) -> Doc {
             module,
             member,
             arguments,
+            ..
         } => {
             let mut head = format!("'%{}", module.join("/"));
             if let Some(member) = member {

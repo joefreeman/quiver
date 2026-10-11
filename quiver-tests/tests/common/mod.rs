@@ -698,6 +698,14 @@ impl TestResult {
     /// for asserting notes/hints without pinning the full error value.
     pub fn expect_error_containing(self, needle: &str) {
         match self.result {
+            Err(ReplError::Parser(e)) => {
+                let rendered = format!("{e}");
+                assert!(
+                    rendered.contains(needle),
+                    "Expected an error containing {needle:?}, but got: {rendered} for source: {}",
+                    self.source
+                );
+            }
             Err(ReplError::Compiler(e)) => {
                 let rendered = format!("{e}");
                 assert!(

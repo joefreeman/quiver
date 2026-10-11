@@ -1216,6 +1216,9 @@ fn resolve_ast_type_impl(
     type_bindings: &HashMap<String, usize>,
 ) -> Result<usize, Error> {
     match ast_type {
+        ast::Type::Hole(_) => {
+            unreachable!("a hole is parsed only in quoted code, which is lowered, never compiled")
+        }
         ast::Type::Primitive(ast::PrimitiveType::Int) => Ok(program.register_type(Type::Integer)),
         ast::Type::Primitive(ast::PrimitiveType::Bin) => Ok(program.register_type(Type::Binary)),
         ast::Type::Primitive(ast::PrimitiveType::Ref) => Ok(program.register_type(Type::Reference)),
@@ -1462,6 +1465,7 @@ fn resolve_ast_type_impl(
             module,
             member,
             arguments,
+            package,
         } => {
             // Build the target module's type namespace and select the default type
             // (`'%mod`) or a named one (`'%mod.name`).
@@ -1469,7 +1473,7 @@ fn resolve_ast_type_impl(
                 &module,
                 env.resolver,
                 env.module_cache,
-                env.package,
+                package.as_ref().unwrap_or(env.package),
                 program,
             )?;
             let display = display_module_type(&module, member.as_deref());

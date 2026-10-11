@@ -404,7 +404,7 @@ dict_dialect = #(content: '%str, chain: '%meta.cb) {
   e2 = %parse.left [entries, %parse.opt d_comma]
   e3 = %parse.left [e2, %parse.ws]
 
-  full = %parse.map [e3, #{ Call[member: "from", arg: %meta.list_expr $] }]
+  full = %parse.map [e3, #{ %meta.call ["dict", "from", %meta.list_expr $] }]
 
   %parse.run [content, full]
 }

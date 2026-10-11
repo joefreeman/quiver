@@ -212,7 +212,8 @@ fn term_assertions(term: &Term) -> usize {
         | Term::Match(_)
         | Term::Access(_)
         | Term::State(..)
-        | Term::Process(_) => 0,
+        | Term::Process(_)
+        | Term::Hole(_) => 0,
     }
 }
 

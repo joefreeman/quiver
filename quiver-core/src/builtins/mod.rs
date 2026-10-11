@@ -1097,8 +1097,17 @@ pub fn register_data_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
         coerce_builtin(data::builtin_data_decode),
         Purity::Pure,
         str_spec,
-        TypeSpec::Union(vec![TypeSpec::Var("t"), nil]),
+        TypeSpec::Union(vec![TypeSpec::Var("t"), nil.clone()]),
         vec!["t".to_string()],
+    );
+    // `meta_reflect<'d>` spells any value out as the tree type `'d` (`'%meta.data`), or nil.
+    registry.register_generic(
+        "meta_reflect".to_string(),
+        coerce_builtin(data::builtin_meta_reflect),
+        Purity::Pure,
+        TypeSpec::Top,
+        TypeSpec::Union(vec![TypeSpec::Var("d"), nil]),
+        vec!["d".to_string()],
     );
     registry.declare_decode_error(data::decode_error_decl());
 }

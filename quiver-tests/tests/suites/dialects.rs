@@ -90,7 +90,7 @@ fn test_flow_receives_the_flowing_value() {
 fn test_call_applies_a_module_export() {
     quiver()
         .with_modules(dialect_module(
-            "Call[member: \"double\", arg: Unquote[offset: 0, length: 1]]",
+            "Apply[callee: Member[module: \"m\", member: \"double\", arguments: Nil], arg: Unquote[offset: 0, length: 1]]",
             "[double: #'int { [~, 2] ~> __integer_multiply__ }]",
         ))
         .evaluate("5 ~> %m{~}")
@@ -105,7 +105,7 @@ fn test_call_argument_span_adopts_labels_and_fills_defaults() {
     // field takes the member's default.
     quiver()
         .with_modules(dialect_module(
-            "Call[member: \"opts\", arg: Unquote[offset: 0, length: 3]]",
+            "Apply[callee: Member[module: \"m\", member: \"opts\", arguments: Nil], arg: Unquote[offset: 0, length: 3]]",
             "[opts: #[(keys): 'int, debounce: 'int = 50] { $ }]",
         ))
         .evaluate("%m{[7]}")
@@ -118,7 +118,7 @@ fn test_call_argument_span_infers_a_function_literal_parameter() {
     // member's declared one.
     quiver()
         .with_modules(dialect_module(
-            "Call[member: \"apply\", arg: Unquote[offset: 0, length: 11]]",
+            "Apply[callee: Member[module: \"m\", member: \"apply\", arguments: Nil], arg: Unquote[offset: 0, length: 11]]",
             "[apply: #['int, #'int -> 'int] { $1 $0 }]",
         ))
         .evaluate("%m{[5, #{ $ }]}")
@@ -131,8 +131,8 @@ fn test_call_argument_span_evaluates_once() {
     // binding, so the member runs once (both fields are the same ref).
     quiver()
         .with_modules(dialect_module(
-            r#"call = Call[member: "id", arg: Unquote[offset: 0, length: 6]]
-Tuple[name: Nil, fields: Cons[call, Cons[call, Nil]]]"#,
+            r#"call = Apply[callee: Member[module: "m", member: "id", arguments: Nil], arg: Unquote[offset: 0, length: 6]]
+Tuple[name: [], fields: Cons[call, Cons[call, Nil]]]"#,
             "[id: #'ref { $ }]",
         ))
         .evaluate("ref = %ref; %m{ref []} ~> =[a, b]; a ~> { =^b => Same | Distinct }")
@@ -141,10 +141,10 @@ Tuple[name: Nil, fields: Cons[call, Cons[call, Nil]]]"#,
 
 #[test]
 fn test_call_reaches_a_named_module() {
-    // A `module` field names the module to call into — resolved at the invocation site,
-    // so a dialect can emit calls to a companion module it does not itself import.
+    // A `module` field names the module to call into — resolved in the dialect's package, so
+    // a dialect can emit calls to a companion module it does not itself import.
     let mut modules = dialect_module(
-        "Call[module: \"helper\", member: \"double\", arg: Unquote[offset: 0, length: 1]]",
+        "Apply[callee: Member[module: \"helper\", member: \"double\", arguments: Nil], arg: Unquote[offset: 0, length: 1]]",
         "Ok",
     );
     modules.insert(
@@ -161,7 +161,7 @@ fn test_call_reaches_a_named_module() {
 fn test_expansions_chain() {
     quiver()
         .with_modules(dialect_module(
-            "Call[member: \"double\", arg: Unquote[offset: 0, length: 1]]",
+            "Apply[callee: Member[module: \"m\", member: \"double\", arguments: Nil], arg: Unquote[offset: 0, length: 1]]",
             "[double: #'int { [~, 2] ~> __integer_multiply__ }]",
         ))
         .evaluate("5 ~> %m{~} ~> %m{~}")
@@ -185,7 +185,7 @@ fn test_tuple_construction() {
 #[test]
 fn test_nil_expansion_short_circuits() {
     quiver()
-        .with_modules(dialect_module("Tuple[name: Nil, fields: Nil]", "Ok"))
+        .with_modules(dialect_module("Tuple[name: [], fields: Nil]", "Ok"))
         .evaluate("%m{}; 5")
         .expect("[]");
 }
@@ -329,7 +329,8 @@ fn test_num_dialect_flow_and_unary() {
 
 #[test]
 fn test_dialect_call_with_literal_argument() {
-    // `-1` emits `Call[member: "neg", arg: 1]`: a plain-data argument splices as a literal.
+    // `-1` emits `Apply[callee: Member[module: "num", member: "neg", arguments: Nil], arg: 1]`:
+    // a plain-data argument splices as a literal.
     quiver().evaluate("%num{ -1 }").expect("-1");
     quiver().evaluate("%num{ 2 ^ -1 }").expect("1/2");
 }
@@ -423,7 +424,7 @@ fn test_malformed_field_list_tail_is_an_error() {
     // splice `Cons[1, Nil[2]]` as `[1]`).
     quiver()
         .with_modules(dialect_module(
-            "Tuple[name: Nil, fields: Cons[1, Nil[2]]]",
+            "Tuple[name: [], fields: Cons[1, Nil[2]]]",
             "Ok",
         ))
         .evaluate("%m{}")
@@ -576,7 +577,7 @@ fn test_unquote_duplicated_span_evaluates_once() {
     // hole runs once — both elements are the *same* ref.
     quiver()
         .with_modules(dialect_module(
-            "Tuple[name: Nil, fields: Cons[Unquote[offset: 0, length: 3], Cons[Unquote[offset: 0, length: 3], Nil]]]",
+            "Tuple[name: [], fields: Cons[Unquote[offset: 0, length: 3], Cons[Unquote[offset: 0, length: 3], Nil]]]",
             "Ok",
         ))
         .evaluate("ref = %ref; %m{ref} ~> =[a, b]; a ~> { =^b => Same | Distinct }")
@@ -671,4 +672,262 @@ fn test_dialect_expansion_depth_is_bounded() {
     quiver()
         .evaluate(&format!("wide = [{}]; wide.999", items(1000)))
         .expect("1");
+}
+
+/// [`dialect_module`], with the dialect's result declared `'%meta.expr`, so a test's IR is
+/// checked against the alias as well as by the splicer.
+fn ir_module(body: &str) -> HashMap<Vec<String>, String> {
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["m".to_string()],
+        format!(
+            "d0 = #Str['bin] -> '%meta.expr {{ {body} }}\nd = #(content: Str['bin]) {{ $content ~> d0 }}\n{{ :dialect d; Ok }}"
+        ),
+    );
+    modules
+}
+
+/// An expansion that is a list of IR items, as a `Cons` list expression.
+fn ir_list(items: &[&str]) -> String {
+    items.iter().rev().fold("Nil".to_string(), |tail, item| {
+        format!("Cons[{item}, {tail}]")
+    })
+}
+
+#[test]
+fn test_function_literal_expansion() {
+    // `#'int { %num.add [$, 1] }`
+    let body = "Function[parameters: Nil, parameter: Int, result: [], annotations: Nil, body: Apply[callee: Member[module: \"num\", member: \"add\", arguments: Nil], arg: Tuple[name: [], fields: Cons[Param[0], Cons[1, Nil]]]]]";
+    quiver()
+        .with_modules(ir_module(body))
+        .evaluate("f = %m{}; f 41")
+        .expect("42");
+    // A generic one, naming its own type parameter.
+    let body = "Function[parameters: Cons[\"d\", Nil], parameter: Var[\"d\"], result: [], annotations: Nil, body: Param[0]]";
+    quiver()
+        .with_modules(ir_module(body))
+        .evaluate("f = %m{}; [f <01>, f 2]")
+        .expect("[<01>, 2]");
+    // A module's type, by reference.
+    let body = "Function[parameters: Nil, parameter: Named[module: \"list\", member: [], arguments: Cons[Int, Nil]], result: [], annotations: Nil, body: Apply[callee: Member[module: \"list\", member: \"count\", arguments: Nil], arg: Param[0]]]";
+    quiver()
+        .with_modules(ir_module(body))
+        .evaluate("f = %m{}; f %list{ 1, 2 }")
+        .expect("2");
+}
+
+#[test]
+fn test_block_match_and_bindings_expansion() {
+    // `#_ { | =P[x] => x | 0 }`
+    let branches = ir_list(&[
+        "Branch[condition: Cons[Match[value: Param[0], pattern: Tuple[name: \"P\", fields: Cons[Bind[\"x\"], Nil]]], Nil], consequence: Cons[Local[\"x\"], Nil]]",
+        "Branch[condition: Cons[0, Nil], consequence: []]",
+    ]);
+    let body = format!(
+        "Function[parameters: Nil, parameter: Top, result: [], annotations: Nil, body: Block[branches: {branches}]]"
+    );
+    quiver()
+        .with_modules(ir_module(&body))
+        .evaluate("f = %m{}; [f P[5], f Q]")
+        .expect("[5, 0]");
+    // Patterns: a type test, a negation, a conjunction, a string.
+    let branches = ir_list(&[
+        "Branch[condition: Cons[Match[value: Param[0], pattern: Is[Int]], Nil], consequence: Cons[Tuple[name: \"Int\", fields: Nil], Nil]]",
+        "Branch[condition: Cons[Match[value: Param[0], pattern: \"hi\"], Nil], consequence: Cons[Tuple[name: \"Hi\", fields: Nil], Nil]]",
+        "Branch[condition: Cons[Match[value: Param[0], pattern: And[Cons[Not[Nil], Cons[Bind[\"v\"], Nil]]]], Nil], consequence: Cons[Tuple[name: \"Other\", fields: Cons[Local[\"v\"], Nil]], Nil]]",
+        "Branch[condition: Cons[Tuple[name: \"None\", fields: Nil], Nil], consequence: []]",
+    ]);
+    let body = format!(
+        "Function[parameters: Nil, parameter: Top, result: [], annotations: Nil, body: Block[branches: {branches}]]"
+    );
+    quiver()
+        .with_modules(ir_module(&body))
+        .evaluate("f = %m{}; [f 1, f \"hi\", f <01>, f Nil]")
+        .expect("[Int, Hi, Other[<01>], None]");
+}
+
+#[test]
+fn test_expansion_names_are_hygienic() {
+    // The expansion's own binding is apart from the caller's `x`, which it cannot read...
+    quiver()
+        .with_modules(ir_module("Local[\"x\"]"))
+        .evaluate("x = 1; %m{}")
+        .expect_error_containing("Undefined variable");
+    // ...nor can the caller see the expansion's.
+    let branches = ir_list(&[
+        "Branch[condition: Cons[Match[value: 5, pattern: Bind[\"x\"]], Cons[Local[\"x\"], Nil]], consequence: []]",
+    ]);
+    quiver()
+        .with_modules(ir_module(&format!("Block[branches: {branches}]")))
+        .evaluate("x = 1; [%m{}, x]")
+        .expect("[5, 1]");
+    // A parameter or type variable must belong to one of the expansion's own functions.
+    quiver()
+        .with_modules(ir_module("Param[0]"))
+        .evaluate("f = #'int { %m{} }; f 1")
+        .expect_error_containing("outside a function of its own");
+    quiver()
+        .with_modules(ir_module(
+            "Function[parameters: Nil, parameter: Var[\"t\"], result: [], annotations: Nil, body: Param[0]]",
+        ))
+        .evaluate("f = #<'t>'t { %m{} }; f 1")
+        .expect_error_containing("outside a Function declaring it");
+}
+
+#[test]
+fn test_get_spread_and_apply_expansion() {
+    let pair = "Tuple[name: [], fields: Cons[Labeled[label: \"a\", value: 5], Cons[6, Nil]]]";
+    quiver()
+        .with_modules(ir_module(&format!("Get[of: {pair}, field: \"a\"]")))
+        .evaluate("%m{}")
+        .expect("5");
+    quiver()
+        .with_modules(ir_module(&format!("Get[of: {pair}, field: 1]")))
+        .evaluate("%m{}")
+        .expect("6");
+    // `#_ { t = $; P[...t, b: 2] }`
+    let body = "Function[parameters: Nil, parameter: Tuple[name: [], fields: Cons[Labeled[label: \"a\", value: Int], Nil]], result: [], annotations: Nil, body: Block[branches: Cons[Branch[condition: Cons[Match[value: Param[0], pattern: Bind[\"t\"]], Cons[Tuple[name: \"P\", fields: Cons[Spread[source: Local[\"t\"]], Cons[Labeled[label: \"b\", value: 2], Nil]]], Nil]], consequence: []], Nil]]]";
+    quiver()
+        .with_modules(ir_module(body))
+        .evaluate("f = %m{}; f [a: 1]")
+        .expect("P[a: 1, b: 2]");
+    quiver()
+        .with_modules(ir_module(
+            "Apply[callee: Member[module: \"num\", member: \"add\", arguments: Nil], arg: Tuple[name: [], fields: Cons[1, Cons[2, Nil]]]]",
+        ))
+        .evaluate("%m{}")
+        .expect("3");
+}
+
+#[test]
+fn test_expansion_scopes_keep_holes_to_the_caller() {
+    // Inside an expansion's own function a span cannot stand for per-call code.
+    let body = "Function[parameters: Nil, parameter: Int, result: [], annotations: Nil, body: Unquote[offset: 0, length: 1]]";
+    quiver()
+        .with_modules(ir_module(body))
+        .evaluate("g = #'bin { f = %m{$}; f 5 }; g <ff>")
+        .expect_error_containing("Unquote inside a Function");
+    // Inside its own block, a span still means the caller's: `~` is the dialect input.
+    let branches = ir_list(&[
+        "Branch[condition: Cons[Match[value: 1, pattern: 1], Nil], consequence: Cons[Unquote[offset: 0, length: 3], Nil]]",
+    ]);
+    quiver()
+        .with_modules(ir_module(&format!("Block[branches: {branches}]")))
+        .evaluate("[x: 9] ~> %m{~.x}")
+        .expect("9");
+    let branches = ir_list(&[
+        "Branch[condition: Cons[Match[value: 1, pattern: 1], Nil], consequence: Cons[Unquote[offset: 0, length: 1], Nil]]",
+    ]);
+    quiver()
+        .with_modules(ir_module(&format!("Block[branches: {branches}]")))
+        .evaluate("f = #'int { %m{$} }; f 4")
+        .expect("4");
+}
+
+#[test]
+fn test_expansion_types_are_hygienic() {
+    // A lowercase tuple name would inherit the caller's alias.
+    quiver()
+        .with_modules(ir_module(
+            "Function[parameters: Nil, parameter: Tuple[name: \"secret\", fields: Nil], result: [], annotations: Nil, body: Param[0]]",
+        ))
+        .evaluate("'secret = Hidden; f = %m{}; f Hidden")
+        .expect_error_containing("does not start with an uppercase letter");
+    // A generated type parameter never captures a caller's type of the same name.
+    quiver()
+        .with_modules(ir_module(
+            "Function[parameters: Cons[\"d\", Nil], parameter: Tuple[name: [], fields: Cons[Var[\"d\"], Cons[Named[module: \"str\", member: [], arguments: Nil], Nil]]], result: [], annotations: Nil, body: Param[0]]",
+        ))
+        .evaluate("'d = 'int; f = %m{}; f [<01>, \"x\"]")
+        .expect("[<01>, \"x\"]");
+    quiver()
+        .with_modules(ir_module(
+            "Function[parameters: Cons[\"t\", Cons[\"t\", Nil]], parameter: Top, result: [], annotations: Nil, body: Param[0]]",
+        ))
+        .evaluate("%m{}")
+        .expect_error_containing("twice");
+}
+
+#[test]
+fn test_function_results_bodies_and_type_arguments() {
+    // A stated result is checked, as one written would be.
+    quiver()
+        .with_modules(ir_module(
+            "Function[parameters: Nil, parameter: Int, result: Bin, annotations: Nil, body: Param[0]]",
+        ))
+        .evaluate("%m{}")
+        .expect_error_containing("Type mismatch");
+    // Any expression is a body.
+    quiver()
+        .with_modules(ir_module(
+            "Function[parameters: Nil, parameter: Int, result: [], annotations: Nil, body: 5]",
+        ))
+        .evaluate("f = %m{}; f 1")
+        .expect("5");
+    // A member applied with type arguments, as `%data.decode<'int>` would be.
+    quiver()
+        .with_modules(ir_module(
+            "Apply[callee: Member[module: \"data\", member: \"decode\", arguments: Cons[Int, Nil]], arg: \"42\"]",
+        ))
+        .evaluate("%m{}")
+        .expect("42");
+}
+
+#[test]
+fn test_labelled_node_without_its_label_is_an_error() {
+    // A node built with labels is read only by them: a misspelt label is no field, rather than
+    // the field at its position. (A dialect declaring `'%meta.expr` has it caught as a type
+    // error first; one answering `_` reaches the splicer.)
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["m".to_string()],
+        "d = #(content: _) -> _ { Get[of: Tuple[name: [], fields: Cons[1, Nil]], fild: 0] }
+         { :dialect d; Ok }"
+            .to_string(),
+    );
+    quiver()
+        .with_modules(modules)
+        .evaluate("%m{}")
+        .expect_error_containing("a Get without its `field`");
+}
+
+#[test]
+fn test_member_without_a_member_is_the_module() {
+    // `member: []` names the module's own value: `%ref` is a function.
+    quiver()
+        .with_modules(ir_module(
+            "Apply[callee: Member[module: \"ref\", member: [], arguments: Nil], arg: Tuple[name: [], fields: Nil]]",
+        ))
+        .evaluate("%m{} ~> { | ='ref => Ok | No }")
+        .expect("Ok");
+}
+
+#[test]
+fn test_deep_access_is_bounded() {
+    let base = "Tuple[name: [], fields: Cons[Labeled[label: \"a\", value: 1], Nil]]";
+    let deep = (0..10_000).fold(base.to_string(), |of, _| {
+        format!("Get[of: {of}, field: \"a\"]")
+    });
+    quiver()
+        .with_modules(ir_module(&deep))
+        .evaluate("%m{}")
+        .expect_error_containing("levels deep");
+}
+
+#[test]
+fn test_function_annotations_expansion() {
+    // `#'int { :note "n"; $ }`, with the note read back off the closure.
+    quiver()
+        .with_modules(ir_module(
+            "Function[parameters: Nil, parameter: Int, result: [], annotations: Cons[Annotation[key: \"note\", value: \"n\"], Nil], body: Param[0]]",
+        ))
+        .evaluate("f = %m{}; [f:note, f 3]")
+        .expect("[\"n\", 3]");
+    // An annotation is outside the function, so `Param` there has no function to reach.
+    quiver()
+        .with_modules(ir_module(
+            "Function[parameters: Nil, parameter: Int, result: [], annotations: Cons[Annotation[key: \"note\", value: Param[0]], Nil], body: Param[0]]",
+        ))
+        .evaluate("%m{}")
+        .expect_error_containing("outside a function of its own");
 }

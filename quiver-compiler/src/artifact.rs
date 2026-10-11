@@ -471,9 +471,21 @@ pub(crate) fn key_for_resolved(
     resolved.source.hash(&mut hasher);
 
     module_cache.key_stack.push(resolved.id.clone());
+    let mut closure = std::collections::HashSet::new();
     let mut resolvable = true;
     for (path, _) in &references {
-        match module_key(resolver, module_cache, &resolved.package, path, debug) {
+        let key = resolver
+            .resolve(&resolved.package, path)
+            .ok()
+            .and_then(|dependency| {
+                let key = key_for_resolved(resolver, module_cache, &dependency, debug)?;
+                if let Some(covered) = module_cache.key_closures.get(&dependency.id) {
+                    closure.extend(covered.iter().cloned());
+                }
+                closure.insert(dependency.id);
+                Some(key)
+            });
+        match key {
             Some(key) => {
                 path.hash(&mut hasher);
                 key.hash(&mut hasher);
@@ -491,6 +503,9 @@ pub(crate) fn key_for_resolved(
 
     let key = hasher.finish();
     module_cache.key_cache.insert(resolved.id.clone(), key);
+    module_cache
+        .key_closures
+        .insert(resolved.id.clone(), closure);
     Some(key)
 }
 

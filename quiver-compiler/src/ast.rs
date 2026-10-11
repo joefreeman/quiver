@@ -1,4 +1,5 @@
 use crate::parser::SourceSpan;
+use crate::resolver::PackageId;
 
 /// An optional source span attached to an AST node.
 ///
@@ -262,6 +263,9 @@ pub enum Term {
     /// expression tree it returns is spliced in place of this term. The flowing value is
     /// the expansion's input (like a block), referenced from the tree via `EFlow`.
     Dialect(Dialect),
+    /// A quote's hole, `` `name `` or `` `(chain) ``: inside `%meta{ … }`, the code computed
+    /// where the quote is written that stands here — a `'%meta.expr`. An error anywhere else.
+    Hole(Box<Chain>),
 }
 
 /// A dialect invocation (see [`Term::Dialect`]).
@@ -314,7 +318,7 @@ impl Term {
                 Some(
                     AccessSource::Identifier(_)
                         | AccessSource::Parameter { .. }
-                        | AccessSource::Import(_)
+                        | AccessSource::Import(..)
                         | AccessSource::Builtin(_)
                         | AccessSource::TailCall(_)
                         | AccessSource::Self_
@@ -546,8 +550,10 @@ pub enum AccessSource {
     /// since every spawn form glues its target to the sigil. Applying it sends to self
     /// (`@ x`).
     Self_,
-    /// Import like `%num` or `%mathx/vec`
-    Import(Vec<String>),
+    /// Import like `%num` or `%mathx/vec`, resolved in the package being compiled — or, for a
+    /// module an expansion names, in its dialect's package (`Some`), so that generated code
+    /// reaches the modules its author meant, whatever the caller's own modules are called.
+    Import(Vec<String>, Option<PackageId>),
     /// Builtin like `__integer_add__` — a globally-resolved callable, looked up in the builtin
     /// registry rather than the lexical scope.
     Builtin(String),
@@ -676,6 +682,8 @@ pub enum Match {
     /// matched, so there is nothing to bind), but may pin, test types, and nest anywhere a pattern
     /// can (`=A[b: \'int]`). `(\[] & x)` binds `x` while requiring it to be non-nil.
     Not(Box<Match>),
+    /// A quote's hole standing for a pattern, a `'%meta.pattern` (see [`Term::Hole`]).
+    Hole(Box<Chain>),
 }
 
 impl Match {
@@ -683,6 +691,8 @@ impl Match {
     pub fn contains_ripple(&self) -> bool {
         match self {
             Match::Ripple => true,
+            // A hole's chain is the quoting code's, not the pattern's.
+            Match::Hole(_) => false,
             Match::Tuple(tuple) => tuple
                 .fields
                 .iter()
@@ -745,7 +755,12 @@ pub enum Type {
         module: Vec<String>,
         member: Option<String>,
         arguments: Vec<Type>,
+        /// The package `module` resolves in, as for [`AccessSource::Import`]: `None` for the
+        /// one being compiled.
+        package: Option<PackageId>,
     },
+    /// A quote's hole standing for a type, a `'%meta.type` (see [`Term::Hole`]).
+    Hole(Box<Chain>),
     /// The enclosing module's own default type, written as a bare `'` (or `'<args>` to apply
     /// type arguments). The type-level counterpart of how other modules reach it as `'%mod`.
     SelfDefault {

@@ -1110,10 +1110,10 @@ round = #'opt {
 
 'dexpr = '%meta.expr
 
-d_add = #['dexpr, 'dexpr] { %meta.call2 ["add", $0, $1] }
-d_sub = #['dexpr, 'dexpr] { %meta.call2 ["sub", $0, $1] }
-d_mul = #['dexpr, 'dexpr] { %meta.call2 ["mul", $0, $1] }
-d_div = #['dexpr, 'dexpr] { %meta.call2 ["div", $0, $1] }
+d_add = #['dexpr, 'dexpr] { %meta.call2 ["num", "add", $0, $1] }
+d_sub = #['dexpr, 'dexpr] { %meta.call2 ["num", "sub", $0, $1] }
+d_mul = #['dexpr, 'dexpr] { %meta.call2 ["num", "mul", $0, $1] }
+d_div = #['dexpr, 'dexpr] { %meta.call2 ["num", "div", $0, $1] }
 
 // Operator parsers: leading whitespace, the symbol, yielding the combining function.
 d_add_op = {
@@ -1178,7 +1178,7 @@ d_number = #'%parse {
 
 // A generator's monomial `g¹`, as the literal `Tx[g, Cons[[1, 1], Nil]]`.
 d_tx = #'dexpr {
-  one = Tuple[name: Nil, fields: Cons[1, Cons[1, Nil]]]
+  one = Tuple[name: [], fields: Cons[1, Cons[1, Nil]]]
   Tuple[
     name: "Tx",
     fields: Cons[$, Cons[Tuple[name: "Cons", fields: Cons[one, Cons[Nil, Nil]]], Nil]],
@@ -1238,7 +1238,7 @@ d_factor_step = #[(self): ^, (term): '%parse.p<'dexpr>, (st): '%parse] -> (['dex
 
   n1 = %parse.right [%parse.byte [45, "'-'"], factor]
 
-  neg = %parse.map [n1, #{ Call[member: "neg", arg: $] }]
+  neg = %parse.map [n1, #{ %meta.call ["num", "neg", $] }]
 
   close = %parse.right [%parse.ws, %parse.byte [41, "')'"]]
 
@@ -1253,7 +1253,7 @@ d_factor_step = #[(self): ^, (term): '%parse.p<'dexpr>, (st): '%parse] -> (['dex
   power = %parse.then [atom, exponent] ~> %parse.map [
     ~,
     #{
-      | =[base, Some[x]] => %meta.call2 ["pow", base, x]
+      | =[base, Some[x]] => %meta.call2 ["num", "pow", base, x]
       | $0
     },
   ]

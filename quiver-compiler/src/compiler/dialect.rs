@@ -1,29 +1,26 @@
-//! Dialect expansion: converting the `'expr` value a dialect function returns into an AST
-//! term, spliced at the invocation site and type-checked there like ordinary code.
+//! Expansion: converting the `'%meta.expr` value a dialect function returns into an AST term,
+//! spliced at the invocation site and type-checked there like ordinary code.
 //!
-//! The IR is recognized structurally (`std/meta.qv` is its canonical Quiver-side
-//! definition). Plain data splices as itself — integers, binaries, `Str`s, and a bare
-//! `Nil` become the corresponding literals — and the named-tuple wrappers cover the rest:
+//! The IR is recognized structurally (`std/meta.qv` is its canonical Quiver-side definition,
+//! and documents each node). Plain data splices as itself — integers, binaries, `Str`s, and a
+//! bare `Nil` become the corresponding literals — and named tuples cover the rest: tuple
+//! construction (`Tuple`, with `Labeled` and `Spread` fields), calls (`Apply`, `Pipe`), names
+//! (`Ripple`, `Param`, `Local`, `Member`, `Get`), `Match`, `Block`, and `Function` literals, with
+//! patterns (`'%meta.pattern`) and types (`'%meta.type`) in their positions.
 //!
-//! - `Unquote[offset: 'int, length: 'int]` — a span of the content, parsed as one host
-//!   chain and spliced in the *caller's* scope (the only way an expansion can reach the
-//!   caller — and it can point solely at user-written text, so hygiene is by
-//!   construction). Bind-once: every hole evaluates exactly once, in content order,
-//!   with the dialect term's flowing value as its chain input; provably pure
-//!   single-term holes splice inline instead.
-//! - `Call[member: Str['bin], arg: ^]` — a call to a top-level export of the *dialect
-//!   module itself*, or of the module a `module: Str['bin]` field names (`"html"`,
-//!   `"html/live"`), which is how one module's emitter can be reused by another's
-//!   dialect. An `Unquote` argument is folded into the call's own hole, so the span is
-//!   spliced in **argument position** — the callee's parameter type reaches it, and a
-//!   tuple or `#{ … }` literal there elaborates exactly as at a handwritten call site
-//!   (omittable labels, `:defaults`, parameter inference). Bind-once then covers the
-//!   call as well as the span: two splices of one `Call` evaluate the member once.
-//! - `Tuple[name: (Nil | Str['bin]), fields: 'list<^ | Labeled[label: Str['bin], value: ^]>]`
-//!   — tuple construction (fields are bare expressions, positionally, unless wrapped in
-//!   `Labeled`, which exists only inside `fields`)
+//! One node reaches the caller. `Unquote[offset, length]` is a span of the content, parsed as one
+//! host chain and spliced in the *caller's* scope: bind-once, every hole
+//! evaluates exactly once, in content order, with the dialect term's flowing value as its chain
+//! input, and provably pure holes splice in place instead. An `Apply` of a module's member to an
+//! `Unquote` is folded into the span's own hole, so the span is spliced in **argument
+//! position**, where the callee's parameter type reaches it — as any `Apply`'s argument is.
+//!
+//! Everything else is the expansion's own, which is what keeps it hygienic: its bindings carry
+//! a prefix numbered per expansion, its functions' type parameters a suffix no written name
+//! can, `Param` reaches only its own functions, and tuple names are uppercase as written ones
+//! are.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use crate::ast;
 use crate::compiler::Error;
@@ -47,6 +44,19 @@ pub const RIPPLE_BINDING: &str = "~dialect-ripple";
 /// Prefix of the scope bindings holding evaluated `Unquote` holes (`~dialect-hole-0`,
 /// …). Unspellable, like [`RIPPLE_BINDING`].
 pub const HOLE_BINDING_PREFIX: &str = "~dialect-hole-";
+
+/// The prefix of the scope bindings the `expansion`-th expansion's own `Local`/`Bind` names
+/// become (`~meta-3-v`). Unspellable, like [`RIPPLE_BINDING`], so generated code can neither
+/// capture a caller's binding nor be captured by one, and numbered, so no two expansions share
+/// one.
+pub fn local_prefix(expansion: usize) -> String {
+    format!("~meta-{expansion}-")
+}
+
+/// The suffix a generated function's own type parameter carries (`'d#meta`), which no written
+/// name can, so a caller's type spliced into it never resolves to one. Displayed types drop
+/// it, as they drop the compiler's other `#` uniquifiers.
+const TYPE_PARAMETER_SUFFIX: &str = "#meta";
 
 /// Names of the prefix-parse callbacks passed to dialect functions in the context
 /// record. Registered only in the expansion executor's registry (see
@@ -141,23 +151,64 @@ pub fn content_span(
 /// twice shares one binding, so it evaluates once — and the chain that evaluates it into
 /// its `~dialect-hole-N` binding.
 pub struct Hole {
-    /// `(offset, length)` into the unescaped content, and the member the span is passed
-    /// to (empty when spliced bare): one span reaching two members is two holes.
-    key: (usize, usize, String),
+    /// `(offset, length)` into the unescaped content.
+    span: (usize, usize),
+    /// The member the span is passed to, when it is folded into one: one span reaching two
+    /// members is two holes.
+    callee: Option<CalleeKey>,
     terms: Vec<ast::Term>,
 }
 
-/// A resolved `Call` target: the access term to append, and its `module/path.member`
-/// spelling, which distinguishes holes over one span in [`Hole::key`].
+/// What identifies a callee among an expansion's holes: its access, apart from where it is
+/// written, so that two `Unquote`s of one span folded into one callee evaluate once.
+#[derive(PartialEq)]
+struct CalleeKey {
+    source: Option<ast::AccessSource>,
+    accessors: Vec<ast::AccessPath>,
+    type_arguments: Vec<ast::Type>,
+}
+
+/// An `Apply`'s callee: the access to apply.
 struct Callee {
     access: ast::Access,
-    key: String,
 }
 
 impl Callee {
-    /// `f ~`: the member applied to the chain's flowing value. A `Call` puts its argument
-    /// chain first, so the call is written as a juxtaposition onto `~` — the piped
-    /// spelling of `f arg`, and the only thing that calls.
+    fn new(access: ast::Access) -> Self {
+        Callee { access }
+    }
+
+    fn key(&self) -> CalleeKey {
+        CalleeKey {
+            source: self.access.source.clone(),
+            accessors: self.access.accessors.clone(),
+            type_arguments: self.access.type_arguments.clone(),
+        }
+    }
+
+    /// Whether the callee is a module's member, which is in scope wherever the expansion is.
+    fn is_member(&self) -> bool {
+        matches!(self.access.source, Some(ast::AccessSource::Import(..)))
+    }
+
+    /// The callee applied to the argument `chain` leaves: `f arg` when the argument is one
+    /// term, in argument position (where the callee's parameter type reaches it — omittable
+    /// labels, defaults, an inferred parameter — as at a written call), and `arg ~> f ~`
+    /// otherwise.
+    fn apply(self, mut argument: ast::Chain) -> ast::Chain {
+        if argument.binding.is_none()
+            && let [term] = argument.terms.as_slice()
+            && !matches!(term, ast::Term::Match(_))
+        {
+            let term = argument.terms.pop().expect("one term");
+            return term_chain(ast::Term::Apply(self.access, Box::new(term)));
+        }
+        argument.terms.push(self.applied());
+        argument
+    }
+
+    /// `f ~`: the callee applied to the chain's flowing value — the piped spelling of
+    /// `f arg`, and the only thing that calls.
     fn applied(self) -> ast::Term {
         let span = self.access.span;
         ast::Term::Apply(
@@ -195,7 +246,8 @@ pub fn wrap_expansion(mut holes: Vec<Hole>, expansion: ast::Chain) -> ast::Term 
         assertions: Vec::new(),
     };
     let mut chains = vec![binder];
-    holes.sort_by(|a, b| a.key.cmp(&b.key));
+    // In content order; a stable sort, so holes over one span keep the order they were met in.
+    holes.sort_by_key(|hole| hole.span);
     chains.extend(holes.into_iter().map(|hole| ast::Chain {
         binding: None,
         binding_span: ast::Spanned::default(),
@@ -214,24 +266,53 @@ pub fn wrap_expansion(mut holes: Vec<Hole>, expansion: ast::Chain) -> ast::Term 
     })
 }
 
-/// Converts `'expr` values into AST chains for one dialect invocation.
-pub struct Splicer<'a, F: Fn(&Binary) -> Option<Vec<u8>>> {
-    pub program: &'a Program,
-    /// Reads a binary's bytes from the program's constants or the expansion executor's heap.
-    pub read_binary: F,
-    /// The dialect module, for the error messages and `ECall` member resolution.
-    pub module: String,
-    pub path: Vec<String>,
-    /// The invocation, for the call-site span stamped onto synthesized references (so
-    /// unresolved-`Var` and ill-typed-`Call` errors point at it) and for mapping
-    /// `Unquote` span offsets to file positions.
+/// A dialect invocation's brace content, which `Unquote` spans index into.
+pub struct Content<'a> {
+    /// The invocation, for mapping `Unquote` span offsets to file positions.
     pub dialect: &'a ast::Dialect,
-    /// The unescaped brace content `Unquote` spans index into, with the escape positions
-    /// recorded by [`unescape_content`].
-    pub content: &'a str,
+    /// The unescaped brace content, with the escape positions recorded by
+    /// [`unescape_content`].
+    pub text: &'a str,
     pub escapes: &'a [usize],
+}
+
+/// The dialect an expansion is from.
+pub struct Expander {
+    /// As written at the invocation, for messages: `%json`.
+    pub name: String,
+    /// The package of the dialect's module, which the modules its expansion names resolve in.
+    pub package: crate::resolver::PackageId,
+    /// The invocation's span, stamped onto synthesized references (so unresolved-name and
+    /// ill-typed-call errors point at it).
+    pub span: ast::Spanned,
+}
+
+impl Expander {
+    pub fn error(&self, message: &str) -> Error {
+        Error::DialectFailed {
+            module: self.name.clone(),
+            message: message.to_string(),
+        }
+    }
+}
+
+/// Converts `'%meta.expr` values into AST chains for one dialect invocation.
+pub struct Splicer<'a> {
+    program: &'a Program,
+    expander: &'a Expander,
+    /// The invocation's content, which `Unquote` reads.
+    content: Content<'a>,
+    /// The prefix of this expansion's own bindings (see [`local_prefix`]).
+    locals: String,
     /// `Unquote` holes collected while walking the returned IR (bind-once).
-    pub holes: RefCell<Vec<Hole>>,
+    holes: RefCell<Vec<Hole>>,
+    /// The type parameters of the expansion's function literals enclosing the node being
+    /// spliced, innermost last: the parameters `Param[depth]` may reach, and the names
+    /// `Var[name]` may.
+    functions: RefCell<Vec<Vec<String>>>,
+    /// How many of the expansion's own blocks and functions enclose the node being spliced:
+    /// inside one, `$`, `~` and type parameters mean the expansion's, not the caller's.
+    scopes: Cell<usize>,
 }
 
 /// One entry of [`Splicer::value_to_chain`]'s work stack. `Visit` expands a value; the other
@@ -240,13 +321,21 @@ pub struct Splicer<'a, F: Fn(&Binary) -> Option<Vec<u8>>> {
 enum Step<'v> {
     /// Expand this value, which sits `depth` levels below the expansion's root.
     Visit(&'v Value, usize),
-    /// Build a tuple from the last `labels.len()` chains.
+    /// Build a tuple from its slots, taking each `Chain` slot's value from the chains left
+    /// behind, in order.
     Tuple {
         name: ast::TupleName,
-        labels: Vec<Option<String>>,
+        slots: Vec<Slot>,
     },
     /// Append a call to the chain the argument left.
     Apply(Callee),
+}
+
+/// One field of a `Tuple` being built: a labelled or positional value, whose chain its visit
+/// leaves behind, or a spread of an access path.
+enum Slot {
+    Chain(Option<String>),
+    Spread(ast::Access),
 }
 
 /// How deeply a dialect's expansion may nest.
@@ -263,55 +352,93 @@ enum Step<'v> {
 /// A flat literal is unaffected however wide it is: `[1, …, 1000]` is one level and one type.
 const MAX_EMISSION_DEPTH: usize = 256;
 
-impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
+impl<'a> Splicer<'a> {
+    /// A splicer for one expansion of `content`, its own bindings prefixed `locals`.
+    pub fn new(
+        program: &'a Program,
+        expander: &'a Expander,
+        content: Content<'a>,
+        locals: String,
+    ) -> Self {
+        Splicer {
+            program,
+            expander,
+            content,
+            locals,
+            holes: RefCell::new(Vec::new()),
+            functions: RefCell::new(Vec::new()),
+            scopes: Cell::new(0),
+        }
+    }
+
+    /// The `Unquote` holes collected while splicing (for [`wrap_expansion`]).
+    pub fn finish(self) -> Vec<Hole> {
+        self.holes.into_inner()
+    }
+
     /// Convert the `'expr` value a dialect function returned into a chain to splice at the
     /// invocation site.
     pub fn value_to_chain(&self, value: &Value) -> Result<ast::Chain, Error> {
+        self.chain_at(value, 0)
+    }
+
+    /// The chain for an expression `depth` levels below the expansion's root.
+    fn chain_at(&self, value: &Value, depth: usize) -> Result<ast::Chain, Error> {
         // Driven by an explicit stack rather than by recursion. A dialect's expansion is as
         // deep as its output is long — `%list{ … }` returns a `Cons` spine with one level
         // per element — so recursing per node would put the native stack, not the language,
-        // in charge of how long a literal may be.
-        let mut steps = vec![Step::Visit(value, 0)];
+        // in charge of how long a literal may be. The nodes that hold sequences, patterns
+        // and types (`Block`, `Function`, `Match`) recurse, as the nesting written into code
+        // is bounded by the same depth.
+        let mut steps = vec![Step::Visit(value, depth)];
         let mut done: Vec<ast::Chain> = Vec::new();
         while let Some(step) = steps.pop() {
             match step {
                 Step::Visit(value, depth) => {
-                    if depth > MAX_EMISSION_DEPTH {
-                        return Err(self.error(&format!(
-                            "returned an expansion nesting more than {MAX_EMISSION_DEPTH} levels \
-                             deep. A list-shaped expansion nests once per element, and each \
-                             level costs a type of its own — build a long list at run time \
-                             instead of writing it as one literal"
-                        )));
-                    }
+                    self.check_depth(depth)?;
                     self.visit(value, depth, &mut steps, &mut done)?
                 }
-                Step::Tuple { name, labels } => {
-                    // The fields were pushed in order, so they are the last `labels.len()`
-                    // results and are already in the right order.
-                    let fields = done
-                        .split_off(done.len() - labels.len())
+                Step::Tuple { name, slots } => {
+                    // The fields were pushed in order, so their chains are the last results,
+                    // already in the right order.
+                    let chains = slots
+                        .iter()
+                        .filter(|slot| matches!(slot, Slot::Chain(_)))
+                        .count();
+                    let mut chains = done.split_off(done.len() - chains).into_iter();
+                    let fields = slots
                         .into_iter()
-                        .zip(labels)
-                        .map(|(chain, name)| ast::TupleField {
-                            name,
-                            name_span: ast::Spanned::default(),
-                            span: ast::Spanned::default(),
-                            value: ast::FieldValue::Chain(chain),
+                        .map(|slot| {
+                            let (name, value) = match slot {
+                                Slot::Chain(name) => (
+                                    name,
+                                    ast::FieldValue::Chain(
+                                        chains.next().expect("a chain per chain slot"),
+                                    ),
+                                ),
+                                Slot::Spread(access) => {
+                                    (None, ast::FieldValue::Spread(Some(access)))
+                                }
+                            };
+                            ast::TupleField {
+                                name,
+                                name_span: ast::Spanned::default(),
+                                span: ast::Spanned::default(),
+                                value,
+                            }
                         })
                         .collect();
                     done.push(term_chain(ast::Term::Tuple(ast::Tuple {
                         name,
                         fields,
-                        span: self.dialect.span,
+                        span: self.expander.span,
                         // A dialect emits tuples structurally; punning is a source spelling only.
                         punned: false,
                     })));
                 }
                 Step::Apply(callee) => {
-                    let mut chain = done.pop().expect("a Call's argument leaves its chain");
-                    chain.terms.push(callee.applied());
-                    done.push(chain);
+                    let argument = done.pop().expect("an Apply's argument leaves its chain");
+                    done.push(callee.apply(argument));
                 }
             }
         }
@@ -342,7 +469,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 return Ok(());
             }
             Value::Binary(binary) => {
-                let bytes = (self.read_binary)(binary)
+                let bytes = binary_bytes(self.program, binary)
                     .ok_or_else(|| self.error("returned an unreadable binary"))?;
                 done.push(term_chain(ast::Term::Literal(ast::Literal::Binary(
                     ast::BinaryLiteral::ungrouped(bytes),
@@ -367,23 +494,53 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 done.push(term_chain(ast::Term::Tuple(ast::Tuple {
                     name: ast::TupleName::Named("Nil".to_string()),
                     fields: vec![],
-                    span: self.dialect.span,
+                    span: self.expander.span,
                     punned: false,
                 })));
                 Ok(())
             }
-            "Unquote" => {
-                let (offset, length) = self.unquote_span(value)?;
-                done.push(self.unquote(offset, length, None)?);
+            "Ripple" if fields.is_empty() => {
+                done.push(term_chain(ast::Term::Access(
+                    self.access_from(ast::AccessSource::Ripple),
+                )));
                 Ok(())
             }
-            "Call" => {
-                let callee = self.callee(value)?;
-                let arg = self.field(value, "Call", &["arg"], 1)?;
-                // An `Unquote` argument folds into the call: the span is spliced as the
-                // callee's argument rather than bound first and piped in, so it compiles
-                // against the parameter type.
-                if let Some((offset, length)) = self.as_unquote(arg)? {
+            "Param" | "Local" | "Member" => {
+                done.push(term_chain(ast::Term::Access(self.access(value, depth)?)));
+                Ok(())
+            }
+            "Get" => {
+                let of = self.field(value, "Get", &["of"], 0)?;
+                let accessor = self.accessor(self.field(value, "Get", &["field"], 1)?)?;
+                // A field of a name is read through the name's own accessors, which is what
+                // a spread or a callee needs; any other value is read as it flows on.
+                if self.is_access(of, depth + 1)? {
+                    let mut access = self.access(of, depth + 1)?;
+                    access.accessors.push(accessor);
+                    access.accessor_spans.push(ast::Spanned::default());
+                    done.push(term_chain(ast::Term::Access(access)));
+                } else {
+                    let mut chain = self.chain_at(of, depth + 1)?;
+                    let mut access = self.access_from(ast::AccessSource::Ripple);
+                    access.accessors.push(accessor);
+                    access.accessor_spans.push(ast::Spanned::default());
+                    chain.terms.push(ast::Term::Access(access));
+                    done.push(chain);
+                }
+                Ok(())
+            }
+            "Apply" => {
+                let callee = Callee::new(
+                    self.access(self.field(value, "Apply", &["callee"], 0)?, depth + 1)?,
+                );
+                let arg = self.field(value, "Apply", &["arg"], 1)?;
+                // A module member's `Unquote` argument folds into the call: the span is spliced
+                // as the member's argument rather than bound first and passed in, so it
+                // compiles against the parameter type. (A member is in scope wherever the span
+                // is evaluated; the expansion's own names are not yet.)
+                if callee.is_member()
+                    && let Some((offset, length)) = self.as_unquote(arg)?
+                {
                     done.push(self.unquote(offset, length, Some(callee))?);
                     return Ok(());
                 }
@@ -392,12 +549,66 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 steps.push(Step::Visit(arg, depth + 1));
                 Ok(())
             }
+            "Pipe" => {
+                // `value ~> into`: the chain the value left, carried on by `into`'s terms.
+                let mut chain =
+                    self.chain_at(self.field(value, "Pipe", &["value"], 0)?, depth + 1)?;
+                let into = self.chain_at(self.field(value, "Pipe", &["into"], 1)?, depth + 1)?;
+                chain.terms.extend(into.terms);
+                done.push(chain);
+                Ok(())
+            }
+            "Match" => {
+                let scrutinee = self.field(value, "Match", &["value"], 0)?;
+                let pattern =
+                    self.pattern(self.field(value, "Match", &["pattern"], 1)?, depth + 1)?;
+                // A match of the flowing value is written alone, `=P`, as it is matched.
+                let chain = if self.is_ripple(scrutinee)? {
+                    term_chain(ast::Term::Match(pattern))
+                } else {
+                    let mut chain = self.chain_at(scrutinee, depth + 1)?;
+                    chain.terms.push(ast::Term::Match(pattern));
+                    chain
+                };
+                done.push(chain);
+                Ok(())
+            }
+            "Block" => {
+                done.push(term_chain(ast::Term::Block(self.block(value, depth)?)));
+                Ok(())
+            }
+            "Function" => {
+                done.push(term_chain(ast::Term::Function(
+                    self.function(value, depth)?,
+                )));
+                Ok(())
+            }
+            "Unquote" => {
+                let (offset, length) = self.unquote_span(value)?;
+                done.push(self.unquote(offset, length, None)?);
+                Ok(())
+            }
             "Tuple" => {
                 let name = self.tuple_name(self.field(value, "Tuple", &["name"], 0)?)?;
                 let entries =
                     self.tuple_field_entries(self.field(value, "Tuple", &["fields"], 1)?)?;
-                let (labels, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-                steps.push(Step::Tuple { name, labels });
+                let mut slots = Vec::with_capacity(entries.len());
+                let mut values = Vec::new();
+                for (label, entry) in entries {
+                    match self.spread_source(entry)? {
+                        Some(source) => {
+                            if label.is_some() {
+                                return Err(self.error("returned a labelled Spread"));
+                            }
+                            slots.push(Slot::Spread(self.access(source, depth + 1)?));
+                        }
+                        None => {
+                            slots.push(Slot::Chain(label));
+                            values.push(entry);
+                        }
+                    }
+                }
+                steps.push(Step::Tuple { name, slots });
                 // Reversed, so the stack hands them back in field order.
                 steps.extend(
                     values
@@ -414,6 +625,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
             "" if fields.is_empty() => {
                 Err(self.error("returned nil where a '%meta.expr was expected"))
             }
+            "Hole" => Err(self.hole_returned()),
             other => Err(self.error(&format!("returned {other}[…], which is not a '%meta.expr"))),
         }
     }
@@ -425,7 +637,7 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
     /// see [`splices_in_place`] — splice there instead; anything else becomes a
     /// `~dialect-hole-N` binding, deduplicated by span.
     ///
-    /// `callee` is the member of a `Call` whose argument this span is: it is appended to
+    /// `callee` is the member of an `Apply` whose argument this span is: it is appended to
     /// the span's own chain, so the span sits in argument position (typed by the callee's
     /// parameter) and the call joins the span inside the binding — one evaluation of both.
     fn unquote(
@@ -434,8 +646,9 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
         length: usize,
         callee: Option<Callee>,
     ) -> Result<ast::Chain, Error> {
+        let content = &self.content;
         let text = (length > 0)
-            .then(|| self.content.get(offset..offset + length))
+            .then(|| content.text.get(offset..offset + length))
             .flatten()
             .ok_or_else(|| {
                 self.error(&format!(
@@ -451,8 +664,8 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 .span
                 .map_or((0, length), |span| (span.offset, span.length));
             match content_span(
-                self.dialect,
-                self.escapes,
+                content.dialect,
+                content.escapes,
                 offset + error_offset,
                 error_length,
             ) {
@@ -463,10 +676,19 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                 None => error,
             }
         })?;
-        self.remap_chain_spans(&mut chain, offset);
+        self.remap_chain_spans(content, &mut chain, offset);
 
+        if !self.functions.borrow().is_empty() {
+            return Err(self.error(
+                "returned an Unquote inside a Function: a span is evaluated once, when the \
+                 expansion is entered, so it cannot stand for code run on each call",
+            ));
+        }
+        let scoped = self.scopes.get() > 0;
         let (ripple, pure) = match &chain.terms[..] {
-            [term] if chain.binding.is_none() => (term.is_bare_ripple(), splices_in_place(term)),
+            [term] if chain.binding.is_none() => {
+                (term.is_bare_ripple(), splices_in_place(term, scoped))
+            }
             _ => (false, false),
         };
         if ripple || pure {
@@ -481,20 +703,18 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
             return Ok(spliced);
         }
 
-        let key = (
-            offset,
-            length,
-            callee
-                .as_ref()
-                .map_or(String::new(), |callee| callee.key.clone()),
-        );
+        let span = (offset, length);
+        let callee_key = callee.as_ref().map(Callee::key);
         let mut holes = self.holes.borrow_mut();
-        let index = match holes.iter().position(|hole| hole.key == key) {
+        let index = match holes
+            .iter()
+            .position(|hole| hole.span == span && hole.callee == callee_key)
+        {
             Some(index) => index,
             None => {
                 // The hole runs as a block applied to the ripple binding, so its chain
                 // input — and hence `~` — is the dialect term's flowing value, and any
-                // bindings it makes stay local to it. A `Call`'s member is applied inside
+                // bindings it makes stay local to it. An `Apply`'s member is applied inside
                 // the block, leaving the span in argument position.
                 if let Some(callee) = callee {
                     chain.terms.push(callee.applied());
@@ -513,7 +733,11 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
                         ast::Spanned::default(),
                     )),
                 ];
-                holes.push(Hole { key, terms });
+                holes.push(Hole {
+                    span,
+                    callee: callee_key,
+                    terms,
+                });
                 holes.len() - 1
             }
         };
@@ -526,39 +750,586 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
     /// positions, via the hole's content offset and the escape positions. Without a
     /// content span (synthetic input), spans are cleared rather than left pointing into
     /// the wrong file.
-    fn remap_chain_spans(&self, chain: &mut ast::Chain, hole_offset: usize) {
-        let base = self.dialect.content_span.get();
-        walk_chain_spans(chain, &mut |spanned: &mut ast::Spanned| {
-            spanned.0 = match (base, spanned.0) {
-                (Some(base), Some(span)) => Some(self.remap_span(span, hole_offset, base)),
-                _ => None,
+    fn remap_chain_spans(&self, content: &Content, chain: &mut ast::Chain, hole_offset: usize) {
+        remap_spans(content, chain, hole_offset);
+    }
+
+    fn check_depth(&self, depth: usize) -> Result<(), Error> {
+        if depth > MAX_EMISSION_DEPTH {
+            return Err(self.error(&format!(
+                "returned an expansion nesting more than {MAX_EMISSION_DEPTH} levels \
+                 deep. A list-shaped expansion nests once per element, and each \
+                 level costs a type of its own — build a long list at run time \
+                 instead of writing it as one literal"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether an expression is `Ripple`, the flowing value.
+    fn is_ripple(&self, value: &Value) -> Result<bool, Error> {
+        Ok(matches!(value, Value::Tuple(..)) && self.expect_tuple(value)? == ("Ripple", &[][..]))
+    }
+
+    /// The scope binding a `Local`/`Bind` name stands for.
+    fn local(&self, name: &str) -> String {
+        format!("{}{name}", self.locals)
+    }
+
+    /// A `Local`'s or `Bind`'s name, which must be one a variable could have.
+    fn variable(&self, value: &Value, node: &str) -> Result<String, Error> {
+        let name = self.str_field(value, node, &["name"], 0)?;
+        if !is_variable_name(&name) {
+            return Err(self.error(&format!(
+                "returned {node}[\"{name}\"], which is not a variable name"
+            )));
+        }
+        Ok(name)
+    }
+
+    /// Run `f` inside one of the expansion's own blocks or functions.
+    fn scoped<R>(&self, f: impl FnOnce() -> R) -> R {
+        self.scopes.set(self.scopes.get() + 1);
+        let result = f();
+        self.scopes.set(self.scopes.get() - 1);
+        result
+    }
+
+    /// Whether an expression is a name an access can stand for: `Ripple`, `Param`, `Local`,
+    /// `Member`, or a `Get` of one.
+    fn is_access(&self, value: &Value, depth: usize) -> Result<bool, Error> {
+        self.check_depth(depth)?;
+        let Value::Tuple(tuple_id, _) = value else {
+            return Ok(false);
+        };
+        match self
+            .program
+            .lookup_tuple(*tuple_id)
+            .and_then(|info| info.name.as_deref())
+        {
+            Some("Param" | "Local" | "Member") => Ok(true),
+            Some("Ripple") => self.is_ripple(value),
+            Some("Get") => self.is_access(self.field(value, "Get", &["of"], 0)?, depth + 1),
+            _ => Ok(false),
+        }
+    }
+
+    /// The access a name expression stands for (see [`Self::is_access`]).
+    fn access(&self, value: &Value, depth: usize) -> Result<ast::Access, Error> {
+        self.check_depth(depth)?;
+        match self.expect_tuple(value)?.0 {
+            "Ripple" if self.is_ripple(value)? => Ok(self.access_from(ast::AccessSource::Ripple)),
+            "Param" => {
+                let parameter = self.int_field(value, "Param", &["depth"], 0)?;
+                if parameter >= self.functions.borrow().len() {
+                    return Err(self.error(&format!(
+                        "returned Param[{parameter}] outside a function of its own that deep: \
+                         an expansion reaches only its own functions' parameters"
+                    )));
+                }
+                Ok(self.access_from(ast::AccessSource::Parameter { depth: parameter }))
+            }
+            "Local" => {
+                let name = self.variable(value, "Local")?;
+                Ok(self.access_from(ast::AccessSource::Identifier(self.local(&name))))
+            }
+            "Member" => {
+                let module = self.str_field(value, "Member", &["module"], 0)?;
+                let mut access = self.access_from(self.import(&module));
+                // `member: []` is the module's own value.
+                let member = self.field(value, "Member", &["member"], 1)?;
+                if !member.is_nil() {
+                    let member = self.str_bytes_to_string(self.str_bytes(member, "Member")?)?;
+                    access.accessors.push(ast::AccessPath::Field(member));
+                    access.accessor_spans.push(ast::Spanned::default());
+                }
+                access.type_arguments = self
+                    .list(
+                        self.field(value, "Member", &["arguments"], 2)?,
+                        "Member arguments",
+                    )?
+                    .into_iter()
+                    .map(|argument| self.type_expr(argument, depth + 1))
+                    .collect::<Result<_, Error>>()?;
+                Ok(access)
+            }
+            "Get" => {
+                let mut access = self.access(self.field(value, "Get", &["of"], 0)?, depth + 1)?;
+                access
+                    .accessors
+                    .push(self.accessor(self.field(value, "Get", &["field"], 1)?)?);
+                access.accessor_spans.push(ast::Spanned::default());
+                Ok(access)
+            }
+            other => Err(self.error(&format!(
+                "returned {other}[…] where a name (Ripple, Param, Local, Member, or a Get of \
+                 one) was expected"
+            ))),
+        }
+    }
+
+    /// A pin's target: a `Local` or a `Param`, or a `Get` of one.
+    fn pin(&self, value: &Value, depth: usize) -> Result<ast::PinTarget, Error> {
+        let access = self.access(value, depth)?;
+        let root = match access.source {
+            Some(ast::AccessSource::Identifier(name)) => ast::PinRoot::Variable(name),
+            Some(ast::AccessSource::Parameter { depth }) => ast::PinRoot::Parameter { depth },
+            _ => {
+                return Err(self.unexpected("a name to pin (Local, Param, or a Get of one)", value));
+            }
+        };
+        Ok(ast::PinTarget {
+            root,
+            accessors: access.accessors,
+            accessor_spans: access.accessor_spans,
+            base_span: access.base_span,
+            span: access.span,
+        })
+    }
+
+    /// A `Get`'s field: a label, or a position.
+    fn accessor(&self, value: &Value) -> Result<ast::AccessPath, Error> {
+        match value {
+            Value::Int(index) if *index >= 0 => Ok(ast::AccessPath::Index(*index as usize)),
+            _ => Ok(ast::AccessPath::Field(
+                self.str_bytes_to_string(self.str_bytes(value, "Get field")?)?,
+            )),
+        }
+    }
+
+    /// The source of a `Spread[source]` tuple entry, or `None` for any other entry.
+    fn spread_source<'v>(&self, value: &'v Value) -> Result<Option<&'v Value>, Error> {
+        match value {
+            Value::Tuple(tuple_id, _)
+                if self
+                    .program
+                    .lookup_tuple(*tuple_id)
+                    .is_some_and(|info| info.name.as_deref() == Some("Spread")) =>
+            {
+                Ok(Some(self.field(value, "Spread", &["source"], 0)?))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `Block[branches: list<Branch[condition: list<expr>, consequence: (list<expr> | [])]>]`,
+    /// `[]` for a branch without a consequence.
+    fn block(&self, value: &Value, depth: usize) -> Result<ast::Block, Error> {
+        self.scoped(|| self.block_branches(value, depth))
+    }
+
+    fn block_branches(&self, value: &Value, depth: usize) -> Result<ast::Block, Error> {
+        let branches = self
+            .list(
+                self.field(value, "Block", &["branches"], 0)?,
+                "Block branches",
+            )?
+            .into_iter()
+            .map(|branch| {
+                if self.expect_tuple(branch)?.0 != "Branch" {
+                    return Err(self.unexpected("a Branch", branch));
+                }
+                let condition =
+                    self.sequence(self.field(branch, "Branch", &["condition"], 0)?, depth)?;
+                let consequence = self.field(branch, "Branch", &["consequence"], 1)?;
+                let consequence = match consequence.is_nil() {
+                    true => None,
+                    false => Some(self.sequence(consequence, depth)?),
+                };
+                Ok(ast::Branch {
+                    condition,
+                    consequence,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        if branches.is_empty() {
+            return Err(self.error("returned a Block with no branches"));
+        }
+        Ok(ast::Block {
+            annotations: vec![],
+            branches,
+        })
+    }
+
+    /// A list of expressions as a sequence, each its own step.
+    fn sequence(&self, value: &Value, depth: usize) -> Result<ast::Sequence, Error> {
+        let steps = self.list(value, "sequence")?;
+        if steps.is_empty() {
+            return Err(self.error("returned an empty sequence of steps"));
+        }
+        Ok(ast::Sequence::from_chains(
+            steps
+                .into_iter()
+                .map(|step| self.chain_at(step, depth + 1))
+                .collect::<Result<Vec<_>, Error>>()?,
+        ))
+    }
+
+    /// `Function[parameters: list<Str>, parameter: type, result: type, body: expr]`, its result
+    /// inferred when the node gives none. A `Block` body is the function's own braces; any other
+    /// expression is its one step.
+    fn function(&self, value: &Value, depth: usize) -> Result<ast::Function, Error> {
+        let parameters = self
+            .list(
+                self.field(value, "Function", &["parameters"], 0)?,
+                "Function parameters",
+            )?
+            .into_iter()
+            .map(|name| self.str_bytes_to_string(self.str_bytes(name, "Function parameters")?))
+            .collect::<Result<Vec<_>, Error>>()?;
+        for (index, name) in parameters.iter().enumerate() {
+            if !is_type_parameter_name(name) {
+                return Err(self.error(&format!(
+                    "returned a Function with the type parameter \"{name}\", which is not a name"
+                )));
+            }
+            if parameters[..index].contains(name) {
+                return Err(self.error(&format!(
+                    "returned a Function declaring the type parameter \"{name}\" twice"
+                )));
+            }
+        }
+        // An annotation's value is evaluated where the closure is made, outside the function,
+        // so it is lowered before the function's own scope is entered.
+        let annotations = self
+            .list(
+                self.field(value, "Function", &["annotations"], 3)?,
+                "Function annotations",
+            )?
+            .into_iter()
+            .map(|annotation| {
+                if self.expect_tuple(annotation)?.0 != "Annotation" {
+                    return Err(self.unexpected("an Annotation", annotation));
+                }
+                Ok(ast::Annotation {
+                    name: self.str_field(annotation, "Annotation", &["key"], 0)?,
+                    name_span: ast::Spanned::default(),
+                    span: ast::Spanned::default(),
+                    value: self.chain_at(
+                        self.field(annotation, "Annotation", &["value"], 1)?,
+                        depth + 1,
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        self.functions.borrow_mut().push(parameters.clone());
+        let lowered = self.scoped(|| {
+            let parameter_type =
+                self.type_expr(self.field(value, "Function", &["parameter"], 1)?, depth + 1)?;
+            let result = self.field(value, "Function", &["result"], 2)?;
+            let result_type = match result.is_nil() {
+                true => None,
+                false => Some(self.type_expr(result, depth + 1)?),
             };
+            let body = self.field(value, "Function", &["body"], 4)?;
+            let is_block =
+                matches!(body, Value::Tuple(..)) && self.expect_tuple(body)?.0 == "Block";
+            let body = if is_block {
+                self.block(body, depth + 1)?
+            } else {
+                ast::Block {
+                    annotations: vec![],
+                    branches: vec![ast::Branch {
+                        condition: ast::Sequence::from_chains([self.chain_at(body, depth + 1)?]),
+                        consequence: None,
+                    }],
+                }
+            };
+            Ok((parameter_type, result_type, body))
         });
+        self.functions.borrow_mut().pop();
+        let (parameter_type, return_type, mut body) = lowered?;
+        body.annotations = annotations;
+        Ok(ast::Function {
+            type_parameters: parameters
+                .iter()
+                .map(|name| ast::TypeParameter {
+                    name: format!("{name}{TYPE_PARAMETER_SUFFIX}"),
+                    bound: None,
+                })
+                .collect(),
+            parameter_type: Some(parameter_type),
+            return_type,
+            body: Some(body),
+            span: self.expander.span,
+        })
     }
 
-    fn remap_span(&self, span: SourceSpan, hole_offset: usize, base: SourceSpan) -> SourceSpan {
-        content_span(
-            self.dialect,
-            self.escapes,
-            hole_offset + span.offset,
-            span.length,
-        )
-        .unwrap_or(base)
+    /// A pattern: a literal (integer, binary, `Str`, `Nil`), `Tuple[name, fields]` of patterns,
+    /// `Bind[name]`, `Any`, `Ripple`, `Not[p]`, `And[ps]`, `Or[ps]` or `Is[type]`.
+    fn pattern(&self, value: &Value, depth: usize) -> Result<ast::Match, Error> {
+        self.check_depth(depth)?;
+        match value {
+            Value::Int(int) => {
+                return Ok(ast::Match::Literal(ast::Literal::Integer(
+                    num_bigint::BigInt::from(*int),
+                )));
+            }
+            Value::BigInt(big) => {
+                return Ok(ast::Match::Literal(ast::Literal::Integer((**big).clone())));
+            }
+            Value::Binary(binary) => {
+                let bytes = binary_bytes(self.program, binary)
+                    .ok_or_else(|| self.error("returned an unreadable binary"))?;
+                return Ok(ast::Match::Literal(ast::Literal::Binary(
+                    ast::BinaryLiteral::ungrouped(bytes),
+                )));
+            }
+            _ => {}
+        }
+        let (name, fields) = self.expect_tuple(value)?;
+        let parts = |label: &str| -> Result<Vec<ast::Match>, Error> {
+            self.list(self.field(value, label, &[], 0)?, label)?
+                .into_iter()
+                .map(|part| self.pattern(part, depth + 1))
+                .collect()
+        };
+        Ok(match name {
+            "Str" => ast::Match::String(ast::StringStyle::Single, self.str_bytes(value, "Str")?),
+            "Nil" if fields.is_empty() => ast::Match::Tuple(ast::MatchTuple {
+                name: Some("Nil".to_string()),
+                fields: vec![],
+            }),
+            "Tuple" => {
+                let name = match self.tuple_name(self.field(value, "Tuple", &["name"], 0)?)? {
+                    ast::TupleName::Named(name) => Some(name),
+                    _ => None,
+                };
+                let fields = self
+                    .tuple_field_entries(self.field(value, "Tuple", &["fields"], 1)?)?
+                    .into_iter()
+                    .map(|(label, field)| {
+                        Ok(ast::MatchField {
+                            name: label,
+                            pattern: self.pattern(field, depth + 1)?,
+                            span: ast::Spanned::default(),
+                        })
+                    })
+                    .collect::<Result<_, Error>>()?;
+                ast::Match::Tuple(ast::MatchTuple { name, fields })
+            }
+            "Bind" => ast::Match::Identifier(
+                self.local(&self.variable(value, "Bind")?),
+                ast::Spanned::default(),
+            ),
+            "Any" if fields.is_empty() => ast::Match::Placeholder,
+            "Ripple" if fields.is_empty() => ast::Match::Ripple,
+            "Not" => ast::Match::Not(Box::new(
+                self.pattern(self.field(value, "Not", &[], 0)?, depth + 1)?,
+            )),
+            "And" => ast::Match::And(parts("And")?),
+            "Or" => ast::Match::Or(parts("Or")?),
+            "Is" => ast::Match::Type(self.type_expr(self.field(value, "Is", &[], 0)?, depth + 1)?),
+            "Partial" => {
+                let name = match self.tuple_name(self.field(value, "Partial", &["name"], 0)?)? {
+                    ast::TupleName::Named(name) => Some(name),
+                    _ => None,
+                };
+                let fields = self
+                    .tuple_field_entries(self.field(value, "Partial", &["fields"], 1)?)?
+                    .into_iter()
+                    .map(|(label, field)| {
+                        let name = label.ok_or_else(|| {
+                            self.error("returned a Partial with a field that isn't Labeled")
+                        })?;
+                        Ok(ast::PartialPatternField {
+                            name,
+                            name_span: ast::Spanned::default(),
+                            pattern: Some(self.pattern(field, depth + 1)?),
+                            span: ast::Spanned::default(),
+                        })
+                    })
+                    .collect::<Result<_, Error>>()?;
+                ast::Match::Partial(ast::PartialPattern { name, fields })
+            }
+            "Pin" => ast::Match::Pin(self.pin(self.field(value, "Pin", &[], 0)?, depth + 1)?),
+            "Hole" => return Err(self.hole_returned()),
+            other => {
+                return Err(
+                    self.error(&format!("returned {other}[…] where a pattern was expected"))
+                );
+            }
+        })
     }
 
-    /// The holes collected while splicing, for [`wrap_expansion`].
-    pub fn take_holes(&self) -> Vec<Hole> {
-        self.holes.take()
+    /// A `'%meta.type`.
+    fn type_expr(&self, value: &Value, depth: usize) -> Result<ast::Type, Error> {
+        self.check_depth(depth)?;
+        let (name, _) = self.expect_tuple(value)?;
+        let optional = |value: &Value| -> Result<Option<Box<ast::Type>>, Error> {
+            match value.is_nil() {
+                true => Ok(None),
+                false => Ok(Some(Box::new(self.type_expr(value, depth + 1)?))),
+            }
+        };
+        let types = |value: &Value, node: &str| -> Result<Vec<ast::Type>, Error> {
+            self.list(value, node)?
+                .into_iter()
+                .map(|member| self.type_expr(member, depth + 1))
+                .collect()
+        };
+        // A type's fields are types (positional) or `Labeled[label, value]`, as a `Tuple`
+        // expression's are.
+        let fields = |value: &Value| -> Result<Vec<ast::FieldType>, Error> {
+            self.tuple_field_entries(value)?
+                .into_iter()
+                .map(|(label, field)| {
+                    Ok(ast::FieldType::Field {
+                        span: ast::Spanned::default(),
+                        name: label,
+                        omittable: false,
+                        type_def: Some(self.type_expr(field, depth + 1)?),
+                        default: None,
+                    })
+                })
+                .collect()
+        };
+        Ok(match name {
+            "Int" => ast::Type::Primitive(ast::PrimitiveType::Int),
+            "Bin" => ast::Type::Primitive(ast::PrimitiveType::Bin),
+            "Ref" => ast::Type::Primitive(ast::PrimitiveType::Ref),
+            "Top" => ast::Type::Top,
+            "Var" => {
+                let variable = self.str_field(value, "Var", &[], 0)?;
+                // Only a function of the expansion's own declares a name it may use, so a
+                // variable never resolves to one of the caller's.
+                if !self
+                    .functions
+                    .borrow()
+                    .iter()
+                    .any(|parameters| parameters.contains(&variable))
+                {
+                    return Err(self.error(&format!(
+                        "returned Var[\"{variable}\"] outside a Function declaring it: an \
+                         expansion names only its own type parameters"
+                    )));
+                }
+                ast::Type::Identifier {
+                    name: format!("{variable}{TYPE_PARAMETER_SUFFIX}"),
+                    arguments: vec![],
+                }
+            }
+            "Resource" => ast::Type::Resource(self.str_field(value, "Resource", &[], 0)?),
+            // `^` is `^0`, and is written so.
+            "Cycle" => ast::Type::Cycle(match self.int_field(value, "Cycle", &[], 0)? {
+                0 => None,
+                depth => Some(depth),
+            }),
+            "Tuple" | "Partial" => {
+                let tuple_name = match self.tuple_name(self.field(value, name, &["name"], 0)?)? {
+                    ast::TupleName::Named(tuple_name) => Some(tuple_name),
+                    _ => None,
+                };
+                let rest = if name == "Partial" {
+                    optional(self.field(value, name, &["rest"], 2)?)?
+                } else {
+                    None
+                };
+                let fields = fields(self.field(value, name, &["fields"], 1)?)?;
+                if name == "Partial"
+                    && fields
+                        .iter()
+                        .any(|field| matches!(field, ast::FieldType::Field { name: None, .. }))
+                {
+                    return Err(
+                        self.error("returned a Partial type with a field that isn't Labeled")
+                    );
+                }
+                ast::Type::Tuple(ast::TupleType {
+                    name: tuple_name,
+                    fields,
+                    is_partial: name == "Partial",
+                    rest,
+                })
+            }
+            "Union" => {
+                let mut members = types(self.field(value, "Union", &[], 0)?, "Union")?;
+                match members.len() {
+                    0 => {
+                        return Err(self.error(
+                            "returned an empty Union, which has no spelling: no value is of it",
+                        ));
+                    }
+                    1 => members.pop().expect("one member"),
+                    _ => ast::Type::Union(ast::UnionType { types: members }),
+                }
+            }
+            "Intersection" => {
+                ast::Type::Intersection(types(self.field(value, "Intersection", &[], 0)?, name)?)
+            }
+            "Function" => ast::Type::Function(ast::FunctionType {
+                input: Box::new(
+                    self.type_expr(self.field(value, name, &["parameter"], 0)?, depth + 1)?,
+                ),
+                output: Box::new(
+                    self.type_expr(self.field(value, name, &["result"], 1)?, depth + 1)?,
+                ),
+                receive: None,
+                states: None,
+            }),
+            "Process" => ast::Type::Process(ast::ProcessType {
+                receive_type: optional(self.field(value, name, &["send"], 0)?)?,
+                return_type: optional(self.field(value, name, &["await"], 1)?)?,
+                state_type: optional(self.field(value, name, &["state"], 2)?)?,
+            }),
+            "Named" => {
+                let module = self.str_field(value, name, &["module"], 0)?;
+                let member = match self.field(value, name, &["member"], 1)? {
+                    member if member.is_nil() => None,
+                    member => Some(self.str_bytes_to_string(self.str_bytes(member, name)?)?),
+                };
+                ast::Type::ModuleType {
+                    module: module_path(&module),
+                    member,
+                    arguments: types(self.field(value, name, &["arguments"], 2)?, name)?,
+                    package: Some(self.expander.package.clone()),
+                }
+            }
+            "Hole" => return Err(self.hole_returned()),
+            other => {
+                return Err(self.error(&format!(
+                    "returned {other}[…] where a '%meta.type was expected"
+                )));
+            }
+        })
+    }
+
+    /// The items of a `Nil | Cons[…]` list.
+    fn list<'v>(&self, mut list: &'v Value, node: &str) -> Result<Vec<&'v Value>, Error> {
+        let mut items = Vec::new();
+        loop {
+            match self.expect_tuple(list)? {
+                ("Nil", []) => return Ok(items),
+                ("Cons", [_, _]) => {
+                    items.push(self.field(list, "Cons", &[], 0)?);
+                    list = self.field(list, "Cons", &[], 1)?;
+                }
+                _ => {
+                    return Err(self.unexpected(&format!("a list (Nil | Cons[…]) in {node}"), list));
+                }
+            }
+        }
     }
 
     fn tuple_name(&self, value: &Value) -> Result<ast::TupleName, Error> {
+        if value.is_nil() {
+            return Ok(ast::TupleName::Anonymous);
+        }
         match self.expect_tuple(value)? {
-            ("Nil", []) => Ok(ast::TupleName::Anonymous),
-            ("Str", _) => Ok(ast::TupleName::Named(
-                self.str_bytes_to_string(self.str_bytes(value, "Tuple name")?)?,
-            )),
+            ("Str", _) => {
+                let name = self.str_bytes_to_string(self.str_bytes(value, "Tuple name")?)?;
+                // A tuple's name starts with an uppercase letter; a lowercase one would be read
+                // as an alias to inherit a name from, which is the caller's to define.
+                if !name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                    return Err(self.error(&format!(
+                        "returned the tuple name \"{name}\", which does not start with an \
+                         uppercase letter"
+                    )));
+                }
+                Ok(ast::TupleName::Named(name))
+            }
             (other, _) => Err(self.error(&format!(
-                "returned {other} where a tuple name (Nil | Str['bin]) was expected"
+                "returned {other} where a tuple name (Str['bin] | []) was expected"
             ))),
         }
     }
@@ -605,34 +1376,6 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
         }
     }
 
-    /// A `Call`'s target: the member of the module its `module` field names — a manifest
-    /// path, `"html"` or `"html/live"` — or of the dialect's own module when it names
-    /// none. The emitted access is resolved in the *invoking* module, so a dialect can
-    /// reach a companion module it does not itself import.
-    fn callee(&self, value: &Value) -> Result<Callee, Error> {
-        let member = self.str_field(value, "Call", &["member"], 0)?;
-        let path = match self.optional_field(value, &["module"]) {
-            Some(module) if !module.is_nil() => self
-                .str_bytes_to_string(self.str_bytes(module, "Call module")?)?
-                .split('/')
-                .map(str::to_string)
-                .collect(),
-            _ => self.path.clone(),
-        };
-        let key = format!("{}.{member}", path.join("/"));
-        Ok(Callee {
-            access: ast::Access {
-                source: Some(ast::AccessSource::Import(path)),
-                accessors: vec![ast::AccessPath::Field(member)],
-                accessor_spans: vec![ast::Spanned::default()],
-                type_arguments: vec![],
-                base_span: self.dialect.span,
-                span: self.dialect.span,
-            },
-            key,
-        })
-    }
-
     /// The span of an `Unquote` value, or `None` for any other expression.
     fn as_unquote(&self, value: &Value) -> Result<Option<(usize, usize)>, Error> {
         if !matches!(value, Value::Tuple(..)) {
@@ -651,30 +1394,36 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
         ))
     }
 
-    /// A labeled field of an IR tuple, or `None` when the tuple carries no such label —
-    /// for fields a node may omit, which have no positional reading.
-    fn optional_field<'v>(&self, value: &'v Value, labels: &[&str]) -> Option<&'v Value> {
-        let Value::Tuple(tuple_id, payload) = value else {
-            return None;
-        };
-        let info = self.program.lookup_tuple(*tuple_id)?;
-        let position = info.fields.iter().position(|(label, _)| {
-            label
-                .as_deref()
-                .is_some_and(|label| labels.contains(&label))
-        })?;
-        payload.get(position)
+    /// A `Hole` is a quote's, standing for code computed where the quote is written; spliced, it
+    /// means nothing.
+    fn hole_returned(&self) -> Error {
+        self.error(
+            "returned a Hole, which stands only in code a quote lifts: as code to splice, the \
+             caller's code is an Unquote",
+        )
     }
 
     fn reference(&self, name: String) -> ast::Term {
-        ast::Term::Access(ast::Access {
-            source: Some(ast::AccessSource::Identifier(name)),
+        ast::Term::Access(self.access_from(ast::AccessSource::Identifier(name)))
+    }
+
+    /// The import of a module an expansion names, by its path in the dialect's package: the
+    /// modules generated code reaches are the ones its author meant, whatever the caller's own
+    /// modules are called.
+    fn import(&self, module: &str) -> ast::AccessSource {
+        ast::AccessSource::Import(module_path(module), Some(self.expander.package.clone()))
+    }
+
+    /// An access of `source` alone, at the invocation's span.
+    fn access_from(&self, source: ast::AccessSource) -> ast::Access {
+        ast::Access {
+            source: Some(source),
             accessors: vec![],
             accessor_spans: vec![],
             type_arguments: vec![],
-            base_span: self.dialect.span,
-            span: self.dialect.span,
-        })
+            base_span: self.expander.span,
+            span: self.expander.span,
+        }
     }
 
     fn expect_tuple<'v>(&self, value: &'v Value) -> Result<(&str, &'v [Value]), Error> {
@@ -691,8 +1440,9 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
         }
     }
 
-    /// A field of an IR tuple, located by label when the tuple type carries one, else by
-    /// position — so a dialect may construct IR tuples with labelled fields in any order.
+    /// A field of an IR tuple, located by label when the tuple carries labels, else by position
+    /// — so a dialect may construct IR tuples with labelled fields in any order (see
+    /// [`node_field`]).
     fn field<'v>(
         &self,
         value: &'v Value,
@@ -700,23 +1450,16 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
         labels: &[&str],
         index: usize,
     ) -> Result<&'v Value, Error> {
-        let Value::Tuple(tuple_id, payload) = value else {
+        if !matches!(value, Value::Tuple(..)) {
             return Err(self.unexpected(node, value));
-        };
-        if let Some(info) = self.program.lookup_tuple(*tuple_id) {
-            for (position, (label, _)) in info.fields.iter().enumerate() {
-                if let Some(label) = label
-                    && labels.contains(&label.as_str())
-                {
-                    return payload
-                        .get(position)
-                        .ok_or_else(|| self.error(&format!("returned a malformed {node}")));
-                }
-            }
         }
-        payload
-            .get(index)
-            .ok_or_else(|| self.error(&format!("returned a malformed {node}")))
+        node_field(self.program, value, labels, Some(index)).ok_or_else(|| match labels {
+            [label, ..] => self.error(&format!(
+                "returned {}, a {node} without its `{label}`",
+                format_value(value, self.program)
+            )),
+            [] => self.error(&format!("returned a malformed {node}")),
+        })
     }
 
     fn str_field(
@@ -745,21 +1488,8 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
 
     /// The bytes of a `Str['bin]` value.
     fn str_bytes(&self, value: &Value, node: &str) -> Result<Vec<u8>, Error> {
-        let bytes = match value {
-            Value::Tuple(tuple_id, payload)
-                if self
-                    .program
-                    .lookup_tuple(*tuple_id)
-                    .is_some_and(|info| info.name.as_deref() == Some("Str")) =>
-            {
-                match payload.first() {
-                    Some(Value::Binary(binary)) => (self.read_binary)(binary),
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
-        bytes.ok_or_else(|| self.unexpected(&format!("a Str (in {node})"), value))
+        str_bytes(self.program, value)
+            .ok_or_else(|| self.unexpected(&format!("a Str (in {node})"), value))
     }
 
     fn str_bytes_to_string(&self, bytes: Vec<u8>) -> Result<String, Error> {
@@ -767,17 +1497,128 @@ impl<F: Fn(&Binary) -> Option<Vec<u8>>> Splicer<'_, F> {
     }
 
     fn unexpected(&self, expected: &str, found: &Value) -> Error {
-        self.error(&format!(
-            "returned an unexpected value where {expected} was expected: {found:?}"
-        ))
+        let found = format_value(found, self.program);
+        self.error(&format!("returned {found} where {expected} was expected"))
     }
 
     fn error(&self, message: &str) -> Error {
-        Error::DialectFailed {
-            module: self.module.clone(),
-            message: message.to_string(),
+        self.expander.error(message)
+    }
+}
+
+/// A field of a node a dialect built: the one whose label is among `labels` — or, for a node
+/// built positionally (with no labels at all), the one at `position`, when it may be read by
+/// position. A labelled node without the label has no such field, rather than one read by
+/// position, so a misspelt label is an error rather than another field's value. Nodes are read by
+/// this one rule wherever the compiler reads what a dialect returns.
+pub fn node_field<'v>(
+    program: &Program,
+    value: &'v Value,
+    labels: &[&str],
+    position: Option<usize>,
+) -> Option<&'v Value> {
+    let Value::Tuple(tuple_id, payload) = value else {
+        return None;
+    };
+    let info = program.lookup_tuple(*tuple_id)?;
+    if info.fields.iter().all(|(label, _)| label.is_none()) {
+        return payload.get(position?);
+    }
+    let labelled = info.fields.iter().position(|(label, _)| {
+        label
+            .as_deref()
+            .is_some_and(|label| labels.contains(&label))
+    })?;
+    payload.get(labelled)
+}
+
+/// The bytes of a `Str['bin]` value.
+pub fn str_bytes(program: &Program, value: &Value) -> Option<Vec<u8>> {
+    match value {
+        Value::Tuple(tuple_id, payload)
+            if program
+                .lookup_tuple(*tuple_id)
+                .is_some_and(|info| info.name.as_deref() == Some("Str")) =>
+        {
+            match payload.first() {
+                Some(Value::Binary(binary)) => binary_bytes(program, binary),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A binary's bytes, from the program's constants or held by the value. A compile-time
+/// executor runs over the program's own tables (its context arrives as a value, adding no
+/// constants), so these are all a value it returns can hold.
+pub fn binary_bytes(program: &Program, binary: &Binary) -> Option<Vec<u8>> {
+    match binary {
+        Binary::Constant(index) => match program.get_constant(*index) {
+            Some(Constant::Binary(bytes)) => Some(bytes.clone()),
+            _ => None,
+        },
+        Binary::Data(data) => Some(data.to_vec()),
+    }
+}
+
+/// A compile-time value as source text.
+pub fn format_value(value: &Value, program: &Program) -> String {
+    struct Lookup<'p>(&'p Program);
+    impl quiver_core::format::BinaryLookup for Lookup<'_> {
+        fn get_bytes(&self, binary: &Binary) -> Option<Vec<u8>> {
+            binary_bytes(self.0, binary)
         }
     }
+    quiver_core::format::format_value(value, program, &Lookup(program))
+}
+
+/// Map a chain parsed from the content at `offset` back to the source positions it was written
+/// at; without a content span (synthetic input), its spans are cleared rather than left pointing
+/// into the wrong file.
+pub fn remap_spans(content: &Content, chain: &mut ast::Chain, offset: usize) {
+    let base = content.dialect.content_span.get();
+    walk_chain_spans(chain, &mut |spanned: &mut ast::Spanned| {
+        spanned.0 = match (base, spanned.0) {
+            (Some(base), Some(span)) => Some(remap_span(content, span, offset, base)),
+            _ => None,
+        };
+    });
+}
+
+fn remap_span(
+    content: &Content,
+    span: SourceSpan,
+    hole_offset: usize,
+    base: SourceSpan,
+) -> SourceSpan {
+    content_span(
+        content.dialect,
+        content.escapes,
+        hole_offset + span.offset,
+        span.length,
+    )
+    .unwrap_or(base)
+}
+
+/// A module path as an IR node writes it, `"html/live"`, as its segments.
+fn module_path(module: &str) -> Vec<String> {
+    module.split('/').map(str::to_string).collect()
+}
+
+/// Whether `name` can be written as a variable: a lowercase identifier, which may end in `?`,
+/// `!`, or both.
+fn is_variable_name(name: &str) -> bool {
+    let base = name.trim_end_matches('!').trim_end_matches('?');
+    let suffix = &name[base.len()..];
+    matches!(suffix, "" | "?" | "!" | "?!") && is_type_parameter_name(base)
+}
+
+/// Whether `name` can be written as a type parameter: a lowercase identifier.
+fn is_type_parameter_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn term_chain(term: ast::Term) -> ast::Chain {
@@ -888,6 +1729,7 @@ fn walk_chain_spans(chain: &mut ast::Chain, f: &mut impl FnMut(&mut ast::Spanned
 fn walk_term_spans(term: &mut ast::Term, f: &mut impl FnMut(&mut ast::Spanned)) {
     match term {
         ast::Term::Literal(_) | ast::Term::Process(_) => {}
+        ast::Term::Hole(chain) => walk_chain_spans(chain, f),
         ast::Term::String(_, segments) => {
             for segment in segments {
                 match segment {
@@ -912,6 +1754,13 @@ fn walk_term_spans(term: &mut ast::Term, f: &mut impl FnMut(&mut ast::Spanned)) 
         ast::Term::Block(block) => walk_block_spans(block, f),
         ast::Term::Function(function) => {
             f(&mut function.span);
+            for type_def in function
+                .parameter_type
+                .iter_mut()
+                .chain(function.return_type.iter_mut())
+            {
+                walk_type_spans(type_def, f);
+            }
             if let Some(body) = &mut function.body {
                 walk_block_spans(body, f);
             }
@@ -965,7 +1814,61 @@ fn walk_block_spans(block: &mut ast::Block, f: &mut impl FnMut(&mut ast::Spanned
     }
 }
 
+/// A type's spans are its holes' (a quote's), the only code a type holds.
+fn walk_type_spans(type_def: &mut ast::Type, f: &mut impl FnMut(&mut ast::Spanned)) {
+    match type_def {
+        ast::Type::Hole(chain) => walk_chain_spans(chain, f),
+        ast::Type::Tuple(tuple) => {
+            for field in &mut tuple.fields {
+                if let ast::FieldType::Field {
+                    type_def: Some(type_def),
+                    ..
+                } = field
+                {
+                    walk_type_spans(type_def, f);
+                }
+            }
+            if let Some(rest) = &mut tuple.rest {
+                walk_type_spans(rest, f);
+            }
+        }
+        ast::Type::Function(function) => {
+            walk_type_spans(&mut function.input, f);
+            walk_type_spans(&mut function.output, f);
+        }
+        ast::Type::Union(union) => union
+            .types
+            .iter_mut()
+            .for_each(|member| walk_type_spans(member, f)),
+        ast::Type::Intersection(members) => members
+            .iter_mut()
+            .for_each(|member| walk_type_spans(member, f)),
+        ast::Type::Identifier { arguments, .. }
+        | ast::Type::ModuleType { arguments, .. }
+        | ast::Type::SelfDefault { arguments } => arguments
+            .iter_mut()
+            .for_each(|argument| walk_type_spans(argument, f)),
+        ast::Type::Process(process) => {
+            for part in [
+                &mut process.receive_type,
+                &mut process.return_type,
+                &mut process.state_type,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                walk_type_spans(part, f);
+            }
+        }
+        ast::Type::Primitive(_) | ast::Type::Cycle(_) | ast::Type::Resource(_) | ast::Type::Top => {
+        }
+    }
+}
+
 fn walk_access_spans(access: &mut ast::Access, f: &mut impl FnMut(&mut ast::Spanned)) {
+    for argument in &mut access.type_arguments {
+        walk_type_spans(argument, f);
+    }
     for span in &mut access.accessor_spans {
         f(span);
     }
@@ -976,6 +1879,8 @@ fn walk_access_spans(access: &mut ast::Access, f: &mut impl FnMut(&mut ast::Span
 fn walk_match_spans(pattern: &mut ast::Match, f: &mut impl FnMut(&mut ast::Spanned)) {
     match pattern {
         ast::Match::Identifier(_, span) => f(span),
+        ast::Match::Hole(chain) => walk_chain_spans(chain, f),
+        ast::Match::Type(type_def) => walk_type_spans(type_def, f),
         ast::Match::Not(inner) => walk_match_spans(inner, f),
         ast::Match::Pin(target) => {
             for span in &mut target.accessor_spans {
@@ -988,8 +1893,7 @@ fn walk_match_spans(pattern: &mut ast::Match, f: &mut impl FnMut(&mut ast::Spann
         | ast::Match::String(_, _)
         | ast::Match::Star(_)
         | ast::Match::Placeholder
-        | ast::Match::Ripple
-        | ast::Match::Type(_) => {}
+        | ast::Match::Ripple => {}
         ast::Match::Tuple(tuple) => {
             for field in &mut tuple.fields {
                 walk_match_spans(&mut field.pattern, f);
@@ -1013,16 +1917,24 @@ fn walk_match_spans(pattern: &mut ast::Match, f: &mut impl FnMut(&mut ast::Spann
 
 /// Whether a single-term hole can be spliced where it is written rather than bound to a
 /// `~dialect-hole-N` first: evaluating it must have no effect and no result of its own, so
-/// that "once, in content order" is satisfied trivially. A literal and a text-only string
-/// are values; a name is only ever a load, since every call is written (a tail call is the
-/// one access that is a call).
-fn splices_in_place(term: &ast::Term) -> bool {
+/// that "once, in content order" is satisfied trivially, and it must mean there what it means
+/// where it was written. A literal and a text-only string are values; a name is only ever a
+/// load, since every call is written (a tail call is the one access that is a call). Inside one
+/// of the expansion's own blocks (`scoped`), `$` and `~` would be the expansion's, so only a name
+/// that reads neither — a variable, an import, a builtin — splices there. (A span never stands
+/// inside one of the expansion's functions, so the type parameters in scope are the caller's.)
+fn splices_in_place(term: &ast::Term, scoped: bool) -> bool {
     match term {
         ast::Term::Literal(_) => true,
-        ast::Term::Access(access) => !matches!(
-            access.source,
-            Some(ast::AccessSource::TailCall(_) | ast::AccessSource::TailCallRipple)
-        ),
+        ast::Term::Access(access) => match access.source {
+            Some(
+                ast::AccessSource::Identifier(_)
+                | ast::AccessSource::Import(..)
+                | ast::AccessSource::Builtin(_),
+            ) => true,
+            Some(ast::AccessSource::TailCall(_) | ast::AccessSource::TailCallRipple) => false,
+            _ => !scoped,
+        },
         ast::Term::String(_, segments) => segments
             .iter()
             .all(|segment| matches!(segment, ast::StrSegment::Text(_))),

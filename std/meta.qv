@@ -1,60 +1,193 @@
-// The expression IR a dialect function returns: `%mod{ …content… }` hands the dialect
-// context (see `'ctx` below) to the function the module's `:dialect` annotation carries,
-// at compile time, and splices the `'expr` tree it returns in place of the invocation —
+// Code as data: the expression IR a dialect returns. A dialect, `%mod{ …content… }`, hands its
+// context (see `'ctx` below) to the function the module's `:dialect` annotation carries, at
+// compile time, and the `'expr` tree it returns is spliced in place of the invocation —
 // type-checked there like handwritten code.
 //
 // Plain data splices as itself: an integer, a binary, a `Str`, or `Nil` in expression
-// position is the corresponding literal. `Unquote[offset, length]` names a span of the
+// position is the corresponding literal. `Unquote[offset, length]` names a span of a dialect's
 // content, parsed as ONE host chain and spliced in the *caller's* scope — evaluated once
 // (bind-once, deduplicated by span), with the dialect term's flowing value as its chain
 // input, so `~` inside a span is the dialect input, a bare callable is called with it,
-// and a bare name passes the function by value, exactly as inline host code. `Call` applies an export of the
-// dialect's own module — or of the module its `module` field names (`"html"`,
-// `"html/live"`), resolved at the invocation site, so a dialect can reach a companion
-// module it doesn't itself import. An `Unquote` argument is folded into the call, which
-// splices the span in **argument position**: the member's parameter type reaches it, so a
-// tuple or `#{ … }` literal there elaborates as at a handwritten call (omittable labels,
-// `:defaults`, parameter inference), and bind-once covers the call as well as the span.
-// `Tuple` constructs a tuple — the only way to build one, so the
-// wrapper names stay unambiguous (a data tuple named `Call` is spliced as
-// `Tuple["Call", …]`), and it covers names and labels that come from parsed text. Its
+// and a bare name passes the function by value, exactly as inline host code. `Apply` applies a
+// name — a module's export (`Member`), which need not be one the expander itself imports, or
+// one of the expansion's own — to an argument, which stands in **argument position**: the
+// callee's parameter type reaches it, so a tuple or `#{ … }` literal there elaborates as at a
+// handwritten call (omittable labels, `:defaults`, parameter inference). A member's `Unquote`
+// argument is folded into the call, so bind-once covers the call as well as the span. `Tuple`
+// constructs a tuple — the only way to build one, so the wrapper names stay unambiguous (a
+// data tuple named `Apply` is spliced as `Tuple["Apply", …]`), and it covers names and labels
+// that come from parsed text. Its
 // fields are bare expressions (positional) unless wrapped in `Labeled`, which exists
 // only inside `fields`. A true nil literal, if ever needed, is
-// `Tuple[name: Nil, fields: Nil]`.
+// `Tuple[name: [], fields: Nil]`.
 //
-// Hygiene is by construction: the tree has no identifiers at all — the only caller-scope
-// escape is `Unquote`, which can point solely at text the user wrote between the braces
-// — and `Call` resolves only against the dialect module's own exports. A dialect cannot
-// capture, shadow, bind, or synthesize anything in the caller.
+// An optional field is `[]` when absent — `Nil` is a list's end, and a literal.
 //
-// A dialect signals a parse failure with nil carrying an `:error` payload; an
-// `Expected[offset: 'int, message: Str['bin]]`-shaped payload has its offset mapped back
-// to a source position in the compile error.
+// A dialect signals a failure with nil carrying a `'error` payload under `:error`; an
+// `Expected[offset, message]` has its offset mapped back to a source position in the
+// dialect's content.
 //
 // The compiler recognizes this shape structurally (by tuple names); this module is its
 // canonical definition, for dialect signatures: `#'%meta.ctx -> '%meta.expr` (or a
 // partial parameter naming only the context fields the dialect uses).
 
+// A type as data, as generated code states it: structurally, with recursion as `Cycle[depth]`
+// (`^depth`, counting enclosing unions and function types outward), or by a module's name for it
+// (`'%codec.record<'d>` is `Named[module: "codec", member: "record", arguments: …]`). A tuple's
+// fields are types (positional) or `Labeled[label, value]`, as an expression's are. An absent
+// name, rest or grant is `[]`. A function type gives its parameter and result, and a
+// process type its grants: what applying the pid takes (`send`), what awaiting it answers
+// (`await`) and what sampling it reads (`state`). `Var[name]` is a type parameter of the
+// generated code's own functions, the only ones it may name.
+'type =
+  | Int
+  | Bin
+  | Ref
+  | Top
+  | Var[Str['bin]]
+  | Resource[Str['bin]]
+  | Cycle['int]
+  | Tuple[
+      name: (Str['bin] | []),
+      fields: (Nil | Cons[(^2 | Labeled[label: Str['bin], value: ^2]), ^]),
+    ]
+  | Partial[
+      name: (Str['bin] | []),
+      fields: (Nil | Cons[Labeled[label: Str['bin], value: ^1], ^]),
+      rest: (^1 | []),
+    ]
+  | Union[(Nil | Cons[^1, ^])]
+  | Intersection[(Nil | Cons[^1, ^])]
+  | Function[parameter: ^, result: ^]
+  | Process[send: (^1 | []), await: (^1 | []), state: (^1 | [])]
+  | Named[module: Str['bin], member: (Str['bin] | []), arguments: (Nil | Cons[^1, ^])]
+  | Hole[offset: 'int, length: 'int]
+
+// A name a pin may match against: a binding the expansion made (`Local`), the parameter of one
+// of its functions (`Param`), or a field of one (`Get`).
+'name = Local[Str['bin]] | Param['int] | Get[of: ^, field: (Str['bin] | 'int)]
+
+// A pattern, for `Match`: a literal (an integer, a binary, a `Str`, `Nil`), a `Tuple` of
+// patterns (positional, or `Labeled`), a `Partial` (`(x: p)`, its fields all `Labeled`),
+// `Bind[name]` (a binder, which only the expansion's own `Local[name]` can read), `Any` (`_`),
+// `Ripple` (`~`), `Not`, `And`, `Or`, `Is[type]`, a type test, or `Pin[name]`, `^name`.
+'pattern =
+  | 'int
+  | 'bin
+  | Str['bin]
+  | Nil
+  | Tuple[
+      name: (Str['bin] | []),
+      fields: (Nil | Cons[(^2 | Labeled[label: Str['bin], value: ^2]), ^]),
+    ]
+  | Bind[Str['bin]]
+  | Any
+  | Ripple
+  | Not[^]
+  | And[(Nil | Cons[^1, ^])]
+  | Or[(Nil | Cons[^1, ^])]
+  | Partial[name: (Str['bin] | []), fields: (Nil | Cons[Labeled[label: Str['bin], value: ^1], ^])]
+  | Is['type]
+  | Pin['name]
+  | Hole[offset: 'int, length: 'int]
+
+// Code as data. Beyond the forms above: `Ripple` is the flowing value;
+// `Param[depth]` the parameter of one of the expansion's own functions, `depth` counting
+// outward from the innermost; `Local[name]` a binding the expansion made with `Bind`;
+// `Member[module, member, arguments]` a module's export as a value — or, with `member: []`, the
+// module's own value — instantiated at the type `arguments` it gives (none to leave them
+// inferred); `Get[of, field]` a field of a value, by label or position; `Apply[callee, arg]`
+// a call of a name (`Ripple`, `Param`, `Local`, `Member`, or a `Get` of one);
+// `Pipe[value, into]` the value piped into an expression (`value ~> into`, where `into` reads it
+// as `Ripple`, or is a name it is applied to); `Match[value, pattern]` a match; `Block` braces
+// of branches, each a condition and an optional consequence (`[]` for none), both sequences of
+// steps; and `Function[parameters, parameter, result, annotations, body]` a
+// function literal, generic in `parameters`, its result inferred unless stated as `result`,
+// and its closure carrying `annotations`
+// (`:key value`, each value evaluated where the closure is made). A `Spread[source]` entry
+// among a `Tuple`'s fields spreads a name into it.
+//
+// `%meta{ … }` quotes Quiver code as the `'expr` that builds it, so code that generates code
+// is written as the code it generates: `%meta{ #`t { [$, $] } }` is
+// `Function[parameters: Nil, parameter: t, result: [], annotations: Nil, body: Tuple[…]]`. A hole — `` `name `` or
+// `` `(chain) ``, in an expression, pattern or type — is IR computed where the quote is
+// written. The quote's binders, `$` and type parameters are its own (`Bind`/`Local`, `Param`,
+// `Var`); a value or alias of the quoting code reaches it only through a hole.
+//
+// Hygiene is by construction. An expansion's own names (`Bind`, `Local`, and its functions'
+// type parameters) live apart from the caller's, so they can neither capture nor be captured;
+// `Param` reaches only the expansion's own functions, and `Var` only their type parameters. A
+// tuple name starts with an uppercase letter, as written ones do. The only way to the caller's
+// code is `Unquote`, which points solely at text the user wrote between a dialect's braces
+// (and, being evaluated once on entry, may not stand inside a `Function`). `Member` and `Named`
+// resolve in the dialect's own package, so they reach the modules the dialect's author meant,
+// whatever the caller's are called.
+//
+// `Hole[offset, length]`, in an expression, pattern or type, is a hole in a dialect's content
+// read as code (its `code`): `` `name `` or `` `(chain) ``, the span of the code inside it. It
+// is how `%meta{ … }` quotes, and means nothing in code a dialect returns.
 'expr =
   | 'int
   | 'bin
   | Str['bin]
   | Nil
   | Unquote[offset: 'int, length: 'int]
-  | Call[member: Str['bin], arg: ^]
-  | Call[module: Str['bin], member: Str['bin], arg: ^]
   | Tuple[
-      name: (Nil | Str['bin]),
+      name: (Str['bin] | []),
+      fields: (Nil | Cons[(^2 | Labeled[label: Str['bin], value: ^2] | Spread[source: ^2]), ^]),
+    ]
+  | Ripple
+  | Param['int]
+  | Local[Str['bin]]
+  | Member[module: Str['bin], member: (Str['bin] | []), arguments: (Nil | Cons['type, ^])]
+  | Get[of: ^, field: (Str['bin] | 'int)]
+  | Apply[callee: ^, arg: ^]
+  | Pipe[value: ^, into: ^]
+  | Match[value: ^, pattern: 'pattern]
+  | Block[
+      branches: (
+        | Nil
+        | Cons[
+            Branch[condition: (Nil | Cons[^2, ^]), consequence: (Nil | Cons[^2, ^] | [])],
+            ^,
+          ]
+      ),
+    ]
+  | Function[
+      parameters: (Nil | Cons[Str['bin], ^]),
+      parameter: 'type,
+      result: ('type | []),
+      annotations: (Nil | Cons[Annotation[key: Str['bin], value: ^1], ^]),
+      body: ^,
+    ]
+  | Hole[offset: 'int, length: 'int]
+
+// Data, spelled out: what `reflect` answers, so that a value's names and labels are data too.
+// An integer or a binary is itself; a tuple — a string included, being a `Str` — is
+// `Data[name, fields]`, `[]` for no name, its fields trees (positional) or `Labeled[label, value]`,
+// as an expression's are. `data_expr` is the code that builds the value a tree stands for.
+'data =
+  | 'int
+  | 'bin
+  | Data[
+      name: (Str['bin] | []),
       fields: (Nil | Cons[(^2 | Labeled[label: Str['bin], value: ^2]), ^]),
     ]
+
+// Why an expansion failed: the `:error` payload of the nil a dialect's function answers — a
+// message, or one at an offset into its content (`%parse`'s `Expected`).
+'error = Str['bin] | Expected[offset: 'int, message: Str['bin]] | (message: Str['bin])
 
 // The context record a dialect function receives: the unescaped brace content, and the
 // host prefix-parsers — each takes the content bytes and a byte offset positioned
 // exactly at an expression's first byte, and answers the exclusive end offset of one
 // term/chain there, or nil. `Unquote[offset, length]` splices such a span as host code,
 // evaluated once in the caller's scope with the dialect term's flowing value as input.
+// `code` is the content read as Quiver, given only to a dialect whose parameter names it:
+// content that isn't Quiver, or that the IR can't express, is then an error where it is
+// written.
 'cb = #['bin, 'int] -> ('int | [])
-'ctx = [content: Str['bin], term: 'cb, chain: 'cb]
+'ctx = [content: Str['bin], term: 'cb, chain: 'cb, code: 'expr]
 
 'elist = Nil | Cons['expr, ^]
 
@@ -74,12 +207,17 @@ build_rev = #[(items): 'elist, (acc): 'expr] {
 
 pair2 = #['expr, 'expr] {
   :doc "An unnamed 2-tuple expression: `[a, b]`."
-  Tuple[name: Nil, fields: Cons[$0, Cons[$1, Nil]]]
+  Tuple[name: [], fields: Cons[$0, Cons[$1, Nil]]]
 }
 
-call2 = #[Str['bin], 'expr, 'expr] {
-  :doc "A dialect-module member applied to a 2-tuple: `[a, b] member`."
-  Call[member: $0, arg: Tuple[name: Nil, fields: Cons[$1, Cons[$2, Nil]]]]
+call = #[Str['bin], Str['bin], 'expr] {
+  :doc "A module's member applied to an argument, given the module, the member and the argument: `%module.member arg`."
+  Apply[callee: Member[module: $0, member: $1, arguments: Nil], arg: $2]
+}
+
+call2 = #[Str['bin], Str['bin], 'expr, 'expr] {
+  :doc "A module's member applied to a 2-tuple, given the module, the member and the two: `%module.member [a, b]`."
+  call [$0, $1, Tuple[name: [], fields: Cons[$2, Cons[$3, Nil]]]]
 }
 
 list_expr = #'elist {
@@ -87,4 +225,75 @@ list_expr = #'elist {
   build_rev [rev [~, Nil], Nil]
 }
 
-(pair2, call2, list_expr)
+// A quoted tuple's fields as the fields of the code that builds it.
+fields_step = #[
+  (self): ^,
+  (convert): #'data -> 'expr,
+  (fields): (Nil | Cons[('data | Labeled[label: Str['bin], value: 'data]), ^]),
+] -> (Nil | Cons[('expr | Labeled[label: Str['bin], value: 'expr]), ^]) {
+  $fields ~> {
+    | =Nil => Nil
+    | =Cons[entry, rest] => field = entry ~> {
+          | =Labeled[label: l, value: v] => Labeled[label: l, value: $convert v]
+          | ='data ~> $convert
+        }
+        Cons[field, $self [$self, $convert, rest]]
+  }
+}
+
+// The code that builds the value a quoted tree stands for, each part built by `convert`.
+built = #[(convert): #'data -> 'expr, (data): 'data] -> 'expr {
+  $data ~> {
+    | ='int
+    | ='bin
+    | =Data[name: "Str", fields: Cons[('bin & bytes), Nil]] => Str[bytes]
+    | =Data[name: name, fields: fields] => Tuple[
+        name: name,
+        fields: fields_step [fields_step, $convert, fields],
+      ]
+  }
+}
+
+data_step = #[(self): ^, (data): 'data] -> 'expr {
+  built [#'data { $$self [$$self, $] }, $data]
+}
+
+data_expr = #'data -> 'expr {
+  :doc "The code that builds the value a quoted `'%meta.data` tree stands for."
+  data_step [data_step, $]
+}
+
+// The code that builds the code a tree stands for, but for its holes: each is the code
+// written in it, which computes the IR that stands there.
+lift_step = #[(self): ^, (data): 'data] -> 'expr {
+  $data ~> {
+    | =Data[
+        name: "Hole",
+        fields: Cons[
+          Labeled[label: "offset", value: ('int & offset)],
+          Cons[Labeled[label: "length", value: ('int & length)], Nil],
+        ],
+      ] => Unquote[offset: offset, length: length]
+    | built [#'data { $$self [$$self, $] }, $data]
+  }
+}
+
+reflect = __meta_reflect__<'data> ~> {
+  :doc """
+    Spells out a data value as its `'%meta.data` tree, so that its names and labels can be read:
+    an integer or a binary is itself, and a tuple is `Data[name, fields]`, `[]` for no name, its
+    fields trees (positional) or `Labeled[label, value]`. Nil for a value with identity (a
+    function, a process, a ref, a resource).
+    """
+}
+
+// `%meta{ … }`: the content, read as code, as the code that builds it.
+quote = #(code: 'expr) -> ('expr | []) {
+  (\[] & tree) = reflect $code
+  lift_step [lift_step, tree]
+}
+
+{
+  :dialect quote
+  (pair2, call, call2, list_expr, data_expr, reflect)
+}

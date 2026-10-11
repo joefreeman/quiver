@@ -554,6 +554,9 @@ fn analyze_match_pattern(
     // Each shape below reads a union's members directly, so none may itself be a union.
     let value_type_id = super::typing::flatten_union_members(value_type_id, program);
     match pattern {
+        ast::Match::Hole(_) => {
+            unreachable!("a hole is parsed only in quoted code, which is lowered, never compiled")
+        }
         ast::Match::Identifier(name, _) => {
             analyze_identifier_pattern(name.clone(), value_type_id, path, identifiers)
         }
@@ -822,6 +825,7 @@ fn type_check_requirements(
 fn written_bindings(pattern: &ast::Match) -> Option<Vec<String>> {
     fn collect(pattern: &ast::Match, out: &mut Vec<String>) -> Option<()> {
         match pattern {
+            ast::Match::Hole(_) => {}
             ast::Match::Identifier(name, _) => out.push(name.clone()),
             ast::Match::Ripple => out.push(ast::RIPPLE.to_string()),
             ast::Match::Star(_) => return None,

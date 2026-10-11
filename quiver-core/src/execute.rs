@@ -33,8 +33,48 @@ pub fn execute_bytecode_sync_with<E: Effect>(
     let entry = bytecode
         .entry
         .ok_or_else(|| Error::InvalidArgument("Bytecode has no entry point".to_string()))?;
+    let mut executor = load(bytecode, builtins);
+    // The entry function: no captures, nil argument.
+    executor.spawn_process(PROCESS, Some(entry), vec![], WireValue::nil(), false, None)?;
+    drive(executor, fuel, cancel)
+}
 
-    // Use worker_id 0 for single-threaded execution
+/// As [`execute_bytecode_sync_with`], but applying `function` — a closure over the bytecode's
+/// functions — to `argument`, rather than running an entry point. How the compiler runs a
+/// function it holds as a value (a dialect's) on a value it builds: both cross
+/// in as values, so nothing of them is added to the bytecode.
+pub fn call_sync<E: Effect>(
+    bytecode: Bytecode,
+    builtins: &crate::builtins::BuiltinRegistry<E>,
+    fuel: u64,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    function: &Value,
+    argument: &Value,
+) -> Result<(Value, Executor<E>), Error> {
+    let Value::Function(index, payload) = function else {
+        return Err(Error::TypeMismatch {
+            expected: "function".to_string(),
+            found: function.type_name().to_string(),
+        });
+    };
+    let mut executor = load(bytecode, builtins);
+    let captures = payload
+        .iter()
+        .map(|capture| executor.to_wire(capture))
+        .collect::<Result<_, _>>()?;
+    let argument = executor.to_wire(argument)?;
+    executor.spawn_process(PROCESS, Some(*index), captures, argument, false, None)?;
+    drive(executor, fuel, cancel)
+}
+
+/// Use worker_id 0, and process 0, for single-threaded execution.
+const PROCESS: crate::process::ProcessId = 0;
+
+/// An executor loaded with `bytecode`, for compile-time execution.
+fn load<E: Effect>(
+    bytecode: Bytecode,
+    builtins: &crate::builtins::BuiltinRegistry<E>,
+) -> Executor<E> {
     let mut executor = Executor::new(builtins.clone(), 0);
     // Compile-time execution must be deterministic: host-state reads (clock, entropy)
     // are rejected at the builtin dispatch site.
@@ -73,18 +113,16 @@ pub fn execute_bytecode_sync_with<E: Effect>(
     };
 
     executor.update_program(program_update);
+    executor
+}
 
-    let process_id = 0;
-
-    // Spawn a process with the entry function (no captures, nil argument)
-    executor.spawn_process(
-        process_id,
-        Some(entry),
-        vec![],
-        WireValue::nil(),
-        false,
-        None,
-    )?;
+/// Run the spawned process to completion, within `fuel`.
+fn drive<E: Effect>(
+    mut executor: Executor<E>,
+    fuel: u64,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(Value, Executor<E>), Error> {
+    let process_id = PROCESS;
 
     // Execute until completion
     const SLICE: u64 = 1000;

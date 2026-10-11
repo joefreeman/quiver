@@ -2734,7 +2734,7 @@ zoned_literal = #['bin, 'int] {
       settle [parts, z] ~> =Zoned[Instant[n], _]
       Tuple[name: "Zoned", fields: %list{ Tuple[name: "Instant", fields: %list{ n }], zone_expr z }]
     }
-    | =_ => Call[member: "parse_zoned!", arg: Str[%bin.slice [data, start, e]]]
+    | =_ => %meta.call ["time", "parse_zoned!", Str[%bin.slice [data, start, e]]]
   }
 }
 

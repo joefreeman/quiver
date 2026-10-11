@@ -111,7 +111,7 @@ binding = #[(attr): '%html.pattr, (event): '%str] {
 
   {
     | value ~> =AHole[sp] => Expr[
-        Call[module: "html/live", member: "event_value", arg: Unquote(sp.offset, sp.length)],
+        %meta.call ["html/live", "event_value", Unquote(sp.offset, sp.length)],
       ]
     | %parse.fail [pos, "'\{ … }' (a binding's payload is a hole)"]
   }
@@ -129,7 +129,7 @@ binding = #[(attr): '%html.pattr, (event): '%str] {
             pos: pos,
             mods: [],
             value: Expr[
-              Call[module: "html/live", member: member, arg: Unquote[offset: o, length: l]],
+              %meta.call ["html/live", member, Unquote[offset: o, length: l]],
             ],
           ],
           Nil,

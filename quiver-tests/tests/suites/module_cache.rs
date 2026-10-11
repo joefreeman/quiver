@@ -582,3 +582,49 @@ fn linked_html_live_encodes_frames() {
     );
     assert_eq!(result, EXPECTED);
 }
+
+#[test]
+fn a_module_using_a_dialect_whose_expansion_names_covered_modules_is_cached() {
+    // An expansion names modules the caller never wrote (`%g`'s names `%num`). Each is covered
+    // by the key of the dialect's own module, which the caller does name, so the caller's key
+    // covers it too, and the caller is cacheable.
+    let mut modules = std::collections::HashMap::new();
+    modules.insert(
+        vec!["g".to_string()],
+        "q = #(content: _) { %meta{ %num.add [1, 2] } }
+         { :dialect q; [add: %num.add] }"
+            .to_string(),
+    );
+    modules.insert(vec!["m".to_string()], "[v: %g{}]".to_string());
+    let store = project_store(modules, "%m.v");
+    assert!(
+        store
+            .entries()
+            .iter()
+            .any(|(_, artifact)| artifact.id.name == vec!["m".to_string()]),
+        "%m must be stored"
+    );
+}
+
+#[test]
+fn a_module_reaching_an_uncovered_module_through_an_expansion_is_not_cached() {
+    // A dialect naming a module its own module doesn't reference: no key the caller's covers
+    // that module, so storing the caller could serve it stale.
+    let mut modules = std::collections::HashMap::new();
+    modules.insert(vec!["side".to_string()], "[v: 5]".to_string());
+    modules.insert(
+        vec!["g".to_string()],
+        "q = #(content: _) { Member[module: \"side\", member: \"v\", arguments: Nil] }
+         { :dialect q; Ok }"
+            .to_string(),
+    );
+    modules.insert(vec!["m".to_string()], "[v: %g{}]".to_string());
+    let store = project_store(modules, "%m.v");
+    assert!(
+        !store
+            .entries()
+            .iter()
+            .any(|(_, artifact)| artifact.id.name == vec!["m".to_string()]),
+        "%m must not be stored"
+    );
+}

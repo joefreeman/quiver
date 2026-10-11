@@ -148,6 +148,88 @@ fn quote_string(bytes: &[u8]) -> Option<String> {
     Some(out)
 }
 
+// ===== reflect ==========================================================================
+
+/// `__meta_reflect__<'d>`: any data value as the tree that spells it out, `'%meta.data` (the
+/// type argument `'d`): an integer or a binary is itself, and a tuple is `Data[name, fields]`,
+/// `[]` for no name, its fields trees (positional) or `Labeled[label, value]` — so its names and
+/// labels are data too. Nil for a value with identity (a function, a process, a ref, a resource). The tree is
+/// written as notation and decoded at `'d`: decoding is the walk that builds a value at a type
+/// with honest labels (see [`crate::labels`]), so the tree is built by it rather than by a
+/// second walk of `'d`.
+pub fn builtin_meta_reflect<E: Effect>(
+    arg: &Value,
+    ctx: &mut BuiltinContext<E>,
+) -> Result<Completion<E>, Error> {
+    let tree = ctx.type_arguments().first().copied().ok_or_else(|| {
+        Error::InvalidArgument("__meta_reflect__ called without its tree type".to_string())
+    })?;
+    let mut text = String::new();
+    if !reflect_value(arg, ctx, &mut text)? {
+        return Ok(Completion::Value(Value::nil()));
+    }
+    let value = decode_text(text.as_bytes(), tree, ctx)?;
+    assert!(
+        !value.is_nil(),
+        "a reflected tree decodes at its type: {text}"
+    );
+    Ok(Completion::Value(value))
+}
+
+/// Write `value`'s tree as notation, answering false for a value with identity.
+fn reflect_value<E: Effect>(
+    value: &Value,
+    ctx: &mut BuiltinContext<E>,
+    out: &mut String,
+) -> Result<bool, Error> {
+    match value {
+        Value::Int(_) | Value::BigInt(_) | Value::Binary(_) => {
+            encode_value(value, ctx, out)?;
+            Ok(true)
+        }
+        Value::Tuple(tuple_id, payload) => {
+            let info = TypeLookup::lookup_tuple(&*ctx.executor, *tuple_id)
+                .cloned()
+                .ok_or_else(|| {
+                    Error::InvalidArgument(format!(
+                        "cannot reflect: tuple type {tuple_id} is not in the runtime tables"
+                    ))
+                })?;
+            let text = |text: &str| quote_string(text.as_bytes()).expect("a name is quotable");
+            out.push_str("Data[name: ");
+            match info.name.as_deref() {
+                Some(name) => out.push_str(&text(name)),
+                None => out.push_str("[]"),
+            }
+            out.push_str(", fields: ");
+            for (index, field) in payload.iter().enumerate() {
+                let label = info
+                    .fields
+                    .get(index)
+                    .and_then(|(label, _)| label.as_deref());
+                out.push_str("Cons[");
+                if let Some(label) = label {
+                    out.push_str("Labeled[label: ");
+                    out.push_str(&text(label));
+                    out.push_str(", value: ");
+                }
+                if !reflect_value(field, ctx, out)? {
+                    return Ok(false);
+                }
+                if label.is_some() {
+                    out.push(']');
+                }
+                out.push_str(", ");
+            }
+            out.push_str("Nil");
+            out.push_str(&"]".repeat(payload.len()));
+            out.push(']');
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 // ===== decode ===========================================================================
 
 /// `__data_decode__<'t>`: notation text → a value of the expected type, or nil stamped with

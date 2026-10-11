@@ -302,6 +302,7 @@ fn hint(kind: &ErrorKind) -> String {
         ErrorKind::AssertionOnAlias => "a type alias produces no value to assert on".to_string(),
         ErrorKind::AssertionNotLineFinal => "code may not follow an assertion".to_string(),
         ErrorKind::NestingTooDeep => "nesting starts here".to_string(),
+        ErrorKind::HoleOutsideQuote => "a hole outside quoted code".to_string(),
 
         ErrorKind::IntegerMalformed(lit) => format!("'{}' is not a valid integer", lit),
         ErrorKind::HexMalformed(lit) => format!("'{}' is not a valid hex literal", lit),

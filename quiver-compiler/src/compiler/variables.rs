@@ -115,6 +115,7 @@ impl<'a> FreeVariableCollector<'a> {
     fn visit_term(&mut self, term: &ast::Term) {
         match term {
             ast::Term::Literal(_) => {}
+            ast::Term::Hole(chain) => self.visit_chain(chain),
             ast::Term::Tuple(tuple) => {
                 for field in &tuple.fields {
                     match &field.value {
@@ -206,7 +207,7 @@ impl<'a> FreeVariableCollector<'a> {
             }
             // A module reference needs no capture: it is a compile-time-known value, so
             // the body emits the single constant that names it, wherever it appears.
-            Some(ast::AccessSource::Import(_)) => {}
+            Some(ast::AccessSource::Import(..)) => {}
             Some(
                 ast::AccessSource::Ripple
                 | ast::AccessSource::Self_
@@ -274,6 +275,7 @@ impl<'a> FreeVariableCollector<'a> {
 
     fn visit_match(&mut self, pattern: &ast::Match) {
         match pattern {
+            ast::Match::Hole(chain) => self.visit_chain(chain),
             ast::Match::Pin(target) => {
                 // `^name` / `^name.field` reference an existing variable (with its access path,
                 // so a closure captures exactly what expression accesses would); `^$$x` is an
