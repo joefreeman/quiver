@@ -31,7 +31,8 @@ use std::collections::HashMap;
 use quiver_core::bytecode::{Constant, Instruction, Opcode};
 use quiver_core::types::{Consumes, Requirement, Type, TypeLookup};
 
-use super::{Compiler, Error, typing};
+use super::{Compiler, Error, pattern, typing};
+
 use crate::ast;
 
 /// The requirements found while compiling one function literal, in the order its body first
@@ -55,7 +56,7 @@ impl<E: quiver_core::effects::Effect> Compiler<'_, E> {
     }
 
     /// Whether `type_id` mentions a type parameter of a function being compiled.
-    fn mentions_open_variable(&self, type_id: usize) -> bool {
+    pub(super) fn mentions_open_variable(&self, type_id: usize) -> bool {
         let mut names = Vec::new();
         typing::collect_type_variables(type_id, &*self.program, &mut names);
         names.iter().any(|name| {
@@ -65,63 +66,114 @@ impl<E: quiver_core::effects::Effect> Compiler<'_, E> {
         })
     }
 
-    /// Push the instantiation of `builtin` at `type_arguments`: a constant when they mention no
-    /// type parameter of a function being compiled; otherwise a requirement of the innermost
-    /// one, read from its hidden captures. Answers the constant, when there is one. (Any other
-    /// variable they mention is quantified inside them — a generic edge's own — as checked where
-    /// they were first written.)
+    /// Push the instantiation of `builtin` at `type_arguments` (see [`Self::require`]).
+    /// Answers the constant, when it is one.
     pub(super) fn emit_instance(
         &mut self,
         builtin: &str,
         type_arguments: Vec<usize>,
     ) -> Result<Option<usize>, Error> {
-        if !type_arguments
-            .iter()
-            .any(|&argument| self.mentions_open_variable(argument))
-        {
-            let builtin_index = self.program.register_builtin_instantiated(
-                builtin.to_string(),
-                type_arguments,
-                self.builtins,
-            );
-            super::check_conversion_plan(self.program, builtin_index)?;
-            let constant = self
-                .program
-                .register_constant(Constant::Builtin { id: builtin_index });
-            self.codegen.add_instruction(Instruction::push(constant));
-            return Ok(Some(constant));
-        }
-        let requirement = Requirement {
+        let (push, constant) = self.require(Requirement::Instance {
             builtin: builtin.to_string(),
             type_arguments,
-        };
+        })?;
+        self.codegen.add_instruction(push);
+        Ok(constant)
+    }
+
+    /// The instruction pushing what `requirement` holds, and the constant it pushes when it is
+    /// one: a constant when it mentions no type parameter of a function being compiled;
+    /// otherwise a requirement of the innermost one, read from its hidden captures. (Any other
+    /// variable it mentions is quantified inside it — a generic edge's own — as checked where it
+    /// was first written.)
+    fn require(&mut self, requirement: Requirement) -> Result<(Instruction, Option<usize>), Error> {
+        if !requirement
+            .templates()
+            .iter()
+            .any(|&template| self.mentions_open_variable(template))
+        {
+            let constant = match requirement {
+                Requirement::Instance {
+                    builtin,
+                    type_arguments,
+                } => {
+                    let builtin_index = self.program.register_builtin_instantiated(
+                        builtin,
+                        type_arguments,
+                        self.builtins,
+                    );
+                    super::check_conversion_plan(self.program, builtin_index)?;
+                    Constant::Builtin { id: builtin_index }
+                }
+                Requirement::Type(id) => Constant::Type { id },
+            };
+            let constant = self.program.register_constant(constant);
+            return Ok((Instruction::push(constant), Some(constant)));
+        }
+        Ok((
+            Instruction::hidden(self.requirement_slot(requirement)),
+            None,
+        ))
+    }
+
+    /// The hidden capture of the innermost function being compiled that holds `requirement`.
+    pub(super) fn requirement_slot(&mut self, requirement: Requirement) -> usize {
         let frame = self
             .requirement_frames
             .last_mut()
             .expect("an open type parameter belongs to a function being compiled");
-        let slot = match frame.found.iter().position(|found| *found == requirement) {
+        match frame.found.iter().position(|found| *found == requirement) {
             Some(slot) => slot,
             None => {
                 frame.found.push(requirement);
                 frame.found.len() - 1
             }
-        };
-        self.codegen.add_instruction(Instruction::hidden(slot));
-        Ok(None)
+        }
+    }
+
+    /// The instruction testing a value against `tested`: `TestType` when it is concrete, and
+    /// otherwise `TestHidden`, against the type the function being compiled holds from where it
+    /// is named. Only such a function can be given one, so `tested` may mention no other free
+    /// variable.
+    pub(super) fn type_test(&mut self, tested: usize) -> Result<Instruction, Error> {
+        if !self.only_open_variables(tested) {
+            return Err(Error::TypeTestNotConcrete {
+                tested: quiver_core::format::format_type_by_id(&*self.program, tested),
+            });
+        }
+        if !self.mentions_open_variable(tested) {
+            return Ok(Instruction::test_type(tested));
+        }
+        Ok(Instruction::test_hidden(
+            self.requirement_slot(Requirement::Type(tested)),
+        ))
+    }
+
+    /// The type tests a pattern makes against types its function is named at (see
+    /// [`pattern::witness_types`]).
+    pub(super) fn witnesses(
+        &mut self,
+        binding_sets: &[pattern::BindingSet],
+    ) -> Result<pattern::Witnesses, Error> {
+        pattern::witness_types(binding_sets)
+            .into_iter()
+            .map(|tested| Ok((tested, self.type_test(tested)?)))
+            .collect()
     }
 
     /// Finish a function literal's requirements: split them into those over enclosing type
     /// parameters, filled where the closure is made, and those over its own, filled where it is
-    /// named, and renumber the body's `Hidden` operands to match (the first kind first, so the
-    /// closure's hidden captures can be appended in two steps). Answers the two kinds.
+    /// named, and renumber the body's `Hidden` and `TestHidden` operands to match (the first kind
+    /// first, so the closure's hidden captures can be appended in two steps). Answers the two
+    /// kinds, and each requirement's hidden capture by the order it was found in.
     pub(super) fn finish_requirements(
         &mut self,
         frame: RequirementFrame,
         body: &mut [Instruction],
-    ) -> (Vec<Requirement>, Vec<Requirement>) {
+    ) -> (Vec<Requirement>, Vec<Requirement>, Vec<usize>) {
         let program = &*self.program;
         let owns = |requirement: &Requirement| {
-            requirement.type_arguments.iter().any(|&argument| {
+            requirement.templates().iter().any(|&argument| {
                 frame
                     .own
                     .iter()
@@ -138,8 +190,8 @@ impl<E: quiver_core::effects::Effect> Compiler<'_, E> {
             slots[found] = slot;
         }
         for instruction in body.iter_mut() {
-            if instruction.opcode() == Opcode::Hidden {
-                *instruction = Instruction::hidden(slots[instruction.operand() as usize]);
+            if matches!(instruction.opcode(), Opcode::Hidden | Opcode::TestHidden) {
+                *instruction = instruction.with_operand(slots[instruction.operand() as usize]);
             }
         }
         let clone = |kind: Vec<(usize, &Requirement)>| {
@@ -147,7 +199,7 @@ impl<E: quiver_core::effects::Effect> Compiler<'_, E> {
                 .map(|(_, requirement)| requirement.clone())
                 .collect()
         };
-        (clone(made), clone(named))
+        (clone(made), clone(named), slots)
     }
 
     /// Append the instantiations `requirements` need, at `bindings`, to the closure on top of
@@ -164,14 +216,11 @@ impl<E: quiver_core::effects::Effect> Compiler<'_, E> {
         let closure_at = self.codegen.instructions.len().checked_sub(1);
         let mut constants = Vec::with_capacity(requirements.len());
         for requirement in requirements {
-            let type_arguments = requirement
-                .type_arguments
-                .iter()
-                .map(|&template| typing::substitute(template, bindings, self.program))
-                .collect();
-            if let Some(constant) = self.emit_instance(&requirement.builtin, type_arguments)? {
-                constants.push(constant);
-            }
+            let requirement = requirement
+                .with_templates(|template| typing::substitute(template, bindings, self.program));
+            let (push, constant) = self.require(requirement)?;
+            self.codegen.add_instruction(push);
+            constants.extend(constant);
         }
         let folded = closure_at.and_then(|at| {
             let push = self.codegen.instructions[at];
@@ -273,7 +322,7 @@ impl<E: quiver_core::effects::Effect> Compiler<'_, E> {
             !bindings.contains_key(*name)
                 && requirements
                     .iter()
-                    .flat_map(|requirement| &requirement.type_arguments)
+                    .flat_map(|requirement| requirement.templates())
                     .any(|&template| typing::mentions_variable(template, name, &*self.program))
         }) {
             return Err(Error::TypeArgumentUndetermined {
@@ -321,23 +370,29 @@ impl<E: quiver_core::effects::Effect> Compiler<'_, E> {
         }
     }
 
-    /// Where a value on top of the stack, of type `accessed_type`, is named: instantiate it if
-    /// it is type-consuming and named at types that determine it, and otherwise apply the
-    /// written type arguments to its type, as for any generic.
+    /// Where a value on top of the stack, of type `accessed_type` and with `provenance`, is
+    /// named: instantiate it if it is type-consuming and named at types that determine it, and
+    /// otherwise apply the written type arguments to its type, as for any generic. Answers its
+    /// type as named, and its provenance — none, once instantiated, as the closure is a new one:
+    /// the plain type it now has must not narrow what it was named from.
     pub(super) fn instantiate_named(
         &mut self,
         accessed_type: usize,
         type_arguments: &[ast::Type],
         applied: bool,
         argument: Option<usize>,
-    ) -> Result<usize, Error> {
+        provenance: super::Provenance,
+    ) -> Result<(usize, super::Provenance), Error> {
         let argument = applied.then_some(argument).flatten();
         if let Some(instantiated) =
             self.instantiate_consuming(accessed_type, type_arguments, applied, argument)?
         {
-            return Ok(instantiated);
+            return Ok((instantiated, super::Provenance::Unknown));
         }
-        self.instantiate_type_arguments(accessed_type, type_arguments)
+        Ok((
+            self.instantiate_type_arguments(accessed_type, type_arguments)?,
+            provenance,
+        ))
     }
 
     /// That a value of type `type_id` holds no type-consuming function not yet named (see

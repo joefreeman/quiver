@@ -42,6 +42,8 @@ pub enum WireValue {
     Builtin(usize, Option<WirePayload>),
     Process(ProcessId, usize),
     Resource(ResourceId, usize),
+    /// A type id. Program-global, like the ids the other variants carry.
+    Type(usize),
 }
 
 /// The wire form of a tuple's or function's payload.
@@ -227,6 +229,7 @@ impl WireValue {
             WireValue::Builtin(id, None) => Value::Builtin(*id, None),
             WireValue::Process(pid, function_index) => Value::Process(*pid, *function_index),
             WireValue::Resource(id, type_id) => Value::Resource(*id, *type_id),
+            WireValue::Type(id) => Value::Type(*id),
             WireValue::Tuple(..) | WireValue::Function(..) | WireValue::Builtin(_, Some(_)) => {
                 let _ = heap;
                 unreachable!("composites are handled by the frame stack")

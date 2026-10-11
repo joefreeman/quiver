@@ -48,6 +48,11 @@ pub enum Value {
     Ref {
         value: String, // Hex-encoded ref value for JSON serialization
     },
+    /// A type a closure holds among its captures, as a type-consuming function's
+    /// instantiation does.
+    Type {
+        id: usize,
+    },
 }
 
 impl Value {
@@ -104,6 +109,7 @@ impl Value {
                 let ref_value = u64::from_str_radix(value, 16).unwrap_or(0);
                 quiver_core::value::Value::Reference(ref_value)
             }
+            Value::Type { id } => quiver_core::value::Value::Type(*id),
         }
     }
 
@@ -170,6 +176,7 @@ impl Value {
             quiver_core::value::Value::Reference(r) => Value::Ref {
                 value: format!("{:x}", r),
             },
+            quiver_core::value::Value::Type(id) => Value::Type { id: *id },
         }
     }
 
@@ -224,6 +231,7 @@ impl Value {
                     .map_err(|e| format!("Invalid ref hex: {}", e))?;
                 Ok(quiver_core::value::Value::Reference(ref_value))
             }
+            Value::Type { id } => Ok(quiver_core::value::Value::Type(id)),
         }
     }
 }

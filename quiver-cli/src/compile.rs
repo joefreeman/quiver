@@ -127,6 +127,7 @@ pub fn compile_entry(
     let entry = program.register_function(quiver_core::bytecode::Function {
         instructions: entry_instructions,
         captures: 0,
+        parameter_hidden: None,
         type_id: callable_type_id,
     });
 

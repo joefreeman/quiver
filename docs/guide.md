@@ -976,6 +976,16 @@ read = #<'t>'%str -> ('t | []) { %data.decode<'t> $ }
 %list.map [%list{ "1" }, read<'int>]   //= Cons[1, Nil]
 ```
 
+A test against a type parameter is decided by the type it is named with in the same way, so a
+function that matches `='t`, reads `x:key<'t>`, or receives `!'t` consumes `'t` too:
+
+```quiver
+keep = #<'t>'%list<_> -> '%list<'t> {
+  %list.flat_map [$, #{ $ ~> { =('t & v) => %list{ v } | Nil } }]
+}
+keep<'int> %list{ 1, <01>, 2 }   //= Cons[1, Cons[2, Nil]]
+```
+
 Inside its declaration, a type parameter is one unknown type. Its values can be passed on,
 matched, or used wherever `'t` itself is expected, but not as anything narrower:
 

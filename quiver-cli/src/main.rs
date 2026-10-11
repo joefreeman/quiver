@@ -713,6 +713,7 @@ fn inspect_command(input: ProgramInput, debug: bool) -> Result<(), Box<dyn std::
                 format!("Function{id}({})", refs(captures))
             }
             bytecode::Constant::Builtin { id } => format!("Builtin{id}"),
+            bytecode::Constant::Type { id } => format!("Type{id}"),
             bytecode::Constant::Annotated { value, entries } => {
                 let entries = entries
                     .iter()

@@ -45,6 +45,7 @@ pub fn stack_effect(instruction: Instruction, tables: &impl CodeTables) -> Optio
         Opcode::GetPositional
         | Opcode::GetNamed
         | Opcode::TestType
+        | Opcode::TestHidden
         | Opcode::GetAnnotation
         | Opcode::Stamp
         | Opcode::Select

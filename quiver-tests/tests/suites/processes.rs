@@ -563,12 +563,14 @@ fn test_race_answers_the_first_success() {
 
 #[test]
 fn test_race_fails_when_every_racer_fails() {
+    // `race` receives its racers' results at their type, so with no racers to infer it from,
+    // the type is written.
     quiver()
         .evaluate(
             r#"
             [
               { %proc.race [%list{ #[] { [] }, #[] { __panic__ "x" } }] },
-              { %proc.race [Nil] },
+              { %proc.race<'int> [Nil] },
             ]
             "#,
         )
@@ -1553,17 +1555,41 @@ fn test_constant_binary_crosses_in_a_message() {
 }
 
 #[test]
+fn test_a_receive_takes_a_type_parameter_at_the_type_it_is_named_at() {
+    // Messages are tested against the receive type at runtime. A function's own type
+    // parameters are instantiated afresh by each call, so one receiving them consumes them:
+    // its receive tests messages against the type it is named at, which it holds — directly,
+    // or through a function it makes.
+    quiver()
+        .evaluate("r = #<'t>[] { [!'t, !'bin] }; p = @r<'int> []; p <01>; p 5; !p")
+        .expect("[5, <01>]");
+    quiver()
+        .evaluate(
+            "f = #<'t>[] { g = #[] -> 't { !'t }; [g [], !'bin] }
+             p = @f<'int> []; p <01>; p 5; !p",
+        )
+        .expect("[5, <01>]");
+    // A filter runs only on messages of that type.
+    quiver()
+        .evaluate("r = #<'t>[] { [!'t { =\\0 }, !'int] }; p = @r<'int> []; p 0; p 5; !p")
+        .expect("[5, 0]");
+    // Through a call, the caller consumes what it names the receiver at.
+    quiver()
+        .evaluate("r = #<'t>[] { !'t }; g = #<'u>[] { r<'u> [] }; p = @g<'int> []; p 4; !p")
+        .expect("4");
+    // Its receive type is the one it is named at, so a send is checked against that.
+    quiver()
+        .evaluate("r = #<'t>[] { !'t }; p = @r<'int> []; p <01>")
+        .expect_error_containing("expected message compatible with 'int");
+    quiver()
+        .evaluate("r = #<'t>[] { !'t }; p = @r []")
+        .expect_error_containing("`'t` is neither");
+}
+
+#[test]
 fn test_a_receive_cannot_take_a_type_variable_it_cannot_fix() {
-    // Messages are tested against the receive type at runtime, where no instantiation is
-    // known. A function's own type parameters are instantiated afresh by each call...
-    quiver()
-        .evaluate("f = #<'t>'t -> 't { !'t }; f")
-        .expect_error_containing("A receive can't take 't");
-    quiver()
-        .evaluate("f = #<'t>'t -> 't { g = #[] -> 't { !'t }; g [] }; f")
-        .expect_error_containing("A receive can't take 't");
-    // ... and a generic function value's are never instantiated at all: a receive through
-    // one would type any message as its `'q`.
+    // A generic function value's type parameters are never instantiated at all: a receive
+    // through one would type any message as its `'q`.
     quiver()
         .evaluate(
             "id = #<'q>'q { $ }

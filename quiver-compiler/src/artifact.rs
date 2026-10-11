@@ -49,7 +49,7 @@ use quiver_core::builtins::BuiltinRegistry;
 use quiver_core::bytecode::{Function, IdRemaps, Instruction, Opcode, Site};
 use quiver_core::effects::Effect;
 use quiver_core::program::{Constant, Program};
-use quiver_core::types::{Consumes, TupleTypeInfo, Type};
+use quiver_core::types::{Consumes, Requirement, TupleTypeInfo, Type};
 use quiver_core::value::Value;
 
 /// The hash of every source that determines the compiler's behaviour (this crate and
@@ -719,6 +719,7 @@ fn drain(
                     Constant::Tuple { id, .. } => add_tuple(*id, closure, queue),
                     Constant::Function { id, .. } => add_function(*id, closure, queue),
                     Constant::Builtin { id } => add_builtin(*id, closure, queue),
+                    Constant::Type { id } => add_type(*id, closure, queue),
                     Constant::Annotated { entries, .. } => {
                         for (key, _) in entries {
                             closure.annotation_keys.insert(*key);
@@ -834,8 +835,14 @@ fn fingerprint_type(type_id: usize, program: &Program, memo: &mut HashMap<usize,
                     2u8.hash(&mut hasher);
                     parameters.hash(&mut hasher);
                     for requirement in requirements {
-                        requirement.builtin.hash(&mut hasher);
-                        for &template in &requirement.type_arguments {
+                        match requirement {
+                            Requirement::Instance { builtin, .. } => {
+                                0u8.hash(&mut hasher);
+                                builtin.hash(&mut hasher);
+                            }
+                            Requirement::Type(_) => 1u8.hash(&mut hasher),
+                        }
+                        for &template in requirement.templates() {
                             fingerprint_type(template, program, memo).hash(&mut hasher);
                         }
                     }
@@ -1589,6 +1596,12 @@ fn shake_types(unit: &mut CompiledUnit) {
             *type_argument = remap.types[type_argument];
         }
     }
+    // A type constant (one a type-consuming function's instantiation holds) names a type too.
+    unit.constants = unit
+        .constants
+        .drain(..)
+        .map(|constant| constant.remap_ids(&remap))
+        .collect();
     unit.types = types;
 }
 
@@ -1918,6 +1931,7 @@ fn collect_value(value: &Value, closure: &mut Closure, queue: &mut Vec<Item>) {
                 collect_payload(payload, closure, queue);
             }
         }
+        Value::Type(type_id) => add_type(*type_id, closure, queue),
         Value::Process(..) | Value::Resource(..) => {
             panic!("process/resource values cannot occur in a compile-time module value")
         }
@@ -2218,6 +2232,7 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
             Constant::Tuple { id, .. } => check("tuple", *id, unit.tuples.len())?,
             Constant::Function { id, .. } => check("function", *id, function_space)?,
             Constant::Builtin { id } => check("builtin", *id, unit.builtins.len())?,
+            Constant::Type { id } => check("type", *id, unit.types.len())?,
             Constant::Annotated { entries, .. } => {
                 for (key, _) in entries {
                     check("annotation key", *key, unit.annotation_keys.len())?;

@@ -107,6 +107,7 @@ fn compile_inner(
     let entry = program.register_function(Function {
         instructions: compiled.instructions,
         captures: 0,
+        parameter_hidden: None,
         type_id: callable,
     });
     Compiled {

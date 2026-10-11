@@ -1954,6 +1954,7 @@ impl<E: Effect> Executor<E> {
             Opcode::Stamp => self.handle_stamp(proc, operand),
             Opcode::Hidden => self.handle_hidden(proc, operand),
             Opcode::Extend => self.handle_extend(proc, operand),
+            Opcode::TestHidden => self.handle_test_hidden(proc, operand),
             // Nothing should reach this: reclaimed code (a code-collection liveness bug), the
             // point after a call that never returns, or an irrefutable pattern's failure path.
             // Abort the process loudly rather than return garbage.
@@ -2055,6 +2056,7 @@ impl<E: Effect> Executor<E> {
                 let type_arguments = self.builtin_type_arguments.get(*id).cloned();
                 Value::builtin_typed(*id, type_arguments.unwrap_or_default())
             }
+            Constant::Type { id } => Value::Type(*id),
             Constant::Annotated { value, entries } => {
                 let mut carrier = child(&self.constant_values, *value)?;
                 for (key, index) in entries {
@@ -2420,6 +2422,7 @@ impl<E: Effect> Executor<E> {
             Value::Builtin(builtin_id, _) => ConcreteType::Builtin(*builtin_id),
             Value::Process(_, func_id) => ConcreteType::Process(*func_id),
             Value::Resource(_, resource_type_id) => ConcreteType::Resource(*resource_type_id),
+            Value::Type(_) => unreachable!("a type is held only by hidden captures, never tested"),
         }
     }
 
@@ -2427,10 +2430,19 @@ impl<E: Effect> Executor<E> {
     /// as a type test would.
     fn check_message_compatible(&self, message: &Value, source: &Value) -> bool {
         let parameter = match source {
-            Value::Function(func_id, _) => match self.types.get(self.functions[*func_id].type_id) {
-                Some(Type::Callable { parameter, .. }) => *parameter,
-                _ => unreachable!("a function's type is callable"),
-            },
+            Value::Function(func_id, captures) => {
+                let function = &self.functions[*func_id];
+                match function.parameter_hidden {
+                    Some(position) => match captures.get(function.captures + position) {
+                        Some(Value::Type(held)) => *held,
+                        _ => unreachable!("a receiver holds its parameter's type"),
+                    },
+                    None => match self.types.get(function.type_id) {
+                        Some(Type::Callable { parameter, .. }) => *parameter,
+                        _ => unreachable!("a function's type is callable"),
+                    },
+                }
+            }
             Value::Builtin(builtin_id, _) => self.builtin_signatures[*builtin_id].0,
             _ => return true,
         };
@@ -2739,8 +2751,15 @@ impl<E: Effect> Executor<E> {
         proc: &mut Process,
         position: usize,
     ) -> Result<Option<Action<E>>, Error> {
+        let value = self.hidden_capture(proc, position)?;
+        self.push_value(proc, value);
+        Ok(None)
+    }
+
+    /// The running closure's hidden capture at `position`.
+    fn hidden_capture(&self, proc: &Process, position: usize) -> Result<Value, Error> {
         let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
-        let value = frame
+        frame
             .hidden
             .as_ref()
             .and_then(|captures| captures.get(frame.captures_count + position))
@@ -2750,8 +2769,24 @@ impl<E: Effect> Executor<E> {
                     "a type-consuming function ran without its instantiation {position}, which \
                      its type requires it to be named with before it runs"
                 ))
-            })?;
-        self.push_value(proc, value);
+            })
+    }
+
+    /// Pop a value; push whether it belongs to the type the running closure's hidden capture
+    /// at `position` holds.
+    fn handle_test_hidden(
+        &mut self,
+        proc: &mut Process,
+        position: usize,
+    ) -> Result<Option<Action<E>>, Error> {
+        let Value::Type(tested) = self.hidden_capture(proc, position)? else {
+            return Err(Error::InvalidArgument(format!(
+                "hidden capture {position} holds no type to test against"
+            )));
+        };
+        let value = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
+        let is_match = self.check_type_compatible(&value, tested);
+        self.push_value(proc, if is_match { Value::ok() } else { Value::nil() });
         Ok(None)
     }
 
@@ -3847,6 +3882,7 @@ impl<E: Effect> Executor<E> {
             Value::Builtin(id, None) => WireValue::Builtin(*id, None),
             Value::Process(pid, function_index) => WireValue::Process(*pid, *function_index),
             Value::Resource(id, type_id) => WireValue::Resource(*id, *type_id),
+            Value::Type(id) => WireValue::Type(*id),
             Value::Tuple(..) | Value::Function(..) | Value::Builtin(_, Some(_)) => {
                 unreachable!("composites are handled by the frame stack")
             }
@@ -3941,6 +3977,7 @@ impl<E: Effect> Executor<E> {
             WireValue::Builtin(id, None) => Value::Builtin(id, None),
             WireValue::Process(pid, function_index) => Value::Process(pid, function_index),
             WireValue::Resource(id, type_id) => Value::Resource(id, type_id),
+            WireValue::Type(id) => Value::Type(id),
             WireValue::Tuple(..) | WireValue::Function(..) | WireValue::Builtin(_, Some(_)) => {
                 unreachable!("composites are handled by the frame stack")
             }

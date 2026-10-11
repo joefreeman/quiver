@@ -622,6 +622,10 @@ pub enum Value {
     Builtin(usize, Option<Rc<Payload>>),
     Process(ProcessId, usize),
     Resource(ResourceId, usize), // resource_id, resource_type_id
+    /// A type, by id: one a type-consuming function was named at, held among its closure's
+    /// hidden captures for `TestHidden` to test against. Internal: programs never see one, as
+    /// only `Extend` stores it and only `TestHidden` reads it.
+    Type(usize),
 }
 
 // Manual because annotations must be invisible to equality: a builtin that has gained an
@@ -645,6 +649,7 @@ impl PartialEq for Value {
             }
             (Value::Process(a, x), Value::Process(b, y)) => a == b && x == y,
             (Value::Resource(a, x), Value::Resource(b, y)) => a == b && x == y,
+            (Value::Type(a), Value::Type(b)) => a == b,
             _ => false,
         }
     }
@@ -990,6 +995,7 @@ impl Value {
             Value::Builtin(..) => "builtin",
             Value::Process(_, _) => "process",
             Value::Resource(_, _) => "resource",
+            Value::Type(_) => "type",
         }
     }
 }

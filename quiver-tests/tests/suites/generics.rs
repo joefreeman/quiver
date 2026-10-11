@@ -484,17 +484,18 @@ fn test_type_parameters_visible_in_body_positions() {
 }
 
 #[test]
-fn test_checked_retrieval_cannot_test_a_type_parameter() {
-    // The entry's `'t` is whatever the caller chose, which no runtime test can check: an
-    // annotation carrying a binary would come back as the `'int` of a `Box[1]`.
+fn test_checked_retrieval_tests_a_type_parameter_by_its_witness() {
+    // The entry's `'t` is whatever the caller chose, so the function consumes it: the test is
+    // made at the type it is named with. An annotation carrying a binary is no `'int` entry.
     quiver()
         .evaluate(
             r#"'meta<'t> = [it: 't]
-               peek = #<'t>Box['t] -> 't { $:meta<'meta<'t>> ~> =(it: x); x }
+               peek = #<'t>Box['t] -> ('t | []) { $:meta<'meta<'t>> ~> =(it: x); x }
                b = Box[1] ~> { :meta [it: <01>] }
-               peek b ~> __integer_add__ [~, 1]"#,
+               c = Box[1] ~> { :meta [it: 2] }
+               [peek b, peek c]"#,
         )
-        .expect_error_containing("Cannot test a value against [it: 't]");
+        .expect("[[], 2]");
 }
 
 #[test]
@@ -808,30 +809,39 @@ fn test_a_bare_nil_is_not_a_type_variable() {
 }
 
 #[test]
-fn test_a_type_test_cannot_decide_a_type_parameter() {
-    // No runtime test knows what the caller chose for `'t`, so a test the variable decides
-    // is rejected — otherwise it would cast any value to `'t`.
+fn test_a_type_test_a_type_parameter_decides_uses_its_witness() {
+    // A test the variable decides is made by its witness, at the type the function is named
+    // with, so it casts nothing.
     quiver()
         .evaluate(
             "cast = #<'t>['t, _] -> 't { | $1 ~> =('t & v) => v | $0 }
-             cast [<01>, 42] ~> __binary_length__",
+             [cast [<01>, 42] ~> __binary_length__, cast [<01>, <0203>] ~> __binary_length__]",
         )
-        .expect_error_containing("Cannot test a value against 't");
+        .expect("[1, 2]");
     quiver()
-        .evaluate("f = #<'t>[_] -> ('t | []) { $ ~> { =[('t & v)] => v } }; f<'bin> [5]")
-        .expect_error_containing("Cannot test a value against 't");
+        .evaluate(
+            "f = #<'t>[_] -> ('t | []) { $ ~> { =[('t & v)] => v } }; [f<'bin> [5], f<'bin> [<01>]]",
+        )
+        .expect("[[], <01>]");
     quiver()
-        .evaluate("f = #<'t>_ { | =A['t] => Yes | No }; f<'int> A[<01>]")
-        .expect_error_containing("Cannot test a value against 't");
-    // Nil passes a test of `'t` (the caller may have chosen a type holding it), so the test
-    // can't strip it.
+        .evaluate("f = #<'t>_ { | =A['t] => Yes | No }; [f<'int> A[<01>], f<'int> A[1]]")
+        .expect("[No, Yes]");
+    // Nil passes a test of `'t` only where the type it is named with holds nil.
     quiver()
-        .evaluate("f = #<'t: 'bin>('t | []) { $ ~> =('t & v); __binary_length__ v }; f []")
-        .expect_error_containing("Cannot test a value against 't");
-    // Bounds don't help: two values within the bound may still be different types.
+        .evaluate(
+            "f = #<'t: 'bin>('t | []) { $ ~> =('t & v); __binary_length__ v }
+             [f<'bin> [], f <01>]",
+        )
+        .expect("[[], 1]");
+    // A negated test, and one in a closure the generic makes, which it gives the witness.
     quiver()
-        .evaluate("cast = #<'t: '%data>['t, _] -> 't { | $1 ~> =('t & v) => v | $0 }; cast")
-        .expect_error_containing("Cannot test a value against 't");
+        .evaluate(
+            "neg = #<'t>_ { $ ~> { =\\'t => NotT | IsT } }
+             w = #<'t>[] { #_ { $ ~> { ='t => Y | N } } }
+             f = w<'bin> []
+             [neg<'int> 1, neg<'int> <00>, f 1, f <01>]",
+        )
+        .expect("[IsT, NotT, N, Y]");
 }
 
 #[test]

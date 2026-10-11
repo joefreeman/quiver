@@ -310,6 +310,7 @@ impl Program {
                     payload.as_deref(),
                 )
             }
+            Value::Type(id) => (self.register_constant(Constant::Type { id: *id }), None),
             Value::Reference(_) | Value::Process(..) | Value::Resource(..) => {
                 return Err(InternError::Identity(value.type_name()));
             }
@@ -466,6 +467,7 @@ impl Program {
                     captures: Vec::new(),
                 },
                 Constant::Builtin { id } => Constant::Builtin { id: *id },
+                Constant::Type { id } => Constant::Type { id: *id },
                 Constant::Annotated { value, .. } => Constant::Annotated {
                     value: *value,
                     entries: Vec::new(),

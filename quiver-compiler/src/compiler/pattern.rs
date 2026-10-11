@@ -76,6 +76,10 @@ impl<'a> IdentifierScope<'a> {
 #[derive(Debug, Clone)]
 enum RuntimeCheck {
     TypeId(usize), // Type ID to check against
+    /// A test against a type mentioning the type parameters of a function being compiled,
+    /// which only the types it is named with decide: made against the type its closure is given
+    /// there (`TestHidden`, see [`witness_types`]).
+    Witness(usize),
     Literal(ast::Literal),
     /// A pin (`^name`, `^name.field`, `^$x`): load the referenced value and compare. The
     /// access steps are resolved against the root's static type at analysis; the root itself
@@ -229,6 +233,8 @@ pub fn prevents_complement_narrowing(binding_sets: &[BindingSet], program: &Prog
                 RuntimeCheck::TypeId(type_id) => {
                     matches!(program.lookup_type(*type_id), Some(Type::Partial { .. }))
                 }
+                // Its type is a variable's as written, which a complement can't refine by.
+                RuntimeCheck::Witness(_) => true,
             }
         })
     })
@@ -257,6 +263,7 @@ fn tests_only_data(binding_sets: &[BindingSet], program: &Program) -> bool {
             .iter()
             .all(|requirement| match &requirement.check {
                 RuntimeCheck::TypeId(type_id) => data(*type_id, program),
+                RuntimeCheck::Witness(_) => false,
                 _ => true,
             })
     })
@@ -373,11 +380,39 @@ pub fn analyze_pattern(
     })
 }
 
+/// The instruction making each test against a type a pattern's function is named at, by the
+/// type as written.
+pub type Witnesses = HashMap<usize, Instruction>;
+
+/// The types the pattern tests against by witness (`RuntimeCheck::Witness`), at any depth: those
+/// [`generate_pattern_code`] needs [`Witnesses`] for.
+pub fn witness_types(binding_sets: &[BindingSet]) -> Vec<usize> {
+    fn collect(requirements: &[Requirement], types: &mut Vec<usize>) {
+        for requirement in requirements {
+            match &requirement.check {
+                RuntimeCheck::Witness(type_id) if !types.contains(type_id) => types.push(*type_id),
+                RuntimeCheck::Not { sets, .. } => {
+                    for set in sets {
+                        collect(set, types);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut types = Vec::new();
+    for set in binding_sets {
+        collect(&set.requirements, &mut types);
+    }
+    types
+}
+
 /// Generate bytecode for pattern matching
 pub fn generate_pattern_code(
     codegen: &mut InstructionBuilder,
     program: &mut Program,
     scopes: &[super::scopes::Scope],
+    witnesses: &Witnesses,
     binding_sets: &[BindingSet],
     fail_addr: usize,
 ) -> Result<(), Error> {
@@ -394,7 +429,7 @@ pub fn generate_pattern_code(
 
         // Check all requirements for this binding set
         for requirement in &binding_set.requirements {
-            emit_requirement(codegen, program, scopes, requirement)?;
+            emit_requirement(codegen, program, scopes, witnesses, requirement)?;
             if is_last {
                 codegen.emit_jump_unless_to_addr(fail_addr);
             } else {
@@ -458,6 +493,7 @@ fn emit_requirement(
     codegen: &mut InstructionBuilder,
     program: &mut Program,
     scopes: &[super::scopes::Scope],
+    witnesses: &Witnesses,
     requirement: &Requirement,
 ) -> Result<(), Error> {
     match &requirement.check {
@@ -475,6 +511,10 @@ fn emit_requirement(
         RuntimeCheck::TypeId(type_id) => {
             generate_value_access(codegen, &requirement.path);
             codegen.add_instruction(Instruction::test_type(*type_id));
+        }
+        RuntimeCheck::Witness(type_id) => {
+            generate_value_access(codegen, &requirement.path);
+            codegen.add_instruction(witnesses[type_id]);
         }
         RuntimeCheck::Literal(literal) => {
             generate_value_access(codegen, &requirement.path);
@@ -515,7 +555,7 @@ fn emit_requirement(
             for requirements in sets {
                 let mut next_set_jumps = Vec::new();
                 for requirement in requirements {
-                    emit_requirement(codegen, program, scopes, requirement)?;
+                    emit_requirement(codegen, program, scopes, witnesses, requirement)?;
                     next_set_jumps.push(codegen.emit_jump_unless_placeholder());
                 }
                 codegen.add_instruction(Instruction::build(NIL));
@@ -775,27 +815,23 @@ fn type_check_requirements(
     for member in members {
         let resolved = super::typing::resolve_ast_type(env, scopes, member.clone(), program)?;
         let next = intersect_types(narrowed, resolved, program);
-        // A type variable stands for whatever the caller chose, which the running code does
-        // not know, so a test can only check the type with its variables erased to `_`. That
-        // is enough where the variables don't decide the outcome (`=('<'t> & xs)` on a
-        // `'<'t> | []`, where only the nil is ruled out); where they do (`=('t & v)` on a
-        // `_`), the narrowing would claim what nothing tested.
-        let tested = if super::typing::contains_variables(resolved, &*program) {
+        // A type variable stands for whatever the caller chose, which the body's code does not
+        // know. Where the variables don't decide the outcome (`=('<'t> & xs)` on a `'<'t> | []`,
+        // where only the nil is ruled out), the type with them erased to `_` is tested. Where
+        // they do (`=('t & v)` on a `_`), the test is against the type the function is given
+        // where it is named, at the types it is named with.
+        let (tested, witnessed) = if super::typing::contains_variables(resolved, &*program) {
             let erased = super::typing::erase_type_variables(resolved, program);
             let by_erased = intersect_types(narrowed, erased, program);
-            if !quiver_core::types::is_compatible(by_erased, next, &*program) {
-                return Err(Error::TypeTestNotConcrete {
-                    tested: quiver_core::format::format_type_by_id(&*program, resolved),
-                });
-            }
-            erased
+            let witnessed = !quiver_core::types::is_compatible(by_erased, next, &*program);
+            (if witnessed { resolved } else { erased }, witnessed)
         } else {
-            resolved
+            (resolved, false)
         };
         // A type-consuming function not yet named is judged at run time as the plain function
         // it becomes once named, which only its static type says it isn't yet. A value that
         // may hold one is therefore tested against what it can be, not the pattern as written.
-        let tested = if quiver_core::types::holds_consuming(narrowed, &*program) {
+        let tested = if !witnessed && quiver_core::types::holds_consuming(narrowed, &*program) {
             intersect_types(narrowed, tested, program)
         } else {
             tested
@@ -818,7 +854,11 @@ fn type_check_requirements(
         if !provable {
             requirements.push(Requirement {
                 path: path.clone(),
-                check: RuntimeCheck::TypeId(tested),
+                check: if witnessed {
+                    RuntimeCheck::Witness(tested)
+                } else {
+                    RuntimeCheck::TypeId(tested)
+                },
             });
         }
         narrowed = next;

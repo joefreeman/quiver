@@ -2959,6 +2959,7 @@ impl<E: Effect> Environment<E> {
                     .map(|name| Type::Resource(name.clone()))
                     .unwrap_or_else(|| Type::Resource(format!("Resource#{}", resource_type_id)))
             }
+            Value::Type(_) => unreachable!("a type is held only by hidden captures"),
         }
     }
 

@@ -164,6 +164,7 @@ mod probe {
         let entry = program.register_function(Function {
             instructions: compiled.instructions,
             captures: 0,
+            parameter_hidden: None,
             type_id: callable,
         });
         let (value, mut executor) = quiver_core::execute_bytecode_sync_with(

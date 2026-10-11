@@ -63,12 +63,47 @@ pub enum Consumes {
     },
 }
 
-/// An instantiation of a type-consuming builtin that a body needs: the builtin, and its type
-/// arguments as templates over the type parameters in scope.
+/// What a body needs of the types it is instantiated at, as templates over the type parameters
+/// in scope: held by its closure as a hidden capture.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
-pub struct Requirement {
-    pub builtin: String,
-    pub type_arguments: Vec<usize>,
+pub enum Requirement {
+    /// An instantiation of a type-consuming builtin, which the body calls: the builtin, and
+    /// its type arguments.
+    #[serde(rename = "instance")]
+    Instance {
+        builtin: String,
+        type_arguments: Vec<usize>,
+    },
+    /// A type, which the body tests values against (`TestHidden`).
+    #[serde(rename = "type")]
+    Type(usize),
+}
+
+impl Requirement {
+    /// The templates it is made of, in order.
+    pub fn templates(&self) -> &[usize] {
+        match self {
+            Requirement::Instance { type_arguments, .. } => type_arguments,
+            Requirement::Type(template) => std::slice::from_ref(template),
+        }
+    }
+
+    /// The same, its templates replaced in order.
+    pub fn with_templates(&self, mut next: impl FnMut(usize) -> usize) -> Requirement {
+        match self {
+            Requirement::Instance {
+                builtin,
+                type_arguments,
+            } => Requirement::Instance {
+                builtin: builtin.clone(),
+                type_arguments: type_arguments
+                    .iter()
+                    .map(|&template| next(template))
+                    .collect(),
+            },
+            Requirement::Type(template) => Requirement::Type(next(*template)),
+        }
+    }
 }
 
 impl Consumes {
@@ -81,7 +116,7 @@ impl Consumes {
         };
         requirements
             .iter()
-            .flat_map(|requirement| requirement.type_arguments.iter().copied())
+            .flat_map(|requirement| requirement.templates().iter().copied())
     }
 
     /// The same, its templates replaced in order (as [`Self::templates`] lists them).
@@ -95,14 +130,7 @@ impl Consumes {
                 parameters: parameters.clone(),
                 requirements: requirements
                     .iter()
-                    .map(|requirement| Requirement {
-                        builtin: requirement.builtin.clone(),
-                        type_arguments: requirement
-                            .type_arguments
-                            .iter()
-                            .map(|&template| next(template))
-                            .collect(),
-                    })
+                    .map(|requirement| requirement.with_templates(&mut next))
                     .collect(),
             },
         }
@@ -1680,10 +1708,13 @@ mod annotation_row_tests {
                 omittable: vec![],
                 consumes: Some(Consumes::Captures {
                     parameters: vec!["t#1".to_string()],
-                    requirements: vec![Requirement {
-                        builtin: "data_decode".to_string(),
-                        type_arguments: vec![5],
-                    }],
+                    requirements: vec![
+                        Requirement::Instance {
+                            builtin: "data_decode".to_string(),
+                            type_arguments: vec![5],
+                        },
+                        Requirement::Type(6),
+                    ],
                 }),
             },
             Type::Cycle(2),

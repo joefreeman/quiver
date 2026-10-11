@@ -549,6 +549,7 @@ fn format_step<'a, T: TypeLookup, B: BinaryLookup>(
         },
         Value::Process(process_id, _) => out.push_str(&format!("@{}", process_id)),
         Value::Resource(resource_id, _) => out.push_str(&format!("+#{}", resource_id)),
+        Value::Type(type_id) => out.push_str(&format!("'#{}", type_id)),
         Value::Reference(r) => {
             let worker_id = r >> 48;
             let counter = r & 0xFFFFFFFFFFFF;

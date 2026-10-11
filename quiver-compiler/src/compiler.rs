@@ -80,9 +80,9 @@ pub enum Error {
     AnnotationParameterDepth {
         written: String,
     },
-    /// A receive whose message type mentions a type variable (`!'t` in `#<'t>`, or a generic
-    /// function as the receiver): a receive tests messages at runtime, where no type
-    /// parameter is known.
+    /// A receive whose message type mentions a type variable nothing gives it the
+    /// instantiation of (a generic function as the receiver): a receive tests messages at
+    /// runtime, where no such type parameter is known.
     GenericReceive {
         tested: String,
     },
@@ -1223,6 +1223,10 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     collected_dispatch: Option<DispatchCollection>,
     // The requirements found so far in each function literal being compiled, innermost last.
     requirement_frames: Vec<consuming::RequirementFrame>,
+    // Set while a select source written as a function literal (`!'t`, `![#'t]`) is compiled,
+    // for that literal to take: a receive tests messages against its parameter type, so one
+    // its enclosing function is named at must be held (see `Function::parameter_hidden`).
+    receiver_literal: bool,
 
     // Set by the most recent function-body block: the unhandled parameter type when the body is
     // a non-exhaustive enumeration (every branch a variant pattern, but some variant uncovered).
@@ -1445,6 +1449,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             current_omittable: Vec::new(),
             collected_dispatch: None,
             requirement_frames: Vec::new(),
+            receiver_literal: false,
             last_uncovered: None,
             self_tail_calls: 0,
             fn_case_tables: tables.fn_case_tables,
@@ -3005,6 +3010,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             ast::Term::Select(sources, _) => {
                 // Extract receive types from all sources
                 let mut select_sources = Vec::new();
+                // Those of receivers written in place.
+                let mut held = Vec::new();
 
                 match sources {
                     // Handle postfix form: `receiver ~> !` (bare !)
@@ -3021,21 +3028,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Explicit sources
                     Some(sources) => {
                         for source in sources {
+                            let before = select_sources.len();
                             self.extract_receive_type_from_source(
                                 source,
                                 chained_type.as_ref(),
                                 &mut select_sources,
                             )?;
+                            if Self::receiver_literal(source) {
+                                held.extend(select_sources[before..].iter().copied());
+                            }
                         }
                     }
                 }
 
                 // A receive tests its messages at runtime, which can't decide a type variable
-                // nothing instantiates: a generic function's own, received through it.
-                if let Some(&generic) = select_sources
-                    .iter()
-                    .find(|&&source| typing::contains_free_variables(source, &*self.program))
-                {
+                // nothing instantiates: a generic function's own, received through it. A
+                // receiver written in place is given the types a function being compiled is
+                // named at (see `receiver_literal`), so it may receive those.
+                if let Some(&generic) = select_sources.iter().find(|&&source| {
+                    typing::contains_free_variables(source, &*self.program)
+                        && !(held.contains(&source) && self.only_open_variables(source))
+                }) {
                     return Err(Error::GenericReceive {
                         tested: quiver_core::format::format_type_by_id(&*self.program, generic),
                     });
@@ -3277,6 +3290,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         mut function: ast::Function,
         expected_parameter: Option<usize>,
     ) -> Result<usize, Error> {
+        let receiver = std::mem::take(&mut self.receiver_literal);
         // Dialect invocations expand to ordinary AST that may reference enclosing
         // variables (`EVar`), so expand them before captures are collected — the capture
         // collector cannot see through an unexpanded `%mod{…}`. Only the outermost
@@ -3451,6 +3465,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 },
             );
         }
+
+        // A receive source holds its parameter's type where that is one its enclosing function
+        // is named at: the type a receive tests messages against.
+        let parameter_requirement = (receiver && self.mentions_open_variable(parameter_type))
+            .then(|| self.requirement_slot(quiver_core::types::Requirement::Type(parameter_type)));
 
         self.scopes = vec![Scope::new(function_scope_bindings, None, ScopeKind::Root)];
         self.codegen.instructions = Vec::new();
@@ -3785,7 +3804,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .requirement_frames
             .pop()
             .expect("the literal's requirement frame is open");
-        let (made_requirements, named_requirements) = self.finish_requirements(frame, &mut body);
+        let (made_requirements, named_requirements, slots) =
+            self.finish_requirements(frame, &mut body);
         let function_instructions =
             self.finish_body(body, Locals::Filled(unique_captures.len()))?;
 
@@ -3811,13 +3831,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     .collect::<Vec<_>>()
             });
 
-        // A function can't receive its own type parameters, directly or through what it calls:
-        // each call or spawn instantiates them afresh, and the runtime test that selects a
-        // message can't tell which instantiation it serves. (An enclosing function's are
-        // fine — fixed for as long as a process created under them lives, and every send to
-        // it checked against the same instantiation.)
+        // A function can't receive its own type parameters, directly or through what it calls,
+        // unless it consumes them: each call or spawn instantiates them afresh, and only a
+        // function given them where it is named holds the instantiation the runtime test that
+        // selects a message needs. Its receive type is then instantiated where it is named, as
+        // the rest of its type is. (An enclosing function's are fine — fixed for as long as a
+        // process created under them lives, and every send to it checked against the same
+        // instantiation.)
         if let Some(own) = declared.names().into_iter().find(|name| {
             typing::mentions_variable(self.current_receive_type_id, name, &*self.program)
+                && !named_requirements
+                    .iter()
+                    .flat_map(|requirement| requirement.templates())
+                    .any(|&template| typing::mentions_variable(template, name, &*self.program))
         }) {
             return Err(Error::GenericReceive {
                 // Uniquified as `t#N`; shown as written.
@@ -3861,6 +3887,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let function_index = self.program.register_function(Function {
             instructions: function_instructions,
             captures: unique_captures.len(),
+            parameter_hidden: parameter_requirement.map(|found| slots[found]),
             type_id: callable_type_id,
         });
 
@@ -4189,10 +4216,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Generate pattern matching code (Store instructions push locals)
         // Use on_no_match if provided (for receive blocks), otherwise use fail_jump_addr
         let fail_target = on_no_match.unwrap_or(fail_jump_addr);
+        let witnesses = self.witnesses(&binding_sets)?;
         pattern::generate_pattern_code(
             &mut self.codegen,
             self.program,
             &self.scopes,
+            &witnesses,
             &binding_sets,
             fail_target,
         )?;
@@ -4986,10 +5015,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let start_jump = self.codegen.emit_jump_placeholder();
         let fail_jump = self.codegen.emit_jump_placeholder();
         self.codegen.patch_jump_to_here(start_jump);
+        let witnesses = self.witnesses(&binding_sets)?;
         pattern::generate_pattern_code(
             &mut self.codegen,
             self.program,
             &self.scopes,
+            &witnesses,
             &binding_sets,
             fail_jump,
         )?;
@@ -6076,6 +6107,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         bytecode.functions.push(quiver_core::bytecode::Function {
             instructions: module_instructions,
             captures: 0,
+            parameter_hidden: None,
             type_id: callable_type_id,
         });
         bytecode.entry = Some(bytecode.functions.len() - 1);
@@ -6368,7 +6400,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     consumes,
                 })
             }
-            Value::Process(..) | Value::Resource(..) | Value::Reference(_) => {
+            Value::Process(..) | Value::Resource(..) | Value::Reference(_) | Value::Type(_) => {
                 return Err(Error::FeatureUnsupported(format!(
                     "Cannot use {} in constant context",
                     value.type_name()
@@ -6521,12 +6553,22 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 None
             };
 
-            let source_type = self.compile_chain(source.clone(), None, ripple_param)?;
+            // A source written as a function literal is a receiver whose parameter type is
+            // what the receive takes (see `receiver_literal`).
+            self.receiver_literal = Self::receiver_literal(source);
+            let source_type = self.compile_chain(source.clone(), None, ripple_param);
+            self.receiver_literal = false;
+            let source_type = source_type?;
 
             source_types.push(source_type);
         }
 
         Ok(source_types)
+    }
+
+    /// Whether a select source is written as a function literal, as `!'t` and `![#'t]` are.
+    fn receiver_literal(source: &ast::Chain) -> bool {
+        source.binding.is_none() && matches!(source.terms.as_slice(), [ast::Term::Function(_)])
     }
 
     /// Compile spawn operation. The init argument may be supplied three ways: by juxtaposition
@@ -6574,7 +6616,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// Stack before: [argument, function]
     fn emit_arg_spawn(&mut self, fn_type_id: usize, arg_type: usize) -> Result<usize, Error> {
         // Spawning a type-consuming function names it, applied to its init.
-        let fn_type_id = self.instantiate_named(fn_type_id, &[], true, Some(arg_type))?;
+        let (fn_type_id, _) =
+            self.instantiate_named(fn_type_id, &[], true, Some(arg_type), Provenance::Unknown)?;
         let Some(parts) = typing::open_callable(fn_type_id, self.program) else {
             return Err(Error::FeatureUnsupported(
                 "Can only spawn functions".to_string(),
@@ -6927,8 +6970,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 })?;
                 let (accessed_type, accessed_prov) =
                     self.compile_accessor(val_type, access.accessors, "value", value_provenance)?;
-                let accessed_type =
-                    self.instantiate_named(accessed_type, &type_args, false, None)?;
+                let (accessed_type, accessed_prov) =
+                    self.instantiate_named(accessed_type, &type_args, false, None, accessed_prov)?;
                 Ok((accessed_type, accessed_prov))
             }
             Some(ast::AccessSource::Parameter { depth }) if depth > 0 => {
@@ -6958,8 +7001,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 let (accessed_type, accessed_prov) =
                     self.compile_member_access(&name, access.accessors)?;
-                let accessed_type =
-                    self.instantiate_named(accessed_type, &type_args, is_applicable, value_type)?;
+                let (accessed_type, accessed_prov) = self.instantiate_named(
+                    accessed_type,
+                    &type_args,
+                    is_applicable,
+                    value_type,
+                    accessed_prov,
+                )?;
                 self.check_applied(applied, accessed_type)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
@@ -6989,8 +7037,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     "$",
                     Provenance::Parameter(level),
                 )?;
-                let accessed_type =
-                    self.instantiate_named(accessed_type, &type_args, is_applicable, value_type)?;
+                let (accessed_type, accessed_prov) = self.instantiate_named(
+                    accessed_type,
+                    &type_args,
+                    is_applicable,
+                    value_type,
+                    accessed_prov,
+                )?;
                 self.check_applied(applied, accessed_type)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
@@ -7018,8 +7071,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 let (accessed_type, accessed_prov) =
                     self.compile_member_access(&name, access.accessors)?;
-                let accessed_type =
-                    self.instantiate_named(accessed_type, &type_args, is_applicable, value_type)?;
+                let (accessed_type, accessed_prov) = self.instantiate_named(
+                    accessed_type,
+                    &type_args,
+                    is_applicable,
+                    value_type,
+                    accessed_prov,
+                )?;
                 self.check_applied(applied, accessed_type)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
@@ -7034,15 +7092,26 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Bare ~ - the flowing value itself.
                     if let Some(val_type) = value_type {
                         // Already on the stack as the chained value.
-                        let val_type = self.instantiate_named(val_type, &type_args, false, None)?;
-                        Ok((val_type, value_provenance))
+                        let (val_type, provenance) = self.instantiate_named(
+                            val_type,
+                            &type_args,
+                            false,
+                            None,
+                            value_provenance,
+                        )?;
+                        Ok((val_type, provenance))
                     } else if let Some(ctx) = ripple_context {
                         // Inherit the ripple context from the enclosing tuple.
                         self.codegen
                             .add_instruction(Instruction::pick(ctx.stack_offset));
-                        let ty =
-                            self.instantiate_named(ctx.value_type_id, &type_args, false, None)?;
-                        Ok((ty, ctx.provenance.clone()))
+                        let (ty, provenance) = self.instantiate_named(
+                            ctx.value_type_id,
+                            &type_args,
+                            false,
+                            None,
+                            ctx.provenance.clone(),
+                        )?;
+                        Ok((ty, provenance))
                     } else {
                         Err(Error::FeatureUnsupported(
                             "Ripple placeholder (~) can only be used when a value is being chained"
@@ -7058,8 +7127,13 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     })?;
                     let (accessed_type, accessed_prov) =
                         self.compile_accessor(piped_type, access.accessors, "~", value_provenance)?;
-                    let accessed_type =
-                        self.instantiate_named(accessed_type, &type_args, false, None)?;
+                    let (accessed_type, accessed_prov) = self.instantiate_named(
+                        accessed_type,
+                        &type_args,
+                        false,
+                        None,
+                        accessed_prov,
+                    )?;
                     Ok((accessed_type, accessed_prov))
                 }
             }
@@ -7138,7 +7212,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     }
                 };
                 let accessed_type = if consuming {
-                    self.instantiate_named(accessed_type, &type_args, is_applicable, value_type)?
+                    self.instantiate_named(
+                        accessed_type,
+                        &type_args,
+                        is_applicable,
+                        value_type,
+                        Provenance::Unknown,
+                    )?
+                    .0
                 } else {
                     accessed_type
                 };
@@ -9200,7 +9281,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                             ast_type.clone(),
                             self.program,
                         )?;
-                        typing::require_testable(asked, &*self.program)?;
                         let (key_id, result_type, needs_check) =
                             annotations::checked_retrieval_type(
                                 self.program,
@@ -9208,7 +9288,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                                 name,
                                 asked,
                             );
-                        (key_id, result_type, needs_check.then_some(asked))
+                        // Against a type parameter, the shape is the one the function is named
+                        // at, which its closure holds (see `Compiler::type_test`).
+                        let test = if typing::contains_variables(asked, &*self.program) {
+                            Some(self.type_test(asked)?)
+                        } else {
+                            needs_check.then(|| Instruction::test_type(asked))
+                        };
+                        (key_id, result_type, test)
                     }
                 };
                 self.codegen
@@ -9217,10 +9304,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // shape, answering nil when it does not fit. That is a test the retrieval
                 // itself need not know about: keep the entry when it matches, else discard
                 // it for nil.
-                if let Some(type_id) = check {
+                if let Some(test) = check {
                     self.codegen.add_instruction(Instruction::pick(0));
-                    self.codegen
-                        .add_instruction(Instruction::test_type(type_id));
+                    self.codegen.add_instruction(test);
                     let fits = self.codegen.emit_jump_if_placeholder();
                     self.codegen.add_instruction(Instruction::pop());
                     self.codegen.add_instruction(Instruction::build(NIL));

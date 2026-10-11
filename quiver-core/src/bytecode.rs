@@ -39,6 +39,9 @@ pub enum Constant {
     /// rather than storing it twice.
     #[serde(rename = "builtin")]
     Builtin { id: usize },
+    /// A type (`Value::Type`), as a type-consuming function's instantiation holds it.
+    #[serde(rename = "type")]
+    Type { id: usize },
     /// Annotations over another constant. A separate node rather than a field on each
     /// carrier: one variant serves tuples, functions and builtins alike, and the
     /// *unannotated* carrier stays a slot of its own that other uses can share. `entries`
@@ -56,7 +59,10 @@ impl Constant {
     /// closes over it, and the linker topologically sorts by it.
     pub fn children(&self) -> Vec<usize> {
         match self {
-            Constant::Integer(_) | Constant::Binary(_) | Constant::Builtin { .. } => Vec::new(),
+            Constant::Integer(_)
+            | Constant::Binary(_)
+            | Constant::Builtin { .. }
+            | Constant::Type { .. } => Vec::new(),
             Constant::Tuple { fields, .. } => fields.clone(),
             Constant::Function { captures, .. } => captures.clone(),
             Constant::Annotated { value, entries } => std::iter::once(*value)
@@ -89,6 +95,9 @@ impl Constant {
             },
             Constant::Builtin { id } => Constant::Builtin {
                 id: IdRemaps::map(&remaps.builtins, "builtin", id),
+            },
+            Constant::Type { id } => Constant::Type {
+                id: IdRemaps::map(&remaps.types, "type", id),
             },
             Constant::Annotated { value, entries } => Constant::Annotated {
                 value: map_child(value),
@@ -178,6 +187,11 @@ pub struct Function {
     #[serde(with = "instruction_stream")]
     pub instructions: Vec<Instruction>,
     pub captures: usize,
+    /// The hidden capture holding its parameter's type, for a receive source whose parameter's
+    /// type is one its enclosing function is named at: what a receive tests messages against,
+    /// in place of the parameter type it was compiled with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameter_hidden: Option<usize>,
     /// Type ID referencing this function's callable type in the types vec
     pub type_id: usize,
 }
@@ -218,6 +232,7 @@ impl Function {
         Function {
             instructions,
             captures: self.captures,
+            parameter_hidden: self.parameter_hidden,
             type_id: IdRemaps::map(&remaps.types, "type", self.type_id),
         }
     }
@@ -503,6 +518,7 @@ mod tests {
         let function = Function {
             instructions: instructions.clone(),
             captures: 3,
+            parameter_hidden: None,
             type_id: 7,
         };
         let json = serde_json::to_string(&function).expect("serialize");
@@ -517,6 +533,7 @@ mod tests {
         let function = Function {
             instructions: vec![],
             captures: 0,
+            parameter_hidden: None,
             type_id: 0,
         };
         let json = serde_json::to_string(&function).expect("serialize");
@@ -721,6 +738,7 @@ pub enum Opcode {
     Trap,
     Hidden,
     Extend,
+    TestHidden,
 }
 
 /// What an opcode's operand field means — the one place that knows, so the disassembler
@@ -753,7 +771,7 @@ impl Opcode {
 
     /// Every opcode, in discriminant order — `ALL[op as usize] == op` (asserted in tests),
     /// which is what makes the decode below a single indexed load.
-    pub const ALL: [Opcode; 28] = [
+    pub const ALL: [Opcode; 29] = [
         Opcode::Push,
         Opcode::Pop,
         Opcode::Pick,
@@ -782,6 +800,7 @@ impl Opcode {
         Opcode::Trap,
         Opcode::Hidden,
         Opcode::Extend,
+        Opcode::TestHidden,
     ];
 }
 
@@ -973,6 +992,13 @@ impl Instruction {
     /// its ordinary captures.
     pub fn hidden(position: usize) -> Instruction {
         Instruction::with_id(Opcode::Hidden, position)
+    }
+
+    /// Pop a value; push `Ok` if it belongs to the type the current function's hidden capture
+    /// at this position holds, nil otherwise — `TestType`, at a type the function is given
+    /// where it is named rather than one it was compiled with.
+    pub fn test_hidden(position: usize) -> Instruction {
+        Instruction::with_id(Opcode::TestHidden, position)
     }
 
     /// Pop this many values, then a closure; push the closure with them appended to its

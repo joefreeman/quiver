@@ -261,3 +261,58 @@ fn test_a_type_test_admits_only_an_instantiated_closure() {
         ))
         .expect("[No, Fn]");
 }
+
+#[test]
+fn test_a_type_test_against_a_type_parameter_consumes_it() {
+    // `='t` is decided by the type the function is named with, so the function consumes it,
+    // as it would by naming a type-consuming builtin.
+    quiver()
+        .evaluate(
+            "is = #<'t>_ { $ ~> { ='t => Yes | No } }
+             [is<'int> 5, is<'int> <00>, is<Point[x: 'int]> Point[x: 1]]",
+        )
+        .expect("[Yes, No, Yes]");
+    quiver()
+        .evaluate("is = #<'t>_ { $ ~> { ='t => Yes | No } }; is 5")
+        .expect_error_containing("`'t` is neither");
+}
+
+#[test]
+fn test_a_witness_is_transitive() {
+    quiver()
+        .evaluate(
+            "is = #<'t>_ { $ ~> { ='t => Yes | No } }
+             both = #<'t>[_, _] { [is<'t> $0, is<'t> $1] }
+             both<'bin> [<01>, 2]",
+        )
+        .expect("[Yes, No]");
+}
+
+#[test]
+fn test_a_module_member_testing_its_type_parameter() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["w".to_string()],
+        "keep = #<'t>'%list<_> -> '%list<'t> {
+           %list.flat_map [$, #{ $ ~> { =('t & v) => %list{ v } | Nil } }]
+         }
+         ints = keep<'int>
+         (keep, ints)"
+            .to_string(),
+    );
+    // Named at concrete types in the module itself, the instantiation is part of its value.
+    quiver()
+        .with_modules(modules)
+        .evaluate("[%w.keep<'bin> %list{ 1, <00>, 2 }, %w.ints %list{ 1, <00>, 2 }]")
+        .expect("[Cons[<00>, Nil], Cons[1, Cons[2, Nil]]]");
+}
+
+#[test]
+fn test_naming_leaves_the_named_binding_alone() {
+    // Naming makes a new closure, so binding it doesn't narrow the function it was named from.
+    quiver()
+        .evaluate(&format!(
+            "{DEC}\na = dec<'int>\n[a \"1\", dec<'bin> \"<01>\"]"
+        ))
+        .expect("[1, <01>]");
+}

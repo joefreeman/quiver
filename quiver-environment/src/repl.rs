@@ -372,6 +372,7 @@ impl<E: Effect> LineCompiler<E> {
             let function = Function {
                 instructions,
                 captures: 0,
+                parameter_hidden: None,
                 type_id: callable_type_id,
             };
             let function_index = program.register_function(function);
