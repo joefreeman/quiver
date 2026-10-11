@@ -101,6 +101,85 @@ fn test_closure_captures_nested_member_access() {
 }
 
 #[test]
+fn test_local_binding_shadows_capture_path() {
+    // `o.t` reads the body's own `o`, not the outer one the closure could capture.
+    quiver()
+        .evaluate(
+            r#"
+            o = [t: <01>];
+            f = #[a: [t: 'int]] { o = $a; %num.add [o.t, 1] };
+            f [a: [t: 2]]
+            "#,
+        )
+        .expect("3");
+}
+
+#[test]
+fn test_capture_path_read_before_shadowing() {
+    // Until the body binds `o`, `o.t` is the outer one's.
+    quiver()
+        .evaluate("o = [t: 1]; f = #[] { a = o.t; o = [t: 2]; [a, o.t] }; f []")
+        .expect("[1, 2]");
+}
+
+#[test]
+fn test_shadowed_outer_binding_is_unused() {
+    // The outer `o` is never read, so it is not captured, and its binding is reported.
+    let result = quiver()
+        .evaluate("{ o = [t: 1]; f = #[a: [t: 'int]] { o = $a; o.t }; f [a: [t: 2]] }")
+        .expect("2");
+    let unused: Vec<_> = result
+        .warnings()
+        .iter()
+        .filter_map(|located| match &located.warning {
+            quiver_compiler::compiler::Warning::UnusedBinding { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(unused, ["o"]);
+}
+
+#[test]
+fn test_parameter_label_does_not_hide_outer_binding() {
+    // A parameter's labels name no variables (its fields are `$o`), so `o` is the outer one.
+    quiver()
+        .evaluate("o = 5; f = #[o: 'int] { [o, $o] }; f [o: 9]")
+        .expect("[5, 9]");
+}
+
+#[test]
+fn test_star_binding_shadows_capture() {
+    quiver()
+        .evaluate("x = 1; f = #[] { * = [x: 2]; x }; f []")
+        .expect("2");
+}
+
+#[test]
+fn test_capture_relayed_through_enclosing_functions() {
+    quiver()
+        .evaluate(
+            r#"
+            o = [t: 1, u: 3];
+            f = #[] { #[] { [o.t, o, o.u] } };
+            f [] ~> ~ []
+            "#,
+        )
+        .expect("[1, [t: 1, u: 3], 3]");
+}
+
+#[test]
+fn test_outer_parameters_relayed_through_enclosing_functions() {
+    quiver()
+        .evaluate(
+            r#"
+            f = #[x: 'int] { #'int { #'int { [$, $$, $$$, $$$x] } } };
+            f [x: 1] ~> ~ 2 ~> ~ 3
+            "#,
+        )
+        .expect("[3, 2, [x: 1], 1]");
+}
+
+#[test]
 fn test_nested_function_captures() {
     quiver()
         .evaluate(

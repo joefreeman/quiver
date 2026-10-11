@@ -254,10 +254,10 @@ pub struct Frame {
     pub(crate) locals_base: usize,
     pub(crate) captures_count: usize,
     pub counter: usize,
-    /// The closure's payload, when it holds captures past its function's own
-    /// (`captures_count`): the instantiations a type-consuming function needs, which `Hidden`
-    /// reads.
-    pub(crate) hidden: Option<std::rc::Rc<Payload>>,
+    /// The payload of the closure the frame runs, when it holds anything: its function's own
+    /// captures (`captures_count`), which `Capture` reads, then any instantiations a
+    /// type-consuming function was named with, which `Hidden` reads.
+    pub(crate) closure: Option<std::rc::Rc<Payload>>,
 }
 
 impl Frame {
@@ -267,15 +267,15 @@ impl Frame {
             locals_base,
             captures_count,
             counter: 0,
-            hidden: None,
+            closure: None,
         }
     }
 
     /// The frame, given the payload of the closure it runs, which it keeps when it holds
-    /// hidden captures.
-    pub(crate) fn with_hidden(mut self, captures: &std::rc::Rc<Payload>) -> Self {
-        if captures.len() > self.captures_count {
-            self.hidden = Some(std::rc::Rc::clone(captures));
+    /// anything to read.
+    pub(crate) fn with_closure(mut self, captures: &std::rc::Rc<Payload>) -> Self {
+        if !captures.is_empty() {
+            self.closure = Some(std::rc::Rc::clone(captures));
         }
         self
     }

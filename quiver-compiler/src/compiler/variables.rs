@@ -1,5 +1,18 @@
+//! Variable resolution across function boundaries.
+//!
+//! A function literal's body is compiled in scopes of its own. A name it reads that those
+//! scopes don't bind is resolved where the literal was written, and becomes one of its
+//! **captures** the first time it is read: a value the closure holds, evaluated where the
+//! closure is made. A name the enclosing function doesn't bind either is captured by it in
+//! turn, so a chain of closures relays the value inward. Because captures are found by the same
+//! scope walk as any other read, a body's own bindings shadow them exactly as they shadow outer
+//! bindings anywhere else.
+
+use quiver_core::bytecode::Instruction;
+
+use super::scopes::{self, Scope, Slot, Variable};
+use super::{Compiler, Error, Provenance};
 use crate::ast;
-use std::collections::HashSet;
 
 /// Where a captured value comes from in the creation scope.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,291 +36,205 @@ impl CaptureSource {
             CaptureSource::OuterParameter(levels) => ast::parameter_sigils(*levels),
         }
     }
+
+    /// The error for reading this source where nothing binds it.
+    pub fn undefined(&self) -> Error {
+        match self {
+            CaptureSource::Variable(name) => Error::VariableUndefined(name.clone()),
+            CaptureSource::OuterParameter(levels) => Error::ParameterDepthExceeded {
+                written: ast::parameter_sigils(*levels),
+            },
+        }
+    }
+
+    /// What this source is to the function enclosing the one reading it: the same variable,
+    /// or an outer parameter one level nearer.
+    fn relay(&self) -> CaptureSource {
+        match self {
+            CaptureSource::Variable(name) => CaptureSource::Variable(name.clone()),
+            CaptureSource::OuterParameter(levels) => CaptureSource::OuterParameter(levels - 1),
+        }
+    }
 }
 
+/// One capture of a function literal: a source in the scope the literal was written in,
+/// optionally narrowed to a path within it, so a closure reading only `o.t` holds only that.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Capture {
     pub source: CaptureSource,
     pub accessors: Vec<ast::AccessPath>,
-    /// The (first) referencing site — where diagnostics about this capture should point,
-    /// since captures are materialised far from the reference, at closure creation.
-    pub span: ast::Spanned,
-    /// Whether that site is in a nested literal's annotation value, which is evaluated where
-    /// the literal is — so its `$` run counts from there, which a diagnostic should say.
-    pub in_annotation: bool,
 }
 
-/// Collect free variables (captures) from a function body.
-/// Returns captures in deterministic order (order of first occurrence in AST traversal).
-pub fn collect_free_variables(
-    body: Option<&ast::Block>,
-    function_parameters: &HashSet<String>,
-    defined_variables: &dyn Fn(&str, &[ast::AccessPath]) -> bool,
-) -> Vec<Capture> {
-    let Some(body) = body else {
-        // Identity function has no captures
-        return Vec::new();
-    };
-
-    let mut collector = FreeVariableCollector {
-        function_parameters,
-        defined_variables,
-        captures: Vec::new(),
-        function_depth: 0,
-        in_annotation: false,
-    };
-    collector.visit_block(body);
-    collector.captures
+/// A function literal being compiled inside another: the scopes in effect where it was
+/// written, and the captures its body has needed so far, in the order of its closure's slots.
+pub struct Enclosing {
+    pub scopes: Vec<Scope>,
+    pub captures: Vec<Capture>,
 }
 
-struct FreeVariableCollector<'a> {
-    function_parameters: &'a HashSet<String>,
-    defined_variables: &'a dyn Fn(&str, &[ast::AccessPath]) -> bool,
-    /// Captures in order of first occurrence (deterministic ordering)
-    captures: Vec<Capture>,
-    /// Function-literal nesting below the function being collected: 0 in its direct body,
-    /// incremented inside each nested literal. Outer-parameter references (`$$`, `$$$`) are
-    /// free exactly when they reach above this depth.
-    function_depth: usize,
-    /// Inside a nested literal's annotation values (see `Capture::in_annotation`).
-    in_annotation: bool,
-}
-
-impl<'a> FreeVariableCollector<'a> {
-    fn visit_block(&mut self, block: &ast::Block) {
-        self.visit_annotations(block);
-        self.visit_branches(block);
-    }
-
-    /// A block's annotation prefix (`:key value`) evaluates wherever the block does, so its
-    /// values capture like any other expression in the body.
-    fn visit_annotations(&mut self, block: &ast::Block) {
-        for annotation in &block.annotations {
-            self.visit_chain(&annotation.value);
-        }
-    }
-
-    fn visit_branches(&mut self, block: &ast::Block) {
-        for branch in &block.branches {
-            self.visit_sequence(&branch.condition);
-            if let Some(ref consequence) = branch.consequence {
-                self.visit_sequence(consequence);
-            }
-        }
-    }
-
-    fn visit_sequence(&mut self, sequence: &ast::Sequence) {
-        for chain in sequence.chains() {
-            self.visit_chain(chain);
-        }
-    }
-
-    fn visit_chain(&mut self, chain: &ast::Chain) {
-        for term in &chain.terms {
-            self.visit_term(term);
-        }
-        // A leading binding (`[x, ^y] = …`) may pin, exactly as the `~> =[x, ^y]` spelling.
-        if let Some(pattern) = &chain.binding {
-            self.visit_match(pattern);
-        }
-    }
-
-    fn visit_term(&mut self, term: &ast::Term) {
-        match term {
-            ast::Term::Literal(_) => {}
-            ast::Term::Hole(chain) => self.visit_chain(chain),
-            ast::Term::Tuple(tuple) => {
-                for field in &tuple.fields {
-                    match &field.value {
-                        ast::FieldValue::Chain(chain) => self.visit_chain(chain),
-                        // A sourced spread (`...a.b`, `...$$conn`, including the source of an
-                        // `a[..., y]` spread-update) reads its access, so a closure captures
-                        // exactly what the equivalent expression access would.
-                        ast::FieldValue::Spread(Some(access)) => self.visit_access_capture(access),
-                        // A bare spread (`...`) is the chained value, not a variable.
-                        ast::FieldValue::Spread(None) => {}
-                    }
-                }
-            }
-            ast::Term::String(_, segments) => {
-                // Each hole is an expression that may reference (and so must capture) variables.
-                for segment in segments {
-                    if let ast::StrSegment::Hole(block) = segment {
-                        self.visit_block(block);
-                    }
-                }
-            }
-            ast::Term::Match(pattern) => {
-                // Match patterns can define variables or reference them (via &)
-                // We need to traverse the pattern to find pin nodes
-                self.visit_match(pattern);
-            }
-            ast::Term::Block(block) => {
-                self.visit_block(block);
-            }
-            ast::Term::Function(func) => {
-                // The nested literal's body is one function level deeper: its own `$` is not
-                // ours, and an `$$` inside it refers to *this* function's parameter (bound
-                // here, captured by the literal itself), so only deeper runs are free.
-                // Its annotation prefix, though, attaches to the closure and is evaluated
-                // where the literal is, so it belongs to this level.
-                if let Some(body) = &func.body {
-                    let in_annotation = std::mem::replace(&mut self.in_annotation, true);
-                    self.visit_annotations(body);
-                    self.in_annotation = in_annotation;
-                    self.function_depth += 1;
-                    self.visit_branches(body);
-                    self.function_depth -= 1;
-                }
-            }
-            ast::Term::Access(access) => {
-                // A variable reference or a named tail call (`^f`) captures its identifier; `$`,
-                // imports, builtins, and ripples don't.
-                self.visit_access_capture(access);
-            }
-            ast::Term::Spawn(function, argument, _) => {
-                self.visit_term(function);
-                if let Some(argument) = argument {
-                    self.visit_term(argument);
-                }
-            }
-            ast::Term::Apply(access, argument) => {
-                self.visit_access_capture(access);
-                self.visit_term(argument);
-            }
-            ast::Term::Process(_) => {}
-            ast::Term::Select(sources, _) => {
-                // Visit all source chains (if explicit sources provided)
-                if let Some(sources) = sources {
-                    for source in sources {
-                        self.visit_chain(source);
-                    }
-                }
-            }
-            ast::Term::State(access, _) => {
-                // `?p` names its target without calling it — the same capture as any name.
-                self.visit_access_capture(access);
-            }
-            // Dialects are expanded before capture collection (`compile_function`), so an
-            // unexpanded invocation here has no variable references to collect yet.
-            ast::Term::Dialect(_) => {}
-        }
-    }
-
-    /// Capture the value an access refers to: a plain identifier (`f`, `f.x`), a named tail
-    /// call (`^f`), or an outer-parameter run (`$$`, `$$$x`). Own `$`, imports, builtins,
-    /// ripples, and self tail calls (`^`) capture nothing.
-    fn visit_access_capture(&mut self, access: &ast::Access) {
-        match &access.source {
-            Some(ast::AccessSource::Identifier(name) | ast::AccessSource::TailCall(Some(name))) => {
-                self.visit_identifier(name, access.accessors.clone(), access.base_span);
-            }
-            Some(ast::AccessSource::Parameter { depth }) => {
-                self.visit_parameter(*depth, access.accessors.clone(), access.base_span);
-            }
-            // A module reference needs no capture: it is a compile-time-known value, so
-            // the body emits the single constant that names it, wherever it appears.
-            Some(ast::AccessSource::Import(..)) => {}
-            Some(
-                ast::AccessSource::Ripple
-                | ast::AccessSource::Self_
-                | ast::AccessSource::Builtin(_)
-                | ast::AccessSource::TailCall(None)
-                | ast::AccessSource::TailCallRipple,
-            )
-            | None => {}
-        }
-    }
-
-    /// Record an outer-parameter reference (`$$…`) as a capture when it reaches above the
-    /// function being collected. `depth` is levels-up from the reference's own innermost
-    /// function; re-rooted here, the capture holds levels-up from *this* function. Shallower
-    /// references are some nested literal's concern — its own collection pass captures them
-    /// from us. Validity (enough enclosing functions) is enforced with a pointed error where
-    /// the capture is materialised, since only the creation scope knows the nesting.
-    fn visit_parameter(
+impl<E: quiver_core::effects::Effect> Compiler<'_, E> {
+    /// Resolve a variable, or a captured path of one, for reading: its type and where it is
+    /// read from. A name the function being compiled doesn't bind is captured.
+    ///
+    /// Answers `None` for a path when the base is bound but the path isn't, so the caller reads
+    /// the base and walks the accessors.
+    pub(super) fn lookup_variable(
         &mut self,
-        depth: usize,
-        accessors: Vec<ast::AccessPath>,
-        span: ast::Spanned,
-    ) {
-        if depth <= self.function_depth {
-            return;
+        name: &str,
+        accessors: &[ast::AccessPath],
+    ) -> Option<(usize, Slot)> {
+        self.resolve(CaptureSource::Variable(name.to_string()), accessors)
+    }
+
+    /// Resolve `source` at `accessors`, as [`Self::lookup_variable`] does a variable. An outer
+    /// parameter (`$$`, `$$$x`) is always a capture, as it belongs to an enclosing function.
+    pub(super) fn resolve(
+        &mut self,
+        source: CaptureSource,
+        accessors: &[ast::AccessPath],
+    ) -> Option<(usize, Slot)> {
+        let key = source.scope_name();
+        if let Some(found) = scopes::lookup_variable(&self.scopes, &key, accessors) {
+            return Some(found);
         }
-        self.add_capture(Capture {
-            source: CaptureSource::OuterParameter(depth - self.function_depth),
-            accessors,
-            span,
-            in_annotation: self.in_annotation,
+        if !accessors.is_empty() && scopes::binds(&self.scopes, &key) {
+            return None;
+        }
+        let level = self.enclosing.len();
+        (level > 0).then(|| self.capture(level, source, accessors))?
+    }
+
+    /// The type a read of `source` at `accessors` answers, without emitting it: the captured
+    /// path's when there is one, else the base's with the accessors walked.
+    pub(super) fn peek_resolved_type(
+        &mut self,
+        source: &CaptureSource,
+        accessors: &[ast::AccessPath],
+    ) -> Option<usize> {
+        if let Some((ty, _)) = self.resolve(source.clone(), accessors) {
+            return Some(ty);
+        }
+        let (base, _) = self.resolve(source.clone(), &[])?;
+        self.peek_accessor_type(base, accessors, &source.scope_name())
+            .ok()
+    }
+
+    /// The type a read of variable `name` at `accessors` would answer, from wherever it is
+    /// bound — in the scopes being compiled or an enclosing function's — without reading it:
+    /// nothing is marked used or captured. For passes over a body ahead of compiling it.
+    pub(super) fn peek_variable_type(
+        &mut self,
+        name: &str,
+        accessors: &[ast::AccessPath],
+    ) -> Option<usize> {
+        // The nearest function binding the path whole, or else its base, answers it.
+        let (ty, whole) = (0..=self.enclosing.len()).rev().find_map(|level| {
+            let scopes = self.scopes_at(level);
+            scopes::peek_variable(scopes, name, accessors)
+                .map(|ty| (ty, true))
+                .or_else(|| scopes::peek_variable(scopes, name, &[]).map(|base| (base, false)))
+        })?;
+        if whole {
+            Some(ty)
+        } else {
+            self.peek_accessor_type(ty, accessors, name).ok()
+        }
+    }
+
+    /// The scopes of the function at `level`: 0 is where the outermost literal being compiled
+    /// was written, and `self.enclosing.len()` is the body being compiled now.
+    fn scopes_at(&self, level: usize) -> &[Scope] {
+        if level == self.enclosing.len() {
+            &self.scopes
+        } else {
+            &self.enclosing[level].scopes
+        }
+    }
+
+    fn scopes_at_mut(&mut self, level: usize) -> &mut [Scope] {
+        if level == self.enclosing.len() {
+            &mut self.scopes
+        } else {
+            &mut self.enclosing[level].scopes
+        }
+    }
+
+    /// Capture `source` (at `accessors`) into the literal at `level` (at least 1), from the
+    /// scopes it was written in — capturing it into the literal enclosing it first, when those
+    /// don't bind it either. Answers its type and slot there, or `None` when nothing binds it.
+    fn capture(
+        &mut self,
+        level: usize,
+        source: CaptureSource,
+        accessors: &[ast::AccessPath],
+    ) -> Option<(usize, Slot)> {
+        let creation = level - 1;
+        let key = source.scope_name();
+        let ty = match &source {
+            CaptureSource::OuterParameter(1) => {
+                let (ty, _) = scopes::get_function_parameter(self.scopes_at(creation)).ok()?;
+                self.peek_accessor_type(ty, accessors, &key).ok()?
+            }
+            _ => {
+                let outer = source.relay();
+                let outer_key = outer.scope_name();
+                let read = |accessors| {
+                    scopes::lookup_variable(self.scopes_at(creation), &outer_key, accessors)
+                        .map(|(ty, _)| ty)
+                };
+                match (read(accessors), read(&[])) {
+                    (Some(ty), _) => ty,
+                    (None, Some(base)) => {
+                        self.peek_accessor_type(base, accessors, &outer_key).ok()?
+                    }
+                    (None, None) if creation > 0 => self.capture(creation, outer, accessors)?.0,
+                    (None, None) => return None,
+                }
+            }
+        };
+        let captures = &mut self.enclosing[level - 1].captures;
+        let slot = Slot::Capture(captures.len());
+        captures.push(Capture {
+            source,
+            accessors: accessors.to_vec(),
         });
+        // A function's captures live in its root scope, beneath every scope its body opens.
+        self.scopes_at_mut(level)[0].bindings.variables.insert(
+            super::helpers::make_capture_name(&key, accessors),
+            Variable {
+                ty,
+                slot,
+                provenance: Provenance::Unknown,
+                usage: scopes::Usage::default(),
+            },
+        );
+        Some((ty, slot))
     }
 
-    /// Add a capture unless one for the same source and path exists (preserving
-    /// first-occurrence order — and the first occurrence's span with it).
-    fn add_capture(&mut self, capture: Capture) {
-        if !self
-            .captures
-            .iter()
-            .any(|c| c.source == capture.source && c.accessors == capture.accessors)
-        {
-            self.captures.push(capture);
-        }
-    }
-
-    fn visit_identifier(
-        &mut self,
-        identifier: &str,
-        accessors: Vec<ast::AccessPath>,
-        span: ast::Spanned,
-    ) {
-        if !self.function_parameters.contains(identifier)
-            && (self.defined_variables)(identifier, &accessors)
-        {
-            // Only added if not already present (preserves first-occurrence order)
-            self.add_capture(Capture {
-                source: CaptureSource::Variable(identifier.to_string()),
-                accessors,
-                span,
-                in_annotation: self.in_annotation,
-            });
-        }
-    }
-
-    fn visit_match(&mut self, pattern: &ast::Match) {
-        match pattern {
-            ast::Match::Hole(chain) => self.visit_chain(chain),
-            // A pin reads its target as the expression would, capturing the same path.
-            ast::Match::Pin(target) => self.visit_access_capture(target),
-            ast::Match::Tuple(tuple) => {
-                // Recursively visit fields in tuple patterns
-                for field in &tuple.fields {
-                    self.visit_match(&field.pattern);
+    /// Push each of a literal's captures, read from the scope it is made in, for `Enclose`.
+    pub(super) fn emit_captures(&mut self, captures: Vec<Capture>) -> Result<(), Error> {
+        for Capture { source, accessors } in captures {
+            if source == CaptureSource::OuterParameter(1) {
+                let (ty, index) = scopes::get_function_parameter(&self.scopes)?;
+                self.codegen.add_instruction(Instruction::load(index));
+                self.compile_accessor(ty, accessors, "$", Provenance::Unknown)?;
+                continue;
+            }
+            let outer = source.relay();
+            let key = outer.scope_name();
+            match self.resolve(outer.clone(), &accessors) {
+                Some((_, slot)) => self.codegen.add_instruction(slot.load()),
+                None => {
+                    let (ty, slot) =
+                        self.resolve(outer, &[])
+                            .ok_or_else(|| Error::InternalError {
+                                message: format!("capture of `{key}` unresolved where it is made"),
+                            })?;
+                    self.codegen.add_instruction(slot.load());
+                    self.compile_accessor(ty, accessors, &key, Provenance::Unknown)?;
                 }
             }
-            ast::Match::Partial(partial) => {
-                // Visit nested patterns in partial pattern fields
-                for field in &partial.fields {
-                    if let Some(nested_pattern) = &field.pattern {
-                        self.visit_match(nested_pattern);
-                    }
-                }
-            }
-            ast::Match::Or(parts) | ast::Match::And(parts) => {
-                // Visit each part's nested patterns and references (pins: `=(^a | ^b)`).
-                for part in parts {
-                    self.visit_match(part);
-                }
-            }
-            // A negation can't bind, but may pin (`=\^x`).
-            ast::Match::Not(inner) => self.visit_match(inner),
-            // These don't contain nested patterns or variable references.
-            ast::Match::Identifier(_, _)
-            | ast::Match::Literal(_)
-            | ast::Match::String(_, _)
-            | ast::Match::Star(_)
-            | ast::Match::Placeholder
-            | ast::Match::Ripple
-            | ast::Match::Type(_) => {}
         }
+        Ok(())
     }
 }

@@ -747,6 +747,7 @@ pub enum Opcode {
     Hidden,
     Extend,
     TestHidden,
+    Capture,
 }
 
 /// What an opcode's operand field means — the one place that knows, so the disassembler
@@ -779,7 +780,7 @@ impl Opcode {
 
     /// Every opcode, in discriminant order — `ALL[op as usize] == op` (asserted in tests),
     /// which is what makes the decode below a single indexed load.
-    pub const ALL: [Opcode; 29] = [
+    pub const ALL: [Opcode; 30] = [
         Opcode::Push,
         Opcode::Pop,
         Opcode::Pick,
@@ -809,6 +810,7 @@ impl Opcode {
         Opcode::Hidden,
         Opcode::Extend,
         Opcode::TestHidden,
+        Opcode::Capture,
     ];
 }
 
@@ -988,6 +990,12 @@ impl Instruction {
     /// which is why the two are separate opcodes.
     pub fn recurse() -> Instruction {
         Instruction::bare(Opcode::Recurse)
+    }
+
+    /// Push the running closure's capture at this index — a value the function closed over
+    /// where it was made.
+    pub fn capture(index: usize) -> Instruction {
+        Instruction::with_id(Opcode::Capture, index)
     }
 
     /// Pop this function's captures; push the closure.

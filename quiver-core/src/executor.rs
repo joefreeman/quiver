@@ -311,11 +311,6 @@ impl<E: Effect> Executor<E> {
         proc.stack.pop()
     }
 
-    /// Push a value into the process's locals.
-    fn push_local(&mut self, proc: &mut Process, value: Value) {
-        proc.locals.push(value);
-    }
-
     /// Truncate the process's locals to `len`, dropping every discarded binding.
     fn truncate_locals(&mut self, proc: &mut Process, len: usize) {
         proc.locals.truncate(len);
@@ -914,9 +909,8 @@ impl<E: Effect> Executor<E> {
 
         self.processes.insert(id, process);
 
-        // Rebuild the captures on this worker's heap and populate locals with the function's
-        // own; any past them are its hidden instantiations, which the root frame reads from
-        // the whole payload.
+        // Rebuild the captures on this worker's heap, as the payload the root frame reads them
+        // (and any hidden instantiations past them) from.
         let captures_count = self
             .get_function(function_index)
             .ok_or(Error::FunctionUndefined(function_index))?
@@ -925,14 +919,7 @@ impl<E: Effect> Executor<E> {
             .into_iter()
             .map(|value| self.from_wire(value))
             .collect::<Result<Vec<_>, _>>()?;
-        // Injected into rooted storage (the new frame's locals).
-        let process = self
-            .get_process_mut(id)
-            .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
-        process
-            .locals
-            .extend(captures.iter().take(captures_count).cloned());
-        let hidden = Payload::new(captures).shared();
+        let closure = Payload::new(captures).shared();
 
         // Push argument onto stack; it is also the process's initial observable state
         // (one retain per storage location).
@@ -948,7 +935,7 @@ impl<E: Effect> Executor<E> {
             .get_process_mut(id)
             .ok_or(Error::InvalidArgument("Process not found".to_string()))?;
         process.frames.push(
-            crate::process::Frame::new(function_index, 0, captures_count).with_hidden(&hidden),
+            crate::process::Frame::new(function_index, 0, captures_count).with_closure(&closure),
         );
 
         // Cache the function index for REPL references
@@ -1873,7 +1860,7 @@ impl<E: Effect> Executor<E> {
         let frame = process.frames.pop().expect("an exhausted frame to pop");
         let is_last_frame = process.frames.is_empty();
 
-        // Release the frame's locals (captures included). A persistent process keeps its
+        // Release the frame's locals. A persistent process keeps its
         // top-level frame's locals: they are the session's bindings.
         if !process.persistent || !is_last_frame {
             process.locals.truncate(frame.locals_base);
@@ -1935,6 +1922,7 @@ impl<E: Effect> Executor<E> {
             Opcode::Rotate => self.handle_rotate(proc, operand),
             Opcode::Drop => self.handle_drop(proc, operand),
             Opcode::Load => self.handle_load(proc, operand),
+            Opcode::Capture => self.handle_capture(proc, operand),
             Opcode::Store => self.handle_store(proc, operand),
             Opcode::Build => self.handle_build(proc, operand),
             Opcode::GetPositional => self.handle_get_positional(proc, operand),
@@ -2494,21 +2482,17 @@ impl<E: Effect> Executor<E> {
                     .ok_or(Error::FunctionUndefined(function_index))?
                     .captures;
 
-                // Pop the function (discarded) and the parameter (re-pushed for the callee).
-                // The function's own captures are cloned into the new frame's locals; any past
-                // them are its hidden instantiations, which the frame holds.
+                // Pop the function (discarded) and the parameter (re-pushed for the callee). The
+                // new frame reads its captures from the closure's payload, which it holds.
                 self.pop_value(proc); // function
                 let parameter = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
 
                 let locals_base = proc.locals.len();
 
                 self.push_value(proc, parameter);
-                for capture in captures.iter().take(captures_count) {
-                    self.push_local(proc, capture.clone());
-                }
 
                 proc.frames.push(
-                    Frame::new(function_index, locals_base, captures_count).with_hidden(&captures),
+                    Frame::new(function_index, locals_base, captures_count).with_closure(&captures),
                 );
 
                 Ok(None)
@@ -2673,14 +2657,14 @@ impl<E: Effect> Executor<E> {
         let locals_base = frame.locals_base;
         let captures_count = frame.captures_count;
         let function_index = frame.function_index;
-        let hidden = frame.hidden.clone();
+        let closure = frame.closure.clone();
 
-        // Clear current frame's locals, but keep captures (releasing what's dropped).
-        self.truncate_locals(proc, locals_base + captures_count);
+        // Clear current frame's locals (releasing what's dropped).
+        self.truncate_locals(proc, locals_base);
 
         self.push_value(proc, argument);
         let mut frame = Frame::new(function_index, locals_base, captures_count);
-        frame.hidden = hidden;
+        frame.closure = closure;
         *proc.frames.last_mut().unwrap() = frame;
 
         Ok(None)
@@ -2703,17 +2687,12 @@ impl<E: Effect> Executor<E> {
                 let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
                 let locals_base = frame.locals_base;
 
-                // Clear current frame's locals (releasing the old captures/bindings).
+                // Clear current frame's locals (releasing the old bindings).
                 self.truncate_locals(proc, locals_base);
-
-                // Extend with the new function's own captures; any past them are hidden.
-                for capture in captures.iter().take(captures_count) {
-                    self.push_local(proc, capture.clone());
-                }
 
                 self.push_value(proc, argument);
                 *proc.frames.last_mut().unwrap() =
-                    Frame::new(function_index, locals_base, captures_count).with_hidden(&captures);
+                    Frame::new(function_index, locals_base, captures_count).with_closure(&captures);
 
                 Ok(None)
             }
@@ -2745,6 +2724,24 @@ impl<E: Effect> Executor<E> {
         Ok(None)
     }
 
+    /// Push the running closure's capture at `index`.
+    fn handle_capture(
+        &mut self,
+        proc: &mut Process,
+        index: usize,
+    ) -> Result<Option<Action<E>>, Error> {
+        let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
+        let value = frame
+            .closure
+            .as_ref()
+            .filter(|_| index < frame.captures_count)
+            .and_then(|captures| captures.get(index))
+            .cloned()
+            .ok_or_else(|| Error::VariableUndefined(format!("capture[{index}]")))?;
+        self.push_value(proc, value);
+        Ok(None)
+    }
+
     /// Push the running closure's hidden capture at `position`.
     fn handle_hidden(
         &mut self,
@@ -2760,7 +2757,7 @@ impl<E: Effect> Executor<E> {
     fn hidden_capture(&self, proc: &Process, position: usize) -> Result<Value, Error> {
         let frame = proc.frames.last().ok_or(Error::FrameUnderflow)?;
         frame
-            .hidden
+            .closure
             .as_ref()
             .and_then(|captures| captures.get(frame.captures_count + position))
             .cloned()

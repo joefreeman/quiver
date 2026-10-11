@@ -713,9 +713,8 @@ mod tests {
 
     #[test]
     fn outer_parameter_over_reach_diagnostic_points_at_the_reference() {
-        // The depth error fires when the closure's captures are materialised — far from
-        // the reference — so the diagnostic must carry the referencing site's span, not
-        // wherever compilation last happened to record one.
+        // The diagnostic points at the reference's sigil run, which is what reaches too far —
+        // not at the accessors after it, nor wherever compilation last recorded a span.
         let text = "x = 5\nf = #[k: 'int] { [x, $$k] }";
         let analysis = analyze(text, &LineIndex::new(text), &PackageResolver::inline());
         assert_eq!(analysis.diagnostics.len(), 1, "{:?}", analysis.diagnostics);

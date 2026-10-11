@@ -15,7 +15,7 @@ use crate::environment::{Environment, EnvironmentError};
 use quiver_compiler::Compiler;
 use quiver_compiler::ModuleResolver;
 use quiver_compiler::compiler::{
-    Bindings, ModuleCache, Scope, ScopeKind, SessionTables, resolve_type_alias_for_display,
+    Bindings, ModuleCache, Scope, ScopeKind, SessionTables, Slot, resolve_type_alias_for_display,
 };
 use quiver_core::bytecode::Function;
 use quiver_core::effects::Effect;
@@ -433,7 +433,7 @@ impl<E: Effect> LineCompiler<E> {
             .bindings
             .variables
             .values()
-            .map(|variable| variable.index)
+            .map(|variable| variable.slot.local())
             .collect();
         indices.sort();
         indices
@@ -456,10 +456,12 @@ impl<E: Effect> LineCompiler<E> {
 
         // Update bindings with new indices
         for variable in self.bindings.variables.values_mut() {
-            variable.index = index_mapping
-                .get(&variable.index)
-                .copied()
-                .expect("Invalid variable index");
+            variable.slot = Slot::Local(
+                index_mapping
+                    .get(&variable.slot.local())
+                    .copied()
+                    .expect("Invalid variable index"),
+            );
         }
 
         keep_indices
@@ -470,7 +472,7 @@ impl<E: Effect> LineCompiler<E> {
         self.bindings
             .variables
             .get(name)
-            .map(|variable| variable.index)
+            .map(|variable| variable.slot.local())
             .ok_or_else(|| {
                 if self.bindings.type_aliases.contains_key(name) {
                     EnvironmentError::VariableNotFound(format!(
@@ -493,7 +495,7 @@ impl<E: Effect> LineCompiler<E> {
                 // Format the type using the session's own program
                 let formatted_type =
                     quiver_core::format::format_type_by_id(&self.program, variable.ty);
-                (name.clone(), formatted_type, variable.index)
+                (name.clone(), formatted_type, variable.slot.local())
             })
             .collect();
 

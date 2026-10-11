@@ -2157,13 +2157,13 @@ pub fn validate_unit_bodies(
     };
     for (position, function) in unit.functions.iter().enumerate() {
         // The entry runs in a frame whose earlier bindings (a REPL session's) the unit
-        // cannot see; every other function's frame starts with just its captures.
+        // cannot see; every other function's frame starts with no locals.
         let locals = if unit.entry == Some(position) {
             Locals::Unknown
         } else {
-            Locals::Filled(function.captures)
+            Locals::Filled(0)
         };
-        verify::function(&function.instructions, locals, &tables)
+        verify::function(&function.instructions, locals, function.captures, &tables)
             .map_err(|problem| format!("{label}: function {position}: {problem}"))?;
     }
     Ok(())
@@ -2244,12 +2244,12 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
 
     for (position, function) in unit.functions.iter().enumerate() {
         check("type", function.type_id, unit.types.len())?;
-        // Captures become the frame's leading locals, which instructions name through a
-        // 24-bit operand: past that they are unaddressable, and the closure build would
-        // reserve a nonsense allocation before discovering the stack is short.
+        // Captures are named through a 24-bit operand: past that they are unaddressable, and
+        // the closure build would reserve a nonsense allocation before discovering the stack
+        // is short.
         if function.captures > Instruction::OPERAND_MAX {
             return Err(format!(
-                "{label}: function {position} declares {} captures, past the {} a local slot can name",
+                "{label}: function {position} declares {} captures, past the {} a capture operand can name",
                 function.captures,
                 Instruction::OPERAND_MAX
             ));

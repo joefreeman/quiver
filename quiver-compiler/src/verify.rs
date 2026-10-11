@@ -35,7 +35,7 @@ impl CodeTables for Program {
 pub fn stack_effect(instruction: Instruction, tables: &impl CodeTables) -> Option<(usize, usize)> {
     let operand = instruction.operand() as usize;
     Some(match instruction.opcode() {
-        Opcode::Push | Opcode::Pick | Opcode::Load | Opcode::Hidden => (0, 1),
+        Opcode::Push | Opcode::Pick | Opcode::Load | Opcode::Capture | Opcode::Hidden => (0, 1),
         Opcode::Pop | Opcode::Store | Opcode::JumpIf | Opcode::JumpUnless | Opcode::Recurse => {
             (1, 0)
         }
@@ -66,8 +66,8 @@ pub fn ends_flow(opcode: Opcode) -> bool {
 /// Which locals a body may read without writing them first.
 #[derive(Clone, Copy, Debug)]
 pub enum Locals {
-    /// The frame's first `n` slots are filled on entry: a function's captures, or the
-    /// bindings of the top level's earlier lines.
+    /// The frame's first `n` slots are filled on entry: the bindings of the top level's
+    /// earlier lines, or none for a function, which holds its captures in its closure.
     Filled(usize),
     /// Not known here — a unit's entry runs in a frame whose earlier bindings the unit
     /// cannot see — so reads are not checked.
@@ -84,10 +84,12 @@ struct State {
 
 /// Verify a function body. A function is entered with its parameter as the stack's one
 /// value, and must leave exactly its result: at a return (running off the end) the stack
-/// holds one value, and at a tail call only the call's own operands.
+/// holds one value, and at a tail call only the call's own operands. It reads only the
+/// `captures` its closure holds.
 pub fn function(
     instructions: &[Instruction],
     locals: Locals,
+    captures: usize,
     tables: &impl CodeTables,
 ) -> Result<(), String> {
     let len = instructions.len();
@@ -162,6 +164,11 @@ pub fn function(
             {
                 return fail("reads a local not every path to it has written".to_string());
             }
+            Opcode::Capture if operand >= captures => {
+                return fail(format!(
+                    "reads past the {captures} captures its closure holds"
+                ));
+            }
             Opcode::Store => {
                 if next.written.len() <= operand {
                     next.written.resize(operand + 1, false);
@@ -226,7 +233,7 @@ mod tests {
     }
 
     fn verify(instructions: &[Instruction], locals: Locals) -> Result<(), String> {
-        function(instructions, locals, &Pairs)
+        function(instructions, locals, 0, &Pairs)
     }
 
     #[test]

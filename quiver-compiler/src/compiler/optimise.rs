@@ -392,7 +392,10 @@ fn trace_dead_value(
 
 /// Opcodes that push one value, read nothing beneath it, and have no other effect.
 fn pushes_purely(opcode: Opcode) -> bool {
-    matches!(opcode, Opcode::Push | Opcode::Load | Opcode::Pick)
+    matches!(
+        opcode,
+        Opcode::Push | Opcode::Load | Opcode::Capture | Opcode::Pick
+    )
 }
 
 /// Opcodes that replace the top value with one computed from it, with no other effect.

@@ -100,7 +100,10 @@ fn compile_spread_source<E: quiver_core::effects::Effect>(
 ) -> Result<usize, Error> {
     let type_id = match &access.source {
         Some(ast::AccessSource::Identifier(name)) => {
-            let (type_id, _) = compiler.compile_member_access(name, access.accessors.clone())?;
+            let (type_id, _) = compiler.compile_member_access(
+                super::variables::CaptureSource::Variable(name.clone()),
+                access.accessors.clone(),
+            )?;
             type_id
         }
         Some(ast::AccessSource::Parameter { depth: 0 }) => {
@@ -118,17 +121,11 @@ fn compile_spread_source<E: quiver_core::effects::Effect>(
             type_id
         }
         Some(ast::AccessSource::Parameter { depth }) => {
-            // An outer parameter is this function's capture, a local named by its sigil run.
-            let name = super::variables::CaptureSource::OuterParameter(*depth).scope_name();
-            if super::scopes::lookup_variable(&compiler.scopes, &name, &access.accessors)
-                .or_else(|| super::scopes::lookup_variable(&compiler.scopes, &name, &[]))
-                .is_none()
-            {
-                return Err(Error::ParameterDepthExceeded {
-                    written: ast::parameter_sigils(*depth),
-                });
-            }
-            let (type_id, _) = compiler.compile_member_access(&name, access.accessors.clone())?;
+            // An outer parameter is this function's capture.
+            let (type_id, _) = compiler.compile_member_access(
+                super::variables::CaptureSource::OuterParameter(*depth),
+                access.accessors.clone(),
+            )?;
             type_id
         }
         Some(ast::AccessSource::Ripple) => {

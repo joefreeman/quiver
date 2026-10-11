@@ -548,13 +548,14 @@ fn emit_requirement(
         RuntimeCheck::Pin { load, steps } => {
             generate_value_access(codegen, &requirement.path);
             let load = match load {
-                PinLoad::Variable(name, accessors) => Instruction::load(
+                PinLoad::Variable(name, accessors) => {
                     super::scopes::lookup_variable(scopes, name, accessors)
                         .ok_or_else(|| Error::InternalError {
                             message: format!("Pin variable '{}' not found in scope", name),
                         })?
-                        .1,
-                ),
+                        .1
+                        .load()
+                }
                 PinLoad::Parameter => {
                     Instruction::load(super::scopes::get_function_parameter(scopes)?.1)
                 }
@@ -777,8 +778,8 @@ fn analyze_match_pattern(
                             resolve_pin_steps(program, base_type_id, accessors, &name)?;
                         (PinLoad::Variable(name, vec![]), steps, accessed_type_id)
                     } else {
-                        // Only reachable outside any enclosing literal (module top level):
-                        // within one, the collector recorded the capture or errored earlier.
+                        // The pin's target was resolved, capturing it, before the analysis
+                        // (`pinned_members`): it reaches above the outermost function.
                         return Err(Error::ParameterDepthExceeded {
                             written: ast::parameter_sigils(*depth),
                         });

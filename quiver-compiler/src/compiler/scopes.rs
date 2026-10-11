@@ -1,3 +1,5 @@
+use quiver_core::bytecode::Instruction;
+
 use crate::{
     ast,
     compiler::{Error, Narrowings, Provenance, TypeAliasDef, helpers},
@@ -6,13 +8,40 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// A variable binding: its type, stack slot, and value provenance.
+/// Where a variable's value is read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    /// A local of the running frame.
+    Local(usize),
+    /// A capture of the running closure.
+    Capture(usize),
+}
+
+impl Slot {
+    /// The instruction pushing the value.
+    pub fn load(self) -> Instruction {
+        match self {
+            Slot::Local(index) => Instruction::load(index),
+            Slot::Capture(index) => Instruction::capture(index),
+        }
+    }
+
+    /// The local slot of a binding the frame holds itself, which a top level's always is.
+    pub fn local(self) -> usize {
+        match self {
+            Slot::Local(index) => index,
+            Slot::Capture(index) => panic!("capture {index} has no local slot"),
+        }
+    }
+}
+
+/// A variable binding: its type, slot, and value provenance.
 #[derive(Debug, Clone)]
 pub struct Variable {
     /// Type ID referencing the Program's type registry.
     pub ty: usize,
-    /// Stack index for the variable.
-    pub index: usize,
+    /// Where the value is read from.
+    pub slot: Slot,
     /// Provenance of the value stored in this variable (for tuple field resolution).
     pub provenance: super::Provenance,
     pub usage: Usage,
@@ -100,33 +129,6 @@ impl Scope {
     }
 }
 
-/// Define a new variable in the current scope
-/// Returns the allocated local index for the variable
-pub fn define_variable(
-    scopes: &mut [Scope],
-    local_count: &mut usize,
-    name: &str,
-    accessors: &[ast::AccessPath],
-    var_type_id: usize,
-    provenance: super::Provenance,
-) -> Result<usize, Error> {
-    let full_name = helpers::make_capture_name(name, accessors);
-    let index = *local_count;
-    *local_count += 1;
-    if let Some(scope) = scopes.last_mut() {
-        scope.bindings.variables.insert(
-            full_name,
-            Variable {
-                ty: var_type_id,
-                index,
-                provenance,
-                usage: Usage::default(),
-            },
-        );
-    }
-    Ok(index)
-}
-
 /// Define a new type alias in the current scope
 pub fn define_type_alias(scopes: &mut [Scope], name: String, type_alias: TypeAliasDef) {
     if let Some(scope) = scopes.last_mut() {
@@ -134,36 +136,60 @@ pub fn define_type_alias(scopes: &mut [Scope], name: String, type_alias: TypeAli
     }
 }
 
-/// Look up a variable in the scope stack, checking for narrowings.
+/// Look up a variable in the scope stack, checking for narrowings, as a read of it.
 ///
-/// Searches from innermost to outermost scope for the binding.
-/// If found, checks for any narrowing from current scope back to the binding's scope.
+/// Searches from innermost to outermost scope for the binding. A path (`o.t`) is bound only
+/// where it was captured whole, and a nearer binding of its base shadows that.
 /// Returns the narrowed type ID if one exists, otherwise the original type ID.
 pub fn lookup_variable(
     scopes: &[Scope],
     name: &str,
     accessors: &[ast::AccessPath],
-) -> Option<(usize, usize)> {
+) -> Option<(usize, Slot)> {
+    let (ty, variable) = find_variable(scopes, name, accessors)?;
+    variable.usage.mark();
+    Some((ty, variable.slot))
+}
+
+/// The type [`lookup_variable`] answers, without counting as a read of the binding.
+pub fn peek_variable(scopes: &[Scope], name: &str, accessors: &[ast::AccessPath]) -> Option<usize> {
+    find_variable(scopes, name, accessors).map(|(ty, _)| ty)
+}
+
+fn find_variable<'s>(
+    scopes: &'s [Scope],
+    name: &str,
+    accessors: &[ast::AccessPath],
+) -> Option<(usize, &'s Variable)> {
     let full_name = helpers::make_capture_name(name, accessors);
 
     // Find the scope containing the binding
-    let (binding_scope_idx, variable) = scopes
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(i, s)| s.bindings.variables.get(&full_name).map(|v| (i, v)))?;
-    variable.usage.mark();
+    let (binding_scope_idx, variable) =
+        scopes.iter().enumerate().rev().find_map(|(i, s)| {
+            match s.bindings.variables.get(&full_name) {
+                Some(variable) => Some(Some((i, variable))),
+                None if !accessors.is_empty() && s.bindings.variables.contains_key(name) => {
+                    Some(None)
+                }
+                None => None,
+            }
+        })??;
 
     // Check for narrowings from current scope back to binding scope
     // (innermost narrowing takes precedence)
-    for scope in scopes[binding_scope_idx..].iter().rev() {
-        if let Some(narrowed) = scope.narrowings.variables.get(&full_name) {
-            return Some((*narrowed, variable.index));
-        }
-    }
+    let ty = scopes[binding_scope_idx..]
+        .iter()
+        .rev()
+        .find_map(|scope| scope.narrowings.variables.get(&full_name).copied())
+        .unwrap_or(variable.ty);
+    Some((ty, variable))
+}
 
-    // No narrowing, return original type
-    Some((variable.ty, variable.index))
+/// Whether any scope binds `name` itself, without reading it.
+pub fn binds(scopes: &[Scope], name: &str) -> bool {
+    scopes
+        .iter()
+        .any(|scope| scope.bindings.variables.contains_key(name))
 }
 
 /// The local slot of a binding being written — its definition, which is not a read of it.
@@ -172,7 +198,7 @@ pub fn binding_slot(scopes: &[Scope], name: &str) -> Option<usize> {
         .iter()
         .rev()
         .find_map(|s| s.bindings.variables.get(name))
-        .map(|v| v.index)
+        .map(|v| v.slot.local())
 }
 
 /// Look up a variable's *declared* type, ignoring any runtime narrowings.
