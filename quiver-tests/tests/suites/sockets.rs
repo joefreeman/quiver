@@ -38,10 +38,10 @@ fn test_tcp_client_connect_and_write() {
         .with_io()
         .evaluate(&format!(
             r#"
-            [<7f000001>, {}] ~> __tcp_connect__ ~ ~> =(+TcpSocket & socket);
-            [socket, "Hello from Quiver!" ~> .0] ~> __io_write__ ~;
+            [<7f000001>, {}] ~> __tcp_connect__ ~> =(+TcpSocket & socket);
+            [socket, "Hello from Quiver!" ~> .0] ~> __io_write__;
             ![socket] ~> =Data[source: _, data: response];
-            socket ~> __io_close__ ~;
+            socket ~> __io_close__;
             Str[response]
         "#,
             port
@@ -65,14 +65,14 @@ fn test_tcp_server_accept_and_respond() {
             .with_io()
             .evaluate(&format!(
                 r#"
-                [{}, 10] ~> __tcp_listen__ ~ ~> =(+TcpListener & listener);
+                [{}, 10] ~> __tcp_listen__ ~> =(+TcpListener & listener);
 
                 // Accept one connection and echo
                 ![listener] ~> =Accepted[source: _, sock: client];
                 ![client] ~> =Data[source: _, data: request];
-                [client, request] ~> __io_write__ ~;
-                client ~> __io_close__ ~;
-                listener ~> __io_close__ ~;
+                [client, request] ~> __io_write__;
+                client ~> __io_close__;
+                listener ~> __io_close__;
 
                 Ok
                 "#,
@@ -140,16 +140,16 @@ fn test_tcp_multiple_connections() {
         .evaluate(&format!(
             r#"
             // First connection
-            [<7f000001>, {}] ~> __tcp_connect__ ~ ~> =(+TcpSocket & socket1);
-            [socket1, "First" ~> .0] ~> __io_write__ ~;
+            [<7f000001>, {}] ~> __tcp_connect__ ~> =(+TcpSocket & socket1);
+            [socket1, "First" ~> .0] ~> __io_write__;
             ![socket1] ~> =Data[source: _, data: response1];
-            socket1 ~> __io_close__ ~;
+            socket1 ~> __io_close__;
 
             // Second connection
-            [<7f000001>, {}] ~> __tcp_connect__ ~ ~> =(+TcpSocket & socket2);
-            [socket2, "Second" ~> .0] ~> __io_write__ ~;
+            [<7f000001>, {}] ~> __tcp_connect__ ~> =(+TcpSocket & socket2);
+            [socket2, "Second" ~> .0] ~> __io_write__;
             ![socket2] ~> =Data[source: _, data: response2];
-            socket2 ~> __io_close__ ~;
+            socket2 ~> __io_close__;
 
             [Str[response1], Str[response2]]
         "#,
@@ -172,16 +172,16 @@ fn test_socket_type_checking() {
             handle_socket = #+TcpSocket {
                 =s;
                 ![s] ~> =Data[source: _, data: data];
-                [s, data] ~> __io_write__ ~;
-                s ~> __io_close__ ~
+                [s, data] ~> __io_write__;
+                s ~> __io_close__
             };
 
             // Function that handles a listener
             handle_listener = #+TcpListener {
                 =l;
                 ![l] ~> =Accepted[source: _, sock: client];
-                client ~> __io_close__ ~;
-                l ~> __io_close__ ~
+                client ~> __io_close__;
+                l ~> __io_close__
             };
 
             // Should type check
@@ -222,10 +222,10 @@ fn test_binary_data_over_socket() {
         .with_io()
         .evaluate(&format!(
             r#"
-            [<7f000001>, {}] ~> __tcp_connect__ ~ ~> =(+TcpSocket & socket);
-            [socket, <deadbeef>] ~> __io_write__ ~;
+            [<7f000001>, {}] ~> __tcp_connect__ ~> =(+TcpSocket & socket);
+            [socket, <deadbeef>] ~> __io_write__;
             ![socket] ~> =Data[source: _, data: response];
-            socket ~> __io_close__ ~;
+            socket ~> __io_close__;
             response
         "#,
             port
@@ -259,9 +259,9 @@ fn test_write_to_closed_socket() {
         .with_io()
         .evaluate(&format!(
             r#"
-        [<7f000001>, {}] ~> __tcp_connect__ ~ ~> =(+TcpSocket & socket);
-        socket ~> __io_close__ ~;
-        [socket, "test" ~> .0] ~> __io_write__ ~
+        [<7f000001>, {}] ~> __tcp_connect__ ~> =(+TcpSocket & socket);
+        socket ~> __io_close__;
+        [socket, "test" ~> .0] ~> __io_write__
     "#,
             port
         ))

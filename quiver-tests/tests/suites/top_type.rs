@@ -186,9 +186,9 @@ fn test_predicates_may_answer_any_type() {
         .expect("Cons[2, Cons[4, Nil]]");
     quiver()
         .evaluate(
-            "%list{ 1, 2, 3 } ~> %list.iter ~
+            "%list{ 1, 2, 3 } ~> %list.iter
              ~> %iter.filter [~, #{ %num.gt? [$, 1] }]
-             ~> %list.collect ~",
+             ~> %list.collect",
         )
         .expect("Cons[2, Cons[3, Nil]]");
 }

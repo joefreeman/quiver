@@ -25,18 +25,18 @@ fn test_served_connection_end_to_end() {
             r#"
             handler = #'%http {
               [$method, $path] ~> {
-                | =[GET, Cons["n", Cons[n, Nil]]] => Str[n.0] ~> %http/server.text ~
+                | =[GET, Cons["n", Cons[n, Nil]]] => Str[n.0] ~> %http/server.text
                 | %http/server.not_found []
               }
             };
-            @[] { [port: 4181, handler: handler] ~> %http/server.serve ~ } [];
+            @[] { [port: 4181, handler: handler] ~> %http/server.serve } [];
             { ![50] | Ok };
-            [<7f000001>, 4181] ~> __tcp_connect__ ~ ~> =(+TcpSocket & sock);
-            [sock, "GET /n/one HTTP/1.1\r\n\r\nGET /n/two HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __io_write__ ~;
+            [<7f000001>, 4181] ~> __tcp_connect__ ~> =(+TcpSocket & sock);
+            [sock, "GET /n/one HTTP/1.1\r\n\r\nGET /n/two HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __io_write__;
             ![sock] ~> =Data[source: _, data: r1];
             ![sock] ~> =Data[source: _, data: r2];
-            sock ~> __io_close__ ~;
-            [Str[[r1, r2] ~> %bin.concat ~]]
+            sock ~> __io_close__;
+            [Str[[r1, r2] ~> %bin.concat]]
             "#,
         )
         .expect(r#"["HTTP/1.1 200 OK\r\ncontent-length: 3\r\ncontent-type: text/plain; charset=utf-8\r\n\r\noneHTTP/1.1 200 OK\r\ncontent-length: 3\r\ncontent-type: text/plain; charset=utf-8\r\n\r\ntwo"]"#);
@@ -55,18 +55,18 @@ fn test_crashed_handler_answers_500_and_connection_survives() {
             r#"
             handler = #'%http {
               [$method, $path] ~> {
-                | =[GET, Cons["boom", Nil]] => "handler crashed" ~> __panic__ ~
+                | =[GET, Cons["boom", Nil]] => "handler crashed" ~> __panic__
                 | %http/server.not_found []
               }
             };
-            @[] { [port: 4182, handler: handler] ~> %http/server.serve ~ } [];
+            @[] { [port: 4182, handler: handler] ~> %http/server.serve } [];
             { ![50] | Ok };
-            [<7f000001>, 4182] ~> __tcp_connect__ ~ ~> =(+TcpSocket & sock);
-            [sock, "GET /boom HTTP/1.1\r\n\r\nGET /ok HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __io_write__ ~;
+            [<7f000001>, 4182] ~> __tcp_connect__ ~> =(+TcpSocket & sock);
+            [sock, "GET /boom HTTP/1.1\r\n\r\nGET /ok HTTP/1.1\r\nConnection: close\r\n\r\n" ~> .0] ~> __io_write__;
             ![sock] ~> =Data[source: _, data: r1];
             ![sock] ~> =Data[source: _, data: r2];
-            sock ~> __io_close__ ~;
-            [Str[[r1, r2] ~> %bin.concat ~]]
+            sock ~> __io_close__;
+            [Str[[r1, r2] ~> %bin.concat]]
             "#,
         )
         .expect(r#"["HTTP/1.1 500 Internal Server Error\r\ncontent-length: 21\r\ncontent-type: text/plain; charset=utf-8\r\n\r\nInternal Server ErrorHTTP/1.1 404 Not Found\r\ncontent-length: 9\r\ncontent-type: text/plain; charset=utf-8\r\n\r\nNot Found"]"#);
@@ -82,12 +82,12 @@ fn test_server_response_helpers_need_no_server() {
             r#"
             handler = #'%http {
               [$method, $path] ~> {
-                | =[GET, Cons["greet", Cons[name, Nil]]] => Str[name.0] ~> %http/server.text ~
+                | =[GET, Cons["greet", Cons[name, Nil]]] => Str[name.0] ~> %http/server.text
                 | %http/server.not_found []
               }
             };
-            "GET /greet/ada HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[req, _];
-            req ~> handler ~ ~> =Response(status: s, body: b);
+            "GET /greet/ada HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[req, _];
+            req ~> handler ~> =Response(status: s, body: b);
             [s, Str[b]]
             "#,
         )
@@ -104,12 +104,12 @@ fn test_session_round_trip() {
             r#"
             key = <000102030405060708090a0b0c0d0e0f>;
             resp = Response[status: 200, headers: Nil, body: <>];
-            r2 = [resp, key, Cons[["count", "7"], Cons[["name", "Ada L"], Nil]]] ~> %http/session.put ~;
-            [r2.headers, "set-cookie"] ~> %http.header ~ ~> =Str[scb];
-            [scb, 59, 0] ~> %bin.index ~ ~> =('int & semi);
-            cookie = [scb, 0, semi] ~> %bin.slice ~ ~> Str[~];
-            "GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[rq, _];
-            [rq, key] ~> %http/session.get ~
+            r2 = [resp, key, Cons[["count", "7"], Cons[["name", "Ada L"], Nil]]] ~> %http/session.put;
+            [r2.headers, "set-cookie"] ~> %http.header ~> =Str[scb];
+            [scb, 59, 0] ~> %bin.index ~> =('int & semi);
+            cookie = [scb, 0, semi] ~> %bin.slice ~> Str[~];
+            "GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[rq, _];
+            [rq, key] ~> %http/session.get
             "#,
         )
         .expect(r#"Cons[["count", "7"], Cons[["name", "Ada L"], Nil]]"#);
@@ -122,8 +122,8 @@ fn test_session_rejects_tampering() {
         .evaluate(
             r#"
             key = <000102030405060708090a0b0c0d0e0f>;
-            "GET / HTTP/1.1\r\nCookie: session=ff.00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[rq, _];
-            r = [rq, key] ~> %http/session.get ~;
+            "GET / HTTP/1.1\r\nCookie: session=ff.00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[rq, _];
+            r = [rq, key] ~> %http/session.get;
             { | r ~> =('%http.pairs & p) => Forged | Rejected }
             "#,
         )
@@ -134,12 +134,12 @@ fn test_session_rejects_tampering() {
             key = <000102030405060708090a0b0c0d0e0f>;
             other = <ff0102030405060708090a0b0c0d0e0f>;
             resp = Response[status: 200, headers: Nil, body: <>];
-            r2 = [resp, key, Cons[["a", "1"], Nil]] ~> %http/session.put ~;
-            [r2.headers, "set-cookie"] ~> %http.header ~ ~> =Str[scb];
-            [scb, 59, 0] ~> %bin.index ~ ~> =('int & semi);
-            cookie = [scb, 0, semi] ~> %bin.slice ~ ~> Str[~];
-            "GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[rq, _];
-            r = [rq, other] ~> %http/session.get ~;
+            r2 = [resp, key, Cons[["a", "1"], Nil]] ~> %http/session.put;
+            [r2.headers, "set-cookie"] ~> %http.header ~> =Str[scb];
+            [scb, 59, 0] ~> %bin.index ~> =('int & semi);
+            cookie = [scb, 0, semi] ~> %bin.slice ~> Str[~];
+            "GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[rq, _];
+            r = [rq, other] ~> %http/session.get;
             { | r ~> =('%http.pairs & p) => WrongKeyAccepted | Rejected }
             "#,
         )
@@ -150,7 +150,7 @@ fn test_session_rejects_tampering() {
 fn test_session_clear() {
     quiver()
         .evaluate(
-            r#"Response[status: 200, headers: Nil, body: <>] ~> %http/session.clear ~ ~> =Response(headers: hs); [hs, "set-cookie"] ~> %http.header ~"#,
+            r#"Response[status: 200, headers: Nil, body: <>] ~> %http/session.clear ~> =Response(headers: hs); [hs, "set-cookie"] ~> %http.header"#,
         )
         .expect(r#""session=; Path=/; Max-Age=0""#);
 }

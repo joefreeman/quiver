@@ -3,7 +3,7 @@ use crate::common::*;
 #[test]
 fn test_simple_assignment() {
     quiver()
-        .evaluate("1 ~> =x; 2 ~> =y; [x, y] ~> __integer_add__ ~")
+        .evaluate("1 ~> =x; 2 ~> =y; [x, y] ~> __integer_add__")
         .expect("3");
 
     quiver().evaluate("x = 42; x").expect("42");
@@ -12,7 +12,7 @@ fn test_simple_assignment() {
 #[test]
 fn test_tuple_destructuring() {
     quiver()
-        .evaluate("[1, 2] ~> =[a, b]; [a, b] ~> __integer_add__ ~")
+        .evaluate("[1, 2] ~> =[a, b]; [a, b] ~> __integer_add__")
         .expect("3");
 
     quiver().evaluate("[x, y] = [1, 2]; y").expect("2");
@@ -42,7 +42,7 @@ fn test_nested_field_assignment() {
 #[test]
 fn test_partial_tuple_assignment() {
     quiver()
-        .evaluate("[x: 1, y: 2, z: 3] ~> =(x, y); [x, y] ~> __integer_add__ ~")
+        .evaluate("[x: 1, y: 2, z: 3] ~> =(x, y); [x, y] ~> __integer_add__")
         .expect("3");
 }
 
@@ -61,8 +61,8 @@ fn test_named_partial_pattern_with_union() {
             r#"
             'union = A[x: 'int, y: 'int] | B[x: 'int, z: 'int];
             #'union { =A(x) => x } ~> =f;
-            A[x: 1, y: 2] ~> f ~ ~> =a;
-            B[x: 3, z: 4] ~> f ~ ~> =b;
+            A[x: 1, y: 2] ~> f ~> =a;
+            B[x: 3, z: 4] ~> f ~> =b;
             [a, b]
             "#,
         )
@@ -76,7 +76,7 @@ fn test_named_partial_pattern_in_block() {
             r#"
             A[x: 5, y: 10] ~> {
               | =B(x, y) => 0
-              | =A(x, y) => [x, y] ~> __integer_add__ ~
+              | =A(x, y) => [x, y] ~> __integer_add__
             }
             "#,
         )
@@ -86,11 +86,11 @@ fn test_named_partial_pattern_in_block() {
 #[test]
 fn test_star_assignment() {
     quiver()
-        .evaluate("[a: 1, b: 2] ~> =*; [a, b] ~> __integer_add__ ~")
+        .evaluate("[a: 1, b: 2] ~> =*; [a, b] ~> __integer_add__")
         .expect("3");
 
     quiver()
-        .evaluate("* = [a: 1, b: 2]; [a, b] ~> __integer_add__ ~")
+        .evaluate("* = [a: 1, b: 2]; [a, b] ~> __integer_add__")
         .expect("3");
 }
 
@@ -98,11 +98,11 @@ fn test_star_assignment() {
 fn test_named_star_assignment() {
     // A named star binds all named fields, like `*`, but also requires the tuple name.
     quiver()
-        .evaluate("Config[a: 1, b: 2] ~> =Config*; [a, b] ~> __integer_add__ ~")
+        .evaluate("Config[a: 1, b: 2] ~> =Config*; [a, b] ~> __integer_add__")
         .expect("3");
 
     quiver()
-        .evaluate("Config* = Config[a: 1, b: 2]; [a, b] ~> __integer_add__ ~")
+        .evaluate("Config* = Config[a: 1, b: 2]; [a, b] ~> __integer_add__")
         .expect("3");
 }
 
@@ -120,7 +120,7 @@ fn test_named_star_discriminates_union() {
             r#"
             'union = Config[a: 'int, b: 'int] | Other[x: 'int]
             #'union { =Config* => [a, b] | None } ~> =f
-            [Config[a: 1, b: 2] ~> f ~, Other[x: 9] ~> f ~]
+            [Config[a: 1, b: 2] ~> f, Other[x: 9] ~> f]
             "#,
         )
         .expect("[[1, 2], None]");
@@ -181,8 +181,8 @@ fn test_union_match_with_tuples() {
         .evaluate(
             r#"
             A[3] ~> {
-              | =A[x] => [x, 1] ~> __integer_add__ ~
-              | =B[x] => [x, 2] ~> __integer_add__ ~
+              | =A[x] => [x, 1] ~> __integer_add__
+              | =B[x] => [x, 2] ~> __integer_add__
             }
             "#,
         )
@@ -195,7 +195,7 @@ fn test_union_type_partial_destructuring() {
         .evaluate(
             r#"
             #[a: 'int, b: 'int] { =(a, b) => [a, b] } ~> =f;
-            [a: 1, b: 2] ~> f ~
+            [a: 1, b: 2] ~> f
             "#,
         )
         .expect("[1, 2]");
@@ -205,8 +205,8 @@ fn test_union_type_partial_destructuring() {
             r#"
             'union = [a: 'int, b: 'int] | [x: 'int];
             #'union { =(a, b) => [a, b] } ~> =f;
-            [a: 1, b: 2] ~> f ~ ~> =b1;
-            [x: 3] ~> f ~ ~> =b2;
+            [a: 1, b: 2] ~> f ~> =b1;
+            [x: 3] ~> f ~> =b2;
             [b1, b2]
             "#,
         )
@@ -217,8 +217,8 @@ fn test_union_type_partial_destructuring() {
             r#"
             'union = [a: 'int, b: 'int] | [b: 'int, c: 'int];
             #'union { =(b) => b } ~> =f;
-            [a: 1, b: 2] ~> f ~ ~> =b1;
-            [b: 3, c: 4] ~> f ~ ~> =b2;
+            [a: 1, b: 2] ~> f ~> =b1;
+            [b: 3, c: 4] ~> f ~> =b2;
             [b1, b2]
             "#,
         )
@@ -229,8 +229,8 @@ fn test_union_type_partial_destructuring() {
             r#"
             'union = [a: 'int, b: 'int] | [b: 'int, c: 'int];
             #'union { =(a, b) => [a, b] } ~> =f;
-            [a: 1, b: 2] ~> f ~ ~> =b1;
-            [b: 3, c: 4] ~> f ~ ~> =b2;
+            [a: 1, b: 2] ~> f ~> =b1;
+            [b: 3, c: 4] ~> f ~> =b2;
             [b1, b2]
             "#,
         )
@@ -245,9 +245,9 @@ fn test_match_union_in_nested_tuple() {
             'option = Some['int] | None;
             #['option, 'int] {
               | =[None, z] => 0
-              | =[Some[x], z] => [x, z] ~> __integer_add__ ~
+              | =[Some[x], z] => [x, z] ~> __integer_add__
             } ~> =f;
-            [Some[5], 2] ~> f ~
+            [Some[5], 2] ~> f
             "#,
         )
         .expect("7");
@@ -256,7 +256,7 @@ fn test_match_union_in_nested_tuple() {
 #[test]
 fn test_multiple_placeholders() {
     quiver()
-        .evaluate("[1, 2, 3, 4, 5] ~> =[_, x, _, y, _]; [x, y] ~> __integer_add__ ~")
+        .evaluate("[1, 2, 3, 4, 5] ~> =[_, x, _, y, _]; [x, y] ~> __integer_add__")
         .expect("6");
 }
 
@@ -326,7 +326,7 @@ fn test_partial_pattern_order_for_union() {
             r#"
             'union = A[x: 'int, y: 'int] | B[y: 'int, x: 'int]
             #Wrapper['union] { =Wrapper[(x, y)] => [x, y] } ~> =f
-            Wrapper[B[y: 1, x: 2]] ~> f ~
+            Wrapper[B[y: 1, x: 2]] ~> f
             "#,
         )
         .expect("[2, 1]");
@@ -339,7 +339,7 @@ fn test_star_pattern_order_for_union() {
             r#"
             'union = A[x: 'int, y: 'int] | B[y: 'int, x: 'int]
             #'union { =* => [x, y] } ~> =f
-            B[y: 1, x: 2] ~> f ~
+            B[y: 1, x: 2] ~> f
             "#,
         )
         .expect("[2, 1]");

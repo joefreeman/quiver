@@ -82,8 +82,7 @@ A constructor's result may be nil, so it is narrowed before being used as a date
 
 ```quiver
 next_month = #['int, 'int, 'int] {
-  %time.date [$0, $1, $2] ~> =('%time.date & d)
-  %time.add [d, %time.months 1]
+  %time.date [$0, $1, $2] ~> ='%time.date ~> %time.add [~, %time.months 1]
 }
 next_month [2024, 1, 31]                //= Date[year: 2024, month: 2, day: 29]
 next_month [2024, 2, 30]                //= []

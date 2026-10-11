@@ -53,8 +53,8 @@ fn test_send_through_all_process_union() {
             r#"
             f = #'int { !'int };
             g = #'int { !'int ~> [~] };
-            a = 0 ~> @f ~;
-            p = Ok ~> { | =Ok => a | 0 ~> @g ~ };
+            a = 0 ~> @f;
+            p = Ok ~> { | =Ok => a | 0 ~> @g };
             p 42;
             !a
         "#,
@@ -71,7 +71,7 @@ fn test_union_send_checks_every_member() {
             r#"
             f = #'int { !'int };
             h = #'int { !Str['bin]; $ };
-            p = Ok ~> { | =Ok => 0 ~> @f ~ | 0 ~> @h ~ };
+            p = Ok ~> { | =Ok => 0 ~> @f | 0 ~> @h };
             p 42
         "#,
         )
@@ -89,7 +89,7 @@ fn test_send_to_mixed_union_is_error() {
         .evaluate(
             r#"
             f = #'int { !'int };
-            p = Ok ~> { | =Ok => 0 ~> @f ~ | 5 };
+            p = Ok ~> { | =Ok => 0 ~> @f | 5 };
             p 42
         "#,
         )
@@ -108,7 +108,7 @@ fn test_pipe_into_function_union_calls_it() {
             f = #'int { $ };
             g = #'int { "hi" };
             u = Ok ~> { | =Ok => f | g };
-            42 ~> u ~
+            42 ~> u
         "#,
         )
         .expect("42")
@@ -126,7 +126,7 @@ fn test_spawn_with_argument() {
 fn test_spawn_juxtaposed_argument() {
     // `x @f` supplies the spawned function's init argument from the chained value.
     quiver()
-        .evaluate("f = #'int { $ }; p = 42 ~> @f ~; !p")
+        .evaluate("f = #'int { $ }; p = 42 ~> @f; !p")
         .expect("42");
 }
 
@@ -134,7 +134,7 @@ fn test_spawn_juxtaposed_argument() {
 fn test_spawn_juxtaposed_argument_equals_piped() {
     // `.f x` is equivalent to `x @f`.
     quiver()
-        .evaluate("f = #'int { $ }; p = 42 ~> @f ~; !p")
+        .evaluate("f = #'int { $ }; p = 42 ~> @f; !p")
         .expect("42");
 }
 
@@ -142,7 +142,7 @@ fn test_spawn_juxtaposed_argument_equals_piped() {
 fn test_spawn_juxtaposed_argument_flows_chained_value() {
     // The chained value flows into the argument tuple (via `~`), like a call argument.
     quiver()
-        .evaluate("f = #['int, 'int] { __integer_add__ ~ }; p = 10 ~> [~, 5] ~> @f ~; !p")
+        .evaluate("f = #['int, 'int] { __integer_add__ ~ }; p = 10 ~> [~, 5] ~> @f; !p")
         .expect("15");
 }
 
@@ -151,7 +151,7 @@ fn spawn_with_init_argument_is_argument_first() {
     // There is no form that spawns the flowing function *with* an init argument; spawn a named
     // function argument-first instead (`x @f`). Bare `.~` survives only for a nilary target.
     quiver()
-        .evaluate("f = #'int { $ }; p = 42 ~> @f ~; !p")
+        .evaluate("f = #'int { $ }; p = 42 ~> @f; !p")
         .expect("42");
 }
 
@@ -360,7 +360,7 @@ fn test_receive_function_cannot_perform_effect() {
         .with_io()
         .evaluate(
             r#"
-            p = @#[] { ![#'int { ["/dev/null" ~> .0, 0, 0] ~> __file_open__ ~; Ok }] } [];
+            p = @#[] { ![#'int { ["/dev/null" ~> .0, 0, 0] ~> __file_open__; Ok }] } [];
             p 10;
             r = !p;
             r:crash<(message: Str['bin])> ~> =(message: m);
@@ -622,7 +622,7 @@ fn test_link_fires_on_abnormal_termination() {
         .evaluate(
             r#"
             v = @#[] { !'int } [];
-            c = @#[] { %proc.link v; "die" ~> __panic__ ~ } [];
+            c = @#[] { %proc.link v; "die" ~> __panic__ } [];
             rc = !c;
             rv = !v;
             rv:crash<Killed()>
@@ -655,7 +655,7 @@ fn test_link_to_crashed_process_kills_immediately() {
     quiver()
         .evaluate(
             r#"
-            dead = @#[] { "x" ~> __panic__ ~ } [];
+            dead = @#[] { "x" ~> __panic__ } [];
             { ![50] | Ok };
             c = @#[] { %proc.link dead; !'int } [];
             r = !c;
@@ -673,7 +673,7 @@ fn test_panic_is_catchable_at_await() {
     quiver()
         .evaluate(
             r#"
-            p = @#[] { "boom" ~> __panic__ ~ } [];
+            p = @#[] { "boom" ~> __panic__ } [];
             r = !p;
             r:crash<Panic(message: Str['bin])> ~> =(message: m);
             m
@@ -704,7 +704,7 @@ fn test_late_await_of_crashed_process_yields_same_crash() {
     quiver()
         .evaluate(
             r#"
-            p = @#[] { "gone" ~> __panic__ ~ } [];
+            p = @#[] { "gone" ~> __panic__ } [];
             { ![20] | Ok };
             r = !p;
             r:crash<Panic(pid: (@), message: Str['bin])> ~> =(pid: ^p, message: m);
@@ -770,14 +770,14 @@ fn test_await_simple() {
 #[test]
 fn test_await_returns_process_result() {
     quiver()
-        .evaluate("@#[] { [1, 2] ~> __integer_add__ ~ } [] ~> !")
+        .evaluate("@#[] { [1, 2] ~> __integer_add__ } [] ~> !")
         .expect("3");
 }
 
 #[test]
 fn test_await_with_captures() {
     quiver()
-        .evaluate("x = 10; @#[] { [x, 32] ~> __integer_add__ ~ } [] ~> !")
+        .evaluate("x = 10; @#[] { [x, 32] ~> __integer_add__ } [] ~> !")
         .expect("42");
 }
 
@@ -788,7 +788,7 @@ fn test_await_process_type_checking() {
             r#"
             await_fn = #(@!'int) { =p => !p };
             f = #[] { 42 };
-            @f [] ~> await_fn ~
+            @f [] ~> await_fn
             "#,
         )
         .expect("42");
@@ -1064,7 +1064,7 @@ fn test_receive_type_from_variable() {
         .evaluate(
             r#"
             receiver_func = #'int;
-            p = @#[] { ![receiver_func] ~> [~, 100] ~> __integer_add__ ~ } [];
+            p = @#[] { ![receiver_func] ~> [~, 100] ~> __integer_add__ } [];
             p 42; !p
             "#,
         )
@@ -1226,7 +1226,7 @@ fn test_union_send_accepts_common_message() {
             r#"
             f = #'int { !'int };
             g = #'int { !('int | 'bin) };
-            p = Ok ~> { | =Ok => 0 ~> @f ~ | 0 ~> @g ~ };
+            p = Ok ~> { | =Ok => 0 ~> @f | 0 ~> @g };
             p 42
         "#,
         )
@@ -1239,7 +1239,7 @@ fn test_receive_type_in_function_argument() {
     quiver()
         .evaluate(
             r#"
-            p = 20 ~> @#'int { [~, !#'int] ~> %int.div ~ } ~;
+            p = 20 ~> @#'int { [~, !#'int] ~> %int.div } ~;
             p 2; !p
             "#,
         )
@@ -1265,7 +1265,7 @@ fn test_receive_type_in_builtin_argument() {
     quiver()
         .evaluate(
             r#"
-            p = 10 ~> @#'int { [~, !#'int] ~> __integer_add__ ~ } ~;
+            p = 10 ~> @#'int { [~, !#'int] ~> __integer_add__ } ~;
             p 32; !p
             "#,
         )
@@ -1507,7 +1507,7 @@ fn test_spawn_captures_and_heap_argument_share_one_index_space() {
               [$0, $1, Str[cap]]
             }
             arg = [%bin.concat ["w" ~> .0, "s" ~> .0] ~> Str[~], "plain"]
-            hp = arg ~> @h ~
+            hp = arg ~> @h
             !hp
             "#,
         )

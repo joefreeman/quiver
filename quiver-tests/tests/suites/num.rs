@@ -12,21 +12,21 @@ use crate::common::*;
 
 #[test]
 fn test_surd_formatting() {
-    quiver().evaluate("2 ~> %num.sqrt ~").expect("√2");
-    quiver().evaluate("8 ~> %num.sqrt ~").expect("2√2");
-    quiver().evaluate("1/2 ~> %num.sqrt ~").expect("(1/2)√2");
+    quiver().evaluate("2 ~> %num.sqrt").expect("√2");
+    quiver().evaluate("8 ~> %num.sqrt").expect("2√2");
+    quiver().evaluate("1/2 ~> %num.sqrt").expect("(1/2)√2");
     quiver()
-        .evaluate("s = 2 ~> %num.sqrt ~; [1, s] ~> %num.add ~")
+        .evaluate("s = 2 ~> %num.sqrt; [1, s] ~> %num.add")
         .expect("1 + √2");
     quiver()
-        .evaluate("s = 2 ~> %num.sqrt ~; n = s ~> %num.neg ~; [3, n] ~> %num.add ~")
+        .evaluate("s = 2 ~> %num.sqrt; n = s ~> %num.neg; [3, n] ~> %num.add")
         .expect("3 - √2");
     quiver()
-        .evaluate("2 ~> %num.sqrt ~ ~> %num.neg ~")
+        .evaluate("2 ~> %num.sqrt ~> %num.neg")
         .expect("-√2");
     // φ = 1/2 + (1/2)√5.
     quiver()
-        .evaluate("f = 5 ~> %num.sqrt ~; s = [1, f] ~> %num.add ~; [s, 2] ~> %num.div ~")
+        .evaluate("f = 5 ~> %num.sqrt; s = [1, f] ~> %num.add; [s, 2] ~> %num.div")
         .expect("1/2 + (1/2)√5");
 }
 
@@ -40,7 +40,7 @@ fn test_transcendental_formatting() {
         ("%num.div [180, %num.pi]", "180π⁻¹"),
         ("%num.add [1, %num.pi]", "1 + π"),
         ("%num.sub [3, %num.mul [2, %num.pi]]", "3 - 2π"),
-        ("%num.pi ~> %num.neg ~", "-π"),
+        ("%num.pi ~> %num.neg", "-π"),
         ("%num.e", "e"),
         ("%num.exp 2", "e²"),
         ("%num.exp 1/2", "e^(1/2)"),
@@ -64,7 +64,7 @@ fn test_logarithm_formatting() {
             "%num.ln 3 ~> %num.mul [1/2, ~] ~> %num.sub [1, ~]",
             "1 - (1/2) ln 3",
         ),
-        ("%num.ln 2 ~> %num.neg ~", "-ln 2"),
+        ("%num.ln 2 ~> %num.neg", "-ln 2"),
     ];
     for (source, expected) in cases {
         quiver().evaluate(source).expect(expected);

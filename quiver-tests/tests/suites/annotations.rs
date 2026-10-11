@@ -38,7 +38,7 @@ fn test_annotation_only_block_is_identity() {
 #[test]
 fn test_doc_on_function_retrieved_without_calling() {
     quiver()
-        .evaluate("f = #'int { :doc \"Doubles\"; [~, 2] ~> __integer_multiply__ ~ }; f:doc")
+        .evaluate("f = #'int { :doc \"Doubles\"; [~, 2] ~> __integer_multiply__ }; f:doc")
         .expect("\"Doubles\"");
 }
 
@@ -62,7 +62,7 @@ fn test_nested_function_annotation_captures_at_enclosing_level() {
 #[test]
 fn test_function_annotation_does_not_affect_calls() {
     quiver()
-        .evaluate("f = #'int { :doc \"Doubles\"; [~, 2] ~> __integer_multiply__ ~ }; 21 ~> f ~")
+        .evaluate("f = #'int { :doc \"Doubles\"; [~, 2] ~> __integer_multiply__ }; 21 ~> f")
         .expect("42");
 }
 
@@ -97,13 +97,13 @@ fn test_error_payload_roundtrip() {
     // Failure path: the annotated nil flows through the chain into the retrieval.
     quiver()
         .evaluate(&format!(
-            "{source} [4, 0] ~> div ~ ~> :error ~> {{ =DivisionByZero => 111 | 222 }}"
+            "{source} [4, 0] ~> div ~> :error ~> {{ =DivisionByZero => 111 | 222 }}"
         ))
         .expect("111");
     // Success path: the result carries no :error, so retrieval yields nil.
     quiver()
         .evaluate(&format!(
-            "{source} [4, 2] ~> div ~ ~> :error ~> {{ =DivisionByZero => 111 | 222 }}"
+            "{source} [4, 2] ~> div ~> :error ~> {{ =DivisionByZero => 111 | 222 }}"
         ))
         .expect("222");
 }
@@ -118,8 +118,8 @@ fn test_error_payload_propagates_through_calls() {
               | =[_, 0] => [] ~> { :error DivisionByZero }
               | __integer_divide__ ~
             };
-            half_inc = #'int { [~, 0] ~> div ~; [~, 1] ~> __integer_add__ ~ };
-            10 ~> half_inc ~ ~> :error
+            half_inc = #'int { [~, 0] ~> div; [~, 1] ~> __integer_add__ };
+            10 ~> half_inc ~> :error
             ",
         )
         .expect("DivisionByZero");
@@ -184,7 +184,7 @@ fn test_pre_contract_attaches_and_is_callable() {
     // The entry is definite, so retrieval types as the bare contract; binding it names the
     // contract without applying it, and the call is then explicit.
     quiver()
-        .evaluate("f = #'int { :pre #{ Ok }; [~, 1] ~> __integer_add__ ~ }; p = f:pre; 5 ~> p ~")
+        .evaluate("f = #'int { :pre #{ Ok }; [~, 1] ~> __integer_add__ }; p = f:pre; 5 ~> p")
         .expect("Ok");
 }
 
@@ -193,7 +193,7 @@ fn test_pre_contract_holds_is_transparent() {
     // Debug builds enforce `:pre`; a satisfied precondition is invisible to the result.
     quiver()
         .debug()
-        .evaluate("f = #'int { :pre #{ [~, 0] ~> __integer_compare__ ~ ~> =1 }; [~, 2] ~> __integer_multiply__ ~ }; 5 ~> f ~")
+        .evaluate("f = #'int { :pre #{ [~, 0] ~> __integer_compare__ ~> =1 }; [~, 2] ~> __integer_multiply__ }; 5 ~> f")
         .expect("10");
 }
 
@@ -203,9 +203,9 @@ fn test_pre_contract_violation_aborts() {
     // the callee (`f`), not the `~` standing in for its argument.
     quiver()
         .debug()
-        .evaluate("f = #'int { :pre #{ [~, 0] ~> __integer_compare__ ~ ~> =1 }; [~, 2] ~> __integer_multiply__ ~ }; -5 ~> f ~")
+        .evaluate("f = #'int { :pre #{ [~, 0] ~> __integer_compare__ ~> =1 }; [~, 2] ~> __integer_multiply__ }; -5 ~> f")
         .expect_runtime_error(quiver_core::error::Error::Panic(
-            "Precondition violated at test:1:104".to_string(),
+            "Precondition violated at test:1:100".to_string(),
         ));
 }
 
@@ -237,9 +237,9 @@ fn test_post_contract_violation_aborts() {
     // The post-contract receives `[in: arg, out: result]`; a broken result aborts.
     quiver()
         .debug()
-        .evaluate("f = #'int { :post #{ $ ~> =[in: i, out: o]; [o, i] ~> __integer_compare__ ~ ~> =0 }; [~, 1] ~> __integer_add__ ~ }; 5 ~> f ~")
+        .evaluate("f = #'int { :post #{ $ ~> =[in: i, out: o]; [o, i] ~> __integer_compare__ ~> =0 }; [~, 1] ~> __integer_add__ }; 5 ~> f")
         .expect_runtime_error(quiver_core::error::Error::Panic(
-            "Postcondition violated at test:1:122".to_string(),
+            "Postcondition violated at test:1:118".to_string(),
         ));
 }
 
@@ -248,7 +248,7 @@ fn test_post_contract_holds_is_transparent() {
     // A satisfied postcondition leaves the result untouched.
     quiver()
         .debug()
-        .evaluate("f = #'int { :post #{ $ ~> =[in: i, out: o]; [o, i] ~> __integer_compare__ ~ ~> =1 }; [~, 1] ~> __integer_add__ ~ }; 5 ~> f ~")
+        .evaluate("f = #'int { :post #{ $ ~> =[in: i, out: o]; [o, i] ~> __integer_compare__ ~> =1 }; [~, 1] ~> __integer_add__ }; 5 ~> f")
         .expect("6");
 }
 
@@ -258,7 +258,7 @@ fn test_panic_builtin_aborts_with_message() {
     // a `Str` message and raises a runtime error rather than flowing on as a (recoverable)
     // nil. Usable directly, e.g. to back an `assert`/`unreachable` helper.
     quiver()
-        .evaluate("\"boom\" ~> __panic__ ~")
+        .evaluate("\"boom\" ~> __panic__")
         .expect_runtime_error(quiver_core::error::Error::Panic("boom".to_string()));
 }
 
@@ -266,7 +266,7 @@ fn test_panic_builtin_aborts_with_message() {
 fn test_contracts_not_enforced_in_release() {
     // Release builds emit a plain call: the violated precondition is not checked.
     quiver()
-        .evaluate("f = #'int { :pre #{ [~, 0] ~> __integer_compare__ ~ ~> =1 }; [~, 2] ~> __integer_multiply__ ~ }; -5 ~> f ~")
+        .evaluate("f = #'int { :pre #{ [~, 0] ~> __integer_compare__ ~> =1 }; [~, 2] ~> __integer_multiply__ }; -5 ~> f")
         .expect("-10");
 }
 
@@ -277,7 +277,7 @@ fn test_contract_erased_through_parameter_is_not_enforced() {
     // with annotation visibility. The precondition would fail, but it is never checked.
     quiver()
         .debug()
-        .evaluate("f = #'int { :pre #{ [~, 0] ~> __integer_compare__ ~ ~> =1 }; [~, 2] ~> __integer_multiply__ ~ }; call = #[g: (#'int -> 'int), x: 'int] { $x ~> $g ~ }; [g: f, x: -5] ~> call ~")
+        .evaluate("f = #'int { :pre #{ [~, 0] ~> __integer_compare__ ~> =1 }; [~, 2] ~> __integer_multiply__ }; call = #[g: (#'int -> 'int), x: 'int] { $x ~> $g ~ }; [g: f, x: -5] ~> call")
         .expect("-10");
 }
 
@@ -286,7 +286,7 @@ fn test_absent_post_on_exact_row_is_rejected() {
     // The literal's row is exact (:pre only), so :post is provably absent — an
     // always-nil retrieval, rejected by rule 5.
     quiver()
-        .evaluate("f = #'int { :pre #{ Ok }; [~, 1] ~> __integer_add__ ~ }; f:post")
+        .evaluate("f = #'int { :pre #{ Ok }; [~, 1] ~> __integer_add__ }; f:post")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeUnresolved(
             "No member of (#'int -> 'int) { :pre #'int -> Ok } can carry annotation :post — the retrieval would always be nil"
                 .to_string(),
@@ -347,7 +347,7 @@ fn test_error_payload_propagates_through_a_failed_match() {
     ";
     quiver()
         .evaluate(&format!(
-            "{source} g = #[] {{ [4, 0] ~> div ~ ~> =('int & x); 5 }}; g [] ~> :error"
+            "{source} g = #[] {{ [4, 0] ~> div ~> =('int & x); 5 }}; g [] ~> :error"
         ))
         .expect("DivisionByZero");
     // The two-step spelling answers the same, for a different reason: the first step is the
@@ -355,7 +355,7 @@ fn test_error_payload_propagates_through_a_failed_match() {
     // payload, which is what makes the one-liner a faithful rewrite of the two-stepper.
     quiver()
         .evaluate(&format!(
-            "{source} g = #[] {{ [4, 0] ~> div ~; =x; 5 }}; g [] ~> :error"
+            "{source} g = #[] {{ [4, 0] ~> div; =x; 5 }}; g [] ~> :error"
         ))
         .expect("DivisionByZero");
 }
@@ -370,10 +370,10 @@ fn test_failed_match_carries_only_a_nil_scrutinee() {
         g = #'int { f ~ ~> =B[x]; 5 };
     ";
     quiver()
-        .evaluate(&format!("{source} 0 ~> g ~ ~> :error"))
+        .evaluate(&format!("{source} 0 ~> g ~> :error"))
         .expect("Boom");
     quiver()
-        .evaluate(&format!("{source} 1 ~> g ~ ~> :error"))
+        .evaluate(&format!("{source} 1 ~> g ~> :error"))
         .expect("[]");
 }
 
@@ -454,7 +454,7 @@ fn test_module_member_doc() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["greeter".to_string()],
-        "[ greet: #'int { :doc \"Greets\"; [~, 1] ~> __integer_add__ ~ } ]".to_string(),
+        "[ greet: #'int { :doc \"Greets\"; [~, 1] ~> __integer_add__ } ]".to_string(),
     );
     quiver()
         .with_modules(modules)
@@ -476,7 +476,7 @@ fn test_laundering_is_rejected() {
     quiver()
         .evaluate(
             "launder = #[] { $ };
-             a = [] ~> { :error Overflow } ~> launder ~;
+             a = [] ~> { :error Overflow } ~> launder;
              b = A[c: 1] ~> { =A(c) => a | [] ~> { :error DivisionByZero } };
              b:error",
         )
@@ -506,7 +506,7 @@ fn test_parameter_erases_annotations() {
 fn test_reattach_after_boundary_restores_visibility() {
     // Worked example 6: attach makes the entry definite even on an open row.
     quiver()
-        .evaluate("tag = #[] { $ ~> { :why Unknown } }; [] ~> tag ~ ~> :why")
+        .evaluate("tag = #[] { $ ~> { :why Unknown } }; [] ~> tag ~> :why")
         .expect("Unknown");
 }
 
@@ -517,8 +517,8 @@ fn test_fresh_nil_mixes_with_annotated_nil() {
     quiver()
         .evaluate(
             "div = #['int, 'int] { | =[_, 0] => [] ~> { :error DivisionByZero } | __integer_divide__ ~ };
-             f = #'int { | =0 => [] | [~, 0] ~> div ~ };
-             1 ~> f ~ ~> :error ~> { =DivisionByZero => 111 | 222 }",
+             f = #'int { | =0 => [] | [~, 0] ~> div };
+             1 ~> f ~> :error ~> { =DivisionByZero => 111 | 222 }",
         )
         .expect("111");
 }
@@ -532,9 +532,9 @@ fn test_recursive_inference_with_annotated_nil() {
         .evaluate(
             "f = #['int, 'int] {
                | =[0, acc] => [] ~> { :error Done[acc] }
-               | =[n, acc] => [[n, 1] ~> __integer_subtract__ ~, [acc, n] ~> __integer_add__ ~] ~> ^ ~
+               | =[n, acc] => [[n, 1] ~> __integer_subtract__, [acc, n] ~> __integer_add__] ~> ^ ~
              };
-             [3, 0] ~> f ~ ~> :error ~> { =Done[total] => total | 999 }",
+             [3, 0] ~> f ~> :error ~> { =Done[total] => total | 999 }",
         )
         .expect("6");
 }
@@ -560,7 +560,7 @@ fn test_builtin_attach_and_retrieve() {
         .evaluate("f = __integer_add__ ~> { :doc \"Adds.\" }; f:doc")
         .expect("\"Adds.\"");
     quiver()
-        .evaluate("f = __integer_add__ ~> { :doc \"Adds.\" }; [20, 22] ~> f ~")
+        .evaluate("f = __integer_add__ ~> { :doc \"Adds.\" }; [20, 22] ~> f")
         .expect("42");
 }
 
@@ -589,7 +589,7 @@ fn test_module_member_builtin_doc() {
         .expect("\"Adds two integers.\"");
     quiver()
         .with_modules(modules)
-        .evaluate("[20, 22] ~> %ops.add ~")
+        .evaluate("[20, 22] ~> %ops.add")
         .expect("42");
 }
 
@@ -628,7 +628,7 @@ fn test_checked_retrieval_through_erased_parameter() {
     // The generic-reader case rule 4 forbids for the bare form: the value crossed a
     // declared parameter (rows erased), yet the entry is recovered by shape.
     quiver()
-        .evaluate("report = #[] { $:err<'int> }; [] ~> { :err 9 } ~> report ~")
+        .evaluate("report = #[] { $:err<'int> }; [] ~> { :err 9 } ~> report")
         .expect("9");
 }
 
@@ -639,7 +639,7 @@ fn test_checked_retrieval_gates_laundered_entry() {
     quiver()
         .evaluate(
             "launder = #[] { $ };
-             a = [] ~> { :error \"overflow\" } ~> launder ~;
+             a = [] ~> { :error \"overflow\" } ~> launder;
              b = A[c: 1] ~> { =A(c) => a | [] ~> { :error 404 } };
              b:error<'int> ~> { =[] => Gated | Escaped }",
         )
@@ -674,7 +674,7 @@ fn test_std_module_docstring() {
         .evaluate("%list.head:doc")
         .expect("\"The first element of a list, or nil when it is empty.\"");
     quiver()
-        .evaluate("Cons[1, Cons[2, Nil]] ~> %list.head ~")
+        .evaluate("Cons[1, Cons[2, Nil]] ~> %list.head")
         .expect("1");
 }
 

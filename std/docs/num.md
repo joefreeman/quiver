@@ -198,7 +198,7 @@ Two roots have no answer in this domain, and are nil: a negative one, and the ro
 
 ```quiver
 %num.sqrt -1                  //= []
-%num.sqrt 2 ~> %num.sqrt ~    //= []
+%num.sqrt 2 ~> %num.sqrt      //= []
 ```
 
 ### Arithmetic over ℚ(√n)
@@ -234,8 +234,8 @@ b = %num.add [1, %num.neg s]
 `neg` and `abs` behave as they do for the other kinds:
 
 ```quiver
-%num.sqrt 2 ~> %num.neg ~                  //= Surd[0, -1, 2] // −√2
-%num.sqrt 2 ~> %num.neg ~ ~> %num.abs ~    //= Surd[0, 1, 2] // √2
+%num.sqrt 2 ~> %num.neg                //= Surd[0, -1, 2] // −√2
+%num.sqrt 2 ~> %num.neg ~> %num.abs    //= Surd[0, 1, 2] // √2
 ```
 
 Two *different* radicals live in different fields, and arithmetic across them is unsupported
@@ -287,11 +287,11 @@ s = %num.sqrt 2
 ```quiver
 s = %num.sqrt 2
 %num.to_int s                                //= 1
-%num.neg s ~> %num.to_int ~                  //= -1
-%num.add [1, s] ~> %num.to_int ~             //= 2
-%num.mul [s, 5] ~> %num.to_int ~             //= 7
-%num.add [%num.neg 3, s] ~> %num.to_int ~    //= -1
-%num.sqrt 1/2 ~> %num.to_int ~               //= 0
+%num.neg s ~> %num.to_int                    //= -1
+%num.add [1, s] ~> %num.to_int               //= 2
+%num.mul [s, 5] ~> %num.to_int               //= 7
+%num.add [%num.neg 3, s] ~> %num.to_int      //= -1
+%num.sqrt 1/2 ~> %num.to_int                 //= 0
 ```
 
 ### Worked example: the golden ratio
@@ -370,7 +370,7 @@ powers of e multiply by adding exponents:
 %num.mul [%num.exp 1/2, %num.exp 1/3]   //= Tx[E[6], Cons[[5, 1], Nil]] // e^(5/6)
 %num.mul [%num.exp 1/2, %num.exp 1/2]   //= Tx[E[1], Cons[[1, 1], Nil]] // e
 %num.sqrt %num.e                        //= Tx[E[2], Cons[[1, 1], Nil]] // √e
-%num.mul [2, %num.e] ~> %num.sqrt ~     //= [] // √2·√e, a surd times a power of e
+%num.mul [2, %num.e] ~> %num.sqrt       //= [] // √2·√e, a surd times a power of e
 ```
 
 π and e are two separate families, and whether they are algebraically independent is an open
@@ -413,9 +413,9 @@ proportional forms. A product of two logarithms is outside the representation:
 `exp` and `ln` invert each other wherever the result is representable:
 
 ```quiver
-%num.exp 3/4 ~> %num.ln ~                        //= 3/4
-%num.ln 12 ~> %num.exp ~                         //= 12
-%num.ln 2 ~> %num.mul [1/2, ~] ~> %num.exp ~     //= Surd[0, 1, 2] // √2
+%num.exp 3/4 ~> %num.ln                          //= 3/4
+%num.ln 12 ~> %num.exp                           //= 12
+%num.ln 2 ~> %num.mul [1/2, ~] ~> %num.exp       //= Surd[0, 1, 2] // √2
 %num.ln %num.e                                   //= 1
 ```
 
@@ -423,8 +423,8 @@ A half coefficient on a logarithm makes a square root, which is only representab
 rational term alongside, since e√2 would mix a surd with a power of e:
 
 ```quiver
-%num.ln 1000000000039 ~> %num.mul [1/2, ~] ~> %num.exp ~             //= Surd[0, 1, 1000000000039]
-%num.ln 2 ~> %num.mul [1/2, ~] ~> %num.add [1, ~] ~> %num.exp ~      //= [] // e√2
+%num.ln 1000000000039 ~> %num.mul [1/2, ~] ~> %num.exp             //= Surd[0, 1, 1000000000039]
+%num.ln 2 ~> %num.mul [1/2, ~] ~> %num.add [1, ~] ~> %num.exp      //= [] // e√2
 ```
 
 ### Powers
@@ -499,14 +499,14 @@ runtime error.
 ```quiver
 big = %num.exp 1000000000000
 %num.gt? [big, %num.pi]                                       //= Ok
-%num.exp -1000000000000 ~> %num.sign ~                        //= 1
+%num.exp -1000000000000 ~> %num.sign                          //= 1
 %num.exp -1000000000000 ~> %num.lt? [~, 1/1000]               //= Ok
 %num.sub [big, %num.exp 999999999999] ~> %num.gt? [~, 1]      //= Ok // eᴺ − eᴺ⁻¹
 ```
 
 ```quiver
-c = %num.exp 40000 ~> %num.to_int ~   // ⌊e⁴⁰⁰⁰⁰⌋, so c² is about e⁸⁰⁰⁰⁰
-%num.exp 80000 ~> %num.sub [~, %num.mul [c, c]] ~> %num.sign ~   //! none of which outweighs the rest
+c = %num.exp 40000 ~> %num.to_int   // ⌊e⁴⁰⁰⁰⁰⌋, so c² is about e⁸⁰⁰⁰⁰
+%num.exp 80000 ~> %num.sub [~, %num.mul [c, c]] ~> %num.sign   //! none of which outweighs the rest
 ```
 
 `to_int`, `floor`, `ceil` and `round` refine the same way:
@@ -515,19 +515,19 @@ c = %num.exp 40000 ~> %num.to_int ~   // ⌊e⁴⁰⁰⁰⁰⌋, so c² is about
 (pi) = %num
 %num.floor pi                           //= 3
 %num.ceil pi                            //= 4
-%num.neg pi ~> %num.to_int ~            //= -3
-%num.mul [pi, 100] ~> %num.round ~      //= 314
-%num.exp 10 ~> %num.to_int ~            //= 22026
-%num.ln 1000 ~> %num.floor ~            //= 6
+%num.neg pi ~> %num.to_int              //= -3
+%num.mul [pi, 100] ~> %num.round        //= 314
+%num.exp 10 ~> %num.to_int              //= 22026
+%num.ln 1000 ~> %num.floor              //= 6
 ```
 
 A power beyond the budget truncates only when it is below 1. Any other answers nil, since its
 integer part could have more bits than the budget:
 
 ```quiver
-%num.exp -1000000000000 ~> %num.floor ~                                //= 0
-%num.exp -1000000000000 ~> %num.neg ~ ~> %num.floor ~                  //= -1
-%num.exp 1000000000000 ~> %num.to_int ~ ~> :error<'%num.error>         //= Unrepresentable
+%num.exp -1000000000000 ~> %num.floor                                //= 0
+%num.exp -1000000000000 ~> %num.neg ~> %num.floor                    //= -1
+%num.exp 1000000000000 ~> %num.to_int ~> :error<'%num.error>         //= Unrepresentable
 ```
 
 ## Trigonometry
@@ -542,15 +542,15 @@ multiple of 18°.
 
 ```quiver
 (pi) = %num
-%num.div [pi, 6] ~> %num.sin ~          //= 1/2
-%num.div [pi, 4] ~> %num.sin ~          //= Surd[0, 1/2, 2] // (1/2)√2
-%num.div [pi, 3] ~> %num.cos ~          //= 1/2
-%num.div [pi, 5] ~> %num.cos ~          //= Surd[1/4, 1/4, 5] // (1 + √5)/4
-%num.div [pi, 10] ~> %num.sin ~         //= Surd[-1/4, 1/4, 5] // (√5 − 1)/4
-%num.mul [pi, 7/6] ~> %num.sin ~        //= -1/2
+%num.div [pi, 6] ~> %num.sin            //= 1/2
+%num.div [pi, 4] ~> %num.sin            //= Surd[0, 1/2, 2] // (1/2)√2
+%num.div [pi, 3] ~> %num.cos            //= 1/2
+%num.div [pi, 5] ~> %num.cos            //= Surd[1/4, 1/4, 5] // (1 + √5)/4
+%num.div [pi, 10] ~> %num.sin           //= Surd[-1/4, 1/4, 5] // (√5 − 1)/4
+%num.mul [pi, 7/6] ~> %num.sin          //= -1/2
 %num.sin pi                             //= 0
-%num.div [pi, 12] ~> %num.tan ~         //= Surd[2, -1, 3] // 2 − √3
-%num.div [pi, 8] ~> %num.tan ~          //= Surd[-1, 1, 2] // √2 − 1
+%num.div [pi, 12] ~> %num.tan           //= Surd[2, -1, 3] // 2 − √3
+%num.div [pi, 8] ~> %num.tan            //= Surd[-1, 1, 2] // √2 − 1
 ```
 
 Anything else answers nil: an angle whose value needs nested or several radicals, a pole of
@@ -558,12 +558,12 @@ Anything else answers nil: an angle whose value needs nested or several radicals
 
 ```quiver
 (pi) = %num
-%num.div [pi, 12] ~> %num.cos ~         //= [] // (√6 + √2)/4: two radicals
-%num.div [pi, 5] ~> %num.sin ~          //= [] // sin 36° = √(10 − 2√5)/4: nested
-%num.div [pi, 10] ~> %num.cos ~         //= [] // cos 18° = √(10 + 2√5)/4: nested
-%num.div [pi, 10] ~> %num.tan ~         //= [] // tan 18° = √(25 − 10√5)/5: nested
-%num.div [pi, 7] ~> %num.sin ~          //= [] // a cubic irrational
-%num.div [pi, 2] ~> %num.tan ~          //= []
+%num.div [pi, 12] ~> %num.cos           //= [] // (√6 + √2)/4: two radicals
+%num.div [pi, 5] ~> %num.sin            //= [] // sin 36° = √(10 − 2√5)/4: nested
+%num.div [pi, 10] ~> %num.cos           //= [] // cos 18° = √(10 + 2√5)/4: nested
+%num.div [pi, 10] ~> %num.tan           //= [] // tan 18° = √(25 − 10√5)/5: nested
+%num.div [pi, 7] ~> %num.sin            //= [] // a cubic irrational
+%num.div [pi, 2] ~> %num.tan            //= []
 %num.sin 1                              //= []
 ```
 
@@ -575,7 +575,7 @@ The inverse functions read the same tables backwards, answering a multiple of π
 %num.acos -1                           //= Tx[Pi, Cons[[1, 1], Nil]] // π
 %num.acos 1                            //= 0
 %num.atan 1                            //= Tx[Pi, Cons[[1, 1/4], Nil]] // π/4
-%num.sqrt 3 ~> %num.atan ~             //= Tx[Pi, Cons[[1, 1/3], Nil]] // π/3
+%num.sqrt 3 ~> %num.atan               //= Tx[Pi, Cons[[1, 1/3], Nil]] // π/3
 %num.atan 2                            //= []
 ```
 
@@ -653,15 +653,15 @@ A nil answered for a non-nil input carries its reason as an `:error` annotation,
 ```quiver
 (pi) = %num
 %num.sqrt -1 ~> :error<'%num.error>                        //= OutOfDomain
-%num.div [pi, 2] ~> %num.tan ~ ~> :error<'%num.error>      //= OutOfDomain
+%num.div [pi, 2] ~> %num.tan ~> :error<'%num.error>        //= OutOfDomain
 %num.sin 1 ~> :error<'%num.error>                          //= Unrepresentable
 %num.add [pi, %num.e] ~> :error<'%num.error>               //= Unrepresentable
-%num.mul [2, %num.e] ~> %num.sqrt ~ ~> :error<'%num.error>  //= Unrepresentable
+%num.mul [2, %num.e] ~> %num.sqrt ~> :error<'%num.error>  //= Unrepresentable
 ```
 
 A nil operand is answered as itself, so the first failure's reason survives the rest of a
 calculation:
 
 ```quiver
-%num.div [1, 0] ~> %num.add [~, 1] ~> %num.sqrt ~ ~> :error<'%num.error>   //= DivisionByZero
+%num.div [1, 0] ~> %num.add [~, 1] ~> %num.sqrt ~> :error<'%num.error>   //= DivisionByZero
 ```

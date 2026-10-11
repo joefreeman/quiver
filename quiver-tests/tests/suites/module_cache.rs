@@ -17,10 +17,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// cached module (dispatch-table restore) and union folding of members differing
 /// only by annotation row — the shapes that regressed under cache reuse before.
 const BODY: &str = r#"
-    comma = [44, "','"] ~> %parse.byte ~
-    elems = [%parse.int, comma] ~> %parse.sep_by ~
-    a1 = [[91, "'['"] ~> %parse.byte ~, elems] ~> %parse.right ~
-    a3 = [a1, [93, "']'"] ~> %parse.byte ~] ~> %parse.left ~
+    comma = [44, "','"] ~> %parse.byte
+    elems = [%parse.int, comma] ~> %parse.sep_by
+    a1 = [[91, "'['"] ~> %parse.byte, elems] ~> %parse.right
+    a3 = [a1, [93, "']'"] ~> %parse.byte] ~> %parse.left
     %parse.map [a3, #{ $ }]
 "#;
 
@@ -169,13 +169,13 @@ fn fresh_compile_baseline() {
 
 #[test]
 fn reused_from_direct_import() {
-    let warm = session(false, Some(r#"p = [44, "','"] ~> %parse.byte ~; Ok"#));
+    let warm = session(false, Some(r#"p = [44, "','"] ~> %parse.byte; Ok"#));
     assert_eq!(warm, EXPECTED);
 }
 
 #[test]
 fn reused_from_direct_import_debug() {
-    let warm = session(true, Some(r#"p = [44, "','"] ~> %parse.byte ~; Ok"#));
+    let warm = session(true, Some(r#"p = [44, "','"] ~> %parse.byte; Ok"#));
     assert_eq!(warm, EXPECTED);
 }
 
@@ -198,7 +198,7 @@ fn reused_through_shared_store() {
     // into the harness's artifact store, the second links a fresh REPL from it.
     quiver()
         .debug()
-        .evaluate(r#"p = [44, "','"] ~> %parse.byte ~; Ok"#)
+        .evaluate(r#"p = [44, "','"] ~> %parse.byte; Ok"#)
         .expect("Ok");
     quiver().debug().evaluate(BODY).expect_type(EXPECTED);
 }
@@ -365,8 +365,8 @@ fn a_dependency_change_rekeys_its_dependents_import() {
         modules.insert(vec!["b".to_string()], "[g: #'int { %a.f $ }]".to_string());
         project_store(modules, "%b.g 1")
     };
-    let first = build("[f: #'int { [$, 1] ~> __integer_add__ ~ }]");
-    let second = build("[f: #'int { [$, 2] ~> __integer_add__ ~ }]");
+    let first = build("[f: #'int { [$, 1] ~> __integer_add__ }]");
+    let second = build("[f: #'int { [$, 2] ~> __integer_add__ }]");
 
     let first_key = import_key(&first, "b", "a");
     let second_key = import_key(&second, "b", "a");
@@ -574,8 +574,8 @@ fn linked_html_live_encodes_frames() {
         false,
         Some(
             r#"view = #[name: Str['bin]] { %html{ <p>{$name}</p> } }
-               f1 = view [name: "a"] ~> %html/live.frame ~
-               f2 = view [name: "b"] ~> %html/live.frame ~
+               f1 = view [name: "a"] ~> %html/live.frame
+               f2 = view [name: "b"] ~> %html/live.frame
                %html/live.diff [f1, f2] ~> %html/live.encode ["0", ~] ~> ='%str; Ok"#,
         ),
         &store,

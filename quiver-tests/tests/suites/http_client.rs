@@ -191,7 +191,7 @@ fn test_an_untrusted_anchor_set_is_refused() {
         .with_io()
         .with_real_time()
         .evaluate(
-            r#""example.com" ~> %dns.resolve ~ ~> %iter.nth [~, 0]
+            r#""example.com" ~> %dns.resolve ~> %iter.nth [~, 0]
                ~> { | =IPv4[b] => b | =IPv6[b] => b } ~> =('bin & ip)
                %tcp.connect [ip, 443] ~> =(+TcpSocket & s)
                %tls.attach [socket: s, hostname: "example.com", roots: <deadbeef>]
@@ -215,12 +215,12 @@ fn test_client_over_a_real_socket_against_a_real_server() {
             handler = #'%http {
               [$method, $path] ~> {
                 | =[GET, Cons["echo", Cons[what, Nil]]] => %http/server.text what
-                | =[POST, Cons["upper", Nil]] => Str[$body] ~> %http/server.text ~
+                | =[POST, Cons["upper", Nil]] => Str[$body] ~> %http/server.text
                 | =[GET, Cons["moved", Nil]] => %http/server.redirect "/echo/there"
                 | %http/server.not_found []
               }
             }
-            @[] { [port: 4291, handler: handler] ~> %http/server.serve ~ } []
+            @[] { [port: 4291, handler: handler] ~> %http/server.serve } []
             { ![100] | Ok }
 
             %http/client.get "http://127.0.0.1:4291/echo/hello" ~> =('%http.response & a)
@@ -285,8 +285,8 @@ fn test_pure_std_is_shared_by_both_hosts_unchanged() {
     // `%http` and `%url` are the point of the whole arrangement: one vocabulary, compiled
     // identically for a host with sockets and a host with only fetch.
     for source in [
-        r#""http://e.com/a?x=1" ~> %url.parse ~ ~> =('%url & u); %url.target u"#,
-        r#"%http.request [method: GET, target: "/"] ~> %http.serialize_request ~ ~> Str[~]"#,
+        r#""http://e.com/a?x=1" ~> %url.parse ~> =('%url & u); %url.target u"#,
+        r#"%http.request [method: GET, target: "/"] ~> %http.serialize_request ~> Str[~]"#,
     ] {
         let native = quiver().evaluate(source).value_string();
         let web = quiver().scoped_web().evaluate(source).value_string();

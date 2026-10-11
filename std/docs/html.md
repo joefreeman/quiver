@@ -4,7 +4,7 @@ An HTML dialect and a renderer. `%html{ … }` hands its brace content to the mo
 time, which parses it into a `'%html` node tree; `render` serializes that tree to a string.
 
 ```quiver
-%html{ <p class="greeting">hi</p> } ~> %html.render ~   //= "<p class=\"greeting\">hi</p>"
+%html{ <p class="greeting">hi</p> } ~> %html.render   //= "<p class=\"greeting\">hi</p>"
 ```
 
 The tree is an ordinary value — `Raw`, `Text`, `Element` and `Fragment` tuples — so a template
@@ -20,8 +20,8 @@ because they are not. Unescaped dynamic markup is the explicit opt-in `raw`.
 An element renders as itself, children and all.
 
 ```quiver
-%html{ <p>hi</p> } ~> %html.render ~   //= "<p>hi</p>"
-%html{ <div><span>a</span><span>b</span></div> } ~> %html.render ~
+%html{ <p>hi</p> } ~> %html.render   //= "<p>hi</p>"
+%html{ <div><span>a</span><span>b</span></div> } ~> %html.render
 //= "<div><span>a</span><span>b</span></div>"
 ```
 
@@ -30,21 +30,21 @@ self-closes any element, and a non-void one renders expanded — an empty `<div/
 template is `<div></div>` on the wire, which is what a browser would make of it anyway.
 
 ```quiver
-%html{ <img src="a.png"><br><div/> } ~> %html.render ~
+%html{ <img src="a.png"><br><div/> } ~> %html.render
 //= "<img src=\"a.png\"><br><div></div>"
 ```
 
 Comments are for the template's reader, so they are dropped rather than emitted.
 
 ```quiver
-%html{ <div><!-- note -->x</div> } ~> %html.render ~   //= "<div>x</div>"
+%html{ <div><!-- note -->x</div> } ~> %html.render   //= "<div>x</div>"
 ```
 
 The doctype is not part of the template; it comes from `page`, which renders a tree as a whole
 document.
 
 ```quiver
-%html{ <p>hi</p> } ~> %html.page ~   //= "<!doctype html><p>hi</p>"
+%html{ <p>hi</p> } ~> %html.page   //= "<!doctype html><p>hi</p>"
 ```
 
 ## Attributes
@@ -54,7 +54,7 @@ bytes), or `name={ … }` (a hole — see below). Names may carry `-`, `:` and `
 namespaced attributes need nothing special.
 
 ```quiver
-%html{ <a href="/x" data-k="v" hidden>go</a> } ~> %html.render ~
+%html{ <a href="/x" data-k="v" hidden>go</a> } ~> %html.render
 //= "<a href=\"/x\" data-k=\"v\" hidden>go</a>"
 ```
 
@@ -64,7 +64,7 @@ A template need not have a single root. Several roots render in order — the tr
 `Fragment`, which is a node like any other and splices wherever a node is expected.
 
 ```quiver
-%html{ <li>a</li><li>b</li> } ~> %html.render ~   //= "<li>a</li><li>b</li>"
+%html{ <li>a</li><li>b</li> } ~> %html.render   //= "<li>a</li><li>b</li>"
 ```
 
 Whitespace-only text at the root's *edges* is trimmed, so a template laid out over several
@@ -74,13 +74,13 @@ survives verbatim.
 ```quiver
 %html{
   <p>hi</p>
-} ~> %html.render ~   //= "<p>hi</p>"
+} ~> %html.render   //= "<p>hi</p>"
 ```
 
 ```quiver
 %html{ <ul>
   <li>a</li>
-</ul> } ~> %html.render ~   //= "<ul>\n  <li>a</li>\n</ul>"
+</ul> } ~> %html.render   //= "<ul>\n  <li>a</li>\n</ul>"
 ```
 
 ## Holes
@@ -93,26 +93,26 @@ A string is escaped, because it is data:
 
 ```quiver
 name = "<b>&\"x"
-%html{ <p>{name}</p> } ~> %html.render ~   //= "<p>&lt;b&gt;&amp;\"x</p>"
+%html{ <p>{name}</p> } ~> %html.render   //= "<p>&lt;b&gt;&amp;\"x</p>"
 ```
 
 Static text is not, because it is the author's:
 
 ```quiver
-%html{ <p>&amp; &#123;</p> } ~> %html.render ~   //= "<p>&amp; &#123;</p>"
+%html{ <p>&amp; &#123;</p> } ~> %html.render   //= "<p>&amp; &#123;</p>"
 ```
 
 That asymmetry is the whole safety story, and `raw` is how an author opts a *value* into the
 trusted side.
 
 ```quiver
-%html{ <div>{ "<b>x</b>" ~> %html.raw ~ }</div> } ~> %html.render ~   //= "<div><b>x</b></div>"
+%html{ <div>{ "<b>x</b>" ~> %html.raw }</div> } ~> %html.render   //= "<div><b>x</b></div>"
 ```
 
 An integer renders as its digits:
 
 ```quiver
-%html{ <p>{ 42 }</p> } ~> %html.render ~   //= "<p>42</p>"
+%html{ <p>{ 42 }</p> } ~> %html.render   //= "<p>42</p>"
 ```
 
 A hole is a block, so it holds branches and steps — and a hole that evaluates to nil renders
@@ -120,19 +120,19 @@ nothing. That is the conditional idiom: no separate `if` construct, just a seque
 
 ```quiver
 no = []
-%html{ <p>x{ no => "yes" }y</p> } ~> %html.render ~   //= "<p>xy</p>"
+%html{ <p>x{ no => "yes" }y</p> } ~> %html.render   //= "<p>xy</p>"
 ```
 
 ```quiver
 ok? = Ok
-%html{ <p>{ ok? => "yes" }</p> } ~> %html.render ~   //= "<p>yes</p>"
+%html{ <p>{ ok? => "yes" }</p> } ~> %html.render   //= "<p>yes</p>"
 ```
 
 `~` inside a hole is the value flowing into the dialect term, which is what makes a template a
 step in a chain rather than a thing that needs its data named first.
 
 ```quiver
-[name: "Ada"] ~> %html{ <p>{~.name}</p> } ~> %html.render ~   //= "<p>Ada</p>"
+[name: "Ada"] ~> %html{ <p>{~.name}</p> } ~> %html.render   //= "<p>Ada</p>"
 ```
 
 Because `{` always opens a hole, a literal brace in text is written as an entity — `&#123;`
@@ -147,12 +147,12 @@ entirely.
 
 ```quiver
 c = "a\"b"
-%html{ <div class={c} data-n={ 7 }>x</div> } ~> %html.render ~
+%html{ <div class={c} data-n={ 7 }>x</div> } ~> %html.render
 //= "<div class=\"a&quot;b\" data-n=\"7\">x</div>"
 ```
 
 ```quiver
-%html{ <input disabled={ Ok } value={ [] }> } ~> %html.render ~   //= "<input disabled>"
+%html{ <input disabled={ Ok } value={ [] }> } ~> %html.render   //= "<input disabled>"
 ```
 
 So a boolean attribute is a hole answering `Ok` or nil, and an optional attribute is a hole
@@ -164,7 +164,7 @@ A hole holding a list of nodes splices as a fragment, which is how repetition wo
 
 ```quiver
 items = %list.map [%list{ "a", "b" }, #'%str { %html{ <li>{$}</li> } }]
-%html{ <ul>{items}</ul> } ~> %html.render ~   //= "<ul><li>a</li><li>b</li></ul>"
+%html{ <ul>{items}</ul> } ~> %html.render   //= "<ul><li>a</li><li>b</li></ul>"
 ```
 
 A component is just a function from props to a tree; there is no component protocol to learn.
@@ -176,7 +176,7 @@ parameter by `'%data`.
 card = #<'e: '%data>[title: '%str, children: '%html<'e>] {
   %html{ <section><h2>{$title}</h2>{$children}</section> }
 }
-%html{ <main>{ [title: "T", children: %html{ <p>b</p> }] ~> card ~ }</main> } ~> %html.render ~
+%html{ <main>{ [title: "T", children: %html{ <p>b</p> }] ~> card }</main> } ~> %html.render
 //= "<main><section><h2>T</h2><p>b</p></section></main>"
 ```
 
@@ -207,9 +207,9 @@ Nodes can also be built directly, without the dialect: `text` makes an escaped t
 `raw` a verbatim one.
 
 ```quiver
-"a<b" ~> %html.text ~                     //= Text["a<b"]
-"a<b" ~> %html.text ~ ~> %html.render ~   //= "a&lt;b"
-"a<b" ~> %html.raw ~ ~> %html.render ~    //= "a<b"
+"a<b" ~> %html.text                   //= Text["a<b"]
+"a<b" ~> %html.text ~> %html.render   //= "a&lt;b"
+"a<b" ~> %html.raw ~> %html.render    //= "a<b"
 ```
 
 The two escapers are exported for the same reason — a caller assembling markup by hand needs

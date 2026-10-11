@@ -16,13 +16,13 @@ fn test_data_decode_labels_recursive_values_honestly() {
     // A two-element list must not pass as a one-element one.
     quiver()
         .evaluate(&format!(
-            r#"{LIST} %data.decode<'l> "Cons[1, Cons[2, Nil]]" ~> test ~"#
+            r#"{LIST} %data.decode<'l> "Cons[1, Cons[2, Nil]]" ~> test"#
         ))
         .expect("List");
     // A one-element one does: a type test checks what the value holds, however it was built.
     quiver()
         .evaluate(&format!(
-            r#"{LIST} %data.decode<'l> "Cons[1, Nil]" ~> test ~"#
+            r#"{LIST} %data.decode<'l> "Cons[1, Nil]" ~> test"#
         ))
         .expect("One");
 }
@@ -31,7 +31,7 @@ fn test_data_decode_labels_recursive_values_honestly() {
 fn test_json_decode_labels_recursive_values_honestly() {
     quiver()
         .evaluate(&format!(
-            r#"{LIST} %json.parse "[1, 2]" ~> %json.decode<'l> ~ ~> test ~"#
+            r#"{LIST} %json.parse "[1, 2]" ~> %json.decode<'l> ~ ~> test"#
         ))
         .expect("List");
 }
@@ -51,7 +51,7 @@ fn test_json_encode_labels_its_documents_honestly() {
         .expect("Json");
     quiver()
         .evaluate(&format!(
-            r#"{LIST} %json.encode<'l> Cons[1, Cons[2, Nil]] ~> %json.decode<'l> ~ ~> test ~"#
+            r#"{LIST} %json.encode<'l> Cons[1, Cons[2, Nil]] ~> %json.decode<'l> ~ ~> test"#
         ))
         .expect("List");
 }
@@ -69,24 +69,22 @@ fn test_labels_close_references_reaching_past_the_nearest_binder() {
     // `'flat` when it holds a nested `W`; when its contents fit `'flat`, a test finds so.
     quiver()
         .evaluate(&format!(
-            r#"{NESTED} %data.decode<'j> "W[items: Cons[Z[z: 1], Cons[W[items: Nil], Nil]]]" ~> test ~"#
+            r#"{NESTED} %data.decode<'j> "W[items: Cons[Z[z: 1], Cons[W[items: Nil], Nil]]]" ~> test"#
         ))
         .expect("J");
     quiver()
         .evaluate(&format!(
-            r#"{NESTED} %data.decode<'j> "W[items: Cons[Z[z: 1], Nil]]" ~> test ~"#
+            r#"{NESTED} %data.decode<'j> "W[items: Cons[Z[z: 1], Nil]]" ~> test"#
         ))
         .expect("Flat");
     quiver()
         .evaluate(&format!(
-            r#"{NESTED} %json.parse "\{{\"items\": [\{{\"z\": 1}}, \{{\"items\": []}}]}}" ~> %json.decode<'j> ~ ~> test ~"#
+            r#"{NESTED} %json.parse "\{{\"items\": [\{{\"z\": 1}}, \{{\"items\": []}}]}}" ~> %json.decode<'j> ~ ~> test"#
         ))
         .expect("J");
     // As does the literal, built by the compiler at exactly its shape.
     quiver()
-        .evaluate(&format!(
-            r#"{NESTED} W[items: Cons[Z[z: 1], Nil]] ~> test ~"#
-        ))
+        .evaluate(&format!(r#"{NESTED} W[items: Cons[Z[z: 1], Nil]] ~> test"#))
         .expect("Flat");
 }
 
@@ -113,8 +111,8 @@ fn test_labels_survive_into_later_entries() {
         .evaluate(&format!(
             r#"{LIST} d = %data.decode<'l> "Cons[1, Cons[2, Nil]]""#
         ))
-        .then_evaluate("d ~> test ~")
+        .then_evaluate("d ~> test")
         .expect("List")
-        .then_evaluate(r#"%data.decode<'l> "Cons[3, Cons[4, Nil]]" ~> test ~"#)
+        .then_evaluate(r#"%data.decode<'l> "Cons[3, Cons[4, Nil]]" ~> test"#)
         .expect("List");
 }

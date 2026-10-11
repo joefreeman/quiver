@@ -170,7 +170,7 @@ down to the bottom, then mask off the rest. `0x12345678` is 305419896.
 
 ```quiver
 chunk = #[hash: 'int, depth: 'int] {
-  %num.mul [$depth, 5] ~> %num.neg ~ ~> %int.shift [$hash, ~] ~> %int.and [~, 31]
+  %num.mul [$depth, 5] ~> %num.neg ~> %int.shift [$hash, ~] ~> %int.and [~, 31]
 }
 chunk [hash: 305419896, depth: 0]   //= 24
 chunk [hash: 305419896, depth: 1]   //= 19
@@ -181,5 +181,5 @@ The operations compose in a chain like any others — here masking to a byte, se
 nibble, complementing, and shifting the result up:
 
 ```quiver
-%int.and [255, 240] ~> %int.or [~, 15] ~> %int.not ~ ~> %int.shift [~, 8]   //= -65536
+%int.and [255, 240] ~> %int.or [~, 15] ~> %int.not ~> %int.shift [~, 8]   //= -65536
 ```

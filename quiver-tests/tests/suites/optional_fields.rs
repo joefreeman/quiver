@@ -62,12 +62,12 @@ fn test_piped_literal_omits_too() {
     // A literal piped into a statically-known callable elaborates exactly as an argument
     // does — the same position in which it already adopts omittable labels.
     quiver()
-        .evaluate("f = #[(a): 'int, b: 'int] { :defaults [b: 20]; [$a, $b] }; [1] ~> f ~")
+        .evaluate("f = #[(a): 'int, b: 'int] { :defaults [b: 20]; [$a, $b] }; [1] ~> f")
         .expect("[1, 20]");
     quiver()
         .evaluate(
             "f = #[(a): 'int, b: 'int, c: 'int] { :defaults [b: 20, c: 30]; [$a, $b, $c] }
-             [1, c: 3] ~> f ~",
+             [1, c: 3] ~> f",
         )
         .expect("[1, 20, 3]");
 }
@@ -149,7 +149,7 @@ fn test_default_value_is_evaluated_once_at_closure_build() {
     quiver()
         .evaluate(
             "base = 5
-             f = #[(a): 'int, b: 'int] { :defaults [b: [base, 15] ~> __integer_add__ ~]; [$a, $b] }
+             f = #[(a): 'int, b: 'int] { :defaults [b: [base, 15] ~> __integer_add__]; [$a, $b] }
              f [1]",
         )
         .expect("[1, 20]");

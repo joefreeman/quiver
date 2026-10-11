@@ -79,13 +79,13 @@ rejected as a key at compile time, rather than making a silently wrong lookup.
 writes the same thing directly. Both take later entries as winning over earlier ones.
 
 ```quiver
-%list{ ["a", 1], ["b", 2] } ~> %dict.from ~ ~> %dict.get [~, "b"]   //= 2
+%list{ ["a", 1], ["b", 2] } ~> %dict.from ~> %dict.get [~, "b"]     //= 2
 %dict{ "a" => 1, "b" => 2 } ~> %dict.get [~, "b"]                   //= 2
-%dict{} ~> %dict.count ~                                            //= 0
+%dict{} ~> %dict.count                                              //= 0
 ```
 
 ```quiver
-%list{ ["k", 1], ["k", 2] } ~> %dict.from ~ ~> %dict.get [~, "k"]   //= 2
+%list{ ["k", 1], ["k", 2] } ~> %dict.from ~> %dict.get [~, "k"]     //= 2
 %dict{ "k" => 1, "k" => 2 } ~> %dict.get [~, "k"]                   //= 2
 ```
 
@@ -119,7 +119,7 @@ unchanged when the key was already present.
 ```quiver
 d = %dict{ "a" => 1 }
 %dict.put [d, "a", 99] ~> %dict.get [~, "a"]   //= 99
-%dict.put [d, "a", 99] ~> %dict.count ~        //= 1
+%dict.put [d, "a", 99] ~> %dict.count          //= 1
 ```
 
 `remove` drops a key, leaves the others alone, and is a no-op for a key that is not there.
@@ -128,7 +128,7 @@ d = %dict{ "a" => 1 }
 d = %dict{ "a" => 1, "b" => 2 }
 %dict.remove [d, "b"] ~> %dict.get [~, "b"]    //= []
 %dict.remove [d, "b"] ~> %dict.get [~, "a"]    //= 1
-%dict.remove [d, "z"] ~> %dict.count ~         //= 2
+%dict.remove [d, "z"] ~> %dict.count           //= 2
 ```
 
 Every operation answers a *new* dict; the one it was derived from is untouched, so a
@@ -163,7 +163,7 @@ b = %dict{ "k" => 9, "y" => 2 }
 %dict.merge [a, b] ~> %dict.get [~, "k"]     //= 9
 %dict.merge [a, b] ~> %dict.get [~, "x"]     //= 1
 %dict.merge [a, b] ~> %dict.get [~, "y"]     //= 2
-%dict.merge [a, b] ~> %dict.count ~          //= 3
+%dict.merge [a, b] ~> %dict.count            //= 3
 ```
 
 ## Entries, keys and values
@@ -175,8 +175,8 @@ needs an order must impose one.
 ```quiver
 d = %dict{ "a" => 1, "b" => 2, "c" => 3 }
 %dict.count d                                //= 3
-%dict.entries d ~> %list.count ~             //= 3
-%dict.keys d ~> %list.count ~                //= 3
+%dict.entries d ~> %list.count               //= 3
+%dict.keys d ~> %list.count                  //= 3
 %dict.values d ~> %list.fold [~, 0, %num.add]   //= 6
 ```
 
@@ -187,10 +187,10 @@ through any `%iter` pipeline.
 
 ```quiver
 d = %dict{ "a" => 1, "b" => 2, "c" => 3 }
-%dict.iter d ~> %iter.count ~                                        //= 3
+%dict.iter d ~> %iter.count                                        //= 3
 %dict.iter d ~> %iter.map [~, #{ $1 }] ~> %iter.fold [~, 0, %num.add]   //= 6
-%dict.iter d ~> %dict.collect ~ ~> %dict.get [~, "b"]                //= 2
-%dict.iter d ~> %dict.collect ~ ~> %dict.count ~                     //= 3
+%dict.iter d ~> %dict.collect ~> %dict.get [~, "b"]                //= 2
+%dict.iter d ~> %dict.collect ~> %dict.count                       //= 3
 ```
 
 ## Sequence operations
@@ -204,14 +204,14 @@ operation, so their order is the iterator's — unspecified.
 ```quiver
 d = %dict{ "a" => 1, "b" => 2, "c" => 3 }
 %dict.map [d, #{ [$0, %num.mul [$1, 10]] }] ~> %dict.get [~, "b"]   //= 20
-%dict.map [d, #{ [$0, %num.mul [$1, 10]] }] ~> %dict.count ~        //= 3
+%dict.map [d, #{ [$0, %num.mul [$1, 10]] }] ~> %dict.count          //= 3
 ```
 
 `filter` keeps the entries its predicate answers non-nil for.
 
 ```quiver
 d = %dict{ "a" => 1, "b" => 2, "c" => 3 }
-%dict.filter [d, #{ %num.le? [$1, 2] }] ~> %dict.count ~         //= 2
+%dict.filter [d, #{ %num.le? [$1, 2] }] ~> %dict.count           //= 2
 %dict.filter [d, #{ %num.le? [$1, 2] }] ~> %dict.get [~, "a"]    //= 1
 %dict.filter [d, #{ %num.le? [$1, 2] }] ~> %dict.get [~, "c"]    //= []
 ```
@@ -262,13 +262,13 @@ d = %dict{
   "echo" => 5,    "foxtrot" => 6, "golf" => 7,   "hotel" => 8,
   "india" => 9,   "juliet" => 10, "kilo" => 11,  "lima" => 12,
 }
-%dict.remove [d, "echo"] ~> %dict.count ~             //= 11
+%dict.remove [d, "echo"] ~> %dict.count               //= 11
 %dict.remove [d, "echo"] ~> %dict.get [~, "echo"]     //= []
 %dict.remove [d, "echo"] ~> %dict.get [~, "india"]    //= 9
-%dict.iter d ~> %iter.count ~                         //= 12
+%dict.iter d ~> %iter.count                           //= 12
 %dict.iter d ~> %iter.map [~, #{ $1 }] ~> %iter.fold [~, 0, %num.add]   //= 78
-%dict.iter d ~> %dict.collect ~ ~> %dict.count ~      //= 12
-%dict.iter d ~> %dict.collect ~ ~> %dict.get [~, "echo"]   //= 5
+%dict.iter d ~> %dict.collect ~> %dict.count          //= 12
+%dict.iter d ~> %dict.collect ~> %dict.get [~, "echo"]   //= 5
 ```
 
 ## Canonical form
@@ -325,7 +325,7 @@ d = %dict{ <86f15dabd8> => 1, <86f166b4b6> => 2 }
 %dict.count d                                            //= 2
 %dict.put [d, <86f15dabd8>, 9] ~> %dict.get [~, <86f15dabd8>]   //= 9
 %dict.put [d, <86f15dabd8>, 9] ~> %dict.get [~, <86f166b4b6>]   //= 2
-%dict.put [d, <86f15dabd8>, 9] ~> %dict.count ~          //= 2
+%dict.put [d, <86f15dabd8>, 9] ~> %dict.count            //= 2
 ```
 
 Removing from a bucket is the same story, and removing a key that is not in it changes
@@ -335,8 +335,8 @@ nothing:
 d = %dict{ <86f15dabd8> => 1, <86f166b4b6> => 2 }
 %dict.remove [d, <86f15dabd8>] ~> %dict.get [~, <86f166b4b6>]   //= 2
 %dict.remove [d, <86f15dabd8>] ~> %dict.get [~, <86f15dabd8>]   //= []
-%dict.remove [d, <86f15dabd8>] ~> %dict.count ~                 //= 1
-%dict.remove [d, "zz"] ~> %dict.count ~                         //= 2
+%dict.remove [d, <86f15dabd8>] ~> %dict.count                   //= 1
+%dict.remove [d, "zz"] ~> %dict.count                           //= 2
 ```
 
 Collapse applies here too: a bucket down to one entry becomes a `Leaf`, and an emptied one

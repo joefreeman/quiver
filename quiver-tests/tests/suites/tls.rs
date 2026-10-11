@@ -238,7 +238,7 @@ fn test_https_serves_via_http_server() {
             handler = #'%http { %http/server.text "secure hello" }
             @[] {
               [port: 4382, handler: handler, tls: [cert: __CERT__, key: __KEY__]]
-              ~> %http/server.serve ~
+              ~> %http/server.serve
             } []
             // The server races the connect: retry (bounded) until it accepts and shakes
             // hands — a refused or half-up connection answers nil, and we go again.

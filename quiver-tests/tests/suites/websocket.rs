@@ -8,14 +8,14 @@ use crate::common::*;
 fn test_accept_key_rfc_vector() {
     // RFC 6455 §1.3's worked example.
     quiver()
-        .evaluate(r#""dGhlIHNhbXBsZSBub25jZQ==" ~> %http/websocket.accept_key ~"#)
+        .evaluate(r#""dGhlIHNhbXBsZSBub25jZQ==" ~> %http/websocket.accept_key"#)
         .expect(r#""s3pPLMBiTxaQ9kYGzzhZRbK+xOo=""#);
 }
 
 #[test]
 fn test_handshake_response_bytes() {
     quiver()
-        .evaluate(r#""dGhlIHNhbXBsZSBub25jZQ==" ~> %http/websocket.handshake_response ~ ~> Str[~]"#)
+        .evaluate(r#""dGhlIHNhbXBsZSBub25jZQ==" ~> %http/websocket.handshake_response ~> Str[~]"#)
         .expect(
             r#""HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n""#,
         );
@@ -35,7 +35,7 @@ fn test_frame_codec_rfc_masked_hello() {
         );
     // The unmasked server-side encoding of the same message (§5.7's first example).
     quiver()
-        .evaluate(r#"%http/websocket.encode_frame [1, "Hello" ~> .0] ~> %bin.to_hex ~"#)
+        .evaluate(r#"%http/websocket.encode_frame [1, "Hello" ~> .0] ~> %bin.to_hex"#)
         .expect(r#""810548656c6c6f""#);
 }
 
@@ -54,24 +54,22 @@ fn test_frame_codec_extended_lengths() {
 #[test]
 fn test_frame_codec_incomplete_and_violations() {
     quiver()
-        .evaluate(r#"<81> ~> %http/websocket.parse_frame ~"#)
+        .evaluate(r#"<81> ~> %http/websocket.parse_frame"#)
         .expect("Incomplete");
     // A masked frame cut short of its payload is incomplete, not an error.
     quiver()
         .evaluate(
             r#"m = %http/websocket.encode_masked_frame [1, "Hello" ~> .0, <37fa213d>]
-               %bin.slice [m, 0, 8] ~> %http/websocket.parse_frame ~"#,
+               %bin.slice [m, 0, 8] ~> %http/websocket.parse_frame"#,
         )
         .expect("Incomplete");
     // An unmasked client frame is a protocol violation.
     quiver()
-        .evaluate(
-            r#"%http/websocket.encode_frame [1, "Hi" ~> .0] ~> %http/websocket.parse_frame ~"#,
-        )
+        .evaluate(r#"%http/websocket.encode_frame [1, "Hi" ~> .0] ~> %http/websocket.parse_frame"#)
         .expect(r#"Bad["unmasked client frame"]"#);
     // A fragmented control frame is a protocol violation (RFC 6455 §5.5).
     quiver()
-        .evaluate(r#"<0980ffffffff> ~> %http/websocket.parse_frame ~"#)
+        .evaluate(r#"<0980ffffffff> ~> %http/websocket.parse_frame"#)
         .expect(r#"Bad["malformed control frame"]"#);
 }
 
@@ -99,9 +97,9 @@ fn test_upgraded_echo_end_to_end() {
                 | %http/server.not_found []
               }
             };
-            @[] { [port: 4183, handler: handler] ~> %http/server.serve ~ } [];
+            @[] { [port: 4183, handler: handler] ~> %http/server.serve } [];
             { ![50] | Ok };
-            [<7f000001>, 4183] ~> __tcp_connect__ ~ ~> =(+TcpSocket & sock);
+            [<7f000001>, 4183] ~> __tcp_connect__ ~> =(+TcpSocket & sock);
             req = "GET /ws HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
             __io_write__ [sock, req ~> .0];
             ![sock] ~> =Data[source: _, data: r1];
@@ -109,7 +107,7 @@ fn test_upgraded_echo_end_to_end() {
             ![sock] ~> =Data[source: _, data: r2];
             __io_write__ [sock, %http/websocket.encode_masked_frame [8, <03e8>, <00000000>]];
             ![sock] ~> =Data[source: _, data: r3];
-            sock ~> __io_close__ ~;
+            sock ~> __io_close__;
             [Str[r1], %bin.to_hex r2, %bin.to_hex r3]
             "#,
         )
@@ -137,9 +135,9 @@ fn test_upgrade_pings_and_fragments_end_to_end() {
             handler = #'%http {
               Upgrade[handler: ws_echo]
             };
-            @[] { [port: 4184, handler: handler] ~> %http/server.serve ~ } [];
+            @[] { [port: 4184, handler: handler] ~> %http/server.serve } [];
             { ![50] | Ok };
-            [<7f000001>, 4184] ~> __tcp_connect__ ~ ~> =(+TcpSocket & sock);
+            [<7f000001>, 4184] ~> __tcp_connect__ ~> =(+TcpSocket & sock);
             req = "GET /ws HTTP/1.1\r\nHost: t\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
             __io_write__ [sock, req ~> .0];
             ![sock] ~> =Data[source: _, data: r1];
@@ -151,7 +149,7 @@ fn test_upgrade_pings_and_fragments_end_to_end() {
             f2 = <808200000000> ~> %bin.concat [~, "lo" ~> .0];
             __io_write__ [sock, %bin.concat [f1, f2]];
             ![sock] ~> =Data[source: _, data: r3];
-            sock ~> __io_close__ ~;
+            sock ~> __io_close__;
             [%bin.length r1, %bin.to_hex r2, %bin.to_hex r3]
             "#,
         )
@@ -166,12 +164,12 @@ fn test_upgrade_without_key_answers_400() {
         .evaluate(
             r#"
             handler = #'%http { Upgrade[handler: #'%http/websocket { Ok }] };
-            @[] { [port: 4185, handler: handler] ~> %http/server.serve ~ } [];
+            @[] { [port: 4185, handler: handler] ~> %http/server.serve } [];
             { ![50] | Ok };
-            [<7f000001>, 4185] ~> __tcp_connect__ ~ ~> =(+TcpSocket & sock);
+            [<7f000001>, 4185] ~> __tcp_connect__ ~> =(+TcpSocket & sock);
             __io_write__ [sock, "GET /ws HTTP/1.1\r\n\r\n" ~> .0];
             ![sock] ~> =Data[source: _, data: r];
-            sock ~> __io_close__ ~;
+            sock ~> __io_close__;
             [Str[r]]
             "#,
         )

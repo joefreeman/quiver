@@ -12,7 +12,7 @@ fn test_inferred_mapper_through_iter_map() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Nil]]] ~> %list.iter ~ ~> %iter.map [~, #{ %num.mul [$, 10] }] ~> %list.collect ~
+            Cons[1, Cons[2, Cons[3, Nil]]] ~> %list.iter ~> %iter.map [~, #{ %num.mul [$, 10] }] ~> %list.collect
             "#,
         )
         .expect("Cons[10, Cons[20, Cons[30, Nil]]]");
@@ -23,7 +23,7 @@ fn test_inferred_predicate_through_iter_filter() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] ~> %list.iter ~ ~> %iter.filter [~, #{ %int.mod [$, 2] ~> =0 }] ~> %list.collect ~
+            Cons[1, Cons[2, Cons[3, Cons[4, Nil]]]] ~> %list.iter ~> %iter.filter [~, #{ %int.mod [$, 2] ~> =0 }] ~> %list.collect
             "#,
         )
         .expect("Cons[2, Cons[4, Nil]]");
@@ -36,7 +36,7 @@ fn test_inferred_tuple_param_through_iter_fold() {
     quiver()
         .evaluate(
             r#"
-            Cons[1, Cons[2, Cons[3, Nil]]] ~> %list.iter ~ ~> %iter.fold [~, 0, #{ %num.add [$0, $1] }]
+            Cons[1, Cons[2, Cons[3, Nil]]] ~> %list.iter ~> %iter.fold [~, 0, #{ %num.add [$0, $1] }]
             "#,
         )
         .expect("6");
@@ -51,7 +51,7 @@ fn test_inferred_param_via_local_higher_order_function() {
             'list<'t> = Nil | Cons['t, ^]
             map = #<'t, 'u>['list<'t>, #'t -> 'u, 'list<'u>] {
               =[lst, f, acc];
-              lst ~> { =Nil => acc | =Cons[h, t] => [t, f, Cons[h ~> f ~, acc]] ~> ^ ~ }
+              lst ~> { =Nil => acc | =Cons[h, t] => [t, f, Cons[h ~> f, acc]] ~> ^ ~ }
             };
             Cons[[1, 10], Cons[[2, 20], Nil]] ~> map [~, #{ $0 }, Nil]
             "#,
@@ -113,7 +113,7 @@ fn test_inferred_param_concrete_callee() {
     quiver()
         .evaluate(
             r#"
-            run = #[#'int -> 'int] { =[g]; 10 ~> g ~ };
+            run = #[#'int -> 'int] { =[g]; 10 ~> g };
             run [#{ %num.add [$, 1] }]
             "#,
         )
@@ -149,8 +149,8 @@ fn test_chain_position_infers_from_next_callable() {
     // piped counterpart of Apply-site inference.
     quiver()
         .evaluate(
-            "Cons[1, Cons[2, Nil]] ~> %list.iter ~ ~> [~, #{ %int.mod [$, 2] ~> =0 }] \
-             ~> %iter.filter ~ ~> %list.collect ~",
+            "Cons[1, Cons[2, Nil]] ~> %list.iter ~> [~, #{ %int.mod [$, 2] ~> =0 }] \
+             ~> %iter.filter ~> %list.collect",
         )
         .expect("Cons[2, Nil]");
 }
@@ -160,7 +160,7 @@ fn test_apply_site_argument_infers_parameter() {
     // A bare `#{…}` as a top-level field of a juxtaposed call's argument infers its
     // parameter from the callee's parameter type.
     quiver()
-        .evaluate("call = #[g: #'int -> 'int] { 5 ~> $g ~ }; call [g: #{ [$, $] ~> %num.add ~ }]")
+        .evaluate("call = #[g: #'int -> 'int] { 5 ~> $g ~ }; call [g: #{ [$, $] ~> %num.add }]")
         .expect("10");
 }
 

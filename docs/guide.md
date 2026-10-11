@@ -291,7 +291,7 @@ double = #'int { %num.mul [$, 2] }
 sum = #['int, 'int] { %num.add [$0, $1] }
 
 double 2                      //= 4
-3 ~> double ~                 //= 6
+3 ~> double                   //= 6
 sum [3, 5]                    //= 8
 ```
 
@@ -666,8 +666,8 @@ label = #'int {
   | =0; "zero"    // the match fails unless the input is 0 ...
   | "other"       // ... and control moves to the next branch
 }
-0 ~> label ~      //= "zero"
-1 ~> label ~      //= "other"
+0 ~> label      //= "zero"
+1 ~> label      //= "other"
 ```
 
 ### Condition and consequence
@@ -681,9 +681,9 @@ sign = #'int {
   | %num.gt? [~, 0] => "positive"
   | "negative"
 }
-0 ~> sign ~                     //= "zero"
-5 ~> sign ~                     //= "positive"
--5 ~> sign ~                    //= "negative"
+0 ~> sign                     //= "zero"
+5 ~> sign                     //= "positive"
+-5 ~> sign                    //= "negative"
 ```
 
 The consequence starts from the condition's value, as a branch without one evaluates to it.
@@ -714,9 +714,9 @@ size = #'shape {
   | =Square[side: s]; %num.gt? [s, 10] => "large"
   | "small"
 }
-Square[side: 20] ~> size ~      //= "large"
-Square[side: 2] ~> size ~       //= "small"
-Circle[radius: 1] ~> size ~     //= "small"
+Square[side: 20] ~> size      //= "large"
+Square[side: 2] ~> size       //= "small"
+Circle[radius: 1] ~> size     //= "small"
 ```
 
 The condition's value is its last step's, so after a guard the consequence would start from
@@ -733,8 +733,8 @@ To test that a pattern does *not* match, [negate](#negation) it:
 
 ```quiver
 not_square? = #'shape { =\Square() }
-Circle[radius: 1] ~> not_square? ~   //= Circle[radius: 1]
-Square[side: 1] ~> not_square? ~     //= []
+Circle[radius: 1] ~> not_square?   //= Circle[radius: 1]
+Square[side: 1] ~> not_square?     //= []
 ```
 
 ### Scope
@@ -793,8 +793,7 @@ type parameters. Aliases are positional: a definition must precede its uses.
 ```quiver
 h = #<'t>'t {
   'pair = ['t, 't]
-  [$, $] ~> =('pair & p)
-  p
+  [$, $] ~> ='pair
 }
 h 3                           //= [3, 3]
 ```
@@ -885,7 +884,7 @@ In a nested type, a reference counts the boundaries around it where it is writte
 ```quiver
 'json = Null | 'int | Array[(Nil | Cons[^1, ^])]
 render = #'json { Ok }
-Array[Cons[1, Cons[Null, Nil]]] ~> render ~   //= Ok
+Array[Cons[1, Cons[Null, Nil]]] ~> render   //= Ok
 ```
 
 Here the list's own `Nil | Cons[…]` is nearest, so `^` makes the tail a list. `^1` is one
@@ -1058,7 +1057,7 @@ integers, binaries, and tuples whose fields are data, by a [rest type](#partial-
 parameter that must be data:
 
 ```quiver
-%ref [] ~> %data.encode ~     //! Type mismatch
+%ref [] ~> %data.encode       //! Type mismatch
 key = #<'k: '%data>'k { %data.encode $ }
 key Point[x: 1]               //= "Point[x: 1]"
 ```
@@ -1186,7 +1185,7 @@ p = @[] { 42 } []
 ```
 
 ```quiver
-adder = #[] { !#['int, 'int] ~> %num.add ~ }
+adder = #[] { !#['int, 'int] ~> %num.add }
 q = @adder []
 q [3, 4]; !q                  //= 7
 ```
@@ -1222,7 +1221,7 @@ recently entered with, which is the spawn init and then each tail call in the ro
 ```quiver
 'status = Loading | Done['int]
 step = #'status { =Loading => 7 ~> ^ Done[~] | =Done[x] => x }
-p = Loading ~> @step ~
+p = Loading ~> @step
 ?p ~> ='status                //= ('status) // Loading, then Done[7]
 ```
 
@@ -1241,7 +1240,7 @@ pid yields), and `?'s` the sample grant (what `?` reads). A clause sigil glues t
 ```quiver
 'status = Loading | Done['int]
 step = #'status { =Loading => 7 ~> ^ Done[~] | =Done[x] => x }
-p = Loading ~> @step ~
+p = Loading ~> @step
 
 watch = #(@?'status) { ?$ }         // sample-only
 await = #(@!'int) { !$ }            // awaitable
@@ -1572,7 +1571,7 @@ running it.
 
 ```quiver
 double = #'int { %num.mul [$, 2] }
-5 ~> double ~ //= 10
+5 ~> double   //= 10
 x = double 3  //= 6
 x             //= 6
 ```
@@ -1677,8 +1676,8 @@ notations get first-class syntax without the language growing it.
 ```quiver
 %list{ 1, 2, 3 }                                      //= Cons[1, Cons[2, Cons[3, Nil]]]
 %dict{ "a" => 1, "b" => 2 } ~> %dict.get [~, "a"]     //= 1
-%json{ {"a": [1, 2]} } ~> %json.stringify ~           //= "{\"a\":[1,2]}"
-%html{ <p class="greeting">hi</p> } ~> %html.render ~ //= "<p class=\"greeting\">hi</p>"
+%json{ {"a": [1, 2]} } ~> %json.stringify             //= "{\"a\":[1,2]}"
+%html{ <p class="greeting">hi</p> } ~> %html.render   //= "<p class=\"greeting\">hi</p>"
 ```
 
 The content is arbitrary, being the dialect's grammar rather than Quiver's, but holes are
@@ -1687,7 +1686,7 @@ flowing value as input.
 
 ```quiver
 name = "world"
-%html{ <p>hello {name}</p> } ~> %html.render ~   //= "<p>hello world</p>"
+%html{ <p>hello {name}</p> } ~> %html.render   //= "<p>hello world</p>"
 ```
 
 The standard library ships `%num{ … }`, `%list{ … }`, `%dict{ … }`, `%json{ … }`,

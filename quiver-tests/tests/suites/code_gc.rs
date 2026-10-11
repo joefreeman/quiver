@@ -14,7 +14,7 @@ fn dead_code_is_reclaimed() {
     // are unreachable from any heap; the sweep must find them.
     quiver()
         .isolated()
-        .evaluate("f = #'int { [$, 3] ~> __integer_add__ ~ }")
+        .evaluate("f = #'int { [$, 3] ~> __integer_add__ }")
         .then_evaluate("f = 5")
         .force_code_collection()
         .expect_code_reclaimed_at_least(1)
@@ -28,7 +28,7 @@ fn live_closure_survives_a_sweep() {
     // function, and calling it afterwards proves the code is intact, not a stub.
     quiver()
         .isolated()
-        .evaluate("f = #'int { [$, 3] ~> __integer_add__ ~ }")
+        .evaluate("f = #'int { [$, 3] ~> __integer_add__ }")
         .force_code_collection()
         .then_evaluate("f 4")
         .expect("7");
@@ -57,11 +57,11 @@ fn identical_code_revives_its_reclaimed_slot() {
     // would churn forever) — and the revived slot must actually run.
     quiver()
         .isolated()
-        .evaluate("f = #'int { [$, 3] ~> __integer_add__ ~ }")
+        .evaluate("f = #'int { [$, 3] ~> __integer_add__ }")
         .then_evaluate("f = 5")
         .force_code_collection()
         .expect_code_reclaimed_at_least(1)
-        .then_evaluate("g = #'int { [$, 3] ~> __integer_add__ ~ }")
+        .then_evaluate("g = #'int { [$, 3] ~> __integer_add__ }")
         .then_evaluate("g 4")
         .expect("7");
 }
@@ -74,7 +74,7 @@ fn tombstone_result_on_another_worker_keeps_code_alive() {
     // cross-worker root would surface as "unreachable code executed".
     quiver()
         .isolated()
-        .evaluate("f = #'int { [$, 7] ~> __integer_add__ ~ }; p = @#[] { f } []; Ok")
+        .evaluate("f = #'int { [$, 7] ~> __integer_add__ }; p = @#[] { f } []; Ok")
         .then_evaluate("f = 5")
         .force_code_collection()
         .then_evaluate("!p ~> =((#'int -> 'int) & h); h 3")
@@ -89,7 +89,7 @@ fn abandoned_module_code_is_reclaimed_and_revives() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["m".to_string()],
-        "[f: #'int { [$, 11] ~> __integer_add__ ~ }]".to_string(),
+        "[f: #'int { [$, 11] ~> __integer_add__ }]".to_string(),
     );
     quiver()
         .isolated()
@@ -109,10 +109,10 @@ fn growth_triggers_a_sweep_untouched_by_hand() {
     quiver()
         .isolated()
         .with_code_collection_threshold(4)
-        .evaluate("f = #'int { [$, 3] ~> __integer_add__ ~ }")
+        .evaluate("f = #'int { [$, 3] ~> __integer_add__ }")
         .then_evaluate("f = 5")
         .then_evaluate("g = 6")
-        .then_evaluate("[f, g] ~> __integer_add__ ~")
+        .then_evaluate("[f, g] ~> __integer_add__")
         .expect("11")
         .expect_code_reclaimed_at_least(1);
 }
@@ -123,7 +123,7 @@ fn process_only_rounds_leave_code_alone() {
     // reached) must not touch code.
     quiver()
         .isolated()
-        .evaluate("f = #'int { [$, 3] ~> __integer_add__ ~ }")
+        .evaluate("f = #'int { [$, 3] ~> __integer_add__ }")
         .then_evaluate("f = 5")
         .force_collection()
         .expect_no_code_reclaimed()

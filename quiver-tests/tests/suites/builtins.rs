@@ -2,7 +2,7 @@ use crate::common::*;
 
 #[test]
 fn test_builtin() {
-    quiver().evaluate("-5 ~> __integer_abs__ ~").expect("5");
+    quiver().evaluate("-5 ~> __integer_abs__").expect("5");
 }
 
 // === Type-consuming builtins (`__data_decode__<'t>`) ====================================
@@ -40,7 +40,7 @@ fn test_type_argument_rides_the_value() {
     quiver()
         .evaluate(
             r#"call = #<'u>[#'%str -> 'u] { $.0 "42" }
-               [__data_decode__<'int>] ~> call ~"#,
+               [__data_decode__<'int>] ~> call"#,
         )
         .expect("42");
     // Into a spawned process, by capture and by init argument.
@@ -51,7 +51,7 @@ fn test_type_argument_rides_the_value() {
         .evaluate(
             r#"'decoder = #'%str -> ('int | [])
                w = #'decoder { $ "7" }
-               p = __data_decode__<'int> ~> @w ~; !p"#,
+               p = __data_decode__<'int> ~> @w; !p"#,
         )
         .expect("7");
 }

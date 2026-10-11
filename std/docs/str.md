@@ -237,15 +237,15 @@ separator at either end yields the empty piece beside it — the pieces always n
 than the separators found.
 
 ```quiver
-%str.split ["hello,world,test", ","] ~> %list.collect ~
+%str.split ["hello,world,test", ","] ~> %list.collect
 //= Cons["hello", Cons["world", Cons["test", Nil]]]
 ```
 
 ```quiver
-%str.split ["a::b::c", "::"] ~> %list.collect ~   //= Cons["a", Cons["b", Cons["c", Nil]]]
-%str.split ["hello", ","] ~> %list.collect ~      //= Cons["hello", Nil]
-%str.split ["", ","] ~> %list.collect ~           //= Cons["", Nil]
-%str.split [",hello,", ","] ~> %list.collect ~    //= Cons["", Cons["hello", Cons["", Nil]]]
+%str.split ["a::b::c", "::"] ~> %list.collect   //= Cons["a", Cons["b", Cons["c", Nil]]]
+%str.split ["hello", ","] ~> %list.collect      //= Cons["hello", Nil]
+%str.split ["", ","] ~> %list.collect           //= Cons["", Nil]
+%str.split [",hello,", ","] ~> %list.collect    //= Cons["", Cons["hello", Cons["", Nil]]]
 ```
 
 Being an iterator, it is a value that flows through a chain, and a consumer that needs one
@@ -261,7 +261,7 @@ An empty separator would match between every pair of characters, which is never 
 split means, so it is rejected. `%str.iter` is how to take a string apart by character.
 
 ```quiver
-%str.split ["abc", ""] ~> %list.collect ~         //! Cannot split on an empty separator
+%str.split ["abc", ""] ~> %list.collect         //! Cannot split on an empty separator
 ```
 
 `split_once` splits at the first occurrence only, answering the two sides as a pair, or nil
@@ -289,19 +289,19 @@ line ending reads the same. A final line feed ends the last line rather than sta
 empty one, and the empty string has no lines.
 
 ```quiver
-%str.lines "one\ntwo\nthree" ~> %list.collect ~    //= Cons["one", Cons["two", Cons["three", Nil]]]
-%str.lines "one\r\ntwo\r\n" ~> %list.collect ~    //= Cons["one", Cons["two", Nil]]
-%str.lines "a\n\nb" ~> %list.collect ~             //= Cons["a", Cons["", Cons["b", Nil]]]
-%str.lines "\n" ~> %list.collect ~                 //= Cons["", Nil]
-%str.lines "" ~> %list.collect ~                   //= Nil
+%str.lines "one\ntwo\nthree" ~> %list.collect    //= Cons["one", Cons["two", Cons["three", Nil]]]
+%str.lines "one\r\ntwo\r\n" ~> %list.collect    //= Cons["one", Cons["two", Nil]]
+%str.lines "a\n\nb" ~> %list.collect             //= Cons["a", Cons["", Cons["b", Nil]]]
+%str.lines "\n" ~> %list.collect                 //= Cons["", Nil]
+%str.lines "" ~> %list.collect                   //= Nil
 ```
 
 `join` is the inverse of `split`, placing a separator between each of an iterator's strings.
 
 ```quiver
-%list{ "one", "two", "three" } ~> %list.iter ~ ~> %str.join [~, ", "]   //= "one, two, three"
-%list{ "only" } ~> %list.iter ~ ~> %str.join [~, ", "]                  //= "only"
-Nil ~> %list.iter ~ ~> %str.join [~, ", "]                              //= ""
+%list{ "one", "two", "three" } ~> %list.iter ~> %str.join [~, ", "]   //= "one, two, three"
+%list{ "only" } ~> %list.iter ~> %str.join [~, ", "]                  //= "only"
+Nil ~> %list.iter ~> %str.join [~, ", "]                              //= ""
 ```
 
 ## Replacing
@@ -408,29 +408,29 @@ Unicode codepoint, whatever its encoded width — `"é"` is 233 (U+00E9) and `"�
 compares against a codepoint from anywhere else.
 
 ```quiver
-"hello" ~> %str.iter ~ ~> %list.collect ~   //= Cons[104, Cons[101, Cons[108, Cons[108, Cons[111, Nil]]]]]
-"" ~> %str.iter ~ ~> %list.collect ~        //= Nil
-"é" ~> %str.iter ~ ~> %list.collect ~       //= Cons[233, Nil] // two bytes, one codepoint
-"€" ~> %str.iter ~ ~> %list.collect ~       //= Cons[8364, Nil] // three
-"🚀" ~> %str.iter ~ ~> %list.collect ~      //= Cons[128640, Nil] // four
-"hi🚀" ~> %str.iter ~ ~> %list.collect ~    //= Cons[104, Cons[105, Cons[128640, Nil]]]
+"hello" ~> %str.iter ~> %list.collect   //= Cons[104, Cons[101, Cons[108, Cons[108, Cons[111, Nil]]]]]
+"" ~> %str.iter ~> %list.collect        //= Nil
+"é" ~> %str.iter ~> %list.collect       //= Cons[233, Nil] // two bytes, one codepoint
+"€" ~> %str.iter ~> %list.collect       //= Cons[8364, Nil] // three
+"🚀" ~> %str.iter ~> %list.collect      //= Cons[128640, Nil] // four
+"hi🚀" ~> %str.iter ~> %list.collect    //= Cons[104, Cons[105, Cons[128640, Nil]]]
 ```
 
 `collect` encodes each codepoint back to UTF-8, picking the width from its magnitude:
 
 ```quiver
-%list{ 104, 101, 108, 108, 111 } ~> %list.iter ~ ~> %str.collect ~   //= "hello"
-Nil ~> %list.iter ~ ~> %str.collect ~                                //= ""
-%list{ 128640 } ~> %list.iter ~ ~> %str.collect ~                    //= "🚀"
-%list{ 72, 233, 8364, 128640 } ~> %list.iter ~ ~> %str.collect ~     //= "Hé€🚀"
+%list{ 104, 101, 108, 108, 111 } ~> %list.iter ~> %str.collect   //= "hello"
+Nil ~> %list.iter ~> %str.collect                                //= ""
+%list{ 128640 } ~> %list.iter ~> %str.collect                    //= "🚀"
+%list{ 72, 233, 8364, 128640 } ~> %list.iter ~> %str.collect     //= "Hé€🚀"
 ```
 
 The two round-trip, and any `%iter` operation may sit between them:
 
 ```quiver
-"hello world 🚀" ~> %str.iter ~ ~> %str.collect ~                  //= "hello world 🚀"
-"hello" ~> %str.iter ~ ~> %iter.take [~, 3] ~> %str.collect ~      //= "hel"
-"hello" ~> %str.iter ~ ~> %iter.drop [~, 2] ~> %str.collect ~      //= "llo"
+"hello world 🚀" ~> %str.iter ~> %str.collect                  //= "hello world 🚀"
+"hello" ~> %str.iter ~> %iter.take [~, 3] ~> %str.collect      //= "hel"
+"hello" ~> %str.iter ~> %iter.drop [~, 2] ~> %str.collect      //= "llo"
 ```
 
 ## Bytes that are not UTF-8
@@ -442,10 +442,10 @@ byte that is not a continuation byte (`10xxxxxx`), together with the continuatio
 it; one that is not a well-formed encoding reads as U+FFFD, the replacement character.
 
 ```quiver
-%str.iter Str[<41806142>] ~> %list.collect ~   //= Cons[65533, Cons[97, Cons[66, Nil]]] // A plus a stray byte is one bad character
-%str.iter Str[<e282>] ~> %list.collect ~       //= Cons[65533, Nil] // truncated
-%str.iter Str[<eda080>] ~> %list.collect ~     //= Cons[65533, Nil] // a UTF-16 surrogate
-%str.iter Str[<c0af>] ~> %list.collect ~       //= Cons[65533, Nil] // an overlong "/"
+%str.iter Str[<41806142>] ~> %list.collect     //= Cons[65533, Cons[97, Cons[66, Nil]]] // A plus a stray byte is one bad character
+%str.iter Str[<e282>] ~> %list.collect         //= Cons[65533, Nil] // truncated
+%str.iter Str[<eda080>] ~> %list.collect       //= Cons[65533, Nil] // a UTF-16 surrogate
+%str.iter Str[<c0af>] ~> %list.collect         //= Cons[65533, Nil] // an overlong "/"
 %str.length Str[<41806142>]                    //= 3
 ```
 
@@ -454,7 +454,7 @@ Continuation bytes with nothing before them are not a character at all, so `leng
 between them is kept exactly:
 
 ```quiver
-%str.iter Str[<8041>] ~> %list.collect ~       //= Cons[65, Nil]
+%str.iter Str[<8041>] ~> %list.collect         //= Cons[65, Nil]
 %str.slice [Str[<e28241ff>], 1, 3] ~> .0       //= <41ff>
 ```
 
@@ -462,7 +462,7 @@ between them is kept exactly:
 surrogate, or past U+10FFFF — is a mistake in the program rather than in some data, so it fails:
 
 ```quiver
-%list{ 55296 } ~> %list.iter ~ ~> %str.collect ~   //! Not a Unicode code point: 55296
+%list{ 55296 } ~> %list.iter ~> %str.collect   //! Not a Unicode code point: 55296
 ```
 
 ## Integers
@@ -492,7 +492,7 @@ optionally-signed run of decimal digits.
 The pair round-trips, and the arbitrary precision of `'int` survives it:
 
 ```quiver
-%str.from_int 123456789012345678901234567890 ~> %str.parse_int ~
+%str.from_int 123456789012345678901234567890 ~> %str.parse_int
 //= 123456789012345678901234567890
 ```
 

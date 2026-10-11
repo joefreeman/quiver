@@ -183,7 +183,7 @@ fn test_scoped_host_still_compiles_pure_code() {
     // The always-set (and pure std modules) work identically on a scoped host.
     quiver()
         .scoped_no_io()
-        .evaluate(r#"[1, 2] ~> %num.add ~ ~> %str.from_int ~"#)
+        .evaluate(r#"[1, 2] ~> %num.add ~> %str.from_int"#)
         .expect(r#""3""#);
     // Naming a resource TYPE needs no capability — only the builtins do.
     quiver()
@@ -199,7 +199,7 @@ fn test_system_only_host_runs_clocks_and_entropy() {
     // job: no effect backend, nothing parks, and `%time`/`%random` run unchanged.
     quiver()
         .scoped_system_only()
-        .evaluate(r#"%time.now [] ~> %time.to_unix ~ ~> %num.gt? [~, 1700000000]"#)
+        .evaluate(r#"%time.now [] ~> %time.to_unix ~> %num.gt? [~, 1700000000]"#)
         .expect("Ok");
     quiver()
         .scoped_system_only()
@@ -208,7 +208,7 @@ fn test_system_only_host_runs_clocks_and_entropy() {
     // The pure half of the module composes over the host reading, as it does natively.
     quiver()
         .scoped_system_only()
-        .evaluate(r#"%time.now [] ~> %time.utc ~ ~> .year ~> %num.gt? [~, 2024]"#)
+        .evaluate(r#"%time.now [] ~> %time.utc ~> .year ~> %num.gt? [~, 2024]"#)
         .expect("Ok");
 }
 

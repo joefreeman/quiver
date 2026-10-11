@@ -70,7 +70,7 @@ fn test_ref_pattern_matching_mismatch() {
 fn test_ref_type_annotation() {
     // ref type can be used in function signatures
     quiver()
-        .evaluate("f = #'ref { $ }; %ref [] ~> f ~")
+        .evaluate("f = #'ref { $ }; %ref [] ~> f")
         .expect_type("'ref");
 }
 
@@ -78,9 +78,9 @@ fn test_ref_type_annotation() {
 fn test_ref_in_union_type() {
     // ref can be part of union types
     quiver()
-        .evaluate("f = #('int | 'ref) { | ='int => 1 | 2 }; %ref [] ~> f ~")
+        .evaluate("f = #('int | 'ref) { | ='int => 1 | 2 }; %ref [] ~> f")
         .expect("2");
     quiver()
-        .evaluate("f = #('int | 'ref) { | ='int => 1 | 2 }; 42 ~> f ~")
+        .evaluate("f = #('int | 'ref) { | ='int => 1 | 2 }; 42 ~> f")
         .expect("1");
 }

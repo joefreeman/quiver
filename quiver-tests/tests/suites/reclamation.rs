@@ -37,7 +37,7 @@ fn reclaims_many_unheld_tombstones_across_workers() {
     // scope). Below the auto-trigger threshold, so the forced round sweeps all of them.
     quiver().isolated()
         .evaluate(
-            "loop = #'int { | =0 => Done | =n => { c = @#[] { Ok } []; !c; %num.sub [n, 1] ~> ^ ~ } }; 20 ~> loop ~",
+            "loop = #'int { | =0 => Done | =n => { c = @#[] { Ok } []; !c; %num.sub [n, 1] ~> ^ ~ } }; 20 ~> loop",
         )
         .expect("Done")
         .force_collection()
@@ -52,7 +52,7 @@ fn reclamation_bounds_process_population_under_load() {
     quiver().isolated()
         .with_collection_threshold(40)
         .evaluate(
-            "loop = #'int { | =0 => Done | =n => { c = @#[] { Ok } []; !c; %num.sub [n, 1] ~> ^ ~ } }; 150 ~> loop ~",
+            "loop = #'int { | =0 => Done | =n => { c = @#[] { Ok } []; !c; %num.sub [n, 1] ~> ^ ~ } }; 150 ~> loop",
         )
         .expect("Done")
         .force_collection()

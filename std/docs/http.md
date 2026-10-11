@@ -32,7 +32,7 @@ reads *one* request out of a buffer and answers `Incomplete` (read more), `Bad[s
 reason]` (send that status and close), or the request together with the bytes left over.
 
 ```quiver
-"GET /posts/7 HTTP/1.1\r\nHost: x\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[r, rest]
+"GET /posts/7 HTTP/1.1\r\nHost: x\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[r, rest]
 r.method    //= GET
 r.path      //= Cons["posts", Cons["7", Nil]]
 r.version   //= "HTTP/1.1"
@@ -43,15 +43,15 @@ A head that has not finished arriving, and a head that has but whose body has no
 `Incomplete` — the caller reads more and asks again.
 
 ```quiver
-"GET / HTTP/1.1\r\nHost:" ~> .0 ~> %http.parse_request ~   //= Incomplete
-"POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhe" ~> .0 ~> %http.parse_request ~   //= Incomplete
+"GET / HTTP/1.1\r\nHost:" ~> .0 ~> %http.parse_request   //= Incomplete
+"POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhe" ~> .0 ~> %http.parse_request   //= Incomplete
 ```
 
 `Content-Length` delimits the body. Bytes beyond it are the start of the *next* request on a
 keep-alive connection, and come back as the leftover rather than being buffered out of sight.
 
 ```quiver
-"POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET /" ~> .0 ~> %http.parse_request ~ ~> =[r, rest]
+"POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloGET /" ~> .0 ~> %http.parse_request ~> =[r, rest]
 r.body   //= <68656c6c6f> // "hello"
 rest     //= <474554202f> // "GET /"
 ```
@@ -62,16 +62,16 @@ A `Bad` carries the status to answer with and a reason for the log. Malformed in
 reported rather than guessed at.
 
 ```quiver
-"nonsense\r\n\r\n" ~> .0 ~> %http.parse_request ~
+"nonsense\r\n\r\n" ~> .0 ~> %http.parse_request
 //= Bad[status: 400, reason: "malformed request line"]
-"POST /x HTTP/1.1\r\nContent-Length: nope\r\n\r\n" ~> .0 ~> %http.parse_request ~
+"POST /x HTTP/1.1\r\nContent-Length: nope\r\n\r\n" ~> .0 ~> %http.parse_request
 //= Bad[status: 400, reason: "invalid content-length"]
 ```
 
 A chunked request body is refused outright, with 501:
 
 ```quiver
-"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ~> .0 ~> %http.parse_request ~
+"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ~> .0 ~> %http.parse_request
 //= Bad[status: 501, reason: "transfer encodings are not supported"]
 ```
 
@@ -101,7 +101,7 @@ The target is kept verbatim, and the decoded `path` and `query` are derived from
 and query values are percent-decoded, and in a query `+` is a space.
 
 ```quiver
-"GET /a%20b?x=1&msg=hi+there HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[r, _]
+"GET /a%20b?x=1&msg=hi+there HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[r, _]
 r.target   //= "/a%20b?x=1&msg=hi+there"
 r.path     //= Cons["a b", Nil]
 r.query    //= Cons[["x", "1"], Cons[["msg", "hi there"], Nil]]
@@ -112,9 +112,9 @@ single trailing empty segment drops, so `/posts/` and `/posts` are the same rout
 the empty list. Interior empty segments are kept, since those the writer meant.
 
 ```quiver
-"GET /posts/ HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[r, _]
+"GET /posts/ HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[r, _]
 r.path   //= Cons["posts", Nil]
-"GET / HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[r, _]
+"GET / HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[r, _]
 r.path   //= Nil
 ```
 
@@ -134,7 +134,7 @@ header is nil, like any other lookup that found nothing, and a duplicated one an
 first.
 
 ```quiver
-"GET / HTTP/1.1\r\nX-Thing: One\r\nx-thing: Two\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[r, _]
+"GET / HTTP/1.1\r\nX-Thing: One\r\nx-thing: Two\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[r, _]
 %http.header [r.headers, "X-THING"]   //= "One"
 %http.header [r.headers, "missing"]   //= []
 ```
@@ -160,7 +160,7 @@ ways. This is the unit a host hands over when it has already done the framing it
 `%http` is the one place that knows the grammar.
 
 ```quiver
-"host: x\r\ncontent-length: 0\r\n" ~> .0 ~> %http.headers_of ~
+"host: x\r\ncontent-length: 0\r\n" ~> .0 ~> %http.headers_of
 //= Cons[["host", "x"], Cons[["content-length", "0"], Nil]]
 %http.headers_to_bytes %list{ ["host", "x"] } ~> Str[~]   //= "host: x\r\n"
 ```
@@ -171,7 +171,7 @@ ways. This is the unit a host hands over when it has already done the framing it
 the same for any buffer — a query string, say, since the two grammars are one.
 
 ```quiver
-"POST /x HTTP/1.1\r\nContent-Length: 23\r\n\r\na=1&b=hi+x&c=%2Fpath%2F" ~> .0 ~> %http.parse_request ~ ~> =[r, _]
+"POST /x HTTP/1.1\r\nContent-Length: 23\r\n\r\na=1&b=hi+x&c=%2Fpath%2F" ~> .0 ~> %http.parse_request ~> =[r, _]
 %http.form r   //= Cons[["a", "1"], Cons[["b", "hi x"], Cons[["c", "/path/"], Nil]]]
 ```
 
@@ -180,7 +180,7 @@ the first, which is what a caller that expects one field wants; a caller that wa
 them has the list.
 
 ```quiver
-f = "k=1&k=2&bare" ~> .0 ~> %http.form_decode ~
+f = "k=1&k=2&bare" ~> .0 ~> %http.form_decode
 f                    //= Cons[["k", "1"], Cons[["k", "2"], Cons[["bare", ""], Nil]]]
 %http.get [f, "k"]   //= "1"
 ```
@@ -189,8 +189,8 @@ f                    //= Cons[["k", "1"], Cons[["k", "2"], Cons[["bare", ""], Ni
 percent-escaped — including the `&` and `=` that would otherwise be read as structure.
 
 ```quiver
-%list{ ["a b", "c&d=e"], ["k", "v"] } ~> %http.form_encode ~ ~> Str[~]   //= "a+b=c%26d%3De&k=v"
-%list{ ["a b", "c&d=e"] } ~> %http.form_encode ~ ~> %http.form_decode ~   //= Cons[["a b", "c&d=e"], Nil]
+%list{ ["a b", "c&d=e"], ["k", "v"] } ~> %http.form_encode ~> Str[~]   //= "a+b=c%26d%3De&k=v"
+%list{ ["a b", "c&d=e"] } ~> %http.form_encode ~> %http.form_decode   //= Cons[["a b", "c&d=e"], Nil]
 ```
 
 ## Cookies
@@ -200,7 +200,7 @@ bytes: cookie values are not percent-encoded by the protocol, so decoding one wo
 value that happens to contain a `%`.
 
 ```quiver
-"GET / HTTP/1.1\r\nCookie: a=1; session=abc.def; b=x%20y\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[r, _]
+"GET / HTTP/1.1\r\nCookie: a=1; session=abc.def; b=x%20y\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[r, _]
 %http.cookies r   //= Cons[["a", "1"], Cons[["session", "abc.def"], Cons[["b", "x%20y"], Nil]]]
 ```
 
@@ -208,7 +208,7 @@ No `Cookie` header means no cookies, and a segment without an `=` is skipped rat
 failing the request.
 
 ```quiver
-"GET / HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[r, _]
+"GET / HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[r, _]
 %http.cookies r   //= Nil
 ```
 
@@ -229,14 +229,14 @@ phrase is decoration and the version is HTTP/1.1.
 `serialize_response` writes it, supplying `content-length` when the headers do not:
 
 ```quiver
-Response[status: 404, headers: Nil, body: "gone" ~> .0] ~> %http.serialize_response ~ ~> Str[~]
+Response[status: 404, headers: Nil, body: "gone" ~> .0] ~> %http.serialize_response ~> Str[~]
 //= "HTTP/1.1 404 Not Found\r\ncontent-length: 4\r\n\r\ngone"
 ```
 
 A stated one is left alone, which is what lets a caller frame a body itself:
 
 ```quiver
-Response[status: 200, headers: %list{ ["content-length", "0"] }, body: <>] ~> %http.serialize_response ~ ~> Str[~]
+Response[status: 200, headers: %list{ ["content-length", "0"] }, body: <>] ~> %http.serialize_response ~> Str[~]
 //= "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"
 ```
 
@@ -263,7 +263,7 @@ req = %http.request [
   headers: %list{ ["host", "x"] },
   body: "hello" ~> .0,
 ]
-%http.serialize_request req ~> %http.parse_request ~ ~> =[r, _]
+%http.serialize_request req ~> %http.parse_request ~> =[r, _]
 r.method     //= POST
 r.target     //= "/submit?a=1"
 r.path       //= Cons["submit", Nil]
@@ -275,7 +275,7 @@ Str[r.body]  //= "hello"
 there is a body and no length already stated — a bodyless GET carries neither.
 
 ```quiver
-%http.request [method: GET, target: "/"] ~> %http.serialize_request ~ ~> Str[~]
+%http.request [method: GET, target: "/"] ~> %http.serialize_request ~> Str[~]
 //= "GET / HTTP/1.1\r\n\r\n"
 ```
 
@@ -285,7 +285,7 @@ there is a body and no length already stated — a bodyless GET carries neither.
   target: "/x",
   headers: %list{ ["content-length", "99"] },
   body: "hi" ~> .0,
-] ~> %http.serialize_request ~ ~> Str[~]   //= "PUT /x HTTP/1.1\r\ncontent-length: 99\r\n\r\nhi"
+] ~> %http.serialize_request ~> Str[~]   //= "PUT /x HTTP/1.1\r\ncontent-length: 99\r\n\r\nhi"
 ```
 
 `Host` is the caller's to supply: this module never sees the authority, only the target.
@@ -418,8 +418,8 @@ handler = #'%http {
   }
 }
 
-"GET /greet/ada HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[req, _]
-req ~> handler ~ ~> =Response(status: s, body: b)
+"GET /greet/ada HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[req, _]
+req ~> handler ~> =Response(status: s, body: b)
 s        //= 200
 Str[b]   //= "ada"
 ```
@@ -432,6 +432,6 @@ handler = #'%http {
   }
 }
 
-"GET /nope HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~ ~> =[req, _]
-req ~> handler ~ ~> .status   //= 404
+"GET /nope HTTP/1.1\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[req, _]
+req ~> handler ~> .status   //= 404
 ```

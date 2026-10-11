@@ -44,7 +44,7 @@ sugar for one:
 Annotations are data *about* a value, not part of it, so the notation does not see them:
 
 ```quiver
-P[x: 1] ~> { :note "hi" } ~> %data.encode ~   //= "P[x: 1]"
+P[x: 1] ~> { :note "hi" } ~> %data.encode   //= "P[x: 1]"
 ```
 
 ## What has no notation
@@ -59,7 +59,7 @@ union itself holds exactly the tuples whose every field is data.
 ```quiver
 f = #'int { $ }
 %data.encode f              //! Type mismatch
-%ref [] ~> %data.encode ~   //! Type mismatch
+%ref [] ~> %data.encode     //! Type mismatch
 ```
 
 A generic that encodes its parameter bounds it by `'%data`, and its callers are held to that:
@@ -99,7 +99,7 @@ The string sugar is a synonym, not a format, so the tuple spelling decodes to th
 Leaving the type argument off is a compile error, not a guess:
 
 ```quiver
-"5" ~> %data.decode ~   //! consumes its type argument
+"5" ~> %data.decode   //! consumes its type argument
 ```
 
 ## Tuples, labels and layout
@@ -225,8 +225,8 @@ f = #(Ev['wire] | []) {
     | Missed
   }
 }
-%data.decode<Ev['wire]> "Ev[Submit]" ~> f ~      //= S
-%data.decode<Ev['wire]> "Ev[Toggle[1]]" ~> f ~   //= T[1]
-%data.decode<Ev['wire]> "Ev[Del[7]]" ~> f ~      //= D[7]
-%data.decode<Ev['wire]> "garbage" ~> f ~         //= Missed
+%data.decode<Ev['wire]> "Ev[Submit]" ~> f      //= S
+%data.decode<Ev['wire]> "Ev[Toggle[1]]" ~> f   //= T[1]
+%data.decode<Ev['wire]> "Ev[Del[7]]" ~> f      //= D[7]
+%data.decode<Ev['wire]> "garbage" ~> f         //= Missed
 ```

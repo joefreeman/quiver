@@ -3,7 +3,7 @@
 // value and never calls it, so a callable field is the function itself.
 use crate::common::*;
 
-const INC: &str = "inc = #'int { [~, 1] ~> __integer_add__ ~ };";
+const INC: &str = "inc = #'int { [~, 1] ~> __integer_add__ };";
 
 #[test]
 fn callable_field_is_the_function_not_a_call() {
@@ -40,7 +40,7 @@ fn nil_arg_callable_field_is_stored_not_called() {
 fn builtin_reference_in_record() {
     // A builtin named in a field is stored as a value (e.g. a module export tuple).
     quiver()
-        .evaluate("r = [a: __integer_add__]; [3, 4] ~> r.a ~")
+        .evaluate("r = [a: __integer_add__]; [3, 4] ~> r.a")
         .expect("7");
 }
 
@@ -48,7 +48,7 @@ fn builtin_reference_in_record() {
 fn passes_callable_by_value() {
     // A bare name stores the function; it can be called later.
     quiver()
-        .evaluate(&format!("{INC} t = 5 ~> [inc, ~]; 10 ~> t.0 ~"))
+        .evaluate(&format!("{INC} t = 5 ~> [inc, ~]; 10 ~> t.0"))
         .expect("11");
 }
 
@@ -75,7 +75,7 @@ fn higher_order_argument_is_a_plain_name() {
     // A function passed as an argument is named, and applied inside.
     quiver()
         .evaluate(&format!(
-            "{INC} twice = #[#'int -> 'int, 'int] {{ $.1 ~> $.0 ~ ~> $.0 ~ }}; [inc, 5] ~> twice ~"
+            "{INC} twice = #[#'int -> 'int, 'int] {{ $.1 ~> $.0 ~ ~> $.0 ~ }}; [inc, 5] ~> twice"
         ))
         .expect("7");
 }
@@ -84,7 +84,7 @@ fn higher_order_argument_is_a_plain_name() {
 fn nil_arg_callable_passed_then_called() {
     // A nil-arg function passed by `&`, then explicitly called.
     quiver()
-        .evaluate("g = #[] { 42 }; t = [g]; [] ~> t.0 ~")
+        .evaluate("g = #[] { 42 }; t = [g]; [] ~> t.0")
         .expect("42");
 }
 
@@ -94,7 +94,7 @@ fn tuple_field_provenance_preserved() {
     quiver()
         .evaluate(
             "make_ab = #'int { =0 => A[a: 1] | B[b: 2] };
-             x = 0 ~> make_ab ~;
+             x = 0 ~> make_ab;
              t = x ~> [~, 1];
              t.0 ~> =A[a: 'int]; x.a",
         )

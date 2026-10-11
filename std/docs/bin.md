@@ -36,7 +36,7 @@ something the world decided.
 ```quiver
 %bin.new 5                    //= <0000000000>
 %bin.new 0                    //= <>
-%bin.new 5 ~> %bin.length ~   //= 5
+%bin.new 5 ~> %bin.length     //= 5
 %bin.length <>                //= 0
 ```
 
@@ -68,7 +68,7 @@ Nothing else in the module can tell a rope from a flat binary; the sharing is an
 implementation detail of `concat` and `repeat`.
 
 ```quiver
-%bin.concat [<6162>, <0a63>] ~> %bin.length ~   //= 4
+%bin.concat [<6162>, <0a63>] ~> %bin.length   //= 4
 ```
 
 ## Slicing and searching
@@ -249,7 +249,7 @@ significant, so a left shift moves bits toward the front.
 Chained, the two families read as one expression — `¬(a ∧ b)`:
 
 ```quiver
-%bin.and [<aa>, <ff>] ~> %bin.not ~   //= <55>
+%bin.and [<aa>, <ff>] ~> %bin.not   //= <55>
 ```
 
 ## Hex
@@ -275,9 +275,9 @@ value the caller can branch on.
 This is the readable form of a digest, and is what a hash is usually compared in:
 
 ```quiver
-d = "abc" ~> .0 ~> %hash.sha256 ~
+d = "abc" ~> .0 ~> %hash.sha256
 %bin.to_hex d                           //= "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-%bin.to_hex d ~> %bin.from_hex ~        //= ^d // the round trip is exact
+%bin.to_hex d ~> %bin.from_hex          //= ^d // the round trip is exact
 ```
 
 ## Base64
@@ -287,12 +287,12 @@ test vectors:
 
 ```quiver
 %bin.to_base64 <>                  //= ""
-"f" ~> .0 ~> %bin.to_base64 ~      //= "Zg=="
-"fo" ~> .0 ~> %bin.to_base64 ~     //= "Zm8="
-"foo" ~> .0 ~> %bin.to_base64 ~    //= "Zm9v"
-"foob" ~> .0 ~> %bin.to_base64 ~   //= "Zm9vYg=="
-"fooba" ~> .0 ~> %bin.to_base64 ~  //= "Zm9vYmE="
-"foobar" ~> .0 ~> %bin.to_base64 ~ //= "Zm9vYmFy"
+"f" ~> .0 ~> %bin.to_base64        //= "Zg=="
+"fo" ~> .0 ~> %bin.to_base64       //= "Zm8="
+"foo" ~> .0 ~> %bin.to_base64      //= "Zm9v"
+"foob" ~> .0 ~> %bin.to_base64     //= "Zm9vYg=="
+"fooba" ~> .0 ~> %bin.to_base64    //= "Zm9vYmE="
+"foobar" ~> .0 ~> %bin.to_base64   //= "Zm9vYmFy"
 ```
 
 Decoding round-trips them:

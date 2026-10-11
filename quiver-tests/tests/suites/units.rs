@@ -249,7 +249,7 @@ fn units_link_under_either_registration_policy() {
 fn module_a(n: &str) -> HashMap<Vec<String>, String> {
     HashMap::from([(
         vec!["a".to_string()],
-        format!("[f: #'int {{ [$, {n}] ~> __integer_add__ ~ }}]"),
+        format!("[f: #'int {{ [$, {n}] ~> __integer_add__ }}]"),
     )])
 }
 
@@ -503,7 +503,7 @@ fn a_program_that_is_not_executable_still_extracts() {
     // `quiv compile` accepts a top level that does not evaluate to a function, so that
     // `quiv inspect` can still show it. The unit form of that is an entry of `None` over
     // everything the compile registered — not an empty unit.
-    let compiled = compile("[1, 2] ~> __integer_add__ ~", false);
+    let compiled = compile("[1, 2] ~> __integer_add__", false);
     let unit = quiver_compiler::extract_unit(
         &compiled.program,
         &compiled.module_cache,

@@ -289,7 +289,7 @@ value = #['%parse.p<'int>, '%parse] {
   parens = %parse.between [%parse.byte [40, "'('"], value, %parse.byte [41, "')'"]]
   core = %parse.alt2 [%parse.int, parens]
   core st
-} ~> %parse.rec ~
+} ~> %parse.rec
 
 %parse.run ["7", value]       //= 7
 %parse.run ["((7))", value]   //= 7
@@ -316,7 +316,7 @@ expr = #['%parse.p<('%num | [])>, '%parse] {
   op = %parse.alt2 [plus, minus]
   p = %parse.chainl [atom, op]
   p st
-} ~> %parse.rec ~
+} ~> %parse.rec
 
 %parse.run ["1+2+3", expr]      //= 6
 %parse.run ["10-3-2", expr]     //= 5
@@ -412,7 +412,7 @@ the digits, the second matches empty and stops, and there is no phantom trailing
 
 ```quiver
 digit? = #'int { %num.ge? [$, 48]; %num.le? [$, 57]; Ok }
-p = %parse.take_while digit? ~> %parse.many0 ~
+p = %parse.take_while digit? ~> %parse.many0
 %parse.run ["12", p]   //= Cons[<3132>, Nil]
 ```
 

@@ -282,7 +282,7 @@ fn a_missing_path_is_an_error() {
 #[test]
 fn eval_writes_to_stdout() {
     let out = quiv()
-        .args(["format", "-e", "#[] {[1,2] ~> __integer_add__ ~}"])
+        .args(["format", "-e", "#[] {[1,2] ~> __integer_add__}"])
         .output()
         .unwrap();
     assert!(out.status.success());

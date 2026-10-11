@@ -27,7 +27,7 @@ The input is written while the output is read, so neither waits on the other how
 there is of either:
 
 ```quiver
-%exec.run ["cat", stdin: %bin.new 300000] ~> =(stdout: ~) ~> %bin.length ~   //= 300000
+%exec.run ["cat", stdin: %bin.new 300000] ~> =(stdout: ~) ~> %bin.length   //= 300000
 ```
 
 A program that ran but did not succeed fails as a nil carrying `:error`: `Failed` with its

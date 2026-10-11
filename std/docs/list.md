@@ -260,7 +260,7 @@ further than it must.
 `iter` and `collect` are the bridge to `%iter`, and are inverse over a finite list.
 
 ```quiver
-%list.iter %list{ 1, 2, 3 } ~> %list.collect ~   //= Cons[1, Cons[2, Cons[3, Nil]]]
+%list.iter %list{ 1, 2, 3 } ~> %list.collect   //= Cons[1, Cons[2, Cons[3, Nil]]]
 ```
 
 Going through them once is how to compose several stages without materialising a list between
@@ -270,13 +270,13 @@ each:
 %list.iter %list{ 1, 2, 3, 4 }
 ~> %iter.filter [~, #{ %num.gt? [$, 1] }]
 ~> %iter.map [~, #{ %num.mul [$, 10] }]
-~> %list.collect ~            //= Cons[20, Cons[30, Cons[40, Nil]]]
+~> %list.collect            //= Cons[20, Cons[30, Cons[40, Nil]]]
 ```
 
 It is also what makes an infinite iterator usable: bound it first, then collect.
 
 ```quiver
-%iter.repeat 7 ~> %iter.take [~, 3] ~> %list.collect ~   //= Cons[7, Cons[7, Cons[7, Nil]]]
+%iter.repeat 7 ~> %iter.take [~, 3] ~> %list.collect   //= Cons[7, Cons[7, Cons[7, Nil]]]
 ```
 
 `collect` reads exhaustion as the end of the list, which is right for every pure source but
@@ -285,5 +285,5 @@ quietly answer a short list. `try_collect` checks first, and answers nil carryin
 failure's `:error` instead. Over a pure source the two agree.
 
 ```quiver
-%list.iter %list{ 1, 2, 3 } ~> %list.try_collect ~   //= Cons[1, Cons[2, Cons[3, Nil]]]
+%list.iter %list{ 1, 2, 3 } ~> %list.try_collect   //= Cons[1, Cons[2, Cons[3, Nil]]]
 ```

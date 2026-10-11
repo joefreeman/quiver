@@ -206,7 +206,7 @@ fn test_a_child_and_what_it_started_die_with_their_owner() {
               | $tries ~> =0 => []
               | { ![50] | Ok }; ^ [$pid, %num.sub [$tries, 1]]
             }
-            %str.trim pids ~> %str.split [~, " "] ~> %list.collect ~
+            %str.trim pids ~> %str.split [~, " "] ~> %list.collect
             ~> =Cons[child, Cons[grandchild, Nil]]
             [wait_gone [child, 100], wait_gone [grandchild, 100]]
             "#,

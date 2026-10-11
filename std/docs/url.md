@@ -120,26 +120,22 @@ Since it is nil, a guard is a step boundary and nothing more:
 was parsed with an explicit `:443` comes back canonical rather than as written.
 
 ```quiver
-%url.parse "https://e.com:443/p" ~> =('%url & u)
-%url.format u                  //= "https://e.com/p"
+%url.parse "https://e.com:443/p" ~> ='%url ~> %url.format                  //= "https://e.com/p"
 ```
 
 ```quiver
-%url.parse "http://e.com:8080/p?q#f" ~> =('%url & u)
-%url.format u                  //= "http://e.com:8080/p?q#f"
+%url.parse "http://e.com:8080/p?q#f" ~> ='%url ~> %url.format                  //= "http://e.com:8080/p?q#f"
 ```
 
 `authority` is the `host` or `host:port` half of that — what a `Host` header carries, under
 the same default-port rule.
 
 ```quiver
-%url.parse "http://e.com/a" ~> =('%url & u)
-%url.authority u               //= "e.com"
+%url.parse "http://e.com/a" ~> ='%url ~> %url.authority               //= "e.com"
 ```
 
 ```quiver
-%url.parse "http://e.com:8080/a" ~> =('%url & u)
-%url.authority u               //= "e.com:8080"
+%url.parse "http://e.com:8080/a" ~> ='%url ~> %url.authority               //= "e.com:8080"
 ```
 
 `target` is the request-target: path and query, and never the scheme, host or fragment. A
@@ -147,13 +143,11 @@ fragment is a client-side concern and is not sent, which is why the split lives 
 than in the caller.
 
 ```quiver
-%url.parse "http://e.com/a?x=1#frag" ~> =('%url & u)
-%url.target u                  //= "/a?x=1"
+%url.parse "http://e.com/a?x=1#frag" ~> ='%url ~> %url.target                  //= "/a?x=1"
 ```
 
 ```quiver
-%url.parse "http://e.com/a" ~> =('%url & u)
-%url.target u                  //= "/a"
+%url.parse "http://e.com/a" ~> ='%url ~> %url.target                  //= "/a"
 ```
 
 Together they are the two halves an HTTP request line and `Host` header need:
@@ -172,7 +166,7 @@ and the result is a URL — or nil when what it names is not well-formed.
 
 ```quiver
 %url.parse "http://example.com/a/b?x=1#f" ~> =('%url & base)
-r = #'%str { %url.resolve [base, $] ~> =('%url & u); %url.format u }
+r = #'%str { %url.resolve [base, $] ~> ='%url ~> %url.format }
 ```
 
 An absolute reference stands alone and the base contributes nothing:

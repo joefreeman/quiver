@@ -82,7 +82,7 @@ fn test_spread_union_single_spread() {
             r#"
             't = [x: 'int] | [y: 'int];
             f = #[v: 't] { =[v: v] => [z: 0, ...v] };
-            [v: [x: 1]] ~> f ~
+            [v: [x: 1]] ~> f
             "#,
         )
         .expect("[z: 0, x: 1]");
@@ -96,7 +96,7 @@ fn test_spread_union_cartesian_product() {
             'ta = [x: 'int] | [y: 'int];
             'tb = [z: 'int] | [w: 'int];
             f = #[a: 'ta, b: 'tb] { =[a: a, b: b] => [...a, ...b] };
-            [a: [x: 1], b: [z: 2]] ~> f ~
+            [a: [x: 1], b: [z: 2]] ~> f
             "#,
         )
         .expect("[x: 1, z: 2]");
@@ -110,7 +110,7 @@ fn test_spread_union_multiple_spreads() {
             'ta = [x: 'int];
             'tb = [z: 'int] | [w: 'int];
             f = #[a: 'ta, b: 'tb] { =[a: a, b: b] => [...a, ...b] };
-            [a: [x: 1], b: [w: 2]] ~> f ~
+            [a: [x: 1], b: [w: 2]] ~> f
             "#,
         )
         .expect("[x: 1, w: 2]");
@@ -124,7 +124,7 @@ fn test_spread_same_fields_different_sources() {
             'ta = [x: 'int];
             'tb = [x: 'int, y: 'int] | [y: 'int];
             f = #[a: 'ta, b: 'tb] { =[a: a, b: b] => [...a, ...b] };
-            [[a: [x: 1], b: [x: 2, y: 3]] ~> f ~, [a: [x: 4], b: [y: 5]] ~> f ~]
+            [[a: [x: 1], b: [x: 2, y: 3]] ~> f, [a: [x: 4], b: [y: 5]] ~> f]
             "#,
         )
         .expect("[[x: 2, y: 3], [x: 4, y: 5]]");
@@ -205,10 +205,10 @@ fn test_identifier_spread_with_ripple_in_field() {
 fn spread_source_is_captured_in_a_closure() {
     // A closure that spreads a variable (`[...a]` or the `a` of `a[..., y]`) must capture it.
     quiver()
-        .evaluate("a = A[x: 1]; g = #[] { a[..., y: 2] }; [] ~> g ~")
+        .evaluate("a = A[x: 1]; g = #[] { a[..., y: 2] }; [] ~> g")
         .expect("A[x: 1, y: 2]");
     quiver()
-        .evaluate("a = [x: 1]; g = #[] { [...a, y: 2] }; [] ~> g ~")
+        .evaluate("a = [x: 1]; g = #[] { [...a, y: 2] }; [] ~> g")
         .expect("[x: 1, y: 2]");
 }
 
@@ -233,7 +233,7 @@ fn test_name_inheriting_spread_over_union_source() {
                check = #'r { $status }
                f = #('int | []) {
                  resp = $ ~> { =('int & s) => Response[status: s, headers: Nil] | Response[status: 500, headers: Cons["a", Nil]] }
-                 resp ~> ~[..., status: 201] ~> check ~
+                 resp ~> ~[..., status: 201] ~> check
                }
                f 200"#,
         )
@@ -245,7 +245,7 @@ fn test_name_inheriting_spread_over_union_source() {
             r#"check = #Response(status: 'int) { $status }
                f = #('int | []) {
                  v = $ ~> { =('int & s) => Response[status: s] | Other[status: 500] }
-                 v ~> ~[..., status: 201] ~> check ~
+                 v ~> ~[..., status: 201] ~> check
                }
                f 200"#,
         )

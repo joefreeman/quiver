@@ -257,7 +257,7 @@ fn concurrent_sessions_evaluate_and_run_independently() {
                 let mut session = Session::open(server);
                 session.evaluate_value(&format!("x = {n}; x"));
                 for step in 0..10u64 {
-                    let value = session.evaluate_value("x = [x, 1] ~> __integer_add__ ~; x");
+                    let value = session.evaluate_value("x = [x, 1] ~> __integer_add__; x");
                     assert_eq!(value, (n + step + 1).to_string(), "session {n}");
                 }
                 // A run beside the session: its own root, one resume, delete.
@@ -267,7 +267,7 @@ fn concurrent_sessions_evaluate_and_run_independently() {
                     .resume(
                         pid,
                         ResumePayload {
-                            unit: program(&format!("#[] {{ [{n}, 1] ~> __integer_add__ ~ }}")),
+                            unit: program(&format!("#[] {{ [{n}, 1] ~> __integer_add__ }}")),
                             modules: Vec::new(),
                         },
                         None,
@@ -398,7 +398,7 @@ fn abandoned_processes_stay_visible_and_collectable() {
 
     // The server stays fully usable beside it...
     let mut session = Session::open(&server);
-    assert_eq!(session.evaluate_value("[40, 2] ~> __integer_add__ ~"), "42");
+    assert_eq!(session.evaluate_value("[40, 2] ~> __integer_add__"), "42");
 
     // ...the orphan is visible...
     assert_eq!(status_of(&client, pid), Some(ProcessStatus::Active));
@@ -423,9 +423,7 @@ fn code_sweeps_fire_under_concurrent_load() {
                     // previous one — churn that crosses the sweep threshold
                     // constantly while other sessions do the same.
                     let offset = n * 1000 + round;
-                    session.evaluate(&format!(
-                        "f = #'int {{ [$, {offset}] ~> __integer_add__ ~ }}"
-                    ));
+                    session.evaluate(&format!("f = #'int {{ [$, {offset}] ~> __integer_add__ }}"));
                     let value = session.evaluate_value("f 1");
                     assert_eq!(value, (offset + 1).to_string(), "session {n} round {round}");
                     session.evaluate("f = 0");
@@ -578,7 +576,7 @@ fn connect_or_spawn_starts_a_server_when_absent() {
     let client = quiver_cli::client::connect_or_spawn(&spawned.socket, &exe())
         .expect("connect_or_spawn failed");
     assert_eq!(
-        quick_value(&client, "#[] { [40, 2] ~> __integer_add__ ~ }"),
+        quick_value(&client, "#[] { [40, 2] ~> __integer_add__ }"),
         "42"
     );
     client.shutdown().expect("shutdown failed");
@@ -659,7 +657,7 @@ fn takeover_replaces_an_incompatible_server() {
     let client =
         quiver_cli::client::connect_or_spawn(&spawned.socket, &exe()).expect("takeover failed");
     assert_eq!(
-        quick_value(&client, "#[] { [40, 2] ~> __integer_add__ ~ }"),
+        quick_value(&client, "#[] { [40, 2] ~> __integer_add__ }"),
         "42"
     );
     client.shutdown().expect("shutdown failed");
@@ -874,7 +872,7 @@ fn a_malformed_unit_is_refused_without_taking_the_server_with_it() {
 
     // Every refusal left the host serviceable.
     let mut session = Session::open(&server);
-    assert_eq!(session.evaluate_value("[40, 2] ~> __integer_add__ ~"), "42");
+    assert_eq!(session.evaluate_value("[40, 2] ~> __integer_add__"), "42");
 }
 
 #[test]

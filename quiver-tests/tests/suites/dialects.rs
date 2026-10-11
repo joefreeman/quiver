@@ -9,7 +9,7 @@ fn dialect_module(body: &str, exports: &str) -> HashMap<Vec<String>, String> {
     modules.insert(
         vec!["m".to_string()],
         format!(
-            "d0 = #Str['bin] {{ {body} }}\nd = #(content: Str['bin]) {{ $content ~> d0 ~ }}\n{{ :dialect d; {exports} }}"
+            "d0 = #Str['bin] {{ {body} }}\nd = #(content: Str['bin]) {{ $content ~> d0 }}\n{{ :dialect d; {exports} }}"
         ),
     );
     modules
@@ -91,7 +91,7 @@ fn test_call_applies_a_module_export() {
     quiver()
         .with_modules(dialect_module(
             "Call[member: \"double\", arg: Unquote[offset: 0, length: 1]]",
-            "[double: #'int { [~, 2] ~> __integer_multiply__ ~ }]",
+            "[double: #'int { [~, 2] ~> __integer_multiply__ }]",
         ))
         .evaluate("5 ~> %m{~}")
         .expect("10");
@@ -149,7 +149,7 @@ fn test_call_reaches_a_named_module() {
     );
     modules.insert(
         vec!["helper".to_string()],
-        "[double: #'int { [~, 2] ~> __integer_multiply__ ~ }]".to_string(),
+        "[double: #'int { [~, 2] ~> __integer_multiply__ }]".to_string(),
     );
     quiver()
         .with_modules(modules)
@@ -162,7 +162,7 @@ fn test_expansions_chain() {
     quiver()
         .with_modules(dialect_module(
             "Call[member: \"double\", arg: Unquote[offset: 0, length: 1]]",
-            "[double: #'int { [~, 2] ~> __integer_multiply__ ~ }]",
+            "[double: #'int { [~, 2] ~> __integer_multiply__ }]",
         ))
         .evaluate("5 ~> %m{~} ~> %m{~}")
         .expect("20");
@@ -195,7 +195,7 @@ fn test_expansion_inside_a_function_captures_variables() {
     // The dialect expands before capture collection, so the closure captures `x`.
     quiver()
         .with_modules(dialect_module("Unquote[offset: 0, length: 1]", "Ok"))
-        .evaluate("x = 7; f = #[] { %m{x} }; [] ~> f ~")
+        .evaluate("x = 7; f = #[] { %m{x} }; [] ~> f")
         .expect("7");
 }
 
@@ -287,7 +287,7 @@ fn test_json_dialect_flow() {
 #[test]
 fn test_json_dialect_unifies_with_module_type() {
     quiver()
-        .evaluate("f = #'%json { Ok }; %json{ [null, -3, \"s\"] } ~> f ~")
+        .evaluate("f = #'%json { Ok }; %json{ [null, -3, \"s\"] } ~> f")
         .expect("Ok");
 }
 
@@ -298,13 +298,13 @@ fn test_json_dialect_unifies_when_composites_alternate() {
     // between them exercises cycle resolution across members. It used to be rejected —
     // object-in-object and array-in-array were fine, but either inside the other was not.
     quiver()
-        .evaluate(r#"%json{ { "a": [1, 2] } } ~> %json.stringify ~"#)
+        .evaluate(r#"%json{ { "a": [1, 2] } } ~> %json.stringify"#)
         .expect(r#""{\"a\":[1,2]}""#);
     quiver()
-        .evaluate(r#"%json{ [{ "a": 1 }] } ~> %json.stringify ~"#)
+        .evaluate(r#"%json{ [{ "a": 1 }] } ~> %json.stringify"#)
         .expect(r#""[{\"a\":1}]""#);
     quiver()
-        .evaluate(r#"%json{ { "a": [1, { "b": [2, 3] }] } } ~> %json.stringify ~"#)
+        .evaluate(r#"%json{ { "a": [1, { "b": [2, 3] }] } } ~> %json.stringify"#)
         .expect(r#""{\"a\":[1,{\"b\":[2,3]}]}""#);
 }
 
@@ -338,17 +338,17 @@ fn test_dialect_call_with_literal_argument() {
 fn test_dict_dialect_generic_values() {
     // The `from` splice unifies dict.from's 'v across mixed 'int / Str values.
     quiver()
-        .evaluate(r#"d = %dict{ "a" => 1, "b" => "foo" }; [d, "b"] ~> %dict.get ~"#)
+        .evaluate(r#"d = %dict{ "a" => 1, "b" => "foo" }; [d, "b"] ~> %dict.get"#)
         .expect("\"foo\"");
 }
 
 #[test]
 fn test_dict_dialect_var_and_flow() {
     quiver()
-        .evaluate(r#"x = 5; %dict{ "k" => x } ~> [~, "k"] ~> %dict.get ~"#)
+        .evaluate(r#"x = 5; %dict{ "k" => x } ~> [~, "k"] ~> %dict.get"#)
         .expect("5");
     quiver()
-        .evaluate(r#"9 ~> %dict{ "flow" => ~ } ~> [~, "flow"] ~> %dict.get ~"#)
+        .evaluate(r#"9 ~> %dict{ "flow" => ~ } ~> [~, "flow"] ~> %dict.get"#)
         .expect("9");
 }
 
@@ -380,15 +380,13 @@ fn test_list_dialect_nested_dialect() {
 #[test]
 fn test_list_dialect_expression_elements() {
     quiver()
-        .evaluate("inc = #'int { [~, 1] ~> __integer_add__ ~ }; x = 2; %list{ x ~> inc ~, inc }")
+        .evaluate("inc = #'int { [~, 1] ~> __integer_add__ }; x = 2; %list{ x ~> inc, inc }")
         .expect_type("Cons['int, Cons[(#'int -> 'int), Nil]]");
 }
 
 #[test]
 fn test_list_dialect_unifies_with_module_type() {
-    quiver()
-        .evaluate("%list{ 7, 8 } ~> %list.head ~")
-        .expect("7");
+    quiver().evaluate("%list{ 7, 8 } ~> %list.head").expect("7");
 }
 
 #[test]
@@ -496,8 +494,8 @@ fn test_a_failing_dialect_function_is_reported_as_a_dialect_evaluation() {
 fn test_expansion_inside_nested_function_literals() {
     // Dialects in doubly nested bodies are expanded by the outermost walk exactly once.
     quiver()
-        .with_modules(dialect_module("$ ~> %str.parse_int ~", "Ok"))
-        .evaluate("f = #[] { g = #[] { [%m{7}, 1] ~> __integer_add__ ~ }; g [] }; f []")
+        .with_modules(dialect_module("$ ~> %str.parse_int", "Ok"))
+        .evaluate("f = #[] { g = #[] { [%m{7}, 1] ~> __integer_add__ }; g [] }; f []")
         .expect("8");
 }
 
@@ -508,11 +506,11 @@ fn test_generics_in_module_imported_inside_a_function_body() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["g".to_string()],
-        "id = #<'t>'t { $ }\nwrap = #<'t>'t { [$ ~> id ~, Nil] }\n[id: id, wrap: wrap]".to_string(),
+        "id = #<'t>'t { $ }\nwrap = #<'t>'t { [$ ~> id, Nil] }\n[id: id, wrap: wrap]".to_string(),
     );
     quiver()
         .with_modules(modules)
-        .evaluate("f = #'int { (id, wrap) = %g; [$ ~> id ~, \"x\" ~> wrap ~] }; 3 ~> f ~")
+        .evaluate("f = #'int { (id, wrap) = %g; [$ ~> id, \"x\" ~> wrap] }; 3 ~> f")
         .expect("[3, [\"x\", Nil]]");
 }
 
@@ -542,7 +540,7 @@ fn test_unquote_callable_is_called_with_the_flowing_value() {
     // in, so calling the callable it names is written there like anywhere else.
     quiver()
         .with_modules(dialect_module("Unquote[offset: 0, length: 5]", "Ok"))
-        .evaluate("inc = #'int { [~, 1] ~> __integer_add__ ~ }; 5 ~> %m{inc ~}")
+        .evaluate("inc = #'int { [~, 1] ~> __integer_add__ }; 5 ~> %m{inc ~}")
         .expect("6");
 }
 
@@ -551,7 +549,7 @@ fn test_unquote_name_passes_by_value() {
     // A name in a hole is the function, not a call — and elides its binding (pure term).
     quiver()
         .with_modules(dialect_module("Unquote[offset: 0, length: 3]", "Ok"))
-        .evaluate("inc = #'int { [~, 1] ~> __integer_add__ ~ }; f = %m{inc}; 5 ~> f ~")
+        .evaluate("inc = #'int { [~, 1] ~> __integer_add__ }; f = %m{inc}; 5 ~> f")
         .expect("6");
 }
 
@@ -589,8 +587,8 @@ fn test_unquote_duplicated_span_evaluates_once() {
 fn test_unquote_expression_chain() {
     // A multi-term chain hole, evaluated in the caller's scope.
     quiver()
-        .with_modules(dialect_module("Unquote[offset: 0, length: 33]", "Ok"))
-        .evaluate("xs = [1, 2]; %m{[xs.0, xs.1] ~> __integer_add__ ~}")
+        .with_modules(dialect_module("Unquote[offset: 0, length: 31]", "Ok"))
+        .evaluate("xs = [1, 2]; %m{[xs.0, xs.1] ~> __integer_add__}")
         .expect("3");
 }
 
@@ -621,13 +619,13 @@ d = #(content: Str['bin], chain: 'cb) {
 fn test_dict_dialect_expression_keys() {
     // Keys are host expressions exactly like values: ints, tuples, variables.
     quiver()
-        .evaluate("%dict{ 5 => 50, 6 => 60 } ~> [~, 6] ~> %dict.get ~")
+        .evaluate("%dict{ 5 => 50, 6 => 60 } ~> [~, 6] ~> %dict.get")
         .expect("60");
     quiver()
-        .evaluate("%dict{ Point[1, 2] => 9 } ~> [~, Point[1, 2]] ~> %dict.get ~")
+        .evaluate("%dict{ Point[1, 2] => 9 } ~> [~, Point[1, 2]] ~> %dict.get")
         .expect("9");
     quiver()
-        .evaluate(r#"k = "a"; %dict{ k => 1 } ~> [~, "a"] ~> %dict.get ~"#)
+        .evaluate(r#"k = "a"; %dict{ k => 1 } ~> [~, "a"] ~> %dict.get"#)
         .expect("1");
 }
 
@@ -635,10 +633,10 @@ fn test_dict_dialect_expression_keys() {
 fn test_dict_dialect_key_chain_and_flow() {
     // A key expression sees the dialect's flowing value and full call chains.
     quiver()
-        .evaluate(r#"7 ~> %dict{ ~ => "seven" } ~> [~, 7] ~> %dict.get ~"#)
+        .evaluate(r#"7 ~> %dict{ ~ => "seven" } ~> [~, 7] ~> %dict.get"#)
         .expect("\"seven\"");
     quiver()
-        .evaluate(r#"%dict{ %num.add [1, 2] => "three" } ~> [~, 3] ~> %dict.get ~"#)
+        .evaluate(r#"%dict{ %num.add [1, 2] => "three" } ~> [~, 3] ~> %dict.get"#)
         .expect("\"three\"");
 }
 
@@ -654,16 +652,16 @@ fn test_dialect_expansion_depth_is_bounded() {
 
     // At the bound, and one past it.
     quiver()
-        .evaluate(&format!("%list{{ {} }} ~> %list.count ~", items(256)))
+        .evaluate(&format!("%list{{ {} }} ~> %list.count", items(256)))
         .expect("256");
     quiver()
-        .evaluate(&format!("%list{{ {} }} ~> %list.count ~", items(257)))
+        .evaluate(&format!("%list{{ {} }} ~> %list.count", items(257)))
         .expect_error_containing("nesting more than 256 levels deep");
 
     // The same bound covers every dialect, because they share one list emitter.
     quiver()
         .evaluate(&format!(
-            "%json{{ [{}] }} ~> %json.stringify ~ ~> %str.length ~",
+            "%json{{ [{}] }} ~> %json.stringify ~> %str.length",
             items(300)
         ))
         .expect_error_containing("nesting more than 256 levels deep");

@@ -66,7 +66,7 @@ still a line, and a trailing newline does not add an empty one.
 ```quiver
 %fs.write [p, "one\ntwo\nthree" ~> .0]           //= Ok
 f = %file.open [p] ~> =\[]
-%file.lines f ~> %list.collect ~                 //= Cons["one", Cons["two", Cons["three", Nil]]]
+%file.lines f ~> %list.collect                   //= Cons["one", Cons["two", Cons["three", Nil]]]
 %file.close f                                    //= Ok
 %fs.remove [d, recursive?: Ok]                   //= Ok
 ```

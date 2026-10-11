@@ -82,10 +82,10 @@ is in every filesystem.
 spelling rather than the input's.
 
 ```quiver
-%path.parse "/" ~> %path.to_string ~            //= "/"
-%path.parse "/foo/bar" ~> %path.to_string ~     //= "/foo/bar"
-%path.parse "foo/bar" ~> %path.to_string ~      //= "foo/bar"
-%path.parse "/foo/./bar/" ~> %path.to_string ~  //= "/foo/bar"
+%path.parse "/" ~> %path.to_string            //= "/"
+%path.parse "/foo/bar" ~> %path.to_string     //= "/foo/bar"
+%path.parse "foo/bar" ~> %path.to_string      //= "foo/bar"
+%path.parse "/foo/./bar/" ~> %path.to_string  //= "/foo/bar"
 ```
 
 A bare `Relative[n]` renders as the dots it stands for:
@@ -112,13 +112,13 @@ compiles, by the same rules as `parse`, so a literal costs nothing at runtime an
 %path{ /etc/hosts }           //= Path["hosts", Path["etc", Root]]
 %path{ a/./b/../c }           //= Path["c", Path["a", Relative[0]]]
 %path{ ../x }                 //= Path["x", Relative[1]]
-%path{ /etc/hosts } ~> %path.basename ~   //= "hosts"
+%path{ /etc/hosts } ~> %path.basename   //= "hosts"
 ```
 
 Whitespace around the path is ignored, and whitespace inside it is part of a segment:
 
 ```quiver
-%path{ /my dir/notes.txt } ~> %path.to_string ~   //= "/my dir/notes.txt"
+%path{ /my dir/notes.txt } ~> %path.to_string   //= "/my dir/notes.txt"
 ```
 
 A `{ … }` hole is a string, evaluated in the surrounding scope like a hole in a string
@@ -171,9 +171,9 @@ Content braces are holes, so a literal `{` or `}` in a name goes through one: `%
 path — answers nil.
 
 ```quiver
-%path.parse "/foo/bar" ~> %path.basename ~   //= "bar"
-%path.parse "/foo" ~> %path.basename ~       //= "foo"
-%path.parse "foo" ~> %path.basename ~        //= "foo"
+%path.parse "/foo/bar" ~> %path.basename     //= "bar"
+%path.parse "/foo" ~> %path.basename         //= "foo"
+%path.parse "foo" ~> %path.basename          //= "foo"
 %path.basename Root                          //= []
 %path.basename Relative[0]                   //= []
 ```
@@ -181,16 +181,16 @@ path — answers nil.
 `parent` drops the final segment, which is just reading the second field of `Path`.
 
 ```quiver
-%path.parse "/foo/bar" ~> %path.parent ~   //= Path["foo", Root]
-%path.parse "/foo" ~> %path.parent ~       //= Root
-%path.parse "foo" ~> %path.parent ~        //= Relative[0]
+%path.parse "/foo/bar" ~> %path.parent   //= Path["foo", Root]
+%path.parse "/foo" ~> %path.parent       //= Root
+%path.parse "foo" ~> %path.parent        //= Relative[0]
 ```
 
 At a starting point there is no segment left to drop, so `parent` says what is above it. The
 root is its own parent, and a relative path's ascent count goes up by one:
 
 ```quiver
-%path.parse "/" ~> %path.parent ~   //= Root
+%path.parse "/" ~> %path.parent     //= Root
 %path.parent Relative[0]            //= Relative[1]
 %path.parent Relative[1]            //= Relative[2]
 ```
@@ -198,7 +198,7 @@ root is its own parent, and a relative path's ascent count goes up by one:
 Walking up terminates, since every chain of parents ends at `Root` or grows a `Relative`:
 
 ```quiver
-%path.parse "/a/b/c" ~> %path.parent ~ ~> %path.parent ~ ~> %path.parent ~   //= Root
+%path.parse "/a/b/c" ~> %path.parent ~> %path.parent ~> %path.parent   //= Root
 ```
 
 ## Absolute and relative
@@ -207,17 +207,17 @@ The two predicates ask which starting point a path descends from. They are exclu
 total: every path is one or the other.
 
 ```quiver
-%path.parse "/" ~> %path.absolute? ~         //= Ok
-%path.parse "/foo/bar" ~> %path.absolute? ~  //= Ok
-%path.parse "foo/bar" ~> %path.absolute? ~   //= []
+%path.parse "/" ~> %path.absolute?           //= Ok
+%path.parse "/foo/bar" ~> %path.absolute?    //= Ok
+%path.parse "foo/bar" ~> %path.absolute?     //= []
 %path.absolute? Relative[0]                  //= []
 ```
 
 ```quiver
-%path.parse "foo/bar" ~> %path.relative? ~   //= Ok
+%path.parse "foo/bar" ~> %path.relative?     //= Ok
 %path.relative? Relative[2]                  //= Ok
-%path.parse "/" ~> %path.relative? ~         //= []
-%path.parse "/foo" ~> %path.relative? ~      //= []
+%path.parse "/" ~> %path.relative?           //= []
+%path.parse "/foo" ~> %path.relative?        //= []
 ```
 
 Being predicates, they gate a step in the usual way:
@@ -234,25 +234,25 @@ absolute path is a destination, not an extension, so joining one is nil rather t
 replacing the first.
 
 ```quiver
-[%path.parse "/foo", %path.parse "bar"] ~> %path.join ~   //= Path["bar", Path["foo", Root]]
-[%path.parse "/foo", %path.parse "bar"] ~> %path.join ~ ~> %path.to_string ~     //= "/foo/bar"
-[%path.parse "/foo", %path.parse "bar/baz"] ~> %path.join ~ ~> %path.to_string ~ //= "/foo/bar/baz"
-[%path.parse "foo", %path.parse "bar"] ~> %path.join ~ ~> %path.to_string ~      //= "foo/bar"
-[%path.parse "/foo", %path.parse "/bar"] ~> %path.join ~                         //= []
+[%path.parse "/foo", %path.parse "bar"] ~> %path.join   //= Path["bar", Path["foo", Root]]
+[%path.parse "/foo", %path.parse "bar"] ~> %path.join ~> %path.to_string     //= "/foo/bar"
+[%path.parse "/foo", %path.parse "bar/baz"] ~> %path.join ~> %path.to_string //= "/foo/bar/baz"
+[%path.parse "foo", %path.parse "bar"] ~> %path.join ~> %path.to_string      //= "foo/bar"
+[%path.parse "/foo", %path.parse "/bar"] ~> %path.join                       //= []
 ```
 
 Joining `Relative[0]` — `.` — leaves the path alone, so it is the identity of the operation:
 
 ```quiver
-[%path.parse "/foo", Relative[0]] ~> %path.join ~ ~> %path.to_string ~   //= "/foo"
+[%path.parse "/foo", Relative[0]] ~> %path.join ~> %path.to_string   //= "/foo"
 ```
 
 A `Relative[n]` with `n` above zero ascends, cancelling that many segments of the first path:
 
 ```quiver
-[%path.parse "/foo/bar", Relative[1]] ~> %path.join ~ ~> %path.to_string ~   //= "/foo"
-[%path.parse "/foo", Relative[1]] ~> %path.join ~ ~> %path.to_string ~       //= "/"
-[%path.parse "a/b", Relative[1]] ~> %path.join ~ ~> %path.to_string ~        //= "a"
+[%path.parse "/foo/bar", Relative[1]] ~> %path.join ~> %path.to_string   //= "/foo"
+[%path.parse "/foo", Relative[1]] ~> %path.join ~> %path.to_string       //= "/"
+[%path.parse "a/b", Relative[1]] ~> %path.join ~> %path.to_string        //= "a"
 ```
 
 Ascending past the root is where the structure earns its keep. There is no `..` above `/` to
@@ -260,22 +260,22 @@ represent, so the join has no answer and is nil — a traversal attempt is caugh
 construction rather than by inspecting the rendered string afterwards.
 
 ```quiver
-[%path.parse "/foo", Relative[2]] ~> %path.join ~   //= []
+[%path.parse "/foo", Relative[2]] ~> %path.join   //= []
 ```
 
 The nil propagates through `to_string`, so a whole pipeline can be written straight and
 checked once at the end:
 
 ```quiver
-[%path.parse "/srv", %path.parse "../../etc/passwd"] ~> %path.join ~ ~> %path.to_string ~   //= []
-[%path.parse "/srv", %path.parse "app/../static/x.css"] ~> %path.join ~ ~> %path.to_string ~
+[%path.parse "/srv", %path.parse "../../etc/passwd"] ~> %path.join ~> %path.to_string   //= []
+[%path.parse "/srv", %path.parse "app/../static/x.css"] ~> %path.join ~> %path.to_string
 //= "/srv/static/x.css"
 ```
 
 A relative starting point has no such floor — ascending simply raises the count:
 
 ```quiver
-[Relative[1], Relative[2]] ~> %path.join ~   //= Relative[3]
+[Relative[1], Relative[2]] ~> %path.join   //= Relative[3]
 ```
 
 ## Adding a segment

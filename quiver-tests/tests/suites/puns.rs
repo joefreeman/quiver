@@ -63,7 +63,7 @@ fn test_pun_stores_the_callable_it_names() {
 #[test]
 fn test_record_of_functions_is_callable_through_the_field() {
     quiver()
-        .evaluate("inc = #'int { __integer_add__ [~, 1] }; r = (inc); 10 ~> r.inc ~")
+        .evaluate("inc = #'int { __integer_add__ [~, 1] }; r = (inc); 10 ~> r.inc")
         .expect("11");
 }
 
@@ -112,7 +112,7 @@ fn test_nested_path_takes_final_segment() {
 #[test]
 fn test_import_member_pun() {
     quiver()
-        .evaluate("r = (%num.add); [3, 4] ~> r.add ~")
+        .evaluate("r = (%num.add); [3, 4] ~> r.add")
         .expect("7");
 }
 
@@ -135,7 +135,7 @@ fn test_pun_as_call_argument() {
 #[test]
 fn test_pun_piped_into_a_call() {
     quiver()
-        .evaluate("f = #[a: 'int, b: 'int] { $b }; a = 3; b = 4; (a, b) ~> f ~")
+        .evaluate("f = #[a: 'int, b: 'int] { $b }; a = 3; b = 4; (a, b) ~> f")
         .expect("4");
 }
 

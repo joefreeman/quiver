@@ -17,7 +17,7 @@ fn test_sample_spawn_init() {
         .evaluate(
             r#"
             f = #'int { !#'int };
-            p = 7 ~> @f ~;
+            p = 7 ~> @f;
             ?p
             "#,
         )
@@ -32,7 +32,7 @@ fn test_sample_reflects_tail_call_transitions() {
             r#"
             'status = Loading | Done['int]
             f = #'status { | =Loading => ^ Done[42] | =Done[x] => x }
-            p = Loading ~> @f ~
+            p = Loading ~> @f
             !p
             ?p
             "#,
@@ -52,7 +52,7 @@ fn test_sample_reflects_named_tail_call_transition() {
               | =[n, acc] => ^ [__integer_subtract__ [n, 1], __integer_add__ [acc, n]]
             }
             init = #'int { ^run [$, 0] }
-            p = 3 ~> @init ~
+            p = 3 ~> @init
             !p
             ?p
             "#,
@@ -69,7 +69,7 @@ fn test_sample_narrows_with_pattern() {
             r#"
             'status = Loading | Done['int]
             f = #'status { | =Loading => ^ Done[42] | =Done[x] => x }
-            p = Loading ~> @f ~
+            p = Loading ~> @f
             !p
             ?p ~> =Done[x]
             x
@@ -107,7 +107,7 @@ fn test_declared_type_without_clause_rejects_sampling() {
             r#"
             f = #@'int { ?$ };
             g = #'int { !#'int };
-            7 ~> @g ~ ~> f ~
+            7 ~> @g ~> f
             "#,
         )
         .expect_error_containing("state type");
@@ -123,7 +123,7 @@ fn test_declared_state_clause_grants_sampling() {
             r#"
             f = #(@'int ?'int) { ?$ };
             g = #'int { !#'int };
-            7 ~> @g ~ ~> f ~
+            7 ~> @g ~> f
             "#,
         )
         .expect("7");
@@ -140,7 +140,7 @@ fn test_pid_message_is_filtered_by_type_not_just_accepted() {
             r#"
             g = #'int { !#'int };
             h = @#[] { ![#'int] ~> =n; ![#(@'int ?'int)] ~> =q; [n, ?q] } [];
-            @g 7 ~> h ~;
+            @g 7 ~> h;
             h 5;
             !h
             "#,
@@ -158,7 +158,7 @@ fn test_message_received_pid_is_sampleable_with_clause() {
             r#"
             g = #'int { !#'int };
             h = @#[] { ![#(@'int ?'int)] ~> =q; ?q } [];
-            @g 7 ~> h ~;
+            @g 7 ~> h;
             !h
             "#,
         )
@@ -176,7 +176,7 @@ fn test_callable_receive_clause_grants_sending_to_spawn() {
             g = #'int { !#'int }
             'w = #'int -> 'int !'int
             run_it = #'w { p = 7 ~> @$ ~; p 1; !p }
-            g ~> run_it ~
+            g ~> run_it
             "#,
         )
         .expect("1");
@@ -193,7 +193,7 @@ fn test_callable_states_clause_grants_sampling_of_spawn() {
             g = #'int { !#'int }
             'starter = #'int -> 'int ?'int
             probe = #'starter { p = 7 ~> @$ ~; ?p }
-            g ~> probe ~
+            g ~> probe
             "#,
         )
         .expect("7");
@@ -207,7 +207,7 @@ fn test_callable_without_states_clause_rejects_sampling() {
             r#"
             g = #'int { !#'int }
             probe = #(#'int -> 'int) { p = 7 ~> @$ ~; ?p }
-            g ~> probe ~
+            g ~> probe
             "#,
         )
         .expect_error_containing("state type");
@@ -223,7 +223,7 @@ fn test_callable_states_clause_rejects_wider_function() {
             h = #Str['bin] { 0 }
             g = #'int { ^h "x" }
             take = #(#'int -> 'int ?'int) { [] }
-            g ~> take ~
+            g ~> take
             "#,
         )
         .expect_error_containing("compatible");
@@ -238,7 +238,7 @@ fn test_callable_receive_clause_rejects_mismatched_receiver() {
             r#"
             g = #'int { !#'int }
             take = #(#'int -> 'int !'bin) { [] }
-            g ~> take ~
+            g ~> take
             "#,
         )
         .expect_error_containing("compatible");

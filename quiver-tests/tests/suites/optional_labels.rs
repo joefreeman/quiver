@@ -140,7 +140,7 @@ fn test_marked_and_unmarked_spellings_are_one_type() {
             r#"
             make = #[foo: 'int] { $ }
             take = #[(foo): 'int] { $foo }
-            make [foo: 5] ~> take ~
+            make [foo: 5] ~> take
             "#,
         )
         .expect("5");
@@ -163,7 +163,7 @@ fn test_apply_argument_callable_adoption() {
     quiver()
         .evaluate(
             "f = #[(a): 'int, (b): 'int] { %num.sub [$a, $b] }; wrap = #'int { [$, $] }; \
-             [10, 3] ~> f ~ ~> wrap ~",
+             [10, 3] ~> f ~> wrap",
         )
         .expect("[7, 7]");
 }
@@ -461,10 +461,10 @@ fn test_spawn_elaborates_its_init_as_a_call_does() {
     quiver()
         .evaluate(
             "f = #[(x): 'int, (y): 'int] { %num.add [$x, $y] }
-             p = [5, 6] ~> @f ~; q = [y: 1, x: 2] ~> @f ~; [!p, !q]",
+             p = [5, 6] ~> @f; q = [y: 1, x: 2] ~> @f; [!p, !q]",
         )
         .expect("[11, 3]");
     quiver()
-        .evaluate("g = #[(path): '%str, n: 'int = 3] { $n }; q = [\"a\"] ~> @g ~; !q")
+        .evaluate("g = #[(path): '%str, n: 'int = 3] { $n }; q = [\"a\"] ~> @g; !q")
         .expect("3");
 }

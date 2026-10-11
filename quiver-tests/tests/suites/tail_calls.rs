@@ -5,9 +5,9 @@ fn test_tail_call() {
     quiver()
         .evaluate(
             r#"
-            g = #'int { [~, 2] ~> __integer_multiply__ ~ };
-            f = #'int { [~, 1] ~> __integer_add__ ~ ~> ^g ~ };
-            1 ~> f ~
+            g = #'int { [~, 2] ~> __integer_multiply__ };
+            f = #'int { [~, 1] ~> __integer_add__ ~> ^g ~ };
+            1 ~> f
             "#,
         )
         .expect("4");
@@ -20,9 +20,9 @@ fn test_countdown() {
             r#"
             countdown = #'int {
               | =0 => 0
-              | [~, 1] ~> __integer_subtract__ ~ ~> ^ ~
+              | [~, 1] ~> __integer_subtract__ ~> ^ ~
             };
-            5 ~> countdown ~
+            5 ~> countdown
             "#,
         )
         .expect("0");
@@ -34,8 +34,8 @@ fn test_tail_call_with_arguments() {
         .evaluate(
             r#"
             g = #['int, 'int] { %num.mul ~ };
-            f = #'int { [~, 1] ~> %num.add ~ ~> [~ , 2] ~> ^g ~ };
-            1 ~> f ~
+            f = #'int { [~, 1] ~> %num.add ~> [~ , 2] ~> ^g ~ };
+            1 ~> f
             "#,
         )
         .expect("4");
@@ -49,12 +49,12 @@ fn test_factorial() {
             f = #['int, 'int] {
               | =[1, y] => y
               | =[x, y] => [
-                [x, 1] ~> __integer_subtract__ ~,
-                [x, y] ~> __integer_multiply__ ~
+                [x, 1] ~> __integer_subtract__,
+                [x, y] ~> __integer_multiply__
               ] ~> ^ ~
             };
-            fact = #'int { [~, 1] ~> f ~ };
-            5 ~> fact ~
+            fact = #'int { [~, 1] ~> f };
+            5 ~> fact
             "#,
         )
         .expect("120");
@@ -74,9 +74,9 @@ fn tail_call_with_argument_is_argument_first() {
     quiver()
         .evaluate(
             r#"
-            g = #'int { [~, 2] ~> __integer_multiply__ ~ };
+            g = #'int { [~, 2] ~> __integer_multiply__ };
             f = #'int { $ ~> ^g ~ };
-            5 ~> f ~
+            5 ~> f
             "#,
         )
         .expect("10");
@@ -90,7 +90,7 @@ fn test_ripple_tail_call_without_argument() {
             r#"
             g = #[] { 42 };
             f = #[] { g ~> ^~ [] };
-            [] ~> f ~
+            [] ~> f
             "#,
         )
         .expect("42");
@@ -101,7 +101,7 @@ fn test_ripple_tail_call_requires_function() {
     // `^~` on a non-function flowing value is a type error. (Bare `^~`, since the
     // argument-supplying `^~ x` form was removed; the flowing int is not callable.)
     quiver()
-        .evaluate("f = #'int { ^~ [] }; 5 ~> f ~")
+        .evaluate("f = #'int { ^~ [] }; 5 ~> f")
         .expect_compile_error(quiver_compiler::compiler::Error::TypeMismatch {
             expected: "function".to_string(),
             found: "'int".to_string(),
@@ -114,7 +114,7 @@ fn test_self_tail_call_argument_is_type_checked() {
     // parameter (regression: this used to compile unchecked and fail at runtime
     // as a field access).
     quiver()
-        .evaluate("f = #'int { ^ [1, 2] }; 1 ~> f ~")
+        .evaluate("f = #'int { ^ [1, 2] }; 1 ~> f")
         .expect_error_containing("function parameter compatible with");
 }
 
@@ -126,7 +126,7 @@ fn test_named_tail_call_argument_is_type_checked() {
             r#"
             g = #'int { $ };
             f = #'int { ^g [1, 2] };
-            1 ~> f ~
+            1 ~> f
             "#,
         )
         .expect_error_containing("function parameter compatible with");
@@ -146,7 +146,7 @@ fn test_self_tail_call_checks_declared_parameter_not_narrowed() {
               | =[acc, Nil] => acc
               | =[acc, Cons[x, rest]] => ^ [__integer_add__ [acc, x], rest]
             };
-            [0, Cons[1, Cons[2, Cons[3, Nil]]]] ~> sum ~
+            [0, Cons[1, Cons[2, Cons[3, Nil]]]] ~> sum
             "#,
         )
         .expect("6");

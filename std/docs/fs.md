@@ -21,7 +21,7 @@ readable only by its owner, and nothing removes it automatically: that is the ca
 ```quiver
 d = %fs.temp [] ~> =\[]
 %fs.dir? [d]                              //= Ok
-%fs.list [d] ~> %iter.count ~             //= 0
+%fs.list [d] ~> %iter.count               //= 0
 %fs.stat [d] ~> =Stat(perm: ~)            //= 448 // 0o700
 %fs.remove [d]                            //= Ok
 { %fs.exists? [d] }                       //= []
@@ -122,8 +122,8 @@ own kind, so a symlink lists as `Symlink` whatever it points to.
 d = %fs.temp [] ~> =\[]
 %fs.create_dir [%path.join [d, %path.parse "one"] ~> =\[]]
 %fs.create_dir [%path.join [d, %path.parse "two"] ~> =\[]]
-%fs.list [d] ~> %iter.count ~                                  //= 2
-%fs.list [d] ~> %iter.map [~, #'%fs.entry { $kind }] ~> %list.collect ~
+%fs.list [d] ~> %iter.count                                  //= 2
+%fs.list [d] ~> %iter.map [~, #'%fs.entry { $kind }] ~> %list.collect
 //= Cons[Dir, Cons[Dir, Nil]]
 %fs.remove [d, recursive?: Ok]                                 //= Ok
 ```
@@ -133,8 +133,8 @@ collect with `%list.try_collect` to see it. Listing what is not there fails stra
 
 ```quiver
 d = %fs.temp [] ~> =\[]
-%fs.list [d] ~> %list.try_collect ~                            //= Nil
-{ %fs.list [%path.parse "/nonexistent-quiver-path"] ~> %list.try_collect ~ }
+%fs.list [d] ~> %list.try_collect                              //= Nil
+{ %fs.list [%path.parse "/nonexistent-quiver-path"] ~> %list.try_collect }
 ~> :error<'%io> ~> =IoError(kind: ~)                           //= NotFound
 %fs.remove [d]                                                 //= Ok
 ```
@@ -150,10 +150,10 @@ d = %fs.temp [] ~> =\[]
 %fs.create_dir [%path.join [d, %path.parse "a/b"] ~> =\[], all?: Ok]           //= Ok
 %fs.write [%path.join [d, %path.parse "a/b/c.txt"] ~> =\[], <>]                //= Ok
 names = #'%fs.entry { $name }
-%fs.walk [d] ~> %iter.map [~, names] ~> %list.collect ~
+%fs.walk [d] ~> %iter.map [~, names] ~> %list.collect
 //= Cons["a", Cons["b", Cons["c.txt", Nil]]]
-%fs.walk [d] ~> %iter.filter [~, #'%fs.entry { =(kind: File) }] ~> %iter.map [~, #'%fs.entry { $path }] ~> %list.collect ~
-~> =Cons[~, Nil] ~> %path.basename ~                                            //= "c.txt"
+%fs.walk [d] ~> %iter.filter [~, #'%fs.entry { =(kind: File) }] ~> %iter.map [~, #'%fs.entry { $path }] ~> %list.collect
+~> =Cons[~, Nil] ~> %path.basename                                            //= "c.txt"
 ```
 
 A symlink is yielded but not entered, so a walk stays inside the tree it was given. With
@@ -165,15 +165,15 @@ outside = %fs.temp [] ~> =\[]
 %fs.write [%path.join [outside, %path.parse "far.txt"] ~> =\[], <>]            //= Ok
 %fs.symlink [link: %path.join [d, %path.parse "a/out"] ~> =\[], target: outside] //= Ok
 %fs.symlink [link: %path.join [d, %path.parse "a/loop"] ~> =\[], target: d]     //= Ok
-%fs.walk [d] ~> %iter.count ~                                                   //= 5
-%fs.walk [d, follow?: Ok] ~> %iter.count ~                                      //= 6 // far.txt, and loop is not entered
+%fs.walk [d] ~> %iter.count                                                     //= 5
+%fs.walk [d, follow?: Ok] ~> %iter.count                                        //= 6 // far.txt, and loop is not entered
 ```
 
 As with `list`, a failure — a directory that cannot be read, say — ends the walk carrying its
 `:error`, which `%list.try_collect` keeps:
 
 ```quiver
-{ %fs.walk [%path.parse "/nonexistent-quiver-path"] ~> %list.try_collect ~ }
+{ %fs.walk [%path.parse "/nonexistent-quiver-path"] ~> %list.try_collect }
 ~> :error<'%io> ~> =IoError(kind: ~)                                            //= NotFound
 %fs.remove [d, recursive?: Ok]                                                  //= Ok
 %fs.remove [outside, recursive?: Ok]                                            //= Ok
@@ -227,7 +227,7 @@ c = %path.join [d, %path.parse "c.txt"] ~> =\[]
 { %fs.exists? [a] }                            //= []
 %fs.stat [c] ~> =Stat(size: ~)                 //= 5
 %fs.rename [c, b]                              //= Ok // b is replaced
-%fs.list [d] ~> %iter.count ~                  //= 1
+%fs.list [d] ~> %iter.count                    //= 1
 %fs.remove [d, recursive?: Ok]                 //= Ok
 ```
 
