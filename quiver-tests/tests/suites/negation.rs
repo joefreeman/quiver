@@ -104,7 +104,11 @@ fn test_inexact_negation_does_not_narrow_later_branches() {
 
 #[test]
 fn test_strict_binder() {
-    // `(\[] & x)` binds `x` and fails the step when the value is nil.
+    // `x = … ~> =\[]` binds `x` and fails the step when the value is nil, as does
+    // `(\[] & x)`.
+    quiver()
+        .evaluate("f = #('int | []) { n = $ ~> =\\[]; %num.add [n, 1] }; [f 1, f []]")
+        .expect("[2, []]");
     quiver()
         .evaluate("f = #('int | []) { (\\[] & n) = $; %num.add [n, 1] }; [f 1, f []]")
         .expect("[2, []]");

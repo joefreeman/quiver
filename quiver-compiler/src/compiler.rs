@@ -667,7 +667,7 @@ impl std::fmt::Display for Error {
             Error::NegatedPatternBindings { bindings } => {
                 write!(
                     f,
-                    "A negated pattern cannot bind variables (found {bindings:?}); bind outside it, as in `(\\[] & x)`"
+                    "A negated pattern cannot bind variables (found {bindings:?}); bind outside it, as in `x = … ~> =\\[]`, or `(\\[] & x)` within a larger pattern"
                 )
             }
             Error::NegatedPatternRipple => write!(

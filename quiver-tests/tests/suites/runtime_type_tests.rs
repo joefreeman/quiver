@@ -37,7 +37,7 @@ fn test_a_tuple_built_wider_than_its_contents_passes_a_narrower_test() {
     quiver()
         .evaluate(
             "'single = Cons['int, Nil]
-             (\\[] & xs) = %data.decode<'%list<'int>> \"Cons[1, Nil]\"
+             xs = %data.decode<'%list<'int>> \"Cons[1, Nil]\" ~> =\\[]
              [xs ~> { ='single }, %data.decode<'%list<'int>> \"Cons[1, Cons[2, Nil]]\" ~> { ='single }]",
         )
         .expect("[Cons[1, Nil], []]");
@@ -59,7 +59,7 @@ fn test_narrowing_after_a_failed_test_sees_only_what_failed_it() {
         .evaluate(
             "'single = Cons['int, Nil]
              f = #'%list<'int> { | ='single => 0 | =Nil => 1 | =Cons[_, t] => t.0 }
-             (\\[] & xs) = %data.decode<'%list<'int>> \"Cons[1, Nil]\"
+             xs = %data.decode<'%list<'int>> \"Cons[1, Nil]\" ~> =\\[]
              f xs",
         )
         .expect("0");

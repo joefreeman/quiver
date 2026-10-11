@@ -294,7 +294,7 @@ reflect = __meta_reflect__<'data> ~> {
 
 // `%meta{ … }`: the content, read as code, as the code that builds it.
 quote = #(code: 'expr) -> ('expr | []) {
-  (\[] & tree) = reflect $code
+  tree = reflect $code ~> =\[]
   lift_step [lift_step, tree]
 }
 

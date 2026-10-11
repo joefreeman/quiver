@@ -597,14 +597,23 @@ A[b: <01>] ~> =A[b: \'int]         //= A[b: <01>]
 2 ~> =\(0 | 1)                    //= 2
 ```
 
-When a negation matches, its pattern didn't, so there is nothing to bind inside one. A
-binder outside it is fine, and a negated type narrows to what is left: `(\[] & x)` binds `x`
-and fails if the value is nil, without having to name the value's type.
+A negated type narrows to what is left, so `=\[]` rules out nil without having to name the
+value's type:
 
 ```quiver
-succ = #('int | []) { (\[] & n) = $; %num.add [n, 1] }
+succ = #('int | []) { n = $ ~> =\[]; %num.add [n, 1] }
 succ 4                        //= 5
 succ []                       //= []
+```
+
+When a negation matches, its pattern didn't, so there is nothing to bind inside one. A
+binder outside it is fine, which is how a field nested in a larger pattern is required to be
+non-nil:
+
+```quiver
+value = #['%str, ('%str | [])] { =[_, (\[] & v)]; v }
+value ["name", "ada"]         //= "ada"
+value ["name", []]            //= []
 5 ~> =\x                      //! cannot bind
 ```
 
