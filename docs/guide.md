@@ -956,6 +956,26 @@ that its behaviour depends on its type arguments themselves, so they must be con
 where it is applied: written, or determined by the argument. `%data.decode<'t>` is one,
 and as nothing in its argument determines `'t`, it is always written.
 
+A function that names one at its own type parameter is type-consuming too, and is instantiated
+where it is named in turn. Its body is still checked once, with its type parameters unknown:
+
+```quiver
+read = #<'t>'%str -> ('t | []) { %data.decode<'t> $ }
+read<'int> "42"                   //= 42
+read<Point[x: 'int]> "Point[x: 1]"   //= Point[x: 1]
+```
+
+Its type says that it consumes them, and travels with it — bound to another name, or
+destructured from a module — so it is instantiated wherever it is next named, which answers a
+plain function. Until then it fits no other type: not a plain function's, nor `_` or a type
+parameter, which would forget what it still needs. Calling it or passing it on is an error:
+
+```quiver
+read = #<'t>'%str -> ('t | []) { %data.decode<'t> $ }
+%list.map [%list{ "1" }, read]    //! passed on uninstantiated
+%list.map [%list{ "1" }, read<'int>]   //= Cons[1, Nil]
+```
+
 Inside its declaration, a type parameter is one unknown type. Its values can be passed on,
 matched, or used wherever `'t` itself is expected, but not as anything narrower:
 
@@ -1094,14 +1114,14 @@ Most of a program's types need no such functions. `convert` reads a tuple from t
 format shares, and writes it as them, by its layout: labelled fields from a record of keyed
 entries, positional ones from a list, a symbol from text. Its options name keys by a convention,
 rename or default particular fields, and say how a union's members are tagged. A format supplies
-the functions between its document and those shapes, `%json.edges` for JSON:
+the functions between its document and those shapes, and its `decode` and `encode` add them,
+passing the options on:
 
 ```quiver
 'user = User[full_name: '%str, age: 'int]
-%codec.convert<'user> [%json{ {"fullName": "Ada", "age": 36} }, using: %json.edges, keys: Camel]
+%json.decode<'user> [%json{ {"fullName": "Ada", "age": 36} }, keys: Camel]
 //= User[full_name: "Ada", age: 36]
-%codec.convert<'%json> [User[full_name: "Ada", age: 36], using: %json.edges, keys: Camel]
-~> ='%json ~> %json.stringify
+%json.encode [User[full_name: "Ada", age: 36], keys: Camel] ~> ='%json ~> %json.stringify
 //= "{\"fullName\":\"Ada\",\"age\":36}"
 ```
 
@@ -1780,7 +1800,7 @@ __integer_add__ [3, 4]                       //= 7
 | `%ref` | mints unique opaque identifiers |
 | `%panic` | aborts the process with a message |
 | `%data` | Quiver data notation: `encode` and `decode<'t>` |
-| `%json` | JSON parsing, rendering, querying and editing, its `edges` for `%codec.convert`, plus `%json{ … }` |
+| `%json` | JSON parsing, rendering, querying and editing, typed `decode<'t>` and `encode`, plus `%json{ … }` |
 | `%codec` | conversion between types, through supplied functions and the shapes formats share: `convert<'t>` |
 | `%parse` | parser combinators over binary input |
 | `%meta` | the code a dialect returns, and data as data |

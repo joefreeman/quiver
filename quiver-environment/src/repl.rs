@@ -367,6 +367,7 @@ impl<E: Effect> LineCompiler<E> {
                 // The REPL wrapper is never spawned; grant nothing.
                 states: None,
                 omittable: Vec::new(),
+                consumes: None,
             });
             let function = Function {
                 instructions,

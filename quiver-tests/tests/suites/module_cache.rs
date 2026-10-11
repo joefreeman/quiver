@@ -458,6 +458,22 @@ fn linked_session_checks_type_parameter_bounds() {
 }
 
 #[test]
+fn linked_session_instantiates_a_type_consuming_function() {
+    // `%json.decode` consumes its type arguments: what it needs where it is named is carried
+    // by its module's artifact, so a session linking it instantiates it as a cold compile does
+    // (rather than running it without its instantiation).
+    let store = build_artifacts(false);
+    let (mut environment, mut repl, virtual_time) = start_session(false, Some(store));
+    let ty = eval_line(
+        &mut environment,
+        &mut repl,
+        &virtual_time,
+        "%json.decode<U[a: 'int]> [%json{ {\"a\": 1} }] ~> =U[a: ~]",
+    );
+    assert_eq!(ty, "'int | []");
+}
+
+#[test]
 fn linked_receive_type_line_matches_cold_inference() {
     // A top-level select naming a module type makes receive-type extraction resolve
     // that module's namespace before the line's body compiles. With the module also

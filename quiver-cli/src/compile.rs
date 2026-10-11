@@ -121,6 +121,7 @@ pub fn compile_entry(
         // The entry is never spawned; grant nothing.
         states: None,
         omittable: Vec::new(),
+        consumes: None,
     });
 
     let entry = program.register_function(quiver_core::bytecode::Function {

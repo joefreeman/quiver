@@ -159,6 +159,7 @@ mod probe {
             receive: never,
             states: None,
             omittable: Vec::new(),
+            consumes: None,
         });
         let entry = program.register_function(Function {
             instructions: compiled.instructions,
@@ -217,12 +218,11 @@ fn test_a_parameter_the_argument_does_not_determine_must_be_written() {
 }
 
 #[test]
-fn test_an_inferred_type_argument_must_be_concrete() {
-    // Inside a generic function the argument's type is a variable, with no type id to embed.
+fn test_an_inferred_type_argument_is_instantiated_where_its_function_is_named() {
+    // Inside a generic function the argument's type is one of its type parameters, so the
+    // function consumes it: the instantiation is made where the function is named.
     assert_eq!(
-        probe::run("f = #<'t>'t { __probe__<'int> $ }; 1").unwrap_err(),
-        quiver_compiler::compiler::Error::TypeArgumentNotConcrete {
-            builtin: "probe".to_string(),
-        }
+        probe::run("f = #<'t>'t { __probe__<'int> $ }; f<'bin> <0a>").unwrap(),
+        ["'int", "'bin"]
     );
 }

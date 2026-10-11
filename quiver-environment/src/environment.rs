@@ -236,12 +236,16 @@ fn import_type_value(
             receive,
             states,
             omittable,
+            consumes,
         } => Type::Callable {
             parameter: import_type(program, src, type_remap, tuple_remap, parameter),
             result: import_type(program, src, type_remap, tuple_remap, result),
             receive: import_type(program, src, type_remap, tuple_remap, receive),
             states: states.map(|t| import_type(program, src, type_remap, tuple_remap, t)),
             omittable,
+            consumes: consumes.map(|consumes| {
+                consumes.with_templates(|t| import_type(program, src, type_remap, tuple_remap, t))
+            }),
         },
         Type::Process {
             send,
@@ -2939,6 +2943,7 @@ impl<E: Effect> Environment<E> {
                     receive: self.program.never(), // Builtins don't receive values
                     states: Some(param_type),      // ... and never tail-call
                     omittable: Vec::new(),
+                    consumes: None,
                 }
             }
             Value::Process(_, function_idx) => {

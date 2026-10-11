@@ -170,6 +170,7 @@ fn format_type_impl(
             receive,
             states,
             omittable,
+            ..
         } => {
             let fmt = |id: usize| {
                 lookup

@@ -102,6 +102,7 @@ fn compile_inner(
         receive: never,
         states: None,
         omittable: Vec::new(),
+        consumes: None,
     });
     let entry = program.register_function(Function {
         instructions: compiled.instructions,

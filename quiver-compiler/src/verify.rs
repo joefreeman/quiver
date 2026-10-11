@@ -35,13 +35,13 @@ impl CodeTables for Program {
 pub fn stack_effect(instruction: Instruction, tables: &impl CodeTables) -> Option<(usize, usize)> {
     let operand = instruction.operand() as usize;
     Some(match instruction.opcode() {
-        Opcode::Push | Opcode::Pick | Opcode::Load => (0, 1),
+        Opcode::Push | Opcode::Pick | Opcode::Load | Opcode::Hidden => (0, 1),
         Opcode::Pop | Opcode::Store | Opcode::JumpIf | Opcode::JumpUnless | Opcode::Recurse => {
             (1, 0)
         }
         Opcode::Reset | Opcode::Jump | Opcode::Trap => (0, 0),
         Opcode::Rotate => (operand, operand),
-        Opcode::Drop => (operand + 1, 1),
+        Opcode::Drop | Opcode::Extend => (operand + 1, 1),
         Opcode::GetPositional
         | Opcode::GetNamed
         | Opcode::TestType

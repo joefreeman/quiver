@@ -44,6 +44,99 @@ pub fn declared_variable_name(name: &str) -> &str {
     name.split('#').next().unwrap_or(name)
 }
 
+/// What a **type-consuming** function needs where it is named: whatever about it depends on
+/// its type arguments themselves, rather than only its type, so that they must be concrete
+/// there — written, or determined by the argument it is applied to.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+pub enum Consumes {
+    /// It is this type-consuming builtin, uninstantiated: naming it makes its instantiation
+    /// in its place.
+    #[serde(rename = "builtin")]
+    Builtin(String),
+    /// Its closure's hidden captures past those it was made with: these instantiations, whose
+    /// type arguments are templates over its type `parameters` (uniquified, in declaration
+    /// order, as written type arguments bind them). Naming it appends them.
+    #[serde(rename = "captures")]
+    Captures {
+        parameters: Vec<String>,
+        requirements: Vec<Requirement>,
+    },
+}
+
+/// An instantiation of a type-consuming builtin that a body needs: the builtin, and its type
+/// arguments as templates over the type parameters in scope.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+pub struct Requirement {
+    pub builtin: String,
+    pub type_arguments: Vec<usize>,
+}
+
+impl Consumes {
+    /// The type ids it mentions — a `Captures`' templates, in order — which are parts of the
+    /// function type that holds it.
+    pub fn templates(&self) -> impl Iterator<Item = usize> + '_ {
+        let requirements: &[Requirement] = match self {
+            Consumes::Builtin(_) => &[],
+            Consumes::Captures { requirements, .. } => requirements,
+        };
+        requirements
+            .iter()
+            .flat_map(|requirement| requirement.type_arguments.iter().copied())
+    }
+
+    /// The same, its templates replaced in order (as [`Self::templates`] lists them).
+    pub fn with_templates(&self, mut next: impl FnMut(usize) -> usize) -> Consumes {
+        match self {
+            Consumes::Builtin(name) => Consumes::Builtin(name.clone()),
+            Consumes::Captures {
+                parameters,
+                requirements,
+            } => Consumes::Captures {
+                parameters: parameters.clone(),
+                requirements: requirements
+                    .iter()
+                    .map(|requirement| Requirement {
+                        builtin: requirement.builtin.clone(),
+                        type_arguments: requirement
+                            .type_arguments
+                            .iter()
+                            .map(|&template| next(template))
+                            .collect(),
+                    })
+                    .collect(),
+            },
+        }
+    }
+}
+
+/// Whether a value of type `type_id` may hold a type-consuming function not yet named with its
+/// type arguments, anywhere within it. Such a value isn't complete: only its own type tracks
+/// what it still needs, so it fits neither the top type nor a type variable, which would
+/// forget it.
+pub fn holds_consuming(type_id: usize, lookup: &impl TypeLookup) -> bool {
+    find_consuming(type_id, lookup).is_some()
+}
+
+/// The type of a type-consuming function not yet named that a value of type `type_id` may
+/// hold (see [`holds_consuming`]), when there is one.
+pub fn find_consuming(type_id: usize, lookup: &impl TypeLookup) -> Option<usize> {
+    fn walk(type_id: usize, lookup: &impl TypeLookup, seen: &mut HashSet<usize>) -> Option<usize> {
+        if !seen.insert(type_id) {
+            return None;
+        }
+        match lookup.lookup_type(type_id)? {
+            Type::Callable {
+                consumes: Some(_), ..
+            } => Some(type_id),
+            typ => typ
+                .parts(lookup)
+                .into_iter()
+                .find_map(|part| walk(part, lookup, seen)),
+        }
+    }
+    walk(type_id, lookup, &mut HashSet::new())
+}
+
 /// The unified type representation used throughout compiler, runtime, and bytecode.
 /// All nested type references use IDs into a type registry.
 ///
@@ -89,6 +182,13 @@ pub enum Type {
         /// unmarked function remain interchangeable as values. Sorted, no duplicates.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         omittable: Vec<usize>,
+        /// What the function needs where it is named, when it consumes its type arguments
+        /// (see [`Consumes`]). Part of type identity and of compatibility: a consuming
+        /// function fits only its own type, so it can be neither called nor passed where a
+        /// plain function is expected until it has been named with its type arguments, which
+        /// answers the plain type.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        consumes: Option<Consumes>,
     },
     #[serde(rename = "cycle")]
     Cycle(usize),
@@ -168,6 +268,7 @@ impl Type {
                 receive,
                 states,
                 omittable,
+                consumes,
             } => Type::Callable {
                 parameter: ty(parameter),
                 result: ty(result),
@@ -175,6 +276,9 @@ impl Type {
                 states: states.as_ref().map(ty),
                 // Field positions, not ids — nothing to remap.
                 omittable: omittable.clone(),
+                consumes: consumes
+                    .as_ref()
+                    .map(|consumes| consumes.with_templates(|template| ty(&template))),
             },
             Type::Union(members) => Type::Union(members.iter().map(ty).collect()),
             Type::Intersection(members) => Type::Intersection(members.iter().map(ty).collect()),
@@ -326,6 +430,9 @@ enum TypeRepr {
         Option<usize>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")] Vec<usize>,
     ),
+    /// A consuming callable: `[parameter, result, receive, states, omittable, consumes]`.
+    #[serde(rename = "cfn")]
+    ConsumingCallable(usize, usize, usize, Option<usize>, Vec<usize>, Consumes),
     #[serde(rename = "cycle")]
     Cycle(usize),
     #[serde(rename = "union")]
@@ -363,7 +470,18 @@ impl From<Type> for TypeRepr {
                 receive,
                 states,
                 omittable,
+                consumes: None,
             } => TypeRepr::Callable(parameter, result, receive, states, omittable),
+            Type::Callable {
+                parameter,
+                result,
+                receive,
+                states,
+                omittable,
+                consumes: Some(consumes),
+            } => {
+                TypeRepr::ConsumingCallable(parameter, result, receive, states, omittable, consumes)
+            }
             Type::Cycle(depth) => TypeRepr::Cycle(depth),
             Type::Union(members) => TypeRepr::Union(members),
             Type::Annotated {
@@ -398,6 +516,22 @@ impl From<TypeRepr> for Type {
                 receive,
                 states,
                 omittable,
+                consumes: None,
+            },
+            TypeRepr::ConsumingCallable(
+                parameter,
+                result,
+                receive,
+                states,
+                omittable,
+                consumes,
+            ) => Type::Callable {
+                parameter,
+                result,
+                receive,
+                states,
+                omittable,
+                consumes: Some(consumes),
             },
             TypeRepr::Cycle(depth) => Type::Cycle(depth),
             TypeRepr::Union(members) => Type::Union(members),
@@ -451,7 +585,7 @@ impl Type {
     }
 
     /// This type's parts, in a fixed order: a union's or intersection's members, a tuple's
-    /// field types, a partial type's field types and then its rest type (when stated), a function type's parameter, result, receive and (when known) states, a process
+    /// field types, a partial type's field types and then its rest type (when stated), a function type's parameter, result, receive, (when known) states and then the templates it consumes, a process
     /// type's stated send, receive and state, an annotated type's base and entry types. A
     /// binder's parts sit one binder deeper than it (`binders::is_binder`).
     /// `Program::with_parts` rebuilds a type from replacements in the same order.
@@ -472,10 +606,12 @@ impl Type {
                 result,
                 receive,
                 states,
+                consumes,
                 ..
             } => [Some(*parameter), Some(*result), Some(*receive), *states]
                 .into_iter()
                 .flatten()
+                .chain(consumes.iter().flat_map(Consumes::templates))
                 .collect(),
             Type::Process {
                 send,
@@ -809,8 +945,9 @@ fn check_type_relation<T: TypeLookup>(
         }
 
         // Every value belongs to the top type, so everything is assignable to it, and every
-        // inhabited type (never is handled above) overlaps it.
-        (_, Type::Top) => true,
+        // inhabited type (never is handled above) overlaps it. A value holding a type-consuming
+        // function not yet named is the exception to assignability (see `holds_consuming`).
+        (_, Type::Top) => mode == UnionMode::Any || !holds_consuming(self_id, lookup),
 
         // Basic types must match exactly
         (Type::Integer, Type::Integer) => true,
@@ -1313,6 +1450,7 @@ fn check_type_relation<T: TypeLookup>(
                 receive: receive1,
                 states: states1,
                 omittable: omittable1,
+                consumes: consumes1,
             },
             Type::Callable {
                 parameter: param2,
@@ -1320,8 +1458,14 @@ fn check_type_relation<T: TypeLookup>(
                 receive: receive2,
                 states: states2,
                 omittable: omittable2,
+                consumes: consumes2,
             },
         ) => {
+            // A consuming function fits only its own kind: it can't be called until it is
+            // named with its type arguments, so it can't stand where a plain one is expected.
+            if consumes1 != consumes2 {
+                return false;
+            }
             if mode == UnionMode::Subsumption
                 && !omittable2.iter().all(|index| omittable1.contains(index))
             {
@@ -1518,6 +1662,7 @@ mod annotation_row_tests {
                 receive: 3,
                 states: None,
                 omittable: vec![],
+                consumes: None,
             },
             Type::Callable {
                 parameter: 1,
@@ -1525,6 +1670,21 @@ mod annotation_row_tests {
                 receive: 3,
                 states: Some(4),
                 omittable: vec![0, 2],
+                consumes: None,
+            },
+            Type::Callable {
+                parameter: 1,
+                result: 2,
+                receive: 3,
+                states: Some(4),
+                omittable: vec![],
+                consumes: Some(Consumes::Captures {
+                    parameters: vec!["t#1".to_string()],
+                    requirements: vec![Requirement {
+                        builtin: "data_decode".to_string(),
+                        type_arguments: vec![5],
+                    }],
+                }),
             },
             Type::Cycle(2),
             Type::Union(vec![]),
@@ -1573,7 +1733,8 @@ mod annotation_row_tests {
                 result: 2,
                 receive: 3,
                 states: None,
-                omittable: vec![]
+                omittable: vec![],
+                consumes: None,
             })
             .unwrap(),
             r#"{"fn":[1,2,3,null]}"#

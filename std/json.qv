@@ -618,7 +618,51 @@ edges = [
   ...standard,
 ]
 
+decode = #<'t, 'u, 'k, 'g, 'h>[
+  (document): (' | []),
+  (using): 'u = [],
+  (keys): 'k = [],
+  (tag): 'g = [],
+  (shapes): 'h = [],
+] -> ('t | []) {
+  :doc """
+    `decode<'t> [document]` converts a JSON document to `'t` — through JSON's own edges
+    (`edges`), and any given in `using:` — answering `'t | []`, nil carrying a `'%data.error`
+    when it doesn't convert. It takes `%codec.convert`'s options (`keys:`, `tag:`, `shapes:`). A
+    nil document (a failed `parse`) answers itself.
+    """
+  %codec.convert<'t> [
+    $document,
+    using: [edges, $using],
+    keys: $keys,
+    tag: $tag,
+    shapes: $shapes,
+  ]
+}
+
+encode = #<'s, 'u, 'k, 'g, 'h>[
+  (value): 's,
+  (using): 'u = [],
+  (keys): 'k = [],
+  (tag): 'g = [],
+  (shapes): 'h = [],
+] -> (' | []) {
+  :doc """
+    `encode [value]` converts a value to a JSON document through JSON's own edges, and any given
+    in `using:`, answering `' | []`. It takes `%codec.convert`'s options (`keys:`, `tag:`,
+    `shapes:`); `encode<'s>` states the value's type, where it is wider than the value's own — a
+    union's, for its variants to be tagged. A nil value answers itself.
+    """
+  %codec.convert<', 's> [
+    $value,
+    using: [edges, $using],
+    keys: $keys,
+    tag: $tag,
+    shapes: $shapes,
+  ]
+}
+
 {
   :dialect json
-  (parse, stringify, get, set, update, delete, merge, to_dict, object, array, edges)
+  (parse, stringify, get, set, update, delete, merge, to_dict, object, array, edges, decode, encode)
 }

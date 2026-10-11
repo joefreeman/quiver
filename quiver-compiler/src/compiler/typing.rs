@@ -33,13 +33,27 @@ pub enum TupleAccessor {
 /// union is spliced with its references to its own root closed (`splice_union_members`), so a
 /// recursive member keeps meaning the union it was written in.
 pub fn union_type_ids(program: &mut Program, type_ids: Vec<usize>) -> usize {
-    // The top type already holds every other member.
+    // The top type already holds every other member, but for one holding a type-consuming
+    // function not yet named, which it would forget (see `holds_consuming`).
     let is_top = |id: usize| matches!(program.lookup_type(id), Some(Type::Top));
     if type_ids.iter().any(|&id| {
         is_top(id)
             || matches!(program.lookup_type(id), Some(Type::Union(members)) if members.iter().any(|&m| is_top(m)))
     }) {
-        return program.register_type(Type::Top);
+        let top = program.register_type(Type::Top);
+        let members: Vec<usize> = type_ids
+            .iter()
+            .flat_map(|&id| match program.lookup_type(id) {
+                Some(Type::Union(members)) => members.clone(),
+                _ => vec![id],
+            })
+            .filter(|&member| quiver_core::types::holds_consuming(member, &*program))
+            .collect();
+        if members.is_empty() {
+            return top;
+        }
+        let members = distinct_members(program, std::iter::once(top).chain(members));
+        return program.register_type(Type::Union(members));
     }
     let is_union = |id: &usize| matches!(program.lookup_type(*id), Some(Type::Union(_)));
     if type_ids.iter().any(is_union) {
@@ -1295,6 +1309,7 @@ fn resolve_ast_type_impl(
                 receive: receive_type_id,
                 states: states_id,
                 omittable,
+                consumes: None,
             }))
         }
         ast::Type::Union(union) => {
@@ -1607,12 +1622,17 @@ pub fn contains_variables(type_id: usize, lookup: &impl TypeLookup) -> bool {
             result,
             receive,
             states,
+            consumes,
             ..
         } => {
             contains_variables(*parameter, lookup)
                 || contains_variables(*result, lookup)
                 || contains_variables(*receive, lookup)
                 || states.is_some_and(|s| contains_variables(s, lookup))
+                || consumes
+                    .iter()
+                    .flat_map(quiver_core::types::Consumes::templates)
+                    .any(|template| contains_variables(template, lookup))
         }
         Type::Process {
             send,
@@ -1683,14 +1703,22 @@ pub fn collect_type_variables(type_id: usize, lookup: &impl TypeLookup, names: &
             result,
             receive,
             states,
+            consumes,
             ..
         } => {
             let (parameter, result, receive, states) = (*parameter, *result, *receive, *states);
+            let templates: Vec<usize> = consumes
+                .iter()
+                .flat_map(quiver_core::types::Consumes::templates)
+                .collect();
             collect_type_variables(parameter, lookup, names);
             collect_type_variables(result, lookup, names);
             collect_type_variables(receive, lookup, names);
             if let Some(s) = states {
                 collect_type_variables(s, lookup, names);
+            }
+            for template in templates {
+                collect_type_variables(template, lookup, names);
             }
         }
         Type::Process {
@@ -1782,14 +1810,25 @@ fn collect_variables_by_variance(
             result,
             receive,
             states,
+            consumes,
             ..
         } => {
             let (parameter, result, receive, states) = (*parameter, *result, *receive, *states);
+            let templates: Vec<usize> = consumes
+                .iter()
+                .flat_map(quiver_core::types::Consumes::templates)
+                .collect();
             collect_variables_by_variance(parameter, program, !covariant, co, contra);
             collect_variables_by_variance(result, program, covariant, co, contra);
             collect_variables_by_variance(receive, program, covariant, co, contra);
             if let Some(states) = states {
                 collect_variables_by_variance(states, program, covariant, co, contra);
+            }
+            // What a function consumes is supplied where it is named, so it is invariant: a
+            // returned function's own consumed parameters stay open for that.
+            for template in templates {
+                collect_variables_by_variance(template, program, true, co, contra);
+                collect_variables_by_variance(template, program, false, co, contra);
             }
         }
         Type::Process {
@@ -2483,6 +2522,17 @@ fn unify_bounded(
             }
         }
 
+        // A type variable ranges over complete values only (see `holds_consuming`).
+        (Type::Variable(_) | Type::Top, _)
+            if quiver_core::types::holds_consuming(concrete_id, &*program) =>
+        {
+            let function =
+                quiver_core::types::find_consuming(concrete_id, &*program).expect("it holds one");
+            Err(Error::ConsumingUninstantiated {
+                function: quiver_core::format::format_type_by_id(&*program, function),
+            })
+        }
+
         // When pattern is a variable, bind it or check consistency
         (Type::Variable(name), _) => {
             let resolved_concrete_id = resolve_bound_variable(bindings, concrete_id, program);
@@ -2933,6 +2983,7 @@ fn unify_bounded(
                 result: result1,
                 receive: receive1,
                 states: states1,
+                consumes: consumes1,
                 ..
             },
             Type::Callable {
@@ -2940,9 +2991,24 @@ fn unify_bounded(
                 result: result2,
                 receive: receive2,
                 states: states2,
+                consumes: consumes2,
                 ..
             },
         ) => {
+            // A type-consuming function fits only its own type (see `check_type_relation`): one
+            // reaching a plain function type is being passed on uninstantiated.
+            if consumes1 != consumes2 {
+                return Err(match consumes2 {
+                    Some(_) => Error::ConsumingUninstantiated {
+                        function: quiver_core::format::format_type_by_id(&*program, concrete_id),
+                    },
+                    None => Error::TypeUnresolved(format!(
+                        "{} is not the type-consuming {}",
+                        quiver_core::format::format_type_by_id(&*program, concrete_id),
+                        quiver_core::format::format_type_by_id(&*program, pattern_id),
+                    )),
+                });
+            }
             // A generic function value is instantiated afresh wherever it is passed: two
             // uses of `id` in one argument are two instantiations, not one `'t` for both.
             let (param2, result2, receive2, states2) = if ctx.in_concrete_callable == 0

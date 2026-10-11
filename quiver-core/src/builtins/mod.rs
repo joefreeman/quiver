@@ -461,6 +461,7 @@ impl TypeSpec {
                     receive,
                     states: None,
                     omittable: Vec::new(),
+                    consumes: None,
                 }
             }
             TypeSpec::Cycle(depth) => Type::Cycle(*depth),

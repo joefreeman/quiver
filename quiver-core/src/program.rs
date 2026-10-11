@@ -702,13 +702,17 @@ impl Program {
                 rest: rest.map(|_| next()),
             },
             Type::Callable {
-                states, omittable, ..
+                states,
+                omittable,
+                consumes,
+                ..
             } => Type::Callable {
                 parameter: next(),
                 result: next(),
                 receive: next(),
                 states: states.map(|_| next()),
                 omittable,
+                consumes: consumes.map(|consumes| consumes.with_templates(|_| next())),
             },
             Type::Process {
                 send,

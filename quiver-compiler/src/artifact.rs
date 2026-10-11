@@ -49,7 +49,7 @@ use quiver_core::builtins::BuiltinRegistry;
 use quiver_core::bytecode::{Function, IdRemaps, Instruction, Opcode, Site};
 use quiver_core::effects::Effect;
 use quiver_core::program::{Constant, Program};
-use quiver_core::types::{TupleTypeInfo, Type};
+use quiver_core::types::{Consumes, TupleTypeInfo, Type};
 use quiver_core::value::Value;
 
 /// The hash of every source that determines the compiler's behaviour (this crate and
@@ -807,6 +807,7 @@ fn fingerprint_type(type_id: usize, program: &Program, memo: &mut HashMap<usize,
             receive,
             states,
             omittable,
+            consumes,
         } => {
             8u8.hash(&mut hasher);
             fingerprint_type(*parameter, program, memo).hash(&mut hasher);
@@ -819,6 +820,27 @@ fn fingerprint_type(type_id: usize, program: &Program, memo: &mut HashMap<usize,
             // in which labels a parameter lets callers omit are different units, and
             // sharing a cache entry between them would hand one the other's convention.
             omittable.hash(&mut hasher);
+            // What it consumes is part of its identity too, its templates by their content.
+            match consumes {
+                None => 0u8.hash(&mut hasher),
+                Some(Consumes::Builtin(name)) => {
+                    1u8.hash(&mut hasher);
+                    name.hash(&mut hasher);
+                }
+                Some(Consumes::Captures {
+                    parameters,
+                    requirements,
+                }) => {
+                    2u8.hash(&mut hasher);
+                    parameters.hash(&mut hasher);
+                    for requirement in requirements {
+                        requirement.builtin.hash(&mut hasher);
+                        for &template in &requirement.type_arguments {
+                            fingerprint_type(template, program, memo).hash(&mut hasher);
+                        }
+                    }
+                }
+            }
         }
         Type::Union(members) => {
             9u8.hash(&mut hasher);
@@ -1445,10 +1467,12 @@ fn type_children(ty: &Type) -> Vec<usize> {
             result,
             receive,
             states,
+            consumes,
             ..
         } => [Some(*parameter), Some(*result), Some(*receive), *states]
             .into_iter()
             .flatten()
+            .chain(consumes.iter().flat_map(Consumes::templates))
             .collect(),
         Type::Annotated { base, entries, .. } => std::iter::once(*base)
             .chain(entries.iter().map(|(_, id)| *id))
@@ -1836,6 +1860,7 @@ fn collect_type_children(ty: &Type, closure: &mut Closure, queue: &mut Vec<Item>
             result,
             receive,
             states,
+            consumes,
             ..
         } => {
             add_type(*parameter, closure, queue);
@@ -1843,6 +1868,9 @@ fn collect_type_children(ty: &Type, closure: &mut Closure, queue: &mut Vec<Item>
             add_type(*receive, closure, queue);
             if let Some(states) = states {
                 add_type(*states, closure, queue);
+            }
+            for template in consumes.iter().flat_map(Consumes::templates) {
+                add_type(template, closure, queue);
             }
         }
         Type::Union(members) | Type::Intersection(members) => {
@@ -1979,11 +2007,13 @@ fn type_refs(ty: &Type) -> Vec<TypeRef> {
             result,
             receive,
             states,
+            consumes,
             ..
-        } => [parameter, result, receive]
+        } => [*parameter, *result, *receive]
             .into_iter()
-            .chain(states.iter())
-            .map(|type_id| TypeRef::Type(*type_id))
+            .chain(*states)
+            .chain(consumes.iter().flat_map(Consumes::templates))
+            .map(TypeRef::Type)
             .collect(),
         Type::Union(members) | Type::Intersection(members) => {
             members.iter().map(|id| TypeRef::Type(*id)).collect()

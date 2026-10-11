@@ -5,6 +5,7 @@ use crate::verify::Locals;
 mod annotations;
 mod code;
 mod codegen;
+pub mod consuming;
 mod dialect;
 mod elision;
 mod folding;
@@ -121,6 +122,17 @@ pub enum Error {
     TypeArgumentsRequired {
         builtin: String,
         parameter: String,
+    },
+    /// A type-consuming function named where a type parameter it consumes is neither written
+    /// nor determined by the argument it is applied to.
+    TypeArgumentUndetermined {
+        function: String,
+        parameter: String,
+    },
+    /// A type-consuming function called, or passed where a plain function is expected, before
+    /// it has been named with its type arguments.
+    ConsumingUninstantiated {
+        function: String,
     },
     /// A type-consuming builtin's type argument resolved to a type still containing
     /// type variables — there is no concrete type id to embed at the call site.
@@ -591,6 +603,19 @@ impl std::fmt::Display for Error {
             Error::ConversionUnplannable { message } => {
                 write!(f, "Conversion can't be planned: {message}")
             }
+            Error::TypeArgumentUndetermined {
+                function,
+                parameter,
+            } => write!(
+                f,
+                "{function} consumes its type arguments, so each must be written or determined \
+                 by the argument it is applied to where it is named: `'{parameter}` is neither"
+            ),
+            Error::ConsumingUninstantiated { function } => write!(
+                f,
+                "{function} consumes its type arguments, so it can't be called or passed on \
+                 uninstantiated: name it with them (`f<'t>`) first"
+            ),
             Error::TypeArgumentNotConcrete { builtin } => {
                 write!(
                     f,
@@ -1096,6 +1121,13 @@ fn condition_complement_faithful(condition: &ast::Sequence) -> bool {
     }
 }
 
+/// An import member as named: its value, or — for a type-consuming builtin named at a type
+/// parameter of the function being compiled — the instantiation that function requires.
+enum MemberInstance {
+    Value(Value),
+    Required(String, Vec<usize>),
+}
+
 /// The function index of a resolved value, when it is (directly) a function. Used at a call
 /// site to select the callee's dispatch table exactly, by identity rather than by its (possibly
 /// shared) callable type.
@@ -1189,6 +1221,8 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     // While compiling a function body, collects per-branch (guard, result) types for the
     // call-site return-type dispatch. `None` outside a function body.
     collected_dispatch: Option<DispatchCollection>,
+    // The requirements found so far in each function literal being compiled, innermost last.
+    requirement_frames: Vec<consuming::RequirementFrame>,
 
     // Set by the most recent function-body block: the unhandled parameter type when the body is
     // a non-exhaustive enumeration (every branch a variant pattern, but some variant uncovered).
@@ -1410,6 +1444,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             current_states: None,
             current_omittable: Vec::new(),
             collected_dispatch: None,
+            requirement_frames: Vec::new(),
             last_uncovered: None,
             self_tail_calls: 0,
             fn_case_tables: tables.fn_case_tables,
@@ -1897,6 +1932,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     found: quiver_core::format::format_type_by_id(&*self.program, value_type),
                 });
             }
+            // A row is shed at a declared boundary, after which only a checked retrieval reads the
+            // entry back, so an entry must be complete.
+            self.check_complete(value_type)?;
             // `:defaults` has no single expected type — it names a *subset* of the
             // parameter's fields — so it is checked against the carrier after the fact.
             if is_defaults {
@@ -2450,6 +2488,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     receive,
                     states: Some(parameter),
                     omittable: Vec::new(),
+                    consumes: None,
                 });
                 self.record_builtin_type_params(name, callable, parameter, result);
                 callable
@@ -3225,8 +3264,11 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // The literal's type parameters are rigid from its signature to the end of its body;
         // restored here so that no exit path, error included, leaks them to the enclosing code.
         let enclosing_rigid = self.program.rigid_variables().clone();
+        let frames = self.requirement_frames.len();
         let result = self.compile_function_literal(function, expected_parameter);
         self.program.set_rigid_variables(enclosing_rigid);
+        // A literal that failed leaves its frame open.
+        self.requirement_frames.truncate(frames);
         result
     }
 
@@ -3317,6 +3359,22 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let enclosing_rigid = self.program.rigid_variables().clone();
         self.program
             .set_rigid_variables(declared.rigid_over(&enclosing_rigid));
+        // The type parameters this literal declares itself, whose instantiations it may need
+        // from where it is named (a nested literal re-declaring an enclosing `'t` names that).
+        let own_parameters: Vec<String> = declared
+            .names()
+            .into_iter()
+            .filter(|name| {
+                !self
+                    .requirement_frames
+                    .iter()
+                    .any(|frame| frame.own.contains(name))
+            })
+            .collect();
+        self.requirement_frames.push(consuming::RequirementFrame {
+            own: own_parameters,
+            found: Vec::new(),
+        });
         // Which parameter labels this literal lets its callers omit (`#[(x): 'int]`). A
         // calling convention, so it rides the function type registered below rather than
         // the parameter's tuple type; an inferred parameter has no written spelling and so
@@ -3583,6 +3641,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     receive: receive_type,
                     states: None,
                     omittable: self.current_omittable.clone(),
+                    consumes: None,
                 });
                 let parts = typing::open_callable(declared, self.program)
                     .expect("a registered function type opens");
@@ -3699,13 +3758,17 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 // two large types explains nothing. If unification can't reproduce the
                 // failure (its semantics differ at the margins), fall back to the dump.
                 let mut diagnostic_bindings = HashMap::new();
-                if let Err(Error::TypeUnresolved(message)) = typing::unify(
+                match typing::unify(
                     &mut diagnostic_bindings,
                     expected_return_type,
                     body_type,
                     self.program,
                 ) {
-                    return Err(Error::DeclaredResultMismatch(message));
+                    Err(Error::TypeUnresolved(message)) => {
+                        return Err(Error::DeclaredResultMismatch(message));
+                    }
+                    Err(error @ Error::ConsumingUninstantiated { .. }) => return Err(error),
+                    _ => {}
                 }
                 // Get types for error message
                 let expected_type = self.program.lookup_type(expected_return_type).unwrap();
@@ -3717,7 +3780,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             }
         }
 
-        let body = std::mem::take(&mut self.codegen.instructions);
+        let mut body = std::mem::take(&mut self.codegen.instructions);
+        let frame = self
+            .requirement_frames
+            .pop()
+            .expect("the literal's requirement frame is open");
+        let (made_requirements, named_requirements) = self.finish_requirements(frame, &mut body);
         let function_instructions =
             self.finish_body(body, Locals::Filled(unique_captures.len()))?;
 
@@ -3764,12 +3832,21 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         //
         // A declared result is the contract: callers see it, never the body's sharper type, which
         // is free to change without changing what a call is typed as.
+        //
+        // The instantiations it needs over its own type parameters are part of its type: it
+        // consumes them, so it is named with them before it can be called.
         let callable_type_id = self.program.register_type(Type::Callable {
             parameter: parameter_type,
             result: written_result.unwrap_or(body_type),
             receive: self.current_receive_type_id,
             states: self.current_states,
             omittable: self.current_omittable.clone(),
+            consumes: (!named_requirements.is_empty()).then(|| {
+                quiver_core::types::Consumes::Captures {
+                    parameters: declared.names(),
+                    requirements: named_requirements,
+                }
+            }),
         });
 
         // Record the declared type parameters (as their uniquified variable names, in
@@ -3888,6 +3965,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
 
         self.codegen
             .add_instruction(Instruction::enclose(function_index));
+        // The instantiations it needs over enclosing type parameters are this body's to give:
+        // constants, or this body's own hidden captures.
+        self.extend_closure(&made_requirements, &HashMap::new())?;
 
         // Attach the literal's annotations to the freshly built closure. Evaluated here —
         // in the enclosing scope, once per literal evaluation — so `pre`/`post` contract
@@ -5988,6 +6068,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             receive: never_id,
             states: Some(nil_type_id),
             omittable: Vec::new(),
+            consumes: None,
         });
 
         // Generate bytecode, then add the module function
@@ -6251,13 +6332,16 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             Value::Int(_) | Value::BigInt(_) => self.program.register_type(Type::Integer),
             Value::Binary(_) => self.program.register_type(Type::Binary),
             Value::Tuple(tuple_id, _) => self.program.register_type(Type::Tuple(*tuple_id)),
-            // The callable type comes straight from the function's table entry — the same
-            // index is reused, no re-registration.
+            // The callable type comes from the function's table entry, as the plain one a
+            // type-consuming function has once named: a value judged by its function is
+            // complete, as one not yet named is only ever reached through its own type.
             Value::Function(function, _) => {
-                self.program
+                let type_id = self
+                    .program
                     .get_function(*function)
                     .ok_or(Error::FunctionUndefined(*function))?
-                    .type_id
+                    .type_id;
+                self.without_consumes(type_id)
             }
             // The generic signature, not the instantiation's: acceptable while no module
             // exports an instantiated builtin whose *result* depends on its type argument.
@@ -6269,6 +6353,10 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     .ok_or_else(|| Error::BuiltinUndefined(format!("builtin_id {builtin_id}")))?;
                 let parameter = builtin_info.param_type;
                 let result = builtin_info.result_type;
+                let consumes = self.uninstantiated_consumes(
+                    &builtin_info.name.clone(),
+                    !builtin_info.type_arguments.is_empty(),
+                );
                 let receive = self.program.never();
                 self.program.register_type(Type::Callable {
                     parameter,
@@ -6277,6 +6365,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Builtins never tail-call: their states are their parameter.
                     states: Some(parameter),
                     omittable: Vec::new(),
+                    consumes,
                 })
             }
             Value::Process(..) | Value::Resource(..) | Value::Reference(_) => {
@@ -6484,6 +6573,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// Emit spawn with argument (case 2)
     /// Stack before: [argument, function]
     fn emit_arg_spawn(&mut self, fn_type_id: usize, arg_type: usize) -> Result<usize, Error> {
+        // Spawning a type-consuming function names it, applied to its init.
+        let fn_type_id = self.instantiate_named(fn_type_id, &[], true, Some(arg_type))?;
         let Some(parts) = typing::open_callable(fn_type_id, self.program) else {
             return Err(Error::FeatureUnsupported(
                 "Can only spawn functions".to_string(),
@@ -6645,6 +6736,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     receive,
                     states: Some(parameter),
                     omittable: Vec::new(),
+                    consumes: None,
                 });
                 self.record_typed(
                     base_span,
@@ -6835,7 +6927,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 })?;
                 let (accessed_type, accessed_prov) =
                     self.compile_accessor(val_type, access.accessors, "value", value_provenance)?;
-                let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
+                let accessed_type =
+                    self.instantiate_named(accessed_type, &type_args, false, None)?;
                 Ok((accessed_type, accessed_prov))
             }
             Some(ast::AccessSource::Parameter { depth }) if depth > 0 => {
@@ -6865,7 +6958,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 let (accessed_type, accessed_prov) =
                     self.compile_member_access(&name, access.accessors)?;
-                let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
+                let accessed_type =
+                    self.instantiate_named(accessed_type, &type_args, is_applicable, value_type)?;
                 self.check_applied(applied, accessed_type)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
@@ -6895,7 +6989,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     "$",
                     Provenance::Parameter(level),
                 )?;
-                let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
+                let accessed_type =
+                    self.instantiate_named(accessed_type, &type_args, is_applicable, value_type)?;
                 self.check_applied(applied, accessed_type)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
@@ -6923,7 +7018,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 let (accessed_type, accessed_prov) =
                     self.compile_member_access(&name, access.accessors)?;
-                let accessed_type = self.instantiate_type_arguments(accessed_type, &type_args)?;
+                let accessed_type =
+                    self.instantiate_named(accessed_type, &type_args, is_applicable, value_type)?;
                 self.check_applied(applied, accessed_type)?;
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
@@ -6938,13 +7034,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     // Bare ~ - the flowing value itself.
                     if let Some(val_type) = value_type {
                         // Already on the stack as the chained value.
-                        let val_type = self.instantiate_type_arguments(val_type, &type_args)?;
+                        let val_type = self.instantiate_named(val_type, &type_args, false, None)?;
                         Ok((val_type, value_provenance))
                     } else if let Some(ctx) = ripple_context {
                         // Inherit the ripple context from the enclosing tuple.
                         self.codegen
                             .add_instruction(Instruction::pick(ctx.stack_offset));
-                        let ty = self.instantiate_type_arguments(ctx.value_type_id, &type_args)?;
+                        let ty =
+                            self.instantiate_named(ctx.value_type_id, &type_args, false, None)?;
                         Ok((ty, ctx.provenance.clone()))
                     } else {
                         Err(Error::FeatureUnsupported(
@@ -6962,7 +7059,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     let (accessed_type, accessed_prov) =
                         self.compile_accessor(piped_type, access.accessors, "~", value_provenance)?;
                     let accessed_type =
-                        self.instantiate_type_arguments(accessed_type, &type_args)?;
+                        self.instantiate_named(accessed_type, &type_args, false, None)?;
                     Ok((accessed_type, accessed_prov))
                 }
             }
@@ -6982,16 +7079,35 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         .map(|info| info.name.clone()),
                     _ => None,
                 };
-                let accessed_type = self.instantiate_type_arguments_of(
-                    accessed_type,
-                    builtin.as_deref(),
-                    &type_args,
-                )?;
+                // A type-consuming function instantiates once it is pushed, below; any other
+                // member's written type arguments apply to its type here.
+                let consuming = matches!(
+                    self.program.lookup_base(accessed_type),
+                    Some(Type::Callable {
+                        consumes: Some(quiver_core::types::Consumes::Captures { .. }),
+                        ..
+                    })
+                );
+                let accessed_type = if consuming {
+                    accessed_type
+                } else {
+                    self.instantiate_type_arguments_of(
+                        accessed_type,
+                        builtin.as_deref(),
+                        &type_args,
+                    )?
+                };
                 // A member holding a type-consuming builtin instantiates here
                 // (`%data.decode<'ev>`), so the emitted value carries the type id.
                 let argument = if applied { value_type } else { None };
-                let resolved_value =
+                let member =
                     self.instantiate_builtin_member(resolved_value, &type_args, applied, argument)?;
+                // Named with its type arguments, a type-consuming builtin is a plain function.
+                let accessed_type = if builtin.is_some() && (applied || !type_args.is_empty()) {
+                    self.without_consumes(accessed_type)
+                } else {
+                    accessed_type
+                };
 
                 self.check_applied(applied, accessed_type)?;
                 let is_applicable = applied && self.is_applicable_type(accessed_type);
@@ -7001,22 +7117,37 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 }
                 // Wrapper elision: an applied member that is a statically-known trivial
                 // forwarder compiles as its builtin, so the callee is never pushed.
-                let forwarder = if is_applicable && value_type.is_some() && type_args.is_empty() {
-                    self.forwarder_for_member(&resolved_value, accessed_type)
-                } else {
-                    None
+                let forwarder = match &member {
+                    MemberInstance::Value(value)
+                        if is_applicable && value_type.is_some() && type_args.is_empty() =>
+                    {
+                        self.forwarder_for_member(value, accessed_type)
+                    }
+                    _ => None,
                 };
-                if forwarder.is_some() {
+                let resolved_value = match member {
                     // Elided: no callee push.
+                    MemberInstance::Value(value) if forwarder.is_some() => Some(value),
+                    MemberInstance::Value(value) => {
+                        self.emit_value(&value)?;
+                        Some(value)
+                    }
+                    MemberInstance::Required(builtin, type_arguments) => {
+                        self.emit_instance(&builtin, type_arguments)?;
+                        None
+                    }
+                };
+                let accessed_type = if consuming {
+                    self.instantiate_named(accessed_type, &type_args, is_applicable, value_type)?
                 } else {
-                    self.emit_value(&resolved_value)?;
-                }
+                    accessed_type
+                };
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
                     // The resolved member is a concrete function value, so its dispatch table can
                     // be selected exactly by index — vital when its type is shared with another
                     // dispatch function (e.g. `%num.add` vs `%num.div`).
-                    let callee_fn = value_fn_index(&resolved_value);
+                    let callee_fn = resolved_value.as_ref().and_then(value_fn_index);
                     let ty = self.apply_value_to_type(
                         accessed_type,
                         val_type,
@@ -8384,6 +8515,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         value_type: usize,
         callee_fn: Option<usize>,
     ) -> Result<(usize, usize, usize), Error> {
+        self.check_named(target_type_id)?;
         let parts =
             typing::open_callable(target_type_id, self.program).expect("a function type opens");
         let (param_id, result_id, receive_id) = (parts.parameter, parts.result, parts.receive);
@@ -8462,6 +8594,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         callable_type_id: usize,
         arg_type: usize,
     ) -> Result<usize, Error> {
+        self.check_named(callable_type_id)?;
         let Some(parts) = typing::open_callable(callable_type_id, self.program) else {
             return Err(Error::TypeMismatch {
                 expected: "function".to_string(),
@@ -8523,6 +8656,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if quiver_core::types::is_compatible(message_type, send, &*self.program) {
             return Ok(());
         }
+        self.check_complete(message_type)?;
         let (expected, found) = self.mismatch_types(send, message_type);
         Err(Error::TypeMismatch {
             expected: format!("message compatible with {expected}"),
@@ -8572,6 +8706,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if fits {
             return Ok(());
         }
+        self.check_complete(arg_type)?;
         let (expected, found) = self.mismatch_types(param, shown);
         Err(Error::TypeMismatch {
             expected: format!("function parameter compatible with {expected}"),
@@ -8674,6 +8809,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let fn_type = value_type.ok_or_else(|| {
             Error::FeatureUnsupported("`^~` tail call requires a piped function".to_string())
         })?;
+        self.check_named(fn_type)?;
         let Some(parts) = typing::open_callable(fn_type, self.program) else {
             return Err(Error::TypeMismatch {
                 expected: "function".to_string(),
@@ -8757,15 +8893,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // `instantiate_type_arguments` every access head gets.
         let type_arguments =
             self.resolve_builtin_type_arguments(name, type_arguments, applied, argument)?;
-
-        let builtin_index = self.program.register_builtin_instantiated(
-            name.to_string(),
-            type_arguments,
-            self.builtins,
-        );
-        check_conversion_plan(self.program, builtin_index)?;
-
-        self.emit_builtin(builtin_index);
+        let consumes = self.uninstantiated_consumes(name, !type_arguments.is_empty());
+        self.emit_instance(name, type_arguments)?;
 
         let never_id = self.program.never();
         let callable_type_id = self.program.register_type(Type::Callable {
@@ -8775,11 +8904,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             // Builtins never tail-call: their states are their parameter.
             states: Some(param_type_id),
             omittable: Vec::new(),
+            consumes,
         });
 
         self.record_builtin_type_params(name, callable_type_id, param_type_id, result_type_id);
 
         Ok(callable_type_id)
+    }
+
+    /// What a reference to the builtin `name` consumes: itself, when it is type-consuming and
+    /// not `instantiated` here.
+    fn uninstantiated_consumes(
+        &self,
+        name: &str,
+        instantiated: bool,
+    ) -> Option<quiver_core::types::Consumes> {
+        let consuming = self
+            .builtins
+            .get_type_parameters(name)
+            .is_some_and(|parameters| !parameters.is_empty());
+        (consuming && !instantiated)
+            .then(|| quiver_core::types::Consumes::Builtin(name.to_string()))
     }
 
     /// Resolve a type-consuming builtin's type arguments to the concrete type ids its
@@ -8821,7 +8966,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             };
             let type_id =
                 typing::resolve_ast_type(&mut env, &self.scopes, written.clone(), self.program)?;
-            if typing::contains_variables(type_id, &*self.program) {
+            // A type parameter of a function being compiled is concrete where that function
+            // is named, which is where the instantiation is then made.
+            if self.has_free_variables(type_id) && !self.only_open_variables(type_id) {
                 return Err(not_concrete());
             }
             resolved.push(type_id);
@@ -8858,7 +9005,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                         builtin: name.to_string(),
                         parameter: variable.clone(),
                     })?;
-            if self.has_free_variables(inferred) {
+            if self.has_free_variables(inferred) && !self.only_open_variables(inferred) {
                 return Err(not_concrete());
             }
             resolved.push(inferred);
@@ -8866,25 +9013,35 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         Ok(resolved)
     }
 
-    /// Whether `type_id` mentions a type variable that nothing inside it declares. A generic
+    /// Whether `type_id` mentions a type variable that nothing inside it declares (see
+    /// [`Self::free_variables`]).
+    fn has_free_variables(&self, type_id: usize) -> bool {
+        !self.free_variables(type_id).is_empty()
+    }
+
+    /// The type variables `type_id` mentions that nothing inside it declares. A generic
     /// function's type quantifies its own parameters — it stands for every instantiation —
     /// while any other variable, an enclosing generic's say, leaves the type without a
     /// concrete meaning.
-    fn has_free_variables(&self, type_id: usize) -> bool {
+    fn free_variables(&self, type_id: usize) -> Vec<String> {
         fn walk(
             compiler: &Compiler<'_, impl quiver_core::effects::Effect>,
             type_id: usize,
             quantified: &mut Vec<String>,
             seen: &mut HashSet<(usize, usize)>,
-        ) -> bool {
+            free: &mut Vec<String>,
+        ) {
             if !seen.insert((type_id, quantified.len())) {
-                return false;
+                return;
             }
             let Some(typ) = compiler.program.lookup_type(type_id) else {
-                return false;
+                return;
             };
             if let Type::Variable(name) = typ {
-                return !quantified.contains(name);
+                if !quantified.contains(name) && !free.contains(name) {
+                    free.push(name.clone());
+                }
+                return;
             }
             let declared = compiler
                 .callable_type_params
@@ -8893,14 +9050,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 .unwrap_or_default();
             let depth = quantified.len();
             quantified.extend(declared);
-            let free = typ
-                .parts(&*compiler.program)
-                .into_iter()
-                .any(|part| walk(compiler, part, quantified, seen));
+            for part in typ.parts(&*compiler.program) {
+                walk(compiler, part, quantified, seen, free);
+            }
             quantified.truncate(depth);
-            free
         }
-        walk(self, type_id, &mut Vec::new(), &mut HashSet::new())
+        let mut free = Vec::new();
+        walk(
+            self,
+            type_id,
+            &mut Vec::new(),
+            &mut HashSet::new(),
+            &mut free,
+        );
+        free
     }
 
     /// An import member holding a **type-consuming builtin** value (a module export
@@ -8916,9 +9079,9 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         type_arguments: &[ast::Type],
         applied: bool,
         argument: Option<usize>,
-    ) -> Result<Value, Error> {
+    ) -> Result<MemberInstance, Error> {
         let Value::Builtin(builtin_id, ref payload) = value else {
-            return Ok(value);
+            return Ok(MemberInstance::Value(value));
         };
         let Some((name, instantiated)) = self
             .program
@@ -8926,7 +9089,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .get(builtin_id)
             .map(|b| (b.name.clone(), !b.type_arguments.is_empty()))
         else {
-            return Ok(value);
+            return Ok(MemberInstance::Value(value));
         };
         if instantiated {
             if !type_arguments.is_empty() {
@@ -8935,12 +9098,20 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     given: type_arguments.len(),
                 });
             }
-            return Ok(value);
+            return Ok(MemberInstance::Value(value));
         }
         let type_arguments =
             self.resolve_builtin_type_arguments(&name, type_arguments, applied, argument)?;
         if type_arguments.is_empty() {
-            return Ok(value);
+            return Ok(MemberInstance::Value(value));
+        }
+        // At a type parameter of a function being compiled, the instantiation is that
+        // function's requirement.
+        if type_arguments
+            .iter()
+            .any(|&argument| self.has_free_variables(argument))
+        {
+            return Ok(MemberInstance::Required(name, type_arguments));
         }
         let instantiated =
             self.program
@@ -8952,14 +9123,14 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             .as_deref()
             .map(|p| p.annotations().to_vec())
             .unwrap_or_default();
-        Ok(Value::Builtin(
+        Ok(MemberInstance::Value(Value::Builtin(
             instantiated,
             Some(
                 Payload::with_annotations(vec![], annotations)
                     .with_type_arguments(type_arguments)
                     .shared(),
             ),
-        ))
+        )))
     }
 
     /// Record a builtin callable's type parameters for explicit instantiation: the

@@ -613,4 +613,14 @@ show = #'int -> '%str { %str.from_int $ }
 `%json.edges` is pairs between JSON's object and a record and between its array and a list, and
 the standard library's own (`%codec.standard`). A format of another syntax needs only the same:
 a document type, its parser and printer, and the pairs between its document and the neutral
-shapes.
+shapes. Its typed `decode` and `encode` are then ordinary functions over `convert`, which is how
+`%json` writes them:
+
+```quiver ignore
+decode = #<'t, 'u, 'k, 'g, 'h>[(document): (' | []), (using): 'u = [], (keys): 'k = [], …] -> ('t | []) {
+  %codec.convert<'t> [$document, using: [edges, $using], keys: $keys, …]
+}
+```
+
+Naming `convert` at its own type parameter makes `decode` *type-consuming*, as `convert` is:
+`%json.decode<'user>` plans the conversion where it is written.

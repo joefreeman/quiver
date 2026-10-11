@@ -80,6 +80,7 @@ mod tls;
 mod tls_leaks;
 mod top_type;
 mod tuples;
+mod type_consuming;
 mod types;
 mod units;
 mod websocket;

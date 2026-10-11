@@ -419,64 +419,82 @@ entries but not their order:
 ~> %json.object ~> %json.get [~, %list{ "m", "x" }]   //= 7
 ```
 
-## Converting to a program's types
+## Typed decoding and encoding
 
-`%codec.convert` takes a document to a program's type, and back, through JSON's edges
-(`%json.edges`): a program's tuples read from JSON's objects, arrays and strings by their layout,
-and need no edges of their own unless they are written some other way. `convert`'s options —
-`keys:`, `tag:` and `shapes:` — say how their fields and variants are written:
+`decode<'t>` converts a document to the program's type `'t`, and `encode` a value to a document.
+Both are `%codec.convert` with JSON's own edges (`%json.edges`) added to any given in `using:`,
+so a program's tuples read from JSON's objects, arrays and strings by their layout, and need no
+edges of their own unless they are written some other way. They take `convert`'s options —
+`keys:`, `tag:` and `shapes:` — and pass them on:
 
 ```quiver
 'user = User[name: '%str, age: 'int, email: ('%str | [])]
 shapes = [User[default: [age: 0]]]
 
 "\{\"name\": \"Ada\", \"email\": \"ada@example.com\"}"
-~> %json.parse ~> %codec.convert<'user> [~, using: %json.edges, shapes: shapes]
+~> %json.parse ~> %json.decode<'user> [~, shapes: shapes]
 //= User[name: "Ada", age: 0, email: "ada@example.com"]
-%codec.convert<'%json> [User[name: "Ada", age: 36, email: []], using: %json.edges]
-~> ='%json ~> %json.stringify
+%json.encode [User[name: "Ada", age: 36, email: []]] ~> ='%json ~> %json.stringify
 //= "{\"name\":\"Ada\",\"age\":36}"
 ```
 
 ```quiver
 'user = User[full_name: '%str, age: 'int]
-%codec.convert<'user> [%json{ {"fullName": "Ada", "age": 36} }, using: %json.edges, keys: Camel]
+%json.decode<'user> [%json{ {"fullName": "Ada", "age": 36} }, keys: Camel]
 //= User[full_name: "Ada", age: 36]
-%codec.convert<'%json> [User[full_name: "Ada", age: 36], using: %json.edges, keys: Camel]
-~> ='%json ~> %json.stringify
+%json.encode [User[full_name: "Ada", age: 36], keys: Camel] ~> ='%json ~> %json.stringify
 //= "{\"fullName\":\"Ada\",\"age\":36}"
 ```
 
-A program's own edges go beside JSON's, as a tuple of their own:
+A value whose own type is narrower than the union it is a variant of states the union, so that
+it is written as that variant, tag and all:
+
+```quiver
+'shape = Circle[radius: 'int] | Dot
+%json.encode<'shape> [Dot, tag: Internal[key: "type"]] ~> ='%json ~> %json.stringify
+//= "{\"type\":\"Dot\"}"
+```
+
+A program's own edges go in `using:`:
 
 ```quiver
 'reading = Reading[celsius: 'int]
-tenths = Edge[
+digits = Edge[
   out: #'%str -> ('int | []) { %str.parse_int $ },
   in: #'int -> '%str { %str.from_int $ },
 ]
-%codec.convert<'reading> [%json{ {"celsius": "21"} }, using: [%json.edges, [tenths]]]
-//= Reading[celsius: 21]
+%json.decode<'reading> [%json{ {"celsius": "21"} }, using: [digits]]   //= Reading[celsius: 21]
+```
+
+JSON's own values need no edges at all:
+
+```quiver
+"[1, 2, 3]" ~> %json.parse ~> %json.decode<'%list<'int>> [~]   //= Cons[1, Cons[2, Cons[3, Nil]]]
+%json.encode [%list{ "a", "b" }] ~> ='%json ~> %json.stringify   //= "[\"a\",\"b\"]"
 ```
 
 A document that doesn't convert answers nil carrying a `'%data.error`, its path leading to where
 it failed. A nil document — a failed `parse` — answers itself, its own `:error` intact, and so
-does a nil value given to be written:
+does a nil value given to `encode`:
 
 ```quiver
 'user = User[name: '%str, age: 'int]
-r = %codec.convert<'user> [%json{ {"name": "Ada", "age": "old"} }, using: %json.edges]
+r = %json.decode<'user> [%json{ {"name": "Ada", "age": "old"} }]
 r   //= []
 r:error<'%data.error> ~> =DecodeError(path: ~)   //= Cons["age", Nil]
-"\{" ~> %json.parse ~> %codec.convert<'user> [~, using: %json.edges] ~> :error<Expected(offset: 'int)>
+"\{" ~> %json.parse ~> %json.decode<'user> [~] ~> :error<Expected(offset: 'int)>
 //= Expected(offset: 1)
-%codec.convert<'%json> [r, using: %json.edges] ~> :error<'%data.error> ~> =DecodeError(path: ~)
-//= Cons["age", Nil]
+%json.encode [r] ~> :error<'%data.error> ~> =DecodeError(path: ~)   //= Cons["age", Nil]
 ```
 
-The conversion is planned where it is written, so a type with no route from JSON is a compile
-error there:
+The conversion is planned where `decode` is named, from JSON's own type, so a type that no JSON
+reaches is a compile error there, and a document that doesn't reach one that some JSON does is a
+failure when it runs:
 
 ```quiver
-%codec.convert<'int> [%json{ "1" }, using: %json.edges]   //! no route
+%json.decode<'ref> [%json{ 1 }]   //! no route
+```
+
+```quiver
+%json.decode<'int> [%json{ "1" }]   //= []
 ```

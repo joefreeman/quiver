@@ -176,16 +176,24 @@ impl TypeIndex {
                 pattern_id,
                 &lookup,
             ),
-            ConcreteType::Function(func_id) => admit_if(is_compatible(
+            // A type-consuming function is judged as the plain function it is once named: one
+            // not yet named never meets a runtime test that could admit it, as only its own
+            // type tracks it (see `holds_consuming`).
+            ConcreteType::Function(func_id) => admit_if(is_compatible_plain(
                 tables.functions[func_id].type_id,
                 pattern_id,
                 &lookup,
             )),
-            ConcreteType::Builtin(builtin_id) => admit_if(
-                self.callable_to_type
-                    .get(&tables.builtin_signatures[builtin_id])
-                    .is_some_and(|&rep| is_compatible(rep, pattern_id, &lookup)),
-            ),
+            // A builtin is judged by its signature, as a plain function: the representative
+            // may be the type of a type-consuming one held uninstantiated, which shares it.
+            // (Holding that one is what the compiler's types track; a runtime test can't tell
+            // it from its instantiations.)
+            ConcreteType::Builtin(builtin_id) => {
+                let rep = *self
+                    .callable_to_type
+                    .get(&tables.builtin_signatures[builtin_id])?;
+                admit_if(is_compatible_plain(rep, pattern_id, &lookup))
+            }
             // A pid is judged by the process type its root function gives it — sends,
             // await result and states alike: its state is what makes a received pid
             // trustworthy for bare `?p`, which has no runtime test of its own.
@@ -200,6 +208,24 @@ impl TypeIndex {
                     .is_some_and(|&rep| is_compatible(rep, pattern_id, &lookup)),
             ),
         }
+    }
+}
+
+/// Whether the callable type `type_id` fits `pattern_id` as the plain function it is once named
+/// with any type arguments it consumes.
+fn is_compatible_plain(type_id: usize, pattern_id: usize, lookup: &Lookup<'_>) -> bool {
+    match lookup.lookup_type(type_id) {
+        Some(Type::Callable {
+            consumes: Some(_), ..
+        }) => {
+            let mut plain = lookup.types[type_id].clone();
+            if let Type::Callable { consumes, .. } = &mut plain {
+                *consumes = None;
+            }
+            let lookup = lookup.clone().with_extra(plain);
+            is_compatible(lookup.extra_id(), pattern_id, &lookup)
+        }
+        _ => is_compatible(type_id, pattern_id, lookup),
     }
 }
 
@@ -227,6 +253,7 @@ fn process_type(func: &Function, types: &[Type]) -> Type {
 
 /// The tables as a [`TypeLookup`], optionally answering one more type — one the program need
 /// not contain, such as the process type of a function nothing named — at the next id.
+#[derive(Clone)]
 struct Lookup<'a> {
     types: &'a [Type],
     tuples: &'a [TupleTypeInfo],

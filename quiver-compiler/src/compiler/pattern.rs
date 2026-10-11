@@ -792,6 +792,14 @@ fn type_check_requirements(
         } else {
             resolved
         };
+        // A type-consuming function not yet named is judged at run time as the plain function
+        // it becomes once named, which only its static type says it isn't yet. A value that
+        // may hold one is therefore tested against what it can be, not the pattern as written.
+        let tested = if quiver_core::types::holds_consuming(narrowed, &*program) {
+            intersect_types(narrowed, tested, program)
+        } else {
+            tested
+        };
         // Elide the runtime check only when the scrutinee *provably* fits: identical
         // ids always do, and otherwise `is_compatible` can vouch only for cycle-free
         // operands — it traverses a `Cycle` optimistically, so trusting it on a
