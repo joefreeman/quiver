@@ -27,11 +27,12 @@ malformed, mismatched, or left over answers nil, exactly like a failed match.
 %data.encode Point[x: 1, y: [2, Blue]]        //= "Point[x: 1, y: [2, Blue]]"
 ```
 
-Text that a string literal can carry uses the string sugar, with the language's escapes. `{` is
-among them, so encoded text reads back as *literal* code: nothing in it interpolates.
+Text that a string literal can carry uses the string sugar, with the language's escapes. A
+backslash is escaped like the rest, so encoded text never holds a `\{` hole and reads back as
+*literal* code: nothing in it interpolates.
 
 ```quiver
-%data.encode "a\"b\\c\{d\ne"   //= "\"a\\\"b\\\\c\\{d\\ne\""
+%data.encode "a\"b\\c{d\ne"    //= "\"a\\\"b\\\\c{d\\ne\""
 ```
 
 Bytes no string literal could carry fall back to the ordinary tuple form — a `Str` is only ever
@@ -168,8 +169,8 @@ to the root union:
 ## What fails
 
 Every kind of mismatch is the same nil: a name the expected type has no member for, the wrong
-arity, malformed bytes, input left over at the end, a raw newline inside a string, or an
-expected type too partial to build a value from.
+arity, malformed bytes, input left over at the end, a raw newline or a `\{` hole inside a
+string, or an expected type too partial to build a value from.
 
 ```quiver
 %data.decode<(A | B)> "C"          //= [] // no such member
@@ -177,6 +178,7 @@ expected type too partial to build a value from.
 %data.decode<'bin> "<0a1>"         //= [] // odd hex
 %data.decode<'int> "4 2"           //= [] // trailing input
 %data.decode<Str['bin]> "\"a\nb\""   //= [] // a string literal ends at the line
+%data.decode<'%str> "\"a\\{b}\""    //= [] // data never interpolates
 %data.decode<(x: 'int)> "[x: 1]"   //= [] // a partial type has no layout to construct
 ```
 
@@ -208,7 +210,7 @@ covers at once — a bignum, an escaped string, and a recursive list:
 
 ```quiver
 'pt = Point[x: 'int, y: Str['bin], z: (Nil | Cons['int, ^])]
-v = Point[x: -12345678901234567890123, y: "a\"b\\c\{d\ne", z: Cons[1, Cons[2, Nil]]]
+v = Point[x: -12345678901234567890123, y: "a\"b\\c{d\ne", z: Cons[1, Cons[2, Nil]]]
 %data.encode v ~> %data.decode<'pt> ~   //= ^v
 ```
 

@@ -796,8 +796,8 @@ fn render_hole(chain: &Chain) -> String {
     }
 }
 
-/// Render a string-literal term in its original delimiter style: a single-line `"…"` (with
-/// interpolation holes), or a multi-line `"""…"""` block (text only).
+/// Render a string-literal term in its original delimiter style: a single-line `"…"` or a
+/// multi-line `"""…"""` block, either with interpolation holes.
 fn string_term_doc(trivia: &Trivia, style: StringStyle, segments: &[StrSegment]) -> Doc {
     match style {
         StringStyle::Single => single_line_string_doc(trivia, segments),
@@ -816,7 +816,7 @@ fn single_line_string_doc(trivia: &Trivia, segments: &[StrSegment]) -> Doc {
                 out.push_str(&escape_single_line_text(text));
             }
             // A hole parses like a block body. Render its branches flat (single-line strings stay
-            // on one line) and wrap them tightly in braces — `{name}`, not `{ name }`.
+            // on one line) and wrap them tightly in braces — `\{name}`, not `\{ name }`.
             StrSegment::Hole(block) => {
                 let body = block
                     .branches
@@ -824,7 +824,7 @@ fn single_line_string_doc(trivia: &Trivia, segments: &[StrSegment]) -> Doc {
                     .map(|branch| pretty::flatten(&branch_doc(trivia, branch, false)))
                     .collect::<Vec<_>>()
                     .join(" | ");
-                out.push('{');
+                out.push_str("\\{");
                 out.push_str(&body);
                 out.push('}');
             }
@@ -834,15 +834,14 @@ fn single_line_string_doc(trivia: &Trivia, segments: &[StrSegment]) -> Doc {
     pretty::text(out)
 }
 
-/// Escape literal text of a single-line string. As well as the basic escapes, `{` is escaped (a bare
-/// `{` would open an interpolation hole); `}` needs no escape.
+/// Escape literal text of a single-line string. Braces need no escape: only `\{` opens a hole, and
+/// a literal backslash is itself escaped.
 fn escape_single_line_text(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            '{' => out.push_str("\\{"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
@@ -923,7 +922,7 @@ fn tuple_doc(trivia: &Trivia, tuple: &Tuple) -> Doc {
 /// Render a multi-line string as a triple-quoted block. The content and closing delimiter are
 /// nested one level under the opening line; that indentation becomes the closing delimiter's
 /// *margin*, which the parser strips back off, so the value round-trips at any nesting depth.
-/// Interpolation holes sit inline on their line as `{…}`; a newline inside a text segment starts a
+/// Interpolation holes sit inline on their line as `\{…}`; a newline inside a text segment starts a
 /// new line.
 fn multiline_string_doc(trivia: &Trivia, segments: &[StrSegment]) -> Doc {
     // Build the content line by line, escaping text and rendering holes inline.
@@ -951,7 +950,7 @@ fn multiline_string_doc(trivia: &Trivia, segments: &[StrSegment]) -> Doc {
                     .collect::<Vec<_>>()
                     .join(" | ");
                 let line = lines.last_mut().unwrap();
-                line.push('{');
+                line.push_str("\\{");
                 line.push_str(&body);
                 line.push('}');
             }
@@ -973,16 +972,15 @@ fn multiline_string_doc(trivia: &Trivia, segments: &[StrSegment]) -> Doc {
 
 /// Escape one text fragment of a multi-line string (no trailing-space handling — that is applied per
 /// line). Tabs and carriage returns are escaped (a literal `\r` would be normalised to `\n`, a
-/// trailing tab would be stripped), a `"` that starts a `"""` run is escaped so it can't close the
-/// string, and a literal `{` becomes `\{` (a bare `{` opens an interpolation hole). Fragments are
-/// bounded by newlines and holes, neither of which can continue a run of quotes.
+/// trailing tab would be stripped), and a `"` that starts a `"""` run is escaped so it can't close
+/// the string. Fragments are bounded by newlines and holes, neither of which can continue a run of
+/// quotes.
 fn escape_multiline_text(text: &str) -> String {
     let mut out = String::new();
     for (index, ch) in text.char_indices() {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' if text[index + 1..].starts_with("\"\"") => out.push_str("\\\""),
-            '{' => out.push_str("\\{"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c => out.push(c),
@@ -2683,8 +2681,8 @@ mod tests {
     fn steps_in_an_interpolation_hole_stay_on_its_line() {
         // A hole has no lines to give: steps written apart in one rejoin with `;`.
         assert_formats(
-            "s = \"\"\"\n  pick {a = 1\n  a} done\n  \"\"\"\n",
-            "s = \"\"\"\n  pick {a = 1; a} done\n  \"\"\"\n",
+            "s = \"\"\"\n  pick \\{a = 1\n  a} done\n  \"\"\"\n",
+            "s = \"\"\"\n  pick \\{a = 1; a} done\n  \"\"\"\n",
         );
     }
 
@@ -3008,7 +3006,7 @@ mod tests {
             "x ~> %num.add [~, 2] ~> d\n",
         );
         assert_formats("[a, b] ~> f ~> g\n", "f [a, b] ~> g\n");
-        assert_formats("x ~> \"a{~}\" ~> d\n", "x ~> d \"a{~}\"\n");
+        assert_formats("x ~> \"a\\{~}\" ~> d\n", "x ~> d \"a\\{~}\"\n");
         // A block, a match or a tail call heading the chain stays put.
         assert_formats("x = 5 ~> { ^ ~> foo }\n", "x = 5 ~> { ^ ~> foo }\n");
         assert_formats("x ~> { =1 => a | b } ~> g\n", "x ~> { =1 => a | b } ~> g\n");
@@ -3074,14 +3072,14 @@ mod tests {
 
     #[test]
     fn interpolation_round_trips() {
-        // Holes render tightly (`{name}`), literal braces escape as `\{`, and nested strings,
+        // Holes render tightly (`\{name}`), literal braces need no escape, and nested strings,
         // adjacent holes, and multi-branch holes all survive a format round-trip unchanged.
         for source in [
-            "x = \"hello {name}!\"",
-            "x = \"{a}{b}\"",
-            "x = \"a \\{ b\"",
-            "x = \"pair: {[p, q] ~> %str.concat}\"",
-            "x = \"v: {flag ~> { =Ok => \"yes\" | \"no\" }}\"",
+            "x = \"hello \\{name}!\"",
+            "x = \"\\{a}\\{b}\"",
+            "x = \"a { b\"",
+            "x = \"pair: \\{[p, q] ~> %str.concat}\"",
+            "x = \"v: \\{flag ~> { =Ok => \"yes\" | \"no\" }}\"",
         ] {
             assert_idempotent(source, source);
         }
@@ -3090,7 +3088,7 @@ mod tests {
     #[test]
     fn interpolation_formats_tightly() {
         // A simple hole renders with no inner padding.
-        assert_formats("x = \"hi {name}\"", "x = \"hi {name}\"\n");
+        assert_formats("x = \"hi \\{name}\"", "x = \"hi \\{name}\"\n");
     }
 
     #[test]
@@ -3190,12 +3188,12 @@ mod tests {
     #[test]
     fn multiline_interpolation_round_trips() {
         // Holes in a multi-line string: inline on a line, the whole of a line, with surrounding
-        // text/spaces, a nested-string hole, an escaped literal brace, and a hole that itself spans
+        // text/spaces, a nested-string hole, a literal brace, and a hole that itself spans
         // lines. Each must format to a value-preserving fixpoint.
         for source in [
-            "s = \"\"\"\n    hi {name}\n    {x}\n    a \\{ b {[p, q] ~> %str.concat} c\n    \"\"\"",
+            "s = \"\"\"\n    hi \\{name}\n    \\{x}\n    a { b \\{[p, q] ~> %str.concat} c\n    \"\"\"",
             // A hole whose expression spans multiple lines stays a single hole.
-            "s = \"\"\"\n    pick {flag ~> {\n      =Ok => \"y\"\n      | \"n\"\n    }} done\n    \"\"\"",
+            "s = \"\"\"\n    pick \\{flag ~> {\n      =Ok => \"y\"\n      | \"n\"\n    }} done\n    \"\"\"",
         ] {
             let ast = parse(source).unwrap_or_else(|e| panic!("source must parse: {e:?}"));
             let printed = format_program(&ast, source);

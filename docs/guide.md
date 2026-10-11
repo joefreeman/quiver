@@ -119,14 +119,16 @@ value with no special support in the language.
 Str[<68656c6c6f>]             //= "hello"
 ```
 
-The escapes `\n`, `\r`, `\t`, `\\`, `\"` and `\{` are recognised. A `{ … }` hole
-interpolates, and the value must evaluate to a string.
+The escapes `\n`, `\r`, `\t`, `\\` and `\"` are recognised. A `\{ … }` hole
+interpolates, and the value must evaluate to a string. A bare `{` or `}` is just text, so
+JSON or CSS can be written as is. A string in a pattern matches fixed text, so it can't hold
+a hole.
 
 ```quiver
 name = "world"
-"hello {name}"                //= "hello world"
-"world" ~> "hello, {~}"       //= "hello, world"
-"1 + 1 = {%str.from_int 2}"   //= "1 + 1 = 2"
+"hello \{name}"               //= "hello world"
+"world" ~> "hello, \{~}"      //= "hello, world"
+"1 + 1 = \{%str.from_int 2}"  //= "1 + 1 = 2"
 ```
 
 A `"""`-delimited string spans lines. The closing delimiter's indentation sets a margin
@@ -1122,8 +1124,8 @@ type's members, so decoding can never produce a shape the program does not alrea
 contain. Anything malformed or mismatched answers nil, like a failed match, and the nil
 carries why under `:error`: a `'%data.error` `DecodeError`, with a path to where it failed.
 
-Strings do not interpolate in data — a `{` is literal, and `encode` escapes it so encoded
-text also reads as literal. Values with identity (refs, pids, functions, resources) have
+Strings do not interpolate in data, and as `encode` escapes every backslash, encoded text
+never holds a `\{` hole and also reads as literal code. Values with identity (refs, pids, functions, resources) have
 no notation at all. The values that do are the type `'%data` — `'int | 'bin | (*^)`, the
 integers, binaries, and tuples whose fields are data, by a [rest type](#partial-types).
 `encode` takes one, as do `%dict` and `%registry` keys, and it is the [bound](#bounds) for a
@@ -1164,7 +1166,7 @@ passing the options on, and read and write its text:
 
 ```quiver
 'user = User[full_name: '%str, age: 'int]
-%json.decode<'user> ["\{\"fullName\": \"Ada\", \"age\": 36}", keys: Camel]
+%json.decode<'user> ["{\"fullName\": \"Ada\", \"age\": 36}", keys: Camel]
 //= User[full_name: "Ada", age: 36]
 %json.encode [User[full_name: "Ada", age: 36], keys: Camel]
 //= "{\"fullName\":\"Ada\",\"age\":36}"

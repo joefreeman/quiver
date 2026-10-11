@@ -69,7 +69,7 @@ an empty one instead.
 %exec.run ["pwd", cwd: %path.parse "/"] ~> =(stdout: ~) ~> Str[~]   //= "/\n"
 %exec.run [
   "sh",
-  %list{ "-c", "echo \"$GREETING, $\{HOME:-nobody}\"" },
+  %list{ "-c", "echo \"$GREETING, ${HOME:-nobody}\"" },
   env: %list{ Set["GREETING", "hi"], Unset["HOME"] },
 ]
 ~> =(stdout: ~) ~> Str[~]                                            //= "hi, nobody\n"

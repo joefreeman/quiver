@@ -113,7 +113,7 @@ binding = #[(attr): '%html.pattr, (event): '%str] {
     | value ~> =AHole[sp] => Expr[
         %meta.call ["html/live", "event_value", Unquote(sp.offset, sp.length)],
       ]
-    | %parse.fail [pos, "'\{ … }' (a binding's payload is a hole)"]
+    | %parse.fail [pos, "'{ … }' (a binding's payload is a hole)"]
   }
   ~> =('%html.pattr_val & payload)
 
@@ -231,7 +231,7 @@ key_opts = #[
     The options a key binding takes, as `on:keydown[…]`'s bracket: `keys` (one key, or a list — only
     these reach the server, matched against the browser's key name) plus `rate_opts`' `debounce` and
     `throttle`. Positional-first, so `on:keydown["Enter"]` sends only Enter, and
-    `on:keydown[%list\{ "Enter", "Escape" }]` those two.
+    `on:keydown[%list{ "Enter", "Escape" }]` those two.
     """
   opts_text ($debounce, $throttle, $keys)
 }
@@ -1421,7 +1421,7 @@ app = #<'i>('root_free | 'root_mapped<'i>) {
   :doc """
     Declares an app — the unit `handle` serves. `[root: comp]` names the root view (a placeable
     component from `component`), which mounts from nil; add `init: #'%http -> 'i` to derive the
-    root's mount init from the request instead (`init: #'%http \{ $ }` passes the request itself).
+    root's mount init from the request instead (`init: #'%http { $ }` passes the request itself).
     Further views are placed in view markup, not declared here.
 
     Spawns the app's parking registry, so create once at startup — the calling process owns it — and
@@ -1894,32 +1894,32 @@ sim_html = #<'i, 's, 'e: '%data>'sim<'i, 's, 'e> {
 // The generic client: resolves marker paths, applies patch frames, echoes event
 // payloads (vid 0 — one region, one view, until boundaries), reconnects with backoff
 // (a token the server still holds re-attaches silently; otherwise the cold join
-// replaces the region). (`\{` is a literal brace in a Quiver string.)
+// replaces the region).
 client_js = """
   <script>
-  (() => \{
+  (() => {
     const root = document.getElementById('q-root');
     const token = root.getAttribute('data-q-token') || '';
-    const nextNode = (n) => \{
+    const nextNode = (n) => {
       if (n.firstChild) return n.firstChild;
-      while (n && n !== root) \{
+      while (n && n !== root) {
         if (n.nextSibling) return n.nextSibling;
         n = n.parentNode;
       }
       return null;
     };
-    const scan = (a, b, visit) => \{
+    const scan = (a, b, visit) => {
       let n = a ? nextNode(a) : root.firstChild;
-      while (n && n !== b) \{
+      while (n && n !== b) {
         if (visit(n)) return;
         n = nextNode(n);
       }
     };
-    const mopen = (n) => \{
+    const mopen = (n) => {
       if (n.nodeType !== 8) return null;
-      if (n.data.startsWith('q:')) return \{ slot: parseInt(n.data.slice(2)) };
-      if (n.data === 'r') return \{ row: true };
-      if (n.data.startsWith('v:')) return \{ bnd: n.data.slice(2) };
+      if (n.data.startsWith('q:')) return { slot: parseInt(n.data.slice(2)) };
+      if (n.data === 'r') return { row: true };
+      if (n.data.startsWith('v:')) return { bnd: n.data.slice(2) };
       return null;
     };
     const mclose = (n) =>
@@ -1927,31 +1927,31 @@ client_js = """
       (n.data.startsWith('/q:') || n.data === '/r' || n.data.startsWith('/v:'));
     // A view's boundary range: the root view ("0") is the whole region; a child's is
     // its v: marker pair (ids are unique, so no depth counting is needed).
-    const boundary = (vid) => \{
-      if (vid === '0') return \{ open: null, close: null };
+    const boundary = (vid) => {
+      if (vid === '0') return { open: null, close: null };
       let open = null, close = null;
-      scan(null, null, (n) => \{
+      scan(null, null, (n) => {
         if (n.nodeType !== 8) return false;
         if (n.data === 'v:' + vid) open = n;
-        else if (n.data === '/v:' + vid) \{ close = n; return true; }
+        else if (n.data === '/v:' + vid) { close = n; return true; }
         return false;
       });
-      return open && close ? \{ open: open, close: close } : null;
+      return open && close ? { open: open, close: close } : null;
     };
-    const resolve = (path, from) => \{
+    const resolve = (path, from) => {
       let open = from.open, close = from.close;
-      for (const idx of path) \{
+      for (const idx of path) {
         // A segment indexes whatever the range holds: numbered slot markers (q:idx) or
         // anonymous row markers (the idx-th r) — the two never mix at one level.
         let found = null, depth = 0, rows = 0;
-        scan(open, close, (n) => \{
+        scan(open, close, (n) => {
           const o = mopen(n);
-          if (o) \{
-            if (depth === 0) \{
-              if (o.row) \{
-                if (rows === idx) \{ found = n; return true; }
+          if (o) {
+            if (depth === 0) {
+              if (o.row) {
+                if (rows === idx) { found = n; return true; }
                 rows++;
-              } else if (o.slot === idx) \{ found = n; return true; }
+              } else if (o.slot === idx) { found = n; return true; }
             }
             depth++;
           } else if (mclose(n)) depth--;
@@ -1959,10 +1959,10 @@ client_js = """
         });
         if (!found) return null;
         let end = null, d = 0;
-        scan(found, close, (n) => \{
+        scan(found, close, (n) => {
           if (mopen(n)) d++;
-          else if (mclose(n)) \{
-            if (d === 0) \{ end = n; return true; }
+          else if (mclose(n)) {
+            if (d === 0) { end = n; return true; }
             d--;
           }
           return false;
@@ -1971,10 +1971,10 @@ client_js = """
         open = found;
         close = end;
       }
-      return \{ open: open, close: close };
+      return { open: open, close: close };
     };
-    const setNodes = (r, frag) => \{
-      if (!r.open) \{ root.replaceChildren(frag); return; }
+    const setNodes = (r, frag) => {
+      if (!r.open) { root.replaceChildren(frag); return; }
       while (r.open.nextSibling && r.open.nextSibling !== r.close) r.open.nextSibling.remove();
       r.close.parentNode.insertBefore(frag, r.close);
     };
@@ -1982,21 +1982,21 @@ client_js = """
     // going into an <svg> is parsed as SVG. A detached <template> would parse everything as
     // HTML, which puts a patched-in <circle> in the wrong namespace — present in the DOM,
     // and invisible.
-    const parseHtml = (h, ctx) => \{
+    const parseHtml = (h, ctx) => {
       const range = document.createRange();
       range.selectNodeContents(ctx && ctx.nodeType === 1 ? ctx : root);
       return range.createContextualFragment(h);
     };
-    const apply = (b, p) => \{
-      if (p[0] === 'a') \{
+    const apply = (b, p) => {
+      if (p[0] === 'a') {
         const r = resolve(p[1].slice(0, -1), b);
         if (!r) return;
         const elem = String(p[2]), name = p[3], v = p[4];
         let target = null, depth = 0;
-        scan(r.open, r.close, (n) => \{
+        scan(r.open, r.close, (n) => {
           if (mopen(n)) depth++;
           else if (mclose(n)) depth--;
-          else if (n.nodeType === 1 && depth === 0 && n.getAttribute('data-q') === elem) \{
+          else if (n.nodeType === 1 && depth === 0 && n.getAttribute('data-q') === elem) {
             target = n;
             return true;
           }
@@ -2008,39 +2008,39 @@ client_js = """
         else target.setAttribute(name, v);
         if (name === 'value' && 'value' in target) target.value = v === null ? '' : v;
         if (name === 'checked' && 'checked' in target) target.checked = v !== null;
-      } else if (p[0] === 'r-') \{
+      } else if (p[0] === 'r-') {
         const r = resolve(p[1].concat([p[2]]), b);
         if (!r || !r.open) return;
         while (r.open.nextSibling && r.open.nextSibling !== r.close) r.open.nextSibling.remove();
         r.close.remove();
         r.open.remove();
-      } else if (p[0] === 'r>') \{
+      } else if (p[0] === 'r>') {
         const src = resolve(p[1].concat([p[2]]), b);
         if (!src || !src.open) return;
         const frag = document.createDocumentFragment();
         const stop = src.close.nextSibling;
         let n = src.open;
-        while (n && n !== stop) \{
+        while (n && n !== stop) {
           const nx = n.nextSibling;
           frag.appendChild(n);
           n = nx;
         }
         const dst = resolve(p[1].concat([p[3]]), b);
         if (dst && dst.open) dst.open.parentNode.insertBefore(frag, dst.open);
-        else \{
+        else {
           const r = resolve(p[1], b);
           if (r && r.close) r.close.parentNode.insertBefore(frag, r.close);
           else root.appendChild(frag);
         }
-      } else if (p[0] === 'r+') \{
+      } else if (p[0] === 'r+') {
         const r = resolve(p[1], b);
         if (!r) return;
         let before = null, depth = 0, rows = 0;
-        scan(r.open, r.close, (n) => \{
+        scan(r.open, r.close, (n) => {
           const o = mopen(n);
-          if (o) \{
-            if (depth === 0 && o.row) \{
-              if (rows === p[2]) \{ before = n; return true; }
+          if (o) {
+            if (depth === 0 && o.row) {
+              if (rows === p[2]) { before = n; return true; }
               rows++;
             }
             depth++;
@@ -2051,7 +2051,7 @@ client_js = """
         if (before) before.parentNode.insertBefore(frag, before);
         else if (r.close) r.close.parentNode.insertBefore(frag, r.close);
         else root.appendChild(frag);
-      } else \{
+      } else {
         const r = resolve(p[1], b);
         if (!r) return;
         const ctx = r.close ? r.close.parentNode : root;
@@ -2059,25 +2059,25 @@ client_js = """
       }
     };
     let ws = null, delay = 500;
-    const connect = () => \{
+    const connect = () => {
       const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
       ws = new WebSocket(proto + location.host + location.pathname + location.search);
-      ws.onopen = () => \{
+      ws.onopen = () => {
         delay = 500;
         ws.send(token);
       };
-      ws.onmessage = (e) => \{
+      ws.onmessage = (e) => {
         const m = JSON.parse(e.data);
         // A `[2, path]` frame is a server-initiated URL change: sync the address bar to
         // match the view the server already patched, without a full navigation.
-        if (m[0] === 2) \{ history.pushState(\{}, '', new URL(m[1], location.href).href); return; }
-        if (m[0] !== 1) \{ location.reload(); return; }
+        if (m[0] === 2) { history.pushState({}, '', new URL(m[1], location.href).href); return; }
+        if (m[0] !== 1) { location.reload(); return; }
         // m[1] is the frame's view id; a vid whose markers are gone (a just-removed
         // child) drops the whole frame.
         const b = boundary(m[1]);
         if (b) for (const p of m[2]) apply(b, p);
       };
-      ws.onclose = () => \{
+      ws.onclose = () => {
         setTimeout(connect, delay);
         delay = Math.min(delay * 2, 15000);
       };
@@ -2088,30 +2088,30 @@ client_js = """
     // pagehide (which also makes the page bfcache-eligible), without triggering the
     // reconnect; a restore from the cache reconnects, and the server treats the join
     // as any other (a fresh mount — a clean close ends the server-side app).
-    addEventListener('pagehide', () => \{
-      if (ws) \{
+    addEventListener('pagehide', () => {
+      if (ws) {
         ws.onclose = null;
         ws.close();
       }
     });
-    addEventListener('pageshow', (e) => \{
+    addEventListener('pageshow', (e) => {
       if (e.persisted) connect();
     });
     // The live element for an event, or null.
-    const live = (e, attr) => \{
+    const live = (e, attr) => {
       const el = e.target.closest && e.target.closest('[' + attr + ']');
       if (!el || !root.contains(el)) return null;
       return ws && ws.readyState === 1 ? el : null;
     };
     // The event's view: the nearest enclosing v: boundary, or the root ("0").
-    const vidOf = (el) => \{
+    const vidOf = (el) => {
       let stack = [], found = '0';
-      scan(null, null, (n) => \{
-        if (n.nodeType === 8) \{
+      scan(null, null, (n) => {
+        if (n.nodeType === 8) {
           if (n.data.startsWith('v:')) stack.push(n.data.slice(2));
           else if (n.data.startsWith('/v:')) stack.pop();
         }
-        if (n === el) \{
+        if (n === el) {
           if (stack.length) found = stack[stack.length - 1];
           return true;
         }
@@ -2129,7 +2129,7 @@ client_js = """
     const mods = (e) => [!!e.altKey, !!e.ctrlKey, !!e.shiftKey, !!e.metaKey];
     // A mouse event's position in the BOUND element's box, not the viewport: a surface
     // reads coordinates in its own space wherever it sits on the page.
-    const pointer = (e, el) => \{
+    const pointer = (e, el) => {
       const r = el.getBoundingClientRect();
       return [Math.round(e.clientX - r.left), Math.round(e.clientY - r.top), e.button | 0, mods(e)];
     };
@@ -2139,9 +2139,9 @@ client_js = """
       String(t.value == null ? '' : t.value),
       !!(t.type === 'checkbox' || t.type === 'radio') && !!t.checked,
     ];
-    const formPairs = (el) => \{
+    const formPairs = (el) => {
       const pairs = [];
-      new FormData(el).forEach((v, k) => \{
+      new FormData(el).forEach((v, k) => {
         if (typeof v === 'string') pairs.push([k, v]);
       });
       return pairs;
@@ -2164,34 +2164,34 @@ client_js = """
     // element drops its pending timer with it, which is what we want — a debounce for a
     // node that no longer exists has nothing to report.
     const limits = new WeakMap();
-    const limitState = (el, name) => \{
+    const limitState = (el, name) => {
       let m = limits.get(el);
-      if (!m) \{
-        m = \{};
+      if (!m) {
+        m = {};
         limits.set(el, m);
       }
-      if (!m[name]) m[name] = \{ timer: 0, last: 0 };
+      if (!m[name]) m[name] = { timer: 0, last: 0 };
       return m[name];
     };
     // A binding's options, from the `data-q-NAME-opts` its `[ … ]` bracket emitted:
     // [debounce, throttle, keys]. A binding without a bracket carries no attribute, and
     // takes the defaults — no rate limit, any key.
     const NO_OPTS = [0, 0, []];
-    const optsOf = (el, name) => \{
+    const optsOf = (el, name) => {
       const raw = el.getAttribute('data-q-' + name + '-opts');
       return raw ? JSON.parse(raw) : NO_OPTS;
     };
     // Deliver, or not, per the binding's rate limits (ms). Debounce waits for the events to
     // stop and sends the newest envelope; throttle sends the first of each window and drops
     // the rest. Neither is visible to the server.
-    const deliver = (el, name, opts, text) => \{
+    const deliver = (el, name, opts, text) => {
       const st = limitState(el, name);
-      if (opts[0] > 0) \{
+      if (opts[0] > 0) {
         clearTimeout(st.timer);
         st.timer = setTimeout(() => ws.send(text), opts[0]);
         return;
       }
-      if (opts[1] > 0) \{
+      if (opts[1] > 0) {
         const now = Date.now();
         if (now - st.last < opts[1]) return;
         st.last = now;
@@ -2201,10 +2201,10 @@ client_js = """
     // A key filter drops the other keys client-side: they never reach the server at all.
     const keyAllowed = (e, keys) =>
       keys.length === 0 || e.key == null || keys.indexOf(e.key) >= 0;
-    EVENTS.forEach((entry) => \{
+    EVENTS.forEach((entry) => {
       const name = entry[0], cancel = entry[1], meta = entry[2];
       const attr = 'data-q-' + name;
-      document.addEventListener(name, (e) => \{
+      document.addEventListener(name, (e) => {
         const el = live(e, attr);
         if (!el) return;
         const opts = optsOf(el, name);
@@ -2219,14 +2219,14 @@ client_js = """
     // message and the URL is updated in place, instead of a full page load. Modified
     // clicks, cross-origin links, and (as a fallback) a closed socket keep the
     // browser's default navigation, so a live link degrades to an ordinary one.
-    const navTo = (href, push) => \{
+    const navTo = (href, push) => {
       const url = new URL(href, location.href);
       if (url.origin !== location.origin || !(ws && ws.readyState === 1)) return false;
-      if (push) history.pushState(\{}, '', url.href);
+      if (push) history.pushState({}, '', url.href);
       ws.send('["nav",' + JSON.stringify(url.pathname + url.search) + ']');
       return true;
     };
-    document.addEventListener('click', (e) => \{
+    document.addEventListener('click', (e) => {
       if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       const a = e.target.closest && e.target.closest('a[data-q-nav]');
       if (!a || !root.contains(a) || a.target || a.hasAttribute('download')) return;
@@ -2237,7 +2237,7 @@ client_js = """
     // the history entry already exists). Unlike a link click there is no default
     // navigation to fall through to — the browser has already moved the URL — so a
     // dead socket reloads, keeping the page and the address bar in step.
-    addEventListener('popstate', () => \{
+    addEventListener('popstate', () => {
       if (!navTo(location.pathname + location.search, false)) location.reload();
     });
   })();
@@ -2263,7 +2263,7 @@ handle = #[(req): '%http, (app): 'app] {
     websocket-upgrade request reads the token from the client's first frame and hands the claimed
     app the socket (an unknown token falls back to a cold fresh mount).
 
-    Wire it as `#'%http \{ %html/live.handle [$, app] }` with an `%html/live.app [root: comp]`
+    Wire it as `#'%http { %html/live.handle [$, app] }` with an `%html/live.app [root: comp]`
     created once at startup.
     """
   // The upgrade handler closes over `req` (an inner `$` would be its own

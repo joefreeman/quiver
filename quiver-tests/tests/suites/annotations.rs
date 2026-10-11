@@ -548,7 +548,7 @@ fn test_block_attach_annotation_chain_with_locals() {
         .evaluate("f = [1] ~> { :doc { y = \"q\"; y } }; f:doc")
         .expect("\"q\"");
     quiver()
-        .evaluate("noun = \"ints\"; f = [1] ~> { :doc \"adds {noun}\" }; z = 5; [f:doc, z]")
+        .evaluate("noun = \"ints\"; f = [1] ~> { :doc \"adds \\{noun}\" }; z = 5; [f:doc, z]")
         .expect("[\"adds ints\", 5]");
 }
 
@@ -580,7 +580,7 @@ fn test_module_member_builtin_doc() {
     let mut modules = HashMap::new();
     modules.insert(
         vec!["ops".to_string()],
-        "noun = \"integers\"; [ add: __integer_add__ ~> { :doc \"Adds two {noun}.\" } ]"
+        "noun = \"integers\"; [ add: __integer_add__ ~> { :doc \"Adds two \\{noun}.\" } ]"
             .to_string(),
     );
     quiver()

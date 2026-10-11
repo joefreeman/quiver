@@ -56,6 +56,7 @@ pub enum ErrorKind {
     IntegerMalformed(String),
     HexMalformed(String),
     StringEscapeInvalid(String),
+    HoleInPattern,
 
     // Delimiter errors
     UnterminatedTuple,
@@ -97,6 +98,9 @@ impl std::fmt::Display for ErrorKind {
             ErrorKind::IntegerMalformed(lit) => write!(f, "Malformed integer: {}", lit),
             ErrorKind::HexMalformed(lit) => write!(f, "Malformed hex literal: {}", lit),
             ErrorKind::StringEscapeInvalid(esc) => write!(f, "Invalid string escape: {}", esc),
+            ErrorKind::HoleInPattern => {
+                write!(f, "A string in a pattern cannot interpolate a value")
+            }
 
             ErrorKind::UnterminatedTuple => write!(f, "Unterminated tuple: expected ']'"),
             ErrorKind::UnterminatedString => write!(f, "Unterminated string: expected '\"'"),
@@ -193,7 +197,10 @@ impl ErrorKind {
                 "Binary literals are an even number of hexadecimal digits between angle brackets: <0a1b>"
             }
             ErrorKind::StringEscapeInvalid(_) => {
-                "Valid escape sequences are: \\n \\r \\t \\\\ \\\""
+                "Valid escape sequences are: \\n \\r \\t \\\\ \\\" — and \\{ … } interpolates; a bare '{' or '}' needs no escape"
+            }
+            ErrorKind::HoleInPattern => {
+                "A pattern matches fixed text: for a literal brace drop the backslash, or build the string first and pin it (s = \"…\\{x}\"; =^s)"
             }
             _ => return None,
         };
@@ -361,6 +368,17 @@ pub fn parse(source: &str) -> Result<Sequence, Error> {
                     // with the (otherwise unused) `TooLarge` code.
                     if is_failure && e.code == nom::error::ErrorKind::TooLarge {
                         return Err(Error::new(ErrorKind::NestingTooDeep, span));
+                    }
+                    // `reject_pattern_hole` smuggles an interpolation hole in a pattern string
+                    // out as a hard failure with the (otherwise unused) `Escaped` code.
+                    if is_failure && e.code == nom::error::ErrorKind::Escaped {
+                        return Err(Error::new(ErrorKind::HoleInPattern, span));
+                    }
+                    // `invalid_escape` smuggles a bad escape out as a hard failure with the
+                    // (otherwise unused) `EscapedTransform` code, located at its backslash.
+                    if is_failure && e.code == nom::error::ErrorKind::EscapedTransform {
+                        let escape = fragment.chars().take(2).collect();
+                        return Err(Error::new(ErrorKind::StringEscapeInvalid(escape), span));
                     }
                     // `hole` smuggles a hole outside quoted code out as a hard failure with
                     // the (otherwise unused) `Fix` code.
@@ -687,10 +705,10 @@ fn binary_literal(input: Span) -> IResult<Span, Literal> {
     Ok((remaining, Literal::Binary(BinaryLiteral::new(rows))))
 }
 
-/// Build the `Str[<…>]` tuple term that a string literal desugars to.
-/// Parse a single-line string body: the characters between `"` quotes, with escapes processed.
-/// The scan for the closing `"` is escape-aware (a backslash skips the next character), so an
-/// escaped quote `\"` does not terminate the string.
+/// Parse a single-line string at pattern position: the characters between `"` quotes, with
+/// escapes processed. The scan for the closing `"` is escape-aware (a backslash skips the next
+/// character), so an escaped quote `\"` does not terminate the string. A pattern is text only,
+/// so an interpolation hole `\{` is rejected.
 fn single_line_string(input: Span) -> IResult<Span, String> {
     let (body, _) = char('"')(input)?;
     let frag = body.fragment();
@@ -713,10 +731,54 @@ fn single_line_string(input: Span) -> IResult<Span, String> {
     let idx = close.ok_or_else(|| {
         nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Eof))
     })?;
-    let value = parse_string_content(body.slice(..idx)).map_err(|_| {
-        nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::MapRes))
-    })?;
+    let raw = body.slice(..idx);
+    reject_pattern_hole(raw)?;
+    let value = parse_string_content(raw)?;
     Ok((body.slice(idx + 1..), value))
+}
+
+/// Fail if a pattern string's raw body contains an interpolation hole (`\{`): a pattern
+/// matches fixed text, so there is no value to interpolate. The failure is smuggled out with
+/// the (otherwise unused) `Escaped` code, located at the hole — hard, except in a binding's
+/// target (see [`binding_target`]), which is only a guess at how the step reads.
+fn reject_pattern_hole(raw: Span) -> Result<(), nom::Err<nom::error::Error<Span>>> {
+    let frag = raw.fragment();
+    let mut iter = frag.char_indices();
+    while let Some((idx, ch)) = iter.next() {
+        if ch == '\\'
+            && let Some((_, '{')) = iter.next()
+        {
+            let error = nom::error::Error::new(raw.slice(idx..), nom::error::ErrorKind::Escaped);
+            return Err(if BINDING_TARGET.with(std::cell::Cell::get) {
+                nom::Err::Error(error)
+            } else {
+                nom::Err::Failure(error)
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Decode the character following a `\` in a string, or `None` if it is not an escape. `\{`
+/// is not an escape but an interpolation hole, which the callers handle.
+fn decode_escape(esc: char) -> Option<char> {
+    match esc {
+        '"' => Some('"'),
+        '\\' => Some('\\'),
+        'n' => Some('\n'),
+        'r' => Some('\r'),
+        't' => Some('\t'),
+        _ => None,
+    }
+}
+
+/// The failure for an invalid escape, located at its backslash and smuggled out with the
+/// (otherwise unused) `EscapedTransform` code.
+fn invalid_escape(at: Span) -> nom::Err<nom::error::Error<Span>> {
+    nom::Err::Failure(nom::error::Error::new(
+        at,
+        nom::error::ErrorKind::EscapedTransform,
+    ))
 }
 
 fn string_term(input: Span) -> IResult<Span, Term> {
@@ -731,7 +793,7 @@ fn string_term(input: Span) -> IResult<Span, Term> {
     ))(input)
 }
 
-/// Parse a single-line string at term position into its segments, where `{ … }` introduces an
+/// Parse a single-line string at term position into its segments, where `\{ … }` introduces an
 /// interpolation hole.
 fn single_line_segments(input: Span) -> IResult<Span, Vec<StrSegment>> {
     let (rest, _) = char('"')(input)?;
@@ -739,9 +801,9 @@ fn single_line_segments(input: Span) -> IResult<Span, Vec<StrSegment>> {
 }
 
 /// Split the body of a single-line string (after the opening `"`) into literal-text and hole
-/// segments, stopping at the closing `"`. Escapes are decoded into the text; an unescaped `{` opens
-/// a hole, which is parsed exactly like a block body (`{ … }`). `open` is the opening quote, used
-/// only to locate errors.
+/// segments, stopping at the closing `"`. Escapes are decoded into the text; `\{` opens a hole,
+/// which is parsed exactly like a block body (`{ … }`), while a bare `{` or `}` is literal text.
+/// `open` is the opening quote, used only to locate errors.
 fn string_segments<'a>(open: Span<'a>, input: Span<'a>) -> IResult<Span<'a>, Vec<StrSegment>> {
     let unterminated =
         || nom::Err::Failure(nom::error::Error::new(open, nom::error::ErrorKind::Eof));
@@ -761,30 +823,19 @@ fn string_segments<'a>(open: Span<'a>, input: Span<'a>) -> IResult<Span<'a>, Vec
                 }
                 return Ok((input.slice(pos + 1..), segments));
             }
-            '{' => {
-                if !text.is_empty() {
-                    segments.push(StrSegment::Text(std::mem::take(&mut text)));
-                }
-                let (after, hole) = block(input.slice(pos..))?;
-                segments.push(StrSegment::Hole(hole));
-                pos = after.location_offset() - input.location_offset();
-            }
             '\\' => {
                 let esc = frag[pos + 1..].chars().next().ok_or_else(unterminated)?;
-                let decoded = match esc {
-                    '"' => '"',
-                    '\\' => '\\',
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    '{' => '{',
-                    _ => {
-                        return Err(nom::Err::Failure(nom::error::Error::new(
-                            open,
-                            nom::error::ErrorKind::MapRes,
-                        )));
+                if esc == '{' {
+                    if !text.is_empty() {
+                        segments.push(StrSegment::Text(std::mem::take(&mut text)));
                     }
-                };
+                    let (after, hole) = block(input.slice(pos + 1..))?;
+                    segments.push(StrSegment::Hole(hole));
+                    pos = after.location_offset() - input.location_offset();
+                    continue;
+                }
+                let decoded =
+                    decode_escape(esc).ok_or_else(|| invalid_escape(input.slice(pos..)))?;
                 text.extend_from_slice(decoded.encode_utf8(&mut buf).as_bytes());
                 pos += '\\'.len_utf8() + esc.len_utf8();
             }
@@ -933,74 +984,22 @@ fn match_fraction(input: Span) -> IResult<Span, Match> {
     map(fraction_parts, |(n, d)| rational_match(n, d))(input)
 }
 
-fn parse_string_content(span: Span) -> Result<String, Error> {
-    let s = span.fragment();
+/// Decode a pattern string's raw body (holes already rejected by [`reject_pattern_hole`]).
+fn parse_string_content(span: Span) -> Result<String, nom::Err<nom::error::Error<Span>>> {
+    let frag = span.fragment();
     let mut result = String::new();
-    let mut chars = s.chars();
-    let mut offset = 0;
-
-    while let Some(ch) = chars.next() {
+    let mut iter = frag.char_indices();
+    while let Some((idx, ch)) = iter.next() {
         if ch == '\\' {
-            let escape_offset = offset;
-            offset += ch.len_utf8();
-
-            match chars.next() {
-                Some('"') => {
-                    result.push('"');
-                    offset += 1;
-                }
-                Some('\\') => {
-                    result.push('\\');
-                    offset += 1;
-                }
-                Some('n') => {
-                    result.push('\n');
-                    offset += 1;
-                }
-                Some('r') => {
-                    result.push('\r');
-                    offset += 1;
-                }
-                Some('t') => {
-                    result.push('\t');
-                    offset += 1;
-                }
-                // A literal brace; `{` alone opens an interpolation hole in a string term.
-                Some('{') => {
-                    result.push('{');
-                    offset += 1;
-                }
-                Some(c) => {
-                    let error_span = SourceSpan {
-                        offset: span.location_offset() + escape_offset,
-                        line: span.location_line() as usize,
-                        column: span.get_column() + escape_offset,
-                        length: 2, // backslash + character
-                    };
-                    return Err(Error::new(
-                        ErrorKind::StringEscapeInvalid(format!("\\{}", c)),
-                        Some(error_span),
-                    ));
-                }
-                None => {
-                    let error_span = SourceSpan {
-                        offset: span.location_offset() + escape_offset,
-                        line: span.location_line() as usize,
-                        column: span.get_column() + escape_offset,
-                        length: 1, // just the backslash
-                    };
-                    return Err(Error::new(
-                        ErrorKind::StringEscapeInvalid("\\".to_string()),
-                        Some(error_span),
-                    ));
-                }
-            }
+            let decoded = iter
+                .next()
+                .and_then(|(_, esc)| decode_escape(esc))
+                .ok_or_else(|| invalid_escape(span.slice(idx..)))?;
+            result.push(decoded);
         } else {
             result.push(ch);
-            offset += ch.len_utf8();
         }
     }
-
     Ok(result)
 }
 
@@ -1013,9 +1012,10 @@ fn is_hspace(c: char) -> bool {
 ///
 /// The scan for the closing `"""` is escape-aware, so `\"""` does not end the string. The
 /// raw text between the delimiters is then de-indented and its escapes processed (see
-/// [`process_multiline_string`]).
+/// [`process_multiline_string`]). As for a single-line pattern string, a hole is rejected.
 fn multiline_string(input: Span) -> IResult<Span, String> {
     let (rest, raw) = multiline_string_raw(input)?;
+    reject_pattern_hole(raw)?;
     match process_multiline_string(raw.fragment()) {
         Some(s) => Ok((rest, s)),
         // Structural problems (bad indentation, invalid escape) abort the parse. The detail is
@@ -1027,7 +1027,7 @@ fn multiline_string(input: Span) -> IResult<Span, String> {
     }
 }
 
-/// Parse a multi-line string at term position into its segments, so `{ … }` interpolation holes are
+/// Parse a multi-line string at term position into its segments, so `\{ … }` interpolation holes are
 /// recognised (unlike [`multiline_string`], the pattern-position form).
 fn multiline_string_segments(input: Span) -> IResult<Span, Vec<StrSegment>> {
     let (rest, raw) = multiline_string_raw(input)?;
@@ -1111,7 +1111,7 @@ fn multiline_dedent(raw: &str) -> Option<String> {
 /// is malformed. After de-indentation, escapes are processed — the single-line set plus `\s` (a
 /// strip-proof space) and `\<newline>` (line continuation, dropping the newline and the next line's
 /// leading whitespace). Trailing whitespace is stripped from each line; blank lines are emitted
-/// empty. This is the pattern-position form — `{` is literal (no interpolation).
+/// empty. This is the pattern-position form, with no interpolation (a `\{` is rejected before this).
 fn process_multiline_string(raw: &str) -> Option<String> {
     let dedented = multiline_dedent(raw)?;
 
@@ -1138,14 +1138,8 @@ fn process_multiline_string(raw: &str) -> Option<String> {
                             chars.next();
                         }
                     }
-                    '"' => result.push('"'),
-                    '\\' => result.push('\\'),
-                    'n' => result.push('\n'),
-                    'r' => result.push('\r'),
-                    't' => result.push('\t'),
                     's' => result.push(' '),
-                    '{' => result.push('{'),
-                    _ => return None,
+                    esc => result.push(decode_escape(esc)?),
                 }
             }
             _ => {
@@ -1158,9 +1152,10 @@ fn process_multiline_string(raw: &str) -> Option<String> {
     Some(result)
 }
 
-/// Like [`process_multiline_string`], but for term position: an unescaped `{` opens an interpolation
-/// hole (parsed like a block body), splitting the result into text and hole segments. The same
-/// escape/strip/continuation rules apply to the text between holes; `\{` is a literal brace.
+/// Like [`process_multiline_string`], but for term position: `\{` opens an interpolation hole
+/// (parsed like a block body), splitting the result into text and hole segments. The same
+/// escape/strip/continuation rules apply to the text between holes, where a bare `{` or `}` is
+/// literal.
 /// Returns `None` if malformed (bad de-indentation/escape, or an unparseable hole).
 fn process_multiline_segments(raw: &str) -> Option<Vec<StrSegment>> {
     let dedented = multiline_dedent(raw)?;
@@ -1182,22 +1177,21 @@ fn process_multiline_segments(raw: &str) -> Option<Vec<StrSegment>> {
                 result.push('\n');
                 pos += 1;
             }
-            '{' => {
-                // A hole boundary: whitespace before a hole is content, so keep it, then finalise
-                // the text run and parse the hole from the (de-indented) source.
-                result.push_str(&pending);
-                pending.clear();
-                if !result.is_empty() {
-                    segments.push(StrSegment::Text(std::mem::take(&mut result).into_bytes()));
-                }
-                let (after, hole) = block(LocatedSpan::new(rest)).ok()?;
-                segments.push(StrSegment::Hole(hole));
-                pos += after.location_offset();
-            }
             '\\' => {
                 result.push_str(&pending);
                 pending.clear();
                 let esc = rest[1..].chars().next()?;
+                if esc == '{' {
+                    // A hole boundary: whitespace before a hole is content (kept above), so
+                    // finalise the text run and parse the hole from the (de-indented) source.
+                    if !result.is_empty() {
+                        segments.push(StrSegment::Text(std::mem::take(&mut result).into_bytes()));
+                    }
+                    let (after, hole) = block(LocatedSpan::new(&rest[1..])).ok()?;
+                    segments.push(StrSegment::Hole(hole));
+                    pos += 1 + after.location_offset();
+                    continue;
+                }
                 pos += 1 + esc.len_utf8();
                 match esc {
                     // Line continuation: drop the newline and the next line's leading whitespace.
@@ -1206,14 +1200,8 @@ fn process_multiline_segments(raw: &str) -> Option<Vec<StrSegment>> {
                             pos += 1;
                         }
                     }
-                    '"' => result.push('"'),
-                    '\\' => result.push('\\'),
-                    'n' => result.push('\n'),
-                    'r' => result.push('\r'),
-                    't' => result.push('\t'),
                     's' => result.push(' '),
-                    '{' => result.push('{'),
-                    _ => return None,
+                    esc => result.push(decode_escape(esc)?),
                 }
             }
             _ => {
@@ -3207,13 +3195,28 @@ fn state_term(input: Span) -> IResult<Span, Term> {
     ))
 }
 
+thread_local! {
+    static BINDING_TARGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A binding's target pattern, `P` in `P = …`. Every step is tried as a binding before it is
+/// read as a value, so this parse is speculative: it marks itself so that an error only a
+/// pattern can make (see [`reject_pattern_hole`]) stays recoverable, and the step is read as a
+/// value instead.
+fn binding_target(input: Span) -> IResult<Span, (SourceSpan, Match)> {
+    let outer = BINDING_TARGET.with(|target| target.replace(true));
+    let result = spanned(match_pattern)(input);
+    BINDING_TARGET.with(|target| target.set(outer));
+    result
+}
+
 fn chain(input: Span) -> IResult<Span, Chain> {
     let start = input;
     let (rest, mut chain) = alt((
         // Match pattern: pattern = chain_inner
         map(
             pair(
-                terminated(spanned(match_pattern), tuple((ws1, char('='), ws1))),
+                terminated(binding_target, tuple((ws1, char('='), ws1))),
                 chain_inner,
             ),
             |((binding_span, binding), chain)| Chain {
@@ -3738,16 +3741,64 @@ mod tests {
 
     #[test]
     fn test_span_invalid_escape_sequence() {
-        // Note: Currently invalid escapes produce UnexpectedEndOfInput errors
-        // because nom converts our custom errors. This could be improved in future.
-        let source = r#"#{ "hello\xworld" }"#;
-        let result = parse(source);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        // Verify we still capture span information
-        assert!(err.span.is_some());
+        let err = parse(r#"#{ "hello\xworld" }"#).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::StringEscapeInvalid("\\x".to_string()));
         let span = err.span.unwrap();
-        assert_eq!(span.line, 1);
+        assert_eq!((span.line, span.column), (1, 10));
+    }
+
+    #[test]
+    fn closing_brace_is_not_an_escape() {
+        let err = parse(r#""a\}""#).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::StringEscapeInvalid("\\}".to_string()));
+    }
+
+    #[test]
+    fn string_hole_opens_with_backslash_brace() {
+        let (_, term) = string_term(Span::new(r#""a\{x}b{c}""#)).unwrap();
+        let Term::String(StringStyle::Single, segments) = term else {
+            panic!("expected a string term, got {term:?}");
+        };
+        assert!(matches!(
+            segments.as_slice(),
+            [StrSegment::Text(a), StrSegment::Hole(_), StrSegment::Text(b)]
+                if a == b"a" && b == b"b{c}"
+        ));
+    }
+
+    #[test]
+    fn multiline_hole_opens_with_backslash_brace() {
+        let segments = process_multiline_segments("\n    {a} \\{x}\n    ").unwrap();
+        assert!(matches!(
+            segments.as_slice(),
+            [StrSegment::Text(a), StrSegment::Hole(_)] if a == b"{a} "
+        ));
+    }
+
+    #[test]
+    fn pattern_string_braces_are_literal() {
+        let (_, pattern) = match_string(Span::new(r#""{a}""#)).unwrap();
+        assert_eq!(pattern, Match::String(StringStyle::Single, b"{a}".to_vec()));
+    }
+
+    #[test]
+    fn hole_in_pattern_string_is_rejected() {
+        for (source, column) in [
+            (r#"x ~> ="a\{y}""#, 9),
+            (r#"x ~> =["\{y}"]"#, 9),
+            ("x //= \"a\\{y}\"", 9),
+            ("x ~> =\"\"\"\n  a\\{y}\n  \"\"\"", 4),
+        ] {
+            let err = parse(source).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::HoleInPattern, "{source}");
+            assert_eq!(err.span.unwrap().column, column, "{source}");
+        }
+    }
+
+    #[test]
+    fn hole_in_leading_string_reads_as_a_value() {
+        // A step is tried as a binding first, so its leading string is briefly a pattern.
+        assert!(parse(r#"x = "1"; "a\{x}""#).is_ok());
     }
 
     #[test]

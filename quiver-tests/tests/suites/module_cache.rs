@@ -468,7 +468,7 @@ fn linked_session_instantiates_a_type_consuming_function() {
         &mut environment,
         &mut repl,
         &virtual_time,
-        "%json.decode<U[a: 'int]> [\"\\{\\\"a\\\": 1}\"] ~> =U[a: ~]",
+        "%json.decode<U[a: 'int]> [\"{\\\"a\\\": 1}\"] ~> =U[a: ~]",
     );
     assert_eq!(ty, "'int | []");
 }

@@ -138,7 +138,7 @@ add segments or climb is refused instead, as nil carrying `:error InvalidSegment
 
 ```quiver
 name = "../../etc/passwd"
-%path.parse "/srv/{name}"                             //= Path["passwd", Path["etc", Root]]
+%path.parse "/srv/\{name}"                            //= Path["passwd", Path["etc", Root]]
 %path{ /srv/{name} }                                  //= []
 %path{ /srv/{name} } ~> :error<'%path.error>          //= InvalidSegment["../../etc/passwd"]
 ```
@@ -163,7 +163,7 @@ would cancel a hole's segment (the hole would go unchecked):
 n = "a"; %path{ /{n}/.. }     //! no '..' cancelling a placeholder
 ```
 
-Content braces are holes, so a literal `{` or `}` in a name goes through one: `%path{ /tmp/{"\{x}"} }`.
+Content braces are holes, so a literal `{` or `}` in a name goes through one: `%path{ /tmp/{"{x}"} }`.
 
 ## Segments and parents
 

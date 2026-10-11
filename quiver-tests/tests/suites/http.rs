@@ -108,7 +108,7 @@ fn test_session_round_trip() {
             [r2.headers, "set-cookie"] ~> %http.header ~> =Str[scb];
             [scb, 59, 0] ~> %bin.index ~> =('int & semi);
             cookie = [scb, 0, semi] ~> %bin.slice ~> Str[~];
-            "GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[rq, _];
+            "GET / HTTP/1.1\r\nCookie: \{cookie}\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[rq, _];
             [rq, key] ~> %http/session.get
             "#,
         )
@@ -138,7 +138,7 @@ fn test_session_rejects_tampering() {
             [r2.headers, "set-cookie"] ~> %http.header ~> =Str[scb];
             [scb, 59, 0] ~> %bin.index ~> =('int & semi);
             cookie = [scb, 0, semi] ~> %bin.slice ~> Str[~];
-            "GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[rq, _];
+            "GET / HTTP/1.1\r\nCookie: \{cookie}\r\n\r\n" ~> .0 ~> %http.parse_request ~> =[rq, _];
             r = [rq, other] ~> %http/session.get;
             { | r ~> =('%http.pairs & p) => WrongKeyAccepted | Rejected }
             "#,

@@ -10,8 +10,8 @@
 //! the program doesn't already contain. Any mismatch, unknown name, or trailing input
 //! answers nil, like a failed match.
 //!
-//! Strings never interpolate here (data, not code); `{` is escaped on encode so encoded
-//! text also reads as literal *code* unchanged.
+//! Strings never interpolate here (data, not code), and as a backslash is escaped on
+//! encode, encoded text never holds a `\{` hole and also reads as literal *code* unchanged.
 
 use num_bigint::BigInt;
 
@@ -121,9 +121,9 @@ fn push_hex(bytes: &[u8], out: &mut String) {
 }
 
 /// Quote as a `"…"` literal if every character is representable: valid UTF-8 whose
-/// control characters are limited to the escapable `\n`, `\r`, `\t`. `{` is escaped so
-/// the encoded text also reads as literal code (data notation itself never
-/// interpolates).
+/// control characters are limited to the escapable `\n`, `\r`, `\t`. A brace needs no
+/// escape, and as a backslash is itself escaped, the encoded text never holds a `\{` hole —
+/// so it also reads as literal code.
 fn quote_string(bytes: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(bytes).ok()?;
     if s.chars()
@@ -140,7 +140,6 @@ fn quote_string(bytes: &[u8]) -> Option<String> {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            '{' => out.push_str("\\{"),
             c => out.push(c),
         }
     }
@@ -786,8 +785,8 @@ impl Text<'_> {
     }
 
     /// A `"…"` literal's bytes. The recognised escapes are the language's (`\n`, `\r`,
-    /// `\t`, `\\`, `\"`, `\{`); there is no interpolation, so a bare `{` is literal. A
-    /// raw newline fails (single-line literals only).
+    /// `\t`, `\\`, `\"`); data has no interpolation, so a `\{` hole fails. A raw newline
+    /// fails (single-line literals only).
     fn parse_string(&mut self) -> Option<Vec<u8>> {
         let start = self.pos;
         if !self.eat(b'"') {
@@ -812,7 +811,6 @@ impl Text<'_> {
                         b't' => out.push(b'\t'),
                         b'\\' => out.push(b'\\'),
                         b'"' => out.push(b'"'),
-                        b'{' => out.push(b'{'),
                         _ => {
                             self.pos = start;
                             return None;

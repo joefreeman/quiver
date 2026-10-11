@@ -30,7 +30,7 @@ accept_key = #'%str {
 
 handshake_response = #'%str {
   :doc "The 101 Switching Protocols bytes answering a handshake with the given Sec-WebSocket-Key."
-  "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept_key $}\r\n\r\n"
+  "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: \{accept_key $}\r\n\r\n"
   ~> .0
 }
 

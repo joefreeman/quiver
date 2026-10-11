@@ -5,14 +5,10 @@ shapes — and everything else in the module is a way in or out of it: a compile
 syntax, a runtime codec, and a query/update API.
 
 ```quiver
-"\{\"name\": \"ada\", \"tags\": [\"admin\"]}"
+"{\"name\": \"ada\", \"tags\": [\"admin\"]}"
 ~> %json.parse
 ~> %json.get [~, %list{ "tags", 0 }]   //= "admin"
 ```
-
-Because a `{` in a Quiver string opens an interpolation hole, inline JSON *text* escapes it as
-`\{`. Input read from a file or a socket needs no such thing — the escape belongs to the
-Quiver literal, not to JSON.
 
 ## The document model
 
@@ -79,16 +75,16 @@ Arrays and objects nest, and an object keeps its keys in the order they were wri
 ```quiver
 "[1, 2, 3]" ~> %json.parse   //= Array[Cons[1, Cons[2, Cons[3, Nil]]]]
 "[[1], []]" ~> %json.parse   //= Array[Cons[Array[Cons[1, Nil]], Cons[Array[Nil], Nil]]]
-"\{}" ~> %json.parse         //= Object[Nil]
+"{}" ~> %json.parse          //= Object[Nil]
 ```
 
 ```quiver
-"\{\"a\": 1, \"b\": true}"
+"{\"a\": 1, \"b\": true}"
 ~> %json.parse   //= Object[Cons[["a", 1], Cons[["b", True], Nil]]]
 ```
 
 ```quiver
-"\{\"a\": [\{\"b\": 1}, 2], \"c\": []}"
+"{\"a\": [{\"b\": 1}, 2], \"c\": []}"
 ~> %json.parse
 //= Object[Cons[["a", Array[Cons[Object[Cons[["b", 1], Nil]], Cons[2, Nil]]]], Cons[["c", Array[Nil]], Nil]]]
 ```
@@ -97,7 +93,7 @@ Whitespace is free, and a trailing comma before `]` or `}` is tolerated:
 
 ```quiver
 "  [1, 2, ]  " ~> %json.parse     //= Array[Cons[1, Cons[2, Nil]]]
-"\{ \"a\": 1, }" ~> %json.parse   //= Object[Cons[["a", 1], Nil]]
+"{ \"a\": 1, }" ~> %json.parse    //= Object[Cons[["a", 1], Nil]]
 ```
 
 The string escapes are `\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\t` and `\r`. There is no `\u`.
@@ -186,7 +182,7 @@ reproduces it byte for byte:
 ```
 
 ```quiver
-"\{\"k\": [true, null]}" ~> %json.parse ~> ='%json ~> %json.stringify   //= "{\"k\":[true,null]}"
+"{\"k\": [true, null]}" ~> %json.parse ~> ='%json ~> %json.stringify    //= "{\"k\":[true,null]}"
 ```
 
 Decimals originating from JSON survive too — including values `f64` cannot represent, and
@@ -206,7 +202,7 @@ A realistic document — nested objects and arrays, every scalar type, empty con
 and strings needing quote, backslash and newline escaping — checked with a single pin:
 
 ```quiver
-doc = "\{\"user\":\{\"name\":\"Ada \\\"L\\\"\",\"age\":36,\"active\":true,\"roles\":[\"admin\",\"dev\"],\"manager\":null},\"scores\":[10,-5,0],\"empty_obj\":\{},\"empty_arr\":[],\"path\":\"a\\\\b\\nc\"}"
+doc = "{\"user\":{\"name\":\"Ada \\\"L\\\"\",\"age\":36,\"active\":true,\"roles\":[\"admin\",\"dev\"],\"manager\":null},\"scores\":[10,-5,0],\"empty_obj\":{},\"empty_arr\":[],\"path\":\"a\\\\b\\nc\"}"
 doc ~> %json.parse ~> ='%json ~> %json.stringify   //= ^doc
 ```
 
@@ -251,7 +247,7 @@ Only `parse` can introduce duplicate keys. `get` answers the last binding, match
 mainstream parsers keep:
 
 ```quiver
-"\{\"a\": 1, \"a\": 2}" ~> %json.parse ~> %json.get [~, "a"]   //= 2
+"{\"a\": 1, \"a\": 2}" ~> %json.parse ~> %json.get [~, "a"]    //= 2
 ```
 
 ## Writing
@@ -271,7 +267,7 @@ document's order; an absent one is appended.
 Duplicates collapse: the first occurrence is rewritten, the rest dropped.
 
 ```quiver
-"\{\"a\": 1, \"b\": 2, \"a\": 3}" ~> %json.parse ~> %json.set [~, "a", 9] ~> ='%json
+"{\"a\": 1, \"b\": 2, \"a\": 3}" ~> %json.parse ~> %json.set [~, "a", 9] ~> ='%json
 ~> %json.stringify   //= "{\"a\":9,\"b\":2}"
 ```
 
@@ -343,7 +339,7 @@ key deletion removes *every* occurrence of it.
 ```
 
 ```quiver
-"\{\"a\": 1, \"b\": 2, \"a\": 3}" ~> %json.parse ~> %json.delete [~, "a"] ~> ='%json
+"{\"a\": 1, \"b\": 2, \"a\": 3}" ~> %json.parse ~> %json.delete [~, "a"] ~> ='%json
 ~> %json.stringify   //= "{\"b\":2}"
 ```
 
@@ -394,7 +390,7 @@ later ones winning, as `get` does) in exchange for hashed lookup.
 ```
 
 ```quiver
-"\{\"a\": 1, \"a\": 2}" ~> %json.parse ~> %json.to_dict
+"{\"a\": 1, \"a\": 2}" ~> %json.parse ~> %json.to_dict
 ~> ='%dict<'%str, '%json> ~> %dict.get [~, "a"]   //= 2
 ```
 
@@ -431,14 +427,14 @@ They take `convert`'s options — `keys:`, `tag:` and `shapes:` — and pass the
 'user = User[name: '%str, age: 'int, email: ('%str | [])]
 shapes = [User[default: [age: 0]]]
 
-%json.decode<'user> ["\{\"name\": \"Ada\", \"email\": \"ada@example.com\"}", shapes: shapes]
+%json.decode<'user> ["{\"name\": \"Ada\", \"email\": \"ada@example.com\"}", shapes: shapes]
 //= User[name: "Ada", age: 0, email: "ada@example.com"]
 %json.encode [User[name: "Ada", age: 36, email: []]]   //= "{\"name\":\"Ada\",\"age\":36}"
 ```
 
 ```quiver
 'user = User[full_name: '%str, age: 'int]
-%json.decode<'user> ["\{\"fullName\": \"Ada\", \"age\": 36}", keys: Camel]
+%json.decode<'user> ["{\"fullName\": \"Ada\", \"age\": 36}", keys: Camel]
 //= User[full_name: "Ada", age: 36]
 %json.encode [User[full_name: "Ada", age: 36], keys: Camel]   //= "{\"fullName\":\"Ada\",\"age\":36}"
 ```
@@ -459,7 +455,7 @@ digits = Edge[
   out: #'%str -> ('int | []) { %str.parse_int $ },
   in: #'int -> '%str { %str.from_int $ },
 ]
-%json.decode<'reading> ["\{\"celsius\": \"21\"}", using: [digits]]   //= Reading[celsius: 21]
+%json.decode<'reading> ["{\"celsius\": \"21\"}", using: [digits]]    //= Reading[celsius: 21]
 ```
 
 JSON's own values need no edges at all:
@@ -487,10 +483,10 @@ itself, its own `:error` intact:
 
 ```quiver
 'user = User[name: '%str, age: 'int]
-r = %json.decode<'user> ["\{\"name\": \"Ada\", \"age\": \"old\"}"]
+r = %json.decode<'user> ["{\"name\": \"Ada\", \"age\": \"old\"}"]
 r   //= []
 r:error<'%json.error> ~> =DecodeError(path: ~)   //= Cons["age", Nil]
-%json.decode<'user> ["\{"] ~> :error<'%json.error> ~> =Expected(offset: ~)   //= 1
+%json.decode<'user> ["{"] ~> :error<'%json.error> ~> =Expected(offset: ~)    //= 1
 %json.encode [r] ~> :error<'%data.error> ~> =DecodeError(path: ~)   //= Cons["age", Nil]
 ```
 

@@ -283,7 +283,7 @@ fixed = #[(data): 'bin, (pos): 'int, (width): 'int, (what): '%str] {
 
 expect = #[(data): 'bin, (pos): 'int, (c): '%str] {
   | char_at [$data, $pos] ~> =^$c => iadd [$pos, 1]
-  | fail [$pos, "'{$c}'"]
+  | fail [$pos, "'\{$c}'"]
 }
 
 // An optional sign: `[multiplier, end]`.
@@ -835,10 +835,10 @@ offset_with = #['int, '%str] {
   =[o, sep]
   sign = { icmp [o, 0] ~> =-1 => "-" | "+" }
   a = { icmp [o, 0] ~> =-1 => isub [0, o] | o }
-  hm = "{pad [idiv [a, 3600], 2]}{sep}{pad [idiv [imod [a, 3600], 60], 2]}"
+  hm = "\{pad [idiv [a, 3600], 2]}\{sep}\{pad [idiv [imod [a, 3600], 60], 2]}"
   {
-    | imod [a, 60] ~> =0 => "{sign}{hm}"
-    | "{sign}{hm}{sep}{pad [imod [a, 60], 2]}"
+    | imod [a, 60] ~> =0 => "\{sign}\{hm}"
+    | "\{sign}\{hm}\{sep}\{pad [imod [a, 60], 2]}"
   }
 }
 
@@ -1429,7 +1429,7 @@ round_zoned = #['zoned, 'int, 'rounding] {
 round = #'roundable {
   :doc """
     The value rounded to a multiple of a positive increment — a unit's length such as
-    `%time.hours 1`, or any duration such as `%time\{ 15m }` — to the nearest by default (halves
+    `%time.hours 1`, or any duration such as `%time{ 15m }` — to the nearest by default (halves
     away from zero), or with `mode:` Floor, Ceil or Trunc (toward zero).
 
     Instants round on the UTC timeline; times, date-times and zoned values on their own clocks, with
@@ -1459,8 +1459,8 @@ round = #'roundable {
 // --- formatting ----------------------------------------------------------------------
 
 year_text = #'int {
-  | icmp [$, 0] ~> =-1 => "-{pad [isub [0, $], 4]}"
-  | icmp [$, 9999] ~> =1 => "+{%str.from_int $}"
+  | icmp [$, 0] ~> =-1 => "-\{pad [isub [0, $], 4]}"
+  | icmp [$, 9999] ~> =1 => "+\{%str.from_int $}"
   | pad [$, 4]
 }
 
@@ -1468,21 +1468,21 @@ year_text = #'int {
 // that are exact.
 fraction_text = #'int {
   | =0 => ""
-  | imod [$, ns_ms] ~> =0 => ".{pad [idiv [$, ns_ms], 3]}"
-  | imod [$, ns_us] ~> =0 => ".{pad [idiv [$, ns_us], 6]}"
-  | ".{pad [$, 9]}"
+  | imod [$, ns_ms] ~> =0 => ".\{pad [idiv [$, ns_ms], 3]}"
+  | imod [$, ns_us] ~> =0 => ".\{pad [idiv [$, ns_us], 6]}"
+  | ".\{pad [$, 9]}"
 }
 
-date_text = #'civil { "{year_text $year}-{pad [$month, 2]}-{pad [$day, 2]}" }
+date_text = #'civil { "\{year_text $year}-\{pad [$month, 2]}-\{pad [$day, 2]}" }
 
 clock_text = #'clock {
-  "{pad [$hour, 2]}:{pad [$minute, 2]}:{pad [$second, 2]}{fraction_text $nano}"
+  "\{pad [$hour, 2]}:\{pad [$minute, 2]}:\{pad [$second, 2]}\{fraction_text $nano}"
 }
 
 // One component of unit notation: a count and its unit, or nothing when the count is zero.
 component = #['int, '%str] {
   | $0 ~> =0 => ""
-  | "{%str.from_int $0}{$1}"
+  | "\{%str.from_int $0}\{$1}"
 }
 
 // The components of a positive duration, largest first.
@@ -1493,14 +1493,14 @@ magnitude_text = #'int {
   ms = component [idiv [imod [$, ns_s], ns_ms], "ms"]
   us = component [idiv [imod [$, ns_ms], ns_us], "us"]
   ns = component [imod [$, ns_us], "ns"]
-  "{h}{m}{s}{ms}{us}{ns}"
+  "\{h}\{m}\{s}\{ms}\{us}\{ns}"
 }
 
 // A duration's components share its sign, so a negative one is written with a single
 // leading `-`.
 duration_text = #'int {
   | =0 => "0s"
-  | icmp [$, 0] ~> =-1 => isub [0, $] ~> magnitude_text ~> "-{~}"
+  | icmp [$, 0] ~> =-1 => isub [0, $] ~> magnitude_text ~> "-\{~}"
   | magnitude_text $
 }
 
@@ -1527,7 +1527,7 @@ period_text = #[(months): 'int, (days): 'int] {
       | icmp [days, 0] ~> =-1 => "+"
       | ""
     }
-    "{head}{y}{mo}{against}{d}"
+    "\{head}\{y}\{mo}\{against}\{d}"
   }
 }
 
@@ -1654,7 +1654,7 @@ shown = #('instant | 'date | 'time | 'datetime | 'zoned) -> 'shown {
 year_field = #['int, ('%str | [])] {
   =[y, flag]
   {
-    | icmp [y, 0] ~> =-1 => numeric [isub [0, y], 4, "0", flag] ~> "-{~}"
+    | icmp [y, 0] ~> =-1 => numeric [isub [0, y], 4, "0", flag] ~> "-\{~}"
     | numeric [y, 4, "0", flag]
   }
 }
@@ -1681,7 +1681,7 @@ date_directive = #['date, ('%str | []), '%str] {
       m = pad [d.month, 2]
       day = pad [d.day, 2]
       y = pad [fmod [d.year, 100], 2]
-      "{m}/{day}/{y}"
+      "\{m}/\{day}/\{y}"
     }
   }
 }
@@ -1705,8 +1705,8 @@ time_directive = #['time, ('%str | []), '%str] {
     | ="3f" => pad [idiv [t.nano, 1000000], 3]
     | ="6f" => pad [idiv [t.nano, 1000], 6]
     | ="9f" => pad [t.nano, 9]
-    | ="R" => "{pad [t.hour, 2]}:{pad [t.minute, 2]}"
-    | ="T" => "{pad [t.hour, 2]}:{pad [t.minute, 2]}:{pad [t.second, 2]}"
+    | ="R" => "\{pad [t.hour, 2]}:\{pad [t.minute, 2]}"
+    | ="T" => "\{pad [t.hour, 2]}:\{pad [t.minute, 2]}:\{pad [t.second, 2]}"
   }
 }
 
@@ -1728,21 +1728,21 @@ emit = #[(s): 'shown, (d): 'directive, (where): 'int] {
     | name
       ~> =("Y" | "y" | "m" | "d" | "e" | "j" | "a" | "A" | "b" | "B" | "u" | "w" | "V" | "G" | "F" | "D") => {
         | $s.date ~> =('date & dt) => date_directive [dt, flag, name]
-        | fail_pattern [$where, "a date, for %{name}"]
+        | fail_pattern [$where, "a date, for %\{name}"]
       }
     | name
       ~> =("H" | "k" | "I" | "l" | "p" | "M" | "S" | "f" | ".f" | "3f" | "6f" | "9f" | "T" | "R") => {
         | $s.time ~> =('time & t) => time_directive [t, flag, name]
-        | fail_pattern [$where, "a time of day, for %{name}"]
+        | fail_pattern [$where, "a time of day, for %\{name}"]
       }
     | name ~> =("z" | ":z" | "Z" | "Q" | "s") => {
       | $s.zone ~> =('zone_view & z) => zone_directive [z, name]
-      | fail_pattern [$where, "an instant or zoned value, for %{name}"]
+      | fail_pattern [$where, "an instant or zoned value, for %\{name}"]
     }
     | name ~> ="%" => "%"
     | name ~> ="n" => "\n"
     | name ~> ="t" => "\t"
-    | fail_pattern [$where, "a directive: %{name} isn't one"]
+    | fail_pattern [$where, "a directive: %\{name} isn't one"]
   }
 }
 
@@ -1770,7 +1770,7 @@ format = #(
   | [('instant | 'date | 'time | 'datetime | 'zoned), pattern: '%str]
 ) {
   :doc """
-    The value as text, in the form `parse` (`parse_zoned`, for a zoned value) and `%time\{ … }` read
+    The value as text, in the form `parse` (`parse_zoned`, for a zoned value) and `%time{ … }` read
     back: ISO 8601 for instants (RFC 3339, in UTC: "2024-03-10T09:30:00Z"), dates ("2024-03-10"),
     times ("09:30:00.5" gives "09:30:00.500") and date-times ("2024-03-10T09:30:00"); unit notation
     for durations ("1h30m", "-250ms") and periods ("1y2mo", "3d", "1mo-3d"); RFC 9557 for zoned
@@ -1783,8 +1783,8 @@ format = #(
     none, `_` spaces, `0` zeros. A directive the value doesn't have answers nil carrying :error
     InvalidPattern[offset, message].
     """
-  | =Instant[n] => civil_of_nanos n ~> "{date_text ~}T{clock_text ~}Z"
-  | =('datetime & t) => "{date_text t}T{clock_text t}"
+  | =Instant[n] => civil_of_nanos n ~> "\{date_text ~}T\{clock_text ~}Z"
+  | =('datetime & t) => "\{date_text t}T\{clock_text t}"
   | =('date & d) => date_text d
   | =('time & t) => clock_text t
   | =Duration[n] => duration_text n
@@ -1793,7 +1793,7 @@ format = #(
   | =('zoned & z) => {
     c = zoned_civil z
     off = zoned_ltt z ~> .offset
-    "{date_text c}T{clock_text c}{offset_text off}[{zone_name z.1}]"
+    "\{date_text c}T\{clock_text c}\{offset_text off}[\{zone_name z.1}]"
   }
 }
 
@@ -1805,7 +1805,7 @@ http_date = #'instant {
   t = civil_of_nanos $0
   wd = weekday t ~> day_name
   mn = month_name t.month
-  "{wd}, {pad [t.day, 2]} {mn} {year_text t.year} {pad [t.hour, 2]}:{pad [t.minute, 2]}:{pad [t.second, 2]} GMT"
+  "\{wd}, \{pad [t.day, 2]} \{mn} \{year_text t.year} \{pad [t.hour, 2]}:\{pad [t.minute, 2]}:\{pad [t.second, 2]} GMT"
 }
 
 // --- parsing -------------------------------------------------------------------------
@@ -2094,7 +2094,7 @@ number_at = #['bin, 'int, 'int, '%str, ('%str | [])] {
   {
     | n ~> =^width => [v, e]
     | lenient ~> =Ok; icmp [n, 0] ~> =1 => [v, e]
-    | fail [pos, "{%str.from_int width} digits"]
+    | fail [pos, "\{%str.from_int width} digits"]
   }
 }
 
@@ -2281,9 +2281,9 @@ read = #[(text): 'bin, (pos): 'int, (d): 'directive, (where): 'int, (got): 'got]
       ]
     | =("u" | "w" | "V" | "G") => fail_pattern [
         $where,
-        "a directive a pattern reads: %{$d.name} isn't",
+        "a directive a pattern reads: %\{$d.name} isn't",
       ]
-    | fail_pattern [$where, "a directive: %{$d.name} isn't one"]
+    | fail_pattern [$where, "a directive: %\{$d.name} isn't one"]
   }
 }
 
@@ -2917,11 +2917,11 @@ time_dialect = #(content: '%str) {
     :doc """
       `parse_zoned`, for text known to be good: a failure panics.
 
-      The `%time\{ … }` dialect places a literal naming an IANA zone with it, so a literal whose
+      The `%time{ … }` dialect places a literal naming an IANA zone with it, so a literal whose
       zone the host lacks, or whose offset the zone doesn't have, fails fast when it runs.
       """
     | parse_zoned $ ~> =('zoned & z) => z
-    | %panic "%time: can't place {$}: no such zone here, or an offset it doesn't have"
+    | %panic "%time: can't place \{$}: no such zone here, or an offset it doesn't have"
   },
 ]
 ~> { :dialect time_dialect }

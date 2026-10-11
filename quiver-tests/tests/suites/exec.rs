@@ -102,7 +102,7 @@ fn test_env_changes_apply_over_the_inherited_environment() {
             r#"
             %exec.spawn [
               "sh",
-              %list{ "-c", "echo \"$QUIVER_A-$\{HOME:-unset}\"" },
+              %list{ "-c", "echo \"$QUIVER_A-${HOME:-unset}\"" },
               env: %list{ Set["QUIVER_A", "set"], Unset["HOME"] },
             ]
             ~> =(stdout: o)
@@ -200,7 +200,7 @@ fn test_a_child_and_what_it_started_die_with_their_owner() {
               Str[d]
             } []
             !owner ~> =('%str & pids)
-            gone? = #'%str { %fs.stat [%path.parse "/proc/{$}"] ~> { ='%fs.stat => [] | Ok } }
+            gone? = #'%str { %fs.stat [%path.parse "/proc/\{$}"] ~> { ='%fs.stat => [] | Ok } }
             wait_gone = #[(pid): '%str, (tries): 'int] {
               | gone? $pid => Ok
               | $tries ~> =0 => []

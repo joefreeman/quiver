@@ -585,19 +585,19 @@ reason = #'int {
 }
 
 serialize_headers = #[(hs): 'pairs, (acc): '%str] {
-  %list.fold [$hs, $acc, #{ "{$0}{$1.0}: {$1.1}\r\n" }]
+  %list.fold [$hs, $acc, #{ "\{$0}\{$1.0}: \{$1.1}\r\n" }]
 }
 
 serialize_response = #'response {
   :doc "The response as HTTP/1.1 bytes; a Content-Length header is added when absent."
   =Response[status: s, headers: hs, body: b]
-  status_line = "HTTP/1.1 {%str.from_int s} {reason s}\r\n"
+  status_line = "HTTP/1.1 \{%str.from_int s} \{reason s}\r\n"
   hs2 = {
     | header [hs, "content-length"] ~> =Str[_] => hs
     | %list.prepend [hs, ["content-length", %bin.length b ~> %str.from_int]]
   }
   head = serialize_headers [hs2, status_line]
-  %bin.concat ["{head}\r\n" ~> .0, b]
+  %bin.concat ["\{head}\r\n" ~> .0, b]
 }
 
 method_name = #'method {
@@ -619,14 +619,14 @@ serialize_request = #' {
     Host is the caller's to supply — this module never sees the authority.
     """
   =Request(method: m, target: t, version: v, headers: hs, body: b)
-  request_line = "{method_name m} {t} {v}\r\n"
+  request_line = "\{method_name m} \{t} \{v}\r\n"
   hs2 = {
     | header [hs, "content-length"] ~> =Str[_] => hs
     | %bin.length b ~> =0 => hs
     | %list.prepend [hs, ["content-length", %bin.length b ~> %str.from_int]]
   }
   head = serialize_headers [hs2, request_line]
-  %bin.concat ["{head}\r\n" ~> .0, b]
+  %bin.concat ["\{head}\r\n" ~> .0, b]
 }
 
 request = #[(method): 'method, (target): '%str, headers: 'pairs = Nil, body: 'bin = <>] {
@@ -728,14 +728,14 @@ cookies = #' {
 
 'attrs = '%list<'%str>
 
-attrs_join = #[(attrs): 'attrs, (acc): '%str] { %list.fold [$attrs, $acc, #{ "{$0}; {$1}" }] }
+attrs_join = #[(attrs): 'attrs, (acc): '%str] { %list.fold [$attrs, $acc, #{ "\{$0}; \{$1}" }] }
 
 set_cookie = #[(name): '%str, (value): '%str, (attrs): 'attrs = Nil] {
   :doc """
     A Set-Cookie header pair for the name and value, with the given attribute strings (e.g.
     "Path=/", "HttpOnly"); none by default.
     """
-  ["set-cookie", attrs_join [$attrs, "{$name}={$value}"]]
+  ["set-cookie", attrs_join [$attrs, "\{$name}=\{$value}"]]
 }
 
 // A header block is the unit a host hands over when it has already done the framing: the

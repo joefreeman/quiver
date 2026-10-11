@@ -26,45 +26,45 @@ splitting and trimming need, since no UTF-8 character's bytes can occur inside a
 
 ## Interpolation
 
-A `{ … }` hole in a literal interpolates. The hole is an ordinary expression, evaluated in
+A `\{ … }` hole in a literal interpolates. The hole is an ordinary expression, evaluated in
 the surrounding scope, and it must produce a string — anything else is a compile error, so
 there is no implicit stringification.
 
 ```quiver
 name = "world"
-"hello {name}"                //= "hello world"
+"hello \{name}"               //= "hello world"
 ```
 
 ```quiver
 n = 5
-"count {n}"                   //! expected Str, found 'int
+"count \{n}"                  //! expected Str, found 'int
 ```
 
-Holes may appear anywhere, repeatedly, and with no text between them. `\{` is a literal
-brace, and a literal without holes is just a literal.
+Holes may appear anywhere, repeatedly, and with no text between them. A bare `{` or `}` is
+literal text, and a literal without holes is just a literal.
 
 ```quiver
 a = "X"; b = "Y"
-"[{a}-{b}]"                   //= "[X-Y]"
-"{a}{b}"                      //= "XY"
-"a \{ b"                      //= "a { b"
+"[\{a}-\{b}]"                 //= "[X-Y]"
+"\{a}\{b}"                    //= "XY"
+"a { b"                       //= "a { b"
 "plain"                       //= "plain"
 ```
 
 A hole holds a full expression, so a call chain can sit inside one:
 
 ```quiver
-"got: {%str.concat ["a", "b"]}"          //= "got: ab"
-"1 + 1 = {%str.from_int 2}"              //= "1 + 1 = 2"
+"got: \{%str.concat ["a", "b"]}"         //= "got: ab"
+"1 + 1 = \{%str.from_int 2}"             //= "1 + 1 = 2"
 ```
 
 Like a tuple field, a hole receives the value flowing into the literal, so `~` is available
 and is copied into each hole:
 
 ```quiver
-"world" ~> "hello, {~}"                  //= "hello, world"
-"x" ~> "{~}-{~}"                         //= "x-x"
-Person[name: "Bo"] ~> "hi {~.name}"      //= "hi Bo"
+"world" ~> "hello, \{~}"                 //= "hello, world"
+"x" ~> "\{~}-\{~}"                       //= "x-x"
+Person[name: "Bo"] ~> "hi \{~.name}"     //= "hi Bo"
 ```
 
 ## Multi-line literals
@@ -76,7 +76,7 @@ they do in a single-line literal.
 ```quiver
 name = "ada"
 """
-hi {name}
+hi \{name}
 bye
 """                           //= "hi ada\nbye"
 ```
@@ -96,13 +96,13 @@ b
 x = "v"
 s = "a v"
 """
-a {x}
+a \{x}
 """                           //= ^s
 ```
 
 ```quiver
 """
-\{ {%str.concat ["p", "q"]}
+{ \{%str.concat ["p", "q"]}
 """                           //= "{ pq"
 ```
 
@@ -110,7 +110,7 @@ The flowing value reaches a multi-line literal's holes too:
 
 ```quiver
 "ada" ~> """
-hi {~}
+hi \{~}
 """                           //= "hi ada"
 ```
 
@@ -198,7 +198,7 @@ it is not there, so testing and cutting are one step:
 
 ```quiver
 route = #'%str {
-  | %str.strip_prefix [~, "/users/"] => "user {~}"
+  | %str.strip_prefix [~, "/users/"] => "user \{~}"
   | "not found"
 }
 route "/users/ada"                           //= "user ada"

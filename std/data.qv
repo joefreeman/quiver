@@ -1,7 +1,7 @@
 // Quiver data notation: the language's literal syntax restricted to data — integers,
 // binaries (`<…>`), and tuples (with names and field labels), plus the `"…"` string
 // sugar for `Str` values. Strings never interpolate here (data, not code), and encoded
-// text reads back as literal code unchanged (`{` is escaped).
+// text reads back as literal code unchanged (a backslash is escaped, so no `\{` hole).
 //
 // `decode` is *type-consuming*: the expected type drives the parse — tuple names
 // resolve only against its members, so text can never produce a shape the program

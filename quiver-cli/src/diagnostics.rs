@@ -309,6 +309,7 @@ fn hint(kind: &ErrorKind) -> String {
         ErrorKind::StringEscapeInvalid(esc) => {
             format!("'{}' is not a valid escape sequence", esc)
         }
+        ErrorKind::HoleInPattern => "an interpolation hole in a pattern".to_string(),
 
         ErrorKind::UnexpectedToken { expected, found } => {
             format!("expected {}, but found '{}'", expected, found)

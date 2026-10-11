@@ -551,7 +551,7 @@ fn test_outer_parameter_in_spawn_and_string_hole() {
         .evaluate("f = #'int { p = @#[] { $$ } []; !p }; f 7")
         .expect("7");
     quiver()
-        .evaluate("f = #[name: '%str] { g = #[] { \"hi {$$name}\" }; g [] }; f [name: \"joe\"]")
+        .evaluate("f = #[name: '%str] { g = #[] { \"hi \\{$$name}\" }; g [] }; f [name: \"joe\"]")
         .expect("\"hi joe\"");
 }
 

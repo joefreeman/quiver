@@ -37,7 +37,7 @@ split_authority = #'%str {
   =authority
   parts = {
     | %str.starts_with? [authority, "["] => {
-      | %str.split_once [authority, "]:"] ~> =[h, p] => ["{h}]", p]
+      | %str.split_once [authority, "]:"] ~> =[h, p] => ["\{h}]", p]
       | [authority, []]
     }
     | %str.split_once [authority, ":"]
@@ -97,15 +97,15 @@ parse = #'%str {
 authority = #' {
   =Url(scheme, host, port)
   {
-    | default_port scheme ~> =^port => "{host}"
-    | "{host}:{%str.from_int port}"
+    | default_port scheme ~> =^port => "\{host}"
+    | "\{host}:\{%str.from_int port}"
   }
 }
 
 // The path up to and including its last `/` — the directory a relative reference resolves
 // against.
 directory = #'%str {
-  | %str.split_last [~, "/"] ~> =[dir, _] => "{dir}/"
+  | %str.split_last [~, "/"] ~> =[dir, _] => "\{dir}/"
   | "/"
 }
 
@@ -120,9 +120,9 @@ directory = #'%str {
   format: #' {
     :doc "The URL as a string. The port is omitted when it is the scheme's default."
     =Url(path, query, fragment)
-    q = { query ~> =""; "" | "?{query}" }
-    f = { fragment ~> =""; "" | "#{fragment}" }
-    "{$scheme}://{authority $}{path}{q}{f}"
+    q = { query ~> =""; "" | "?\{query}" }
+    f = { fragment ~> =""; "" | "#\{fragment}" }
+    "\{$scheme}://\{authority $}\{path}\{q}\{f}"
   },
 
   authority: authority ~> {
@@ -137,7 +137,7 @@ directory = #'%str {
       The request-target for this URL — path and query, without scheme, host or fragment. This is
       what goes in an HTTP request line.
       """
-    =Url(path, query); { query ~> =""; path | "{path}?{query}" }
+    =Url(path, query); { query ~> =""; path | "\{path}?\{query}" }
   },
 
   resolve: #[(base): ', (ref): '%str] {
@@ -151,14 +151,14 @@ directory = #'%str {
       // An absolute reference stands alone.
       | parse $ref
       // `//host/path` — inherit only the scheme.
-      | %str.starts_with? [$ref, "//"] => parse "{$base.scheme}:{$ref}"
+      | %str.starts_with? [$ref, "//"] => parse "\{$base.scheme}:\{$ref}"
       // `/path` — inherit the authority.
-      | %str.starts_with? [$ref, "/"] => parse "{$base.scheme}://{authority $base}{$ref}"
+      | %str.starts_with? [$ref, "/"] => parse "\{$base.scheme}://\{authority $base}\{$ref}"
       // `#fragment` — the base, re-fragmented.
       | %str.strip_prefix [$ref, "#"] => $base[..., fragment: ~]
       | $ref ~> ="" => $base
       // Anything else is relative to the base path's directory.
-      | parse "{$base.scheme}://{authority $base}{directory $base.path}{$ref}"
+      | parse "\{$base.scheme}://\{authority $base}\{directory $base.path}\{$ref}"
     }
   },
 ]

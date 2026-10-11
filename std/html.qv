@@ -259,7 +259,7 @@ attr_value_p = #[(cb): '%meta.cb, (state): '%parse] {
         ]
       | %parse.fail [st.pos, "an expression"]
     }
-    | %parse.fail_in [st, "'\"' or '\{' after '='"]
+    | %parse.fail_in [st, "'\"' or '{' after '='"]
   }
 }
 
@@ -680,7 +680,7 @@ plain_policy = #'pattr {
 
 parse = #[(content): '%str, (term): '%meta.cb] {
   :doc """
-    Parses HTML dialect content into its node tree, with the host `term` callback locating `\{ … }`
+    Parses HTML dialect content into its node tree, with the host `term` callback locating `{ … }`
     holes and `[ … ]` modifier brackets. Answers the root nodes (whitespace-only text trimmed at the
     edges), or nil with a positioned `:error` payload — the dialect failure contract, so a dialect
     can return it as-is.

@@ -438,7 +438,7 @@ parse_digits = #[(str): ', (radix): 'int] {
   }
 }
 
-not_a_char = #'int { %panic "Not a Unicode code point: {int_text [$, 10]}" }
+not_a_char = #'int { %panic "Not a Unicode code point: \{int_text [$, 10]}" }
 
 // Reassemble a Str from an iterator of codepoints, encoding each as UTF-8. A number that is
 // not a codepoint (negative, a UTF-16 surrogate, or past U+10FFFF) is a mistake in the program.

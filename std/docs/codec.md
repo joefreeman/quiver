@@ -261,7 +261,7 @@ decoders = [
   },
 ]
 
-doc = %json.parse "\{\"name\": \"Ada\", \"age\": 36}"   // '%json | []: the nil has no route
+doc = %json.parse "{\"name\": \"Ada\", \"age\": 36}"    // '%json | []: the nil has no route
 %codec.convert<'user, ('%json | [])> [doc, using: decoders]   //= User[name: "Ada", age: 36]
 %codec.convert<'%list<'user>> [%json{ [{"name": "Ada", "age": 36}, {"name": "Bob", "age": 7}] }, using: decoders]
 //= Cons[User[name: "Ada", age: 36], Cons[User[name: "Bob", age: 7], Nil]]
@@ -330,7 +330,7 @@ A nil value is a failure arriving — a document that didn't parse — so it ans
 `:error` intact, rather than a conversion failure of its own:
 
 ```quiver
-"\{" ~> %json.parse ~> %codec.convert<'%json> [~, using: %json.edges] ~> :error<Expected(offset: 'int)>
+"{" ~> %json.parse ~> %codec.convert<'%json> [~, using: %json.edges] ~> :error<Expected(offset: 'int)>
 //= Expected(offset: 1)
 ```
 

@@ -154,7 +154,7 @@ Together they are the two halves an HTTP request line and `Host` header need:
 
 ```quiver
 %url.parse "https://api.example.com/v1/items?page=2" ~> =('%url & u)
-"GET {%url.target u} — Host: {%url.authority u}"
+"GET \{%url.target u} — Host: \{%url.authority u}"
 //= "GET /v1/items?page=2 — Host: api.example.com"
 ```
 

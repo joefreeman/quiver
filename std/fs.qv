@@ -257,7 +257,7 @@ walk_step = #'walk {
   remove: #[(path): '%path, recursive?: (Ok | []) = []] {
     :doc """
       Removes a file, symlink or empty directory; with recursive?, a directory and everything under
-      it. A symlink is removed, never followed. Wrap in a block (\{ %fs.remove [p] }) to ignore a
+      it. A symlink is removed, never followed. Wrap in a block ({ %fs.remove [p] }) to ignore a
       missing path.
       """
     __filesystem_remove__ [os_path $path, $recursive?]

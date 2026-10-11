@@ -74,7 +74,7 @@ value_step = #[(self): ^, (st): '%parse] -> (['expr, '%parse] | []) {
 
   pairs = %parse.sep_end_by [pair, comma]
 
-  o1 = %parse.right [%parse.byte [123, "'\{'"], pairs]
+  o1 = %parse.right [%parse.byte [123, "'{'"], pairs]
 
   o2 = %parse.left [o1, tok [125, "'}'"]]
 
@@ -229,7 +229,7 @@ parse_value = #['%parse.p<'>, '%parse] {
   pair = %parse.then [k1, value_p]
   pairs = %parse.sep_end_by [pair, comma]
 
-  o1 = %parse.right [%parse.byte [123, "'\{'"], pairs]
+  o1 = %parse.right [%parse.byte [123, "'{'"], pairs]
 
   o2 = %parse.left [o1, tok [125, "'}'"]]
   object = %parse.map [o2, #{ Object[$] }]
@@ -376,7 +376,7 @@ str_step = #[(self): ^, (v): '] -> '%str {
       render = #['%str, '] { %str.concat [escape_str $0, ":"] ~> %str.concat [~, go $1] }
       body = join_strs [pairs, render]
 
-      %str.concat ["\{", body] ~> %str.concat [~, "}"]
+      %str.concat ["{", body] ~> %str.concat [~, "}"]
     }
   }
 }

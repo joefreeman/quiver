@@ -386,7 +386,7 @@ A chunk size is hex digits and nothing else — whitespace is allowed only befor
 about where a body ends, which is how requests are smuggled past a proxy.
 
 ```quiver
-chunked = #'%str { "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n{$}" ~> .0 ~> %http.parse_response [~, []] }
+chunked = #'%str { "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n\{$}" ~> .0 ~> %http.parse_response [~, []] }
 chunked "A \r\n0123456789\r\n0\r\n\r\n" ~> =[r, _]; r.body   //= <30313233343536373839>
 chunked "5x\r\nhello\r\n0\r\n\r\n"                        //= Bad[reason: "malformed chunk size"]
 chunked "-5\r\nhello\r\n0\r\n\r\n"                        //= Bad[reason: "malformed chunk size"]
