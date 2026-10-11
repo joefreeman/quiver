@@ -106,6 +106,19 @@ enum PinLoad {
     Variable(String, Vec<ast::AccessPath>),
     /// The enclosing function's parameter (`$`).
     Parameter,
+    /// A module member (`^%mod.member`), interned as this constant.
+    Constant(usize),
+}
+
+/// A module member a pattern pins (`^%mod.member`), resolved by the compiler ahead of analysis:
+/// resolving one may compile its module, which analysis cannot do.
+pub struct PinnedMember {
+    pub module: Vec<String>,
+    pub package: Option<crate::resolver::PackageId>,
+    pub accessors: Vec<ast::AccessPath>,
+    /// The member's value, interned in the constants table.
+    pub constant: usize,
+    pub type_id: usize,
 }
 
 /// A requirement that must be satisfied for a pattern to match
@@ -306,6 +319,7 @@ pub fn analyze_pattern(
     pattern: &ast::Match,
     value_type_id: usize,
     scopes: &[super::scopes::Scope],
+    members: &[PinnedMember],
     value_provenance: &super::provenance::Provenance,
 ) -> Result<PatternAnalysis, Error> {
     let mut identifiers = HashMap::new();
@@ -317,6 +331,7 @@ pub fn analyze_pattern(
         vec![],
         &mut identifiers,
         scopes,
+        members,
         value_provenance,
     )?;
 
@@ -532,17 +547,20 @@ fn emit_requirement(
         }
         RuntimeCheck::Pin { load, steps } => {
             generate_value_access(codegen, &requirement.path);
-            let index = match load {
-                PinLoad::Variable(name, accessors) => {
+            let load = match load {
+                PinLoad::Variable(name, accessors) => Instruction::load(
                     super::scopes::lookup_variable(scopes, name, accessors)
                         .ok_or_else(|| Error::InternalError {
                             message: format!("Pin variable '{}' not found in scope", name),
                         })?
-                        .1
+                        .1,
+                ),
+                PinLoad::Parameter => {
+                    Instruction::load(super::scopes::get_function_parameter(scopes)?.1)
                 }
-                PinLoad::Parameter => super::scopes::get_function_parameter(scopes)?.1,
+                PinLoad::Constant(constant) => Instruction::push(*constant),
             };
-            codegen.add_instruction(Instruction::load(index));
+            codegen.add_instruction(load);
             for &step in steps {
                 emit_access(codegen, step);
             }
@@ -589,6 +607,7 @@ fn analyze_match_pattern(
     path: AccessPath,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
+    members: &[PinnedMember],
     value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     // Each shape below reads a union's members directly, so none may itself be a union.
@@ -630,6 +649,7 @@ fn analyze_match_pattern(
                 path,
                 identifiers,
                 scopes,
+                members,
                 value_provenance,
             )
         }
@@ -641,6 +661,7 @@ fn analyze_match_pattern(
             path,
             identifiers,
             scopes,
+            members,
             value_provenance,
         ),
         ast::Match::Partial(partial) => analyze_partial_pattern(
@@ -651,6 +672,7 @@ fn analyze_match_pattern(
             path,
             identifiers,
             scopes,
+            members,
             value_provenance,
         ),
         ast::Match::Or(alternatives) => analyze_or_pattern(
@@ -661,6 +683,7 @@ fn analyze_match_pattern(
             path,
             identifiers,
             scopes,
+            members,
             value_provenance,
         ),
         ast::Match::And(conjuncts) => analyze_and_pattern(
@@ -671,6 +694,7 @@ fn analyze_match_pattern(
             path,
             identifiers,
             scopes,
+            members,
             value_provenance,
         ),
         ast::Match::Not(inner) => analyze_negated_pattern(
@@ -680,6 +704,7 @@ fn analyze_match_pattern(
             value_type_id,
             path,
             scopes,
+            members,
             value_provenance,
         ),
         ast::Match::Star(name) => {
@@ -693,13 +718,14 @@ fn analyze_match_pattern(
             value_type_id,
         )),
         ast::Match::Pin(target) => {
-            // Pin pattern `^name` / `^name.field` / `^$x`: check the value equals the referenced
-            // value at runtime. A variable root must reference a binding already in scope — if it
-            // isn't found it's undefined, e.g. a name bound by a *sibling* sub-pattern of the same
-            // compound pattern (`=[x, ^x]`), which isn't visible yet.
+            // Pin pattern `^name` / `^name.field` / `^$x` / `^%mod.member`: check the value
+            // equals the referenced value at runtime. A variable root must reference a binding
+            // already in scope — if it isn't found it's undefined, e.g. a name bound by a
+            // *sibling* sub-pattern of the same compound pattern (`=[x, ^x]`), which isn't
+            // visible yet.
             let accessors = &target.accessors;
-            let (load, steps, pinned_type_id) = match &target.root {
-                ast::PinRoot::Variable(name) => {
+            let (load, steps, pinned_type_id) = match &target.source {
+                Some(ast::AccessSource::Identifier(name)) => {
                     // A captured access path materialises as a single pre-evaluated local;
                     // prefer it, exactly as expression accesses do (`compile_member_access`).
                     if !accessors.is_empty()
@@ -726,13 +752,13 @@ fn analyze_match_pattern(
                         )
                     }
                 }
-                ast::PinRoot::Parameter { depth: 0 } => {
+                Some(ast::AccessSource::Parameter { depth: 0 }) => {
                     let (param_type_id, _) = super::scopes::get_function_parameter(scopes)?;
                     let (steps, accessed_type_id) =
                         resolve_pin_steps(program, param_type_id, accessors, "$")?;
                     (PinLoad::Parameter, steps, accessed_type_id)
                 }
-                ast::PinRoot::Parameter { depth } => {
+                Some(ast::AccessSource::Parameter { depth }) => {
                     // `^$$x`: an outer parameter is this function's capture — a local named
                     // by the sigil run — so the pin resolves like a variable-rooted one.
                     let name = super::variables::CaptureSource::OuterParameter(*depth).scope_name();
@@ -758,6 +784,20 @@ fn analyze_match_pattern(
                         });
                     }
                 }
+                Some(ast::AccessSource::Import(module, package)) => {
+                    let member = members
+                        .iter()
+                        .find(|member| {
+                            member.module == *module
+                                && member.package == *package
+                                && member.accessors == *accessors
+                        })
+                        .ok_or_else(|| Error::InternalError {
+                            message: format!("Pinned member %{} not resolved", module.join("/")),
+                        })?;
+                    (PinLoad::Constant(member.constant), vec![], member.type_id)
+                }
+                _ => unreachable!("a pin's target is a variable, parameter or module member"),
             };
 
             let requirements = vec![Requirement {
@@ -948,6 +988,7 @@ fn check_alternative_bindings(expected: &[String], found: &[String]) -> Result<(
 /// otherwise the value's type unchanged (a value test like `\\42` or `\\^x` narrows nothing). An
 /// exact negation is itself a pure type test in this sense, so a negation over one (`\\A[b: \\'int]`)
 /// and complement narrowing past one (`| =\\[] => … | …`) both stay exact.
+#[allow(clippy::too_many_arguments)]
 fn analyze_negated_pattern(
     env: &mut super::typing::TypeEnv,
     program: &mut Program,
@@ -955,6 +996,7 @@ fn analyze_negated_pattern(
     value_type_id: usize,
     path: AccessPath,
     scopes: &[super::scopes::Scope],
+    members: &[PinnedMember],
     value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     match inner {
@@ -977,6 +1019,7 @@ fn analyze_negated_pattern(
         path.clone(),
         &mut HashMap::new(),
         scopes,
+        members,
         value_provenance,
     )?;
     let mut bindings: Vec<String> = sets
@@ -1052,6 +1095,7 @@ fn analyze_or_pattern(
     path: AccessPath,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
+    members: &[PinnedMember],
     value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     let mut written = alternatives.iter().filter_map(written_bindings);
@@ -1075,6 +1119,7 @@ fn analyze_or_pattern(
             path.clone(),
             &mut alt_identifiers,
             scopes,
+            members,
             value_provenance,
         )?;
 
@@ -1118,6 +1163,7 @@ fn analyze_and_pattern(
     path: AccessPath,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
+    members: &[PinnedMember],
     value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     let (binders, tests): (Vec<_>, Vec<_>) = conjuncts
@@ -1137,6 +1183,7 @@ fn analyze_and_pattern(
             path.clone(),
             identifiers,
             scopes,
+            members,
             value_provenance,
         )?;
         if conjunct_sets.is_empty() {
@@ -1165,6 +1212,7 @@ fn analyze_match_tuple_pattern(
     path: AccessPath,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
+    members: &[PinnedMember],
     value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     let mut binding_sets = vec![];
@@ -1315,6 +1363,7 @@ fn analyze_match_tuple_pattern(
                 field_path,
                 variant_identifiers,
                 scopes,
+                members,
                 &field_provenance,
             )?;
 
@@ -1592,6 +1641,7 @@ fn analyze_partial_pattern(
     path: AccessPath,
     identifiers: &mut HashMap<String, Identifier>,
     scopes: &[super::scopes::Scope],
+    members: &[PinnedMember],
     value_provenance: &super::provenance::Provenance,
 ) -> Result<(Vec<BindingSet>, usize), Error> {
     let mut binding_sets = vec![];
@@ -1754,6 +1804,7 @@ fn analyze_partial_pattern(
                     field_path,
                     variant_identifiers,
                     scopes,
+                    members,
                     &field_provenance,
                 )?;
 

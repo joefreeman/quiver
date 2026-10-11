@@ -1,4 +1,5 @@
 use crate::common::*;
+use std::collections::HashMap;
 
 #[test]
 fn test_simple_type_definition() {
@@ -2084,4 +2085,35 @@ fn test_alias_errors_point_at_the_alias() {
         error.span.map(|span| (span.line, span.column)),
         Some((2, 1))
     );
+}
+
+#[test]
+fn test_type_spread_module_types() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["shapes".to_string()],
+        "' = Base[x: 'int]\n'pair<'t> = Pair[a: 't, b: 't]\n[]".to_string(),
+    );
+    quiver()
+        .with_modules(modules.clone())
+        .evaluate("'extended = Extended[...'%shapes, y: 'int]")
+        .expect_alias("extended", "Extended[x: 'int, y: 'int]");
+    quiver()
+        .with_modules(modules)
+        .evaluate("'labelled = [...'%shapes.pair<'bin>, c: 'int]")
+        .expect_alias("labelled", "[a: 'bin, b: 'bin, c: 'int]");
+}
+
+#[test]
+fn test_type_spread_own_default() {
+    // Inside a module, a bare `'` is its own default type, and spreads like any other.
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["shapes".to_string()],
+        "' = Base[x: 'int]\n'tagged = Tagged[...', tag: 'int]\n[]".to_string(),
+    );
+    quiver()
+        .with_modules(modules)
+        .evaluate("'t = '%shapes.tagged")
+        .expect_alias("t", "Tagged[x: 'int, tag: 'int]");
 }

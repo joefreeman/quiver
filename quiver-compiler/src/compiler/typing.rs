@@ -833,49 +833,22 @@ fn resolve_tuple_fields_with_spread(
                     variant_fields.push((name.clone(), field_type_id, *omittable));
                 }
             }
-            ast::FieldType::Spread {
-                identifier,
-                type_arguments,
-                ..
-            } => {
-                // Identifier must be specified (parser transforms `...` in `identifier[...]` to `...identifier`)
-                let spread_id = identifier.as_ref().ok_or_else(|| {
+            ast::FieldType::Spread { source, .. } => {
+                // The parser gives a bare `...` a source in `'alias[..., fields]`, its only place.
+                let source = source.as_ref().ok_or_else(|| {
                     Error::TypeUnresolved(
-                        "Spread without identifier is only allowed in `identifier[..., fields]` syntax"
+                        "Spread without a type is only allowed in `'alias[..., fields]` syntax"
                             .to_string(),
                     )
                 })?;
-
-                // Look up the spread type
-                let type_alias = scopes::lookup_type_alias(scopes_ref, spread_id)
-                    .ok_or_else(|| Error::TypeAliasMissing(spread_id.clone()))?;
-
-                // Check type parameter count matches
-                if type_alias.parameters.len() != type_arguments.len() {
-                    return Err(Error::TypeUnresolved(format!(
-                        "Type alias '{}' expects {} type parameters, got {}",
-                        spread_id,
-                        type_alias.parameters.len(),
-                        type_arguments.len()
-                    )));
-                }
-
-                // Create type bindings for the spread type
-                let mut spread_bindings = HashMap::new();
-                for (param, arg) in type_alias.parameters.iter().zip(type_arguments.iter()) {
-                    let arg_type_id = resolve_ast_type_impl(
-                        recursion_depth,
-                        env,
-                        scopes_ref,
-                        arg.clone(),
-                        program,
-                        type_bindings,
-                    )?;
-                    spread_bindings.insert(param.clone(), arg_type_id);
-                }
-
-                // Substitute type variables in the resolved type
-                let spread_type_id = substitute(type_alias.type_id, &spread_bindings, program);
+                let spread_type_id = resolve_ast_type_impl(
+                    recursion_depth,
+                    env,
+                    scopes_ref,
+                    source.clone(),
+                    program,
+                    type_bindings,
+                )?;
 
                 // Extract tuple types with names from the spread (handling unions)
                 let spread_named_types =

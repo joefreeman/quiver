@@ -118,6 +118,18 @@ fn test_quoted_partial_patterns_and_pins() {
 }
 
 #[test]
+fn test_quoted_module_member_pins_and_spreads() {
+    // A module member is a value path, so it quotes as a `Member` wherever one stands.
+    let code = "#'int { [...%consts.base, hit: $ ~> { =^%consts.base.a => Yes | No }] }";
+    let mut modules = quoting(code);
+    modules.insert(vec!["consts".to_string()], "[base: [a: 1]]".to_string());
+    quiver()
+        .with_modules(modules)
+        .evaluate("f = %g{}; [f 1, f 2]")
+        .expect("[[a: 1, hit: Yes], [a: 1, hit: No]]");
+}
+
+#[test]
 fn test_quote_errors() {
     quiver()
         .evaluate("%meta{ x }")

@@ -1,4 +1,5 @@
 use crate::common::*;
+use std::collections::HashMap;
 
 #[test]
 fn test_pin_simple() {
@@ -1051,4 +1052,52 @@ fn test_partial_pattern_field_of_a_recursive_union() {
              f T[f: Cons[A, Cons[T[f: Nil], Nil]]]",
         )
         .expect("2");
+}
+
+fn limits() -> HashMap<Vec<String>, String> {
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["limits".to_string()],
+        "[max: 10, origin: Point[x: 0, y: 0], range: [low: 1, high: 9]]".to_string(),
+    );
+    modules
+}
+
+#[test]
+fn test_pin_module_member() {
+    quiver()
+        .with_modules(limits())
+        .evaluate("[10 ~> { =^%limits.max }, 11 ~> { =^%limits.max }]")
+        .expect("[10, []]");
+    quiver()
+        .with_modules(limits())
+        .evaluate("Point[x: 0, y: 0] ~> =^%limits.origin")
+        .expect("Point[x: 0, y: 0]");
+}
+
+#[test]
+fn test_pin_module_member_path_in_tuple_pattern() {
+    quiver()
+        .with_modules(limits())
+        .evaluate("[5, 9] ~> =[n, ^%limits.range.high]; n")
+        .expect("5");
+}
+
+#[test]
+fn test_pin_module_member_in_closure_and_alternation() {
+    quiver()
+        .with_modules(limits())
+        .evaluate(
+            "f = #'int { $ ~> { =(^%limits.range.low | ^%limits.range.high) => Edge | Inner } };\n\
+             [f 1, f 5, f 9]",
+        )
+        .expect("[Edge, Inner, Edge]");
+}
+
+#[test]
+fn test_pin_module_member_unknown_field() {
+    quiver()
+        .with_modules(limits())
+        .evaluate("1 ~> =^%limits.nope")
+        .expect_error_containing("nope");
 }

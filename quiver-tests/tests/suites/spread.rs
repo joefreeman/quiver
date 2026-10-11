@@ -1,4 +1,5 @@
 use crate::common::*;
+use std::collections::HashMap;
 
 #[test]
 fn test_spread_simple() {
@@ -369,4 +370,57 @@ fn test_spread_source_unknown_field_is_a_compile_error() {
             field_name: "z".to_string(),
             target: "a".to_string(),
         });
+}
+
+fn consts() -> HashMap<Vec<String>, String> {
+    let mut modules = HashMap::new();
+    modules.insert(
+        vec!["consts".to_string()],
+        "[base: [a: 1, b: 2], origin: Point[x: 0, y: 0], nested: [inner: P[x: 1, y: 2]]]"
+            .to_string(),
+    );
+    modules
+}
+
+#[test]
+fn test_spread_module_member() {
+    quiver()
+        .with_modules(consts())
+        .evaluate("[w: 0, ...%consts.base, b: 5]")
+        .expect("[w: 0, a: 1, b: 5]");
+    quiver()
+        .with_modules(consts())
+        .evaluate("B[...%consts.nested.inner, z: 3]")
+        .expect("B[x: 1, y: 2, z: 3]");
+}
+
+#[test]
+fn test_spread_update_module_member() {
+    quiver()
+        .with_modules(consts())
+        .evaluate("%consts.origin[..., y: 4]")
+        .expect("Point[x: 0, y: 4]");
+    quiver()
+        .with_modules(consts())
+        .evaluate("%consts.nested.inner[..., y: 9]")
+        .expect("P[x: 1, y: 9]");
+}
+
+#[test]
+fn test_spread_module_member_in_closure() {
+    // A module member is a constant, so a closure spreading one captures nothing for it.
+    quiver()
+        .with_modules(consts())
+        .evaluate("f = #'int { [...%consts.base, c: $] }; f 3")
+        .expect("[a: 1, b: 2, c: 3]");
+}
+
+#[test]
+fn test_spread_module_member_not_a_tuple() {
+    let mut modules = HashMap::new();
+    modules.insert(vec!["m".to_string()], "[n: 1]".to_string());
+    quiver()
+        .with_modules(modules)
+        .evaluate("[...%m.n]")
+        .expect_error_containing("expected tuple, found 'int");
 }

@@ -227,7 +227,8 @@ open = #[...'base, (mode)] { $ }
       (function
         parameter: (tuple_type
           (type_spread
-            (type_name))
+            (type_identifier
+              name: (type_name)))
           name: (identifier))
         (block
           (branch
@@ -251,7 +252,8 @@ open = #[...'base, mode = R] { $ }
       (function
         parameter: (tuple_type
           (type_spread
-            (type_name))
+            (type_identifier
+              name: (type_name)))
           name: (identifier)
           (field_default
             (chain
@@ -279,7 +281,8 @@ open = #[...'base, (mode) = R] { $ }
       (function
         parameter: (tuple_type
           (type_spread
-            (type_name))
+            (type_identifier
+              name: (type_name)))
           name: (identifier)
           (field_default
             (chain
@@ -307,7 +310,8 @@ open = #[...'base, mode] { $ }
       (function
         parameter: (tuple_type
           (type_spread
-            (type_name))
+            (type_identifier
+              name: (type_name)))
           name: (identifier))
         (block
           (branch
@@ -331,7 +335,8 @@ open = #[...'base, (mode), buffer: 'int, size = 1024] { $ }
       (function
         parameter: (tuple_type
           (type_spread
-            (type_name))
+            (type_identifier
+              name: (type_name)))
           name: (identifier)
           name: (identifier)
           (type_identifier
@@ -523,3 +528,38 @@ partial rest types
           (module_type
             (import
               (identifier))))))))
+
+==================
+module type spreads
+==================
+
+'p = [...'%m.point<'int>, z: 'int]
+'q = Q[...', z: 'int]
+
+---
+
+(source_file
+  (sequence
+    (type_alias
+      (type_name)
+      (tuple_type
+        (type_spread
+          (module_type
+            (import
+              (identifier))
+            (identifier)
+            (type_arguments
+              (type_identifier
+                (type_name)))))
+        (identifier)
+        (type_identifier
+          (type_name))))
+    (type_alias
+      (type_name)
+      (tuple_type
+        (tuple_name)
+        (type_spread
+          (self_default_type))
+        (identifier)
+        (type_identifier
+          (type_name))))))

@@ -148,7 +148,12 @@ fn compile_spread_source<E: quiver_core::effects::Effect>(
             )?;
             type_id
         }
-        _ => unreachable!("parser restricts spread sources"),
+        Some(ast::AccessSource::Import(module, package)) => {
+            let member = compiler.resolve_import(module, package.as_ref(), &access.accessors)?;
+            compiler.emit_value(&member.value)?;
+            member.ty
+        }
+        _ => unreachable!("a spread's source is a value path"),
     };
 
     let accessor_spans: Vec<Option<crate::parser::SourceSpan>> =

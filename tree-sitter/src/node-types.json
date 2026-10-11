@@ -2021,6 +2021,10 @@
           "named": true
         },
         {
+          "type": "import",
+          "named": true
+        },
+        {
           "type": "parameter",
           "named": true
         }
@@ -2856,6 +2860,10 @@
             "named": true
           },
           {
+            "type": "import",
+            "named": true
+          },
+          {
             "type": "parameter",
             "named": true
           },
@@ -2891,6 +2899,10 @@
         "types": [
           {
             "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "import",
             "named": true
           },
           {
@@ -3362,15 +3374,19 @@
     "named": true,
     "fields": {},
     "children": {
-      "multiple": true,
+      "multiple": false,
       "required": false,
       "types": [
         {
-          "type": "type_arguments",
+          "type": "module_type",
           "named": true
         },
         {
-          "type": "type_name",
+          "type": "self_default_type",
+          "named": true
+        },
+        {
+          "type": "type_identifier",
           "named": true
         }
       ]

@@ -241,13 +241,14 @@ B[...a]                       //= B[x: 1, y: 2] // replaces it
 ```
 
 The source of a spread can be any access path — a variable, a field of one, the function
-parameter, or the flowing value. In the name-preserving form the bracket is glued to its
-source.
+parameter, the flowing value, or a module's member. In the name-preserving form the bracket
+is glued to its source.
 
 ```quiver
 n = [inner: P[x: 1, y: 2]]
 n.inner[..., y: 5]            //= P[x: 1, y: 5]
 B[...n.inner, y: 3]           //= B[x: 1, y: 3]
+At[...%time.epoch]            //= At[0] // a module's member
 A[x: 1] ~> ~[..., y: 2]       //= A[x: 1, y: 2] // `~` as the source, name kept
 A[x: 1] ~> [..., y: 2]        //= [x: 1, y: 2] // in-tuple, name dropped
 ```
@@ -531,12 +532,13 @@ That type is the one it was written with, so where a function is made inside a g
 the test knows nothing of the type parameters it mentions: a function answering `'t` passes
 for a `#[] -> _`, but not for a `#[] -> 'int`, whatever `'t` was.
 
-A pin's target may be any access path — a field of a variable, or of the enclosing
-function's parameter via `$`.
+A pin's target may be any access path — a field of a variable, of the enclosing
+function's parameter via `$`, or a module's member.
 
 ```quiver
 p = Point[x: 1, y: 2]
 1 ~> =^p.x                    //= 1
+Instant[0] ~> =^%time.epoch   //= Instant[0]
 same? = #[x: 'int, y: 'int] { $y ~> =^$x }
 same? [x: 3, y: 3]            //= 3
 ```
@@ -1052,6 +1054,15 @@ Types compose with `...` the way values do, and later fields override earlier on
 
 make = #'post { $title }
 make Post[id: 1, created_at: 0, title: "hi"]   //= "hi"
+```
+
+A spread names its type as any reference does, so it may take type arguments, or be a
+module's type:
+
+```quiver
+'logged = Logged[...'%http.response, at: 'int]
+status = #'logged { $status }
+status Logged[status: 200, headers: Nil, body: <>, at: 0]   //= 200
 ```
 
 Spreading a union distributes over its members:

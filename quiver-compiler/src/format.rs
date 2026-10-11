@@ -1897,28 +1897,7 @@ fn render_match_flat(pattern: &Match) -> String {
         Match::Star(Some(name)) => format!("{}*", name),
         Match::Placeholder => "_".to_string(),
         Match::Ripple => "~".to_string(),
-        Match::Pin(target) => {
-            let mut out = String::from("^");
-            // As in `render_access`, a first accessor on `$` is written dotless (`^$x`, `^$0`).
-            let dotless_first = matches!(target.root, PinRoot::Parameter { .. });
-            match &target.root {
-                PinRoot::Variable(name) => out.push_str(name),
-                PinRoot::Parameter { depth } => out.push_str(&parameter_sigils(*depth)),
-            }
-            for (index, accessor) in target.accessors.iter().enumerate() {
-                if !(index == 0 && dotless_first) {
-                    out.push('.');
-                }
-                match accessor {
-                    AccessPath::Field(field) => out.push_str(field),
-                    AccessPath::Index(value) => out.push_str(&value.to_string()),
-                    AccessPath::Annotation(..) => {
-                        unreachable!("pin targets have no annotation steps")
-                    }
-                }
-            }
-            out
-        }
+        Match::Pin(target) => format!("^{}", render_access(target)),
         Match::Or(alternatives) => format!(
             "({})",
             alternatives
@@ -2224,11 +2203,10 @@ fn tuple_type_doc(trivia: &Trivia, tuple_type: &TupleType) -> Doc {
                 (
                     Some(alias),
                     FieldType::Spread {
-                        identifier: Some(identifier),
-                        type_arguments,
+                        source: Some(Type::Identifier { name, arguments }),
                         ..
                     },
-                ) if identifier == alias && type_arguments.is_empty() => pretty::text("..."),
+                ) if name == alias && arguments.is_empty() => pretty::text("..."),
                 _ => field_type_doc(trivia, field),
             };
             pretty::concat(vec![
@@ -2299,17 +2277,11 @@ fn field_type_doc(trivia: &Trivia, field_type: &FieldType) -> Doc {
                 pretty::text(render_field_default(default)),
             ])
         }
+        FieldType::Spread { source: None, .. } => pretty::text("..."),
         FieldType::Spread {
-            identifier: None, ..
-        } => pretty::text("..."),
-        FieldType::Spread {
-            identifier: Some(identifier),
-            type_arguments,
+            source: Some(source),
             ..
-        } => pretty::concat(vec![
-            pretty::text(format!("...'{}", identifier)),
-            type_arguments_doc(trivia, type_arguments),
-        ]),
+        } => pretty::concat(vec![pretty::text("..."), type_doc(trivia, source)]),
     }
 }
 
@@ -2425,6 +2397,19 @@ mod tests {
         assert_formats("x ~> =[~, [~, _]]\n", "x ~> =[~, [~, _]]\n");
         assert_formats("x ~> =(Ok[~] | ~)\n", "x ~> =(Ok[~] | ~)\n");
         assert_formats("x ~> =(y: ~) ~> f\n", "x ~> =(y: ~) ~> f\n");
+    }
+
+    #[test]
+    fn module_member_value_paths_render_as_written() {
+        assert_formats("[...%m.base, c: 3]\n", "[...%m.base, c: 3]\n");
+        assert_formats("%m.point[..., y: 4]\n", "%m.point[..., y: 4]\n");
+        assert_formats("x ~> =[n, ^%m.limit]\n", "x ~> =[n, ^%m.limit]\n");
+        assert_formats("x ~> =^$x\n", "x ~> =^$x\n");
+        assert_formats(
+            "'p = [...'%m.point<'int>, z: 'int]\n",
+            "'p = [...'%m.point<'int>, z: 'int]\n",
+        );
+        assert_formats("'p = 'base[..., z: 'int]\n", "'p = 'base[..., z: 'int]\n");
     }
 
     #[test]

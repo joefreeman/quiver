@@ -616,28 +616,6 @@ pub struct PartialPattern {
     pub fields: Vec<PartialPatternField>,
 }
 
-/// The root of a pin pattern's target: an existing variable, or a function parameter —
-/// `depth` counts enclosing functions exactly as in `AccessSource::Parameter` (`^$x` is
-/// depth 0, `&$$x` depth 1, …).
-#[derive(Debug, Clone, PartialEq)]
-pub enum PinRoot {
-    Variable(String),
-    Parameter { depth: usize },
-}
-
-/// A pin pattern's target: an access path rooted at a variable or the enclosing function's
-/// parameter (`^name.field`, `^$x.0`). `accessor_spans` parallels `accessors` and `base_span`
-/// covers the root — as in `Access` — so the language server can hover/navigate each component
-/// separately; `span` covers the whole target after the `^`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PinTarget {
-    pub root: PinRoot,
-    pub accessors: Vec<AccessPath>,
-    pub accessor_spans: Vec<Spanned>,
-    pub base_span: Spanned,
-    pub span: Spanned,
-}
-
 /// The reserved binder name a ripple (`~`) is analysed under. Not a valid identifier, so it
 /// never collides with a user binding.
 pub const RIPPLE: &str = "~";
@@ -662,11 +640,10 @@ pub enum Match {
     /// `[42] ~> =[~]` flows `42` on. Repeated, the values at each must be equal, as for a
     /// repeated binder — which is how analysis treats it, under [`RIPPLE`].
     Ripple,
-    /// A pin against an existing value: `^name`, `^name.field`, `^$`, `^$x.0` — matches only
-    /// if the value equals the referenced value. The target is an access path rooted at a
-    /// variable or the enclosing function's parameter (with the parameter's usual glued first
-    /// accessor, as in `$x`); annotation accessors are not part of a pin target.
-    Pin(PinTarget),
+    /// A pin against an existing value: `^name`, `^name.field`, `^$x.0`, `^%mod.member` —
+    /// matches only if the value equals the referenced value. The target is a value path: a
+    /// variable, a function parameter or a module member, with field/index accessors only.
+    Pin(Access),
     Type(Type),
     /// An alternation of patterns (`(p | q | …)`): matches if any alternative matches. Every
     /// alternative must bind the same set of variables (so the body sees them regardless of which
@@ -825,8 +802,11 @@ pub enum FieldType {
     Spread {
         /// As on [`FieldType::Field`]: where the entry starts, for trivia attachment.
         span: Spanned,
-        identifier: Option<String>,
-        type_arguments: Vec<Type>,
+        /// The type spread, a reference to a named one: an alias (`...'event`,
+        /// `...'pair<'int>`), a module's type (`...'%mod`, `...'%mod.name<…>`) or the module's
+        /// own default (`...'`). `None` for a bare `...`, which only the alias-named form
+        /// (`'event[..., at: 'int]`) gives a source.
+        source: Option<Type>,
     },
 }
 

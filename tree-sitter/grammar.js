@@ -68,6 +68,9 @@ module.exports = grammar({
     $.comment,
   ],
 
+  // Spliced into each rule that uses them, so their choices resolve as if written there.
+  inline: $ => [$._value_path_root, $._type_reference],
+
   conflicts: $ => [
     // A leading token in a chain may begin either a binding pattern (`x = ...`,
     // `[a, b] = ...`) or a term; resolved with the `=` lookahead via GLR.
@@ -309,13 +312,13 @@ module.exports = grammar({
       $.access,
     ),
 
-    // Name-preserving spread-update: `a[..., y]` / `~[..., y]` / `$conn[..., y]`. The source
-    // is an access path — a variable path, a parameter or its fields (sigil runs included),
-    // or a ripple field. The bracket is adjacent (no space) and begins with a spread,
+    // Name-preserving spread-update: `a[..., y]` / `~[..., y]` / `$conn[..., y]` /
+    // `%mod.p[..., y]`. The source is a value path — a variable, a parameter (sigil runs
+    // included), the ripple or a module member, with field steps. The bracket is adjacent (no space) and begins with a spread,
     // distinguishing it from `a [..., y]` (two terms) and from a plain spread tuple
     // `[...a, y]`. The result inherits the source tuple's name.
     spread_update: $ => seq(
-      field('source', choice($.ripple, $.identifier, $.parameter)),
+      field('source', $._value_path_root),
       repeat(seq('.', field('field', choice($.identifier, $.index)))),
       token.immediate('['), optional($._nl),
       $.spread,
@@ -610,10 +613,14 @@ module.exports = grammar({
     ),
 
     named_field: $ => seq(field('name', $.identifier), ':', optional($._nl), $.chain),
-    // `...` (the flowing value), or a sourced `...a.b` / `...$conn` / `...~.f` — the same
-    // access-path sources as a spread-update's head, glued to the dots.
+
+    // The root of a value path — a name, not an expression: what a spread spreads, a
+    // spread-update updates, and (all but the ripple) a pin compares against.
+    _value_path_root: $ => choice($.identifier, $.parameter, $.ripple, $.import),
+    // `...` (the flowing value), or a sourced `...a.b` / `...$conn` / `...~.f` /
+    // `...%mod.member` — the same value paths as a spread-update's head, glued to the dots.
     spread: $ => seq('...', optional(seq(
-      field('source', choice($.identifier, $.parameter, $.ripple)),
+      field('source', $._value_path_root),
       repeat(seq('.', field('field', choice($.identifier, $.index)))),
     ))),
 
@@ -643,13 +650,12 @@ module.exports = grammar({
       $.identifier,
     ),
 
-    // A pin: `^` + an access path rooted at a variable (`^x`, `^x.y.0`) or the parameter
-    // (`^$`, `^$x`, `^$0.y` — the parameter rule carries the glued first-accessor sugar).
-    // Field/index steps only: a pin compares by value, so annotation retrieval has no
-    // place in its target.
+    // A pin: `^` + a value path rooted at a variable (`^x`, `^x.y.0`), the parameter
+    // (`^$`, `^$x`, `^$0.y` — the parameter rule carries the glued first-accessor sugar) or a
+    // module member (`^%mod.member`). Not the ripple, which in a pattern marks what flows on.
     pattern_pin: $ => prec.right(seq(
       '^',
-      choice($.identifier, $.parameter),
+      choice($.identifier, $.parameter, $.import),
       repeat(seq('.', field('field', choice($.identifier, $.index)))),
     )),
 
@@ -843,7 +849,9 @@ module.exports = grammar({
     // which reports it better than a positional grammar could.
     field_default: $ => seq('=', optional($._nl), $.chain),
 
-    type_spread: $ => seq('...', optional(seq($.type_name, optional($.type_arguments)))),
+    type_spread: $ => seq('...', optional($._type_reference)),
+    // A reference to a named type: an alias, a module's type, or the module's own default.
+    _type_reference: $ => choice($.type_identifier, $.module_type, $.self_default_type),
 
     resource_type: $ => /\+[A-Z][a-zA-Z0-9_]*/,
 

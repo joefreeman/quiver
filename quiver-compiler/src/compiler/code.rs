@@ -593,46 +593,8 @@ impl Coder<'_> {
             // that knows the value's type could read.
             ast::Match::Star(_) => Err(unsupported("a star pattern", None)),
             ast::Match::Pin(target) => {
-                let span = target.span.get();
-                let mut name = match &target.root {
-                    ast::PinRoot::Variable(name) => {
-                        if !self.bound(name) {
-                            return Err(CodeError {
-                                message: format!(
-                                    "pins `{name}`, which the code doesn't bind: a value from \
-                                     outside it is matched as a hole, `{name}"
-                                ),
-                                span,
-                            });
-                        }
-                        let name = self.text(name);
-                        self.node("Local", vec![(None, name)])
-                    }
-                    ast::PinRoot::Parameter { depth } => {
-                        if *depth >= self.functions.len() {
-                            return Err(CodeError {
-                                message: format!(
-                                    "pins `{}` outside a function of its own that deep",
-                                    ast::parameter_sigils(*depth)
-                                ),
-                                span,
-                            });
-                        }
-                        let depth = self.int(*depth);
-                        self.node("Param", vec![(None, depth)])
-                    }
-                };
-                for accessor in &target.accessors {
-                    let field = match accessor {
-                        ast::AccessPath::Field(field) => self.text(field),
-                        ast::AccessPath::Index(index) => self.int(*index),
-                        ast::AccessPath::Annotation(..) => {
-                            return Err(unsupported("an annotation read", span));
-                        }
-                    };
-                    name = self.node("Get", vec![(Some("of"), name), (Some("field"), field)]);
-                }
-                Ok(self.node("Pin", vec![(None, name)]))
+                let target = self.access(target)?;
+                Ok(self.node("Pin", vec![(None, target)]))
             }
         }
     }

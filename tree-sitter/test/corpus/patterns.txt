@@ -437,3 +437,25 @@ Ripple patterns
             name: (tuple_name)
             (ripple))
           (ripple))))))
+
+==================
+module member pin
+==================
+
+x ~> =[n, ^%m.range.high]
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (access
+        (identifier))
+      (bind_match
+        (pattern_tuple
+          (identifier)
+          (pattern_pin
+            (import
+              (identifier))
+            (identifier)
+            (identifier)))))))

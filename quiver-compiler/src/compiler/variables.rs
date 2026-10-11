@@ -276,20 +276,8 @@ impl<'a> FreeVariableCollector<'a> {
     fn visit_match(&mut self, pattern: &ast::Match) {
         match pattern {
             ast::Match::Hole(chain) => self.visit_chain(chain),
-            ast::Match::Pin(target) => {
-                // `^name` / `^name.field` reference an existing variable (with its access path,
-                // so a closure captures exactly what expression accesses would); `^$$x` is an
-                // outer-parameter reference and captures like the expression `$$x`. An own-`$`
-                // pin reads the enclosing parameter and captures nothing.
-                match &target.root {
-                    ast::PinRoot::Variable(name) => {
-                        self.visit_identifier(name, target.accessors.clone(), target.base_span);
-                    }
-                    ast::PinRoot::Parameter { depth } => {
-                        self.visit_parameter(*depth, target.accessors.clone(), target.base_span);
-                    }
-                }
-            }
+            // A pin reads its target as the expression would, capturing the same path.
+            ast::Match::Pin(target) => self.visit_access_capture(target),
             ast::Match::Tuple(tuple) => {
                 // Recursively visit fields in tuple patterns
                 for field in &tuple.fields {

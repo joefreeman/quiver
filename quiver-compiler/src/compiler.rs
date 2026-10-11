@@ -1370,9 +1370,9 @@ fn collect_binding_spans(pattern: &ast::Match, out: &mut Vec<(String, SourceSpan
     }
 }
 
-/// Collect every pin target in a pattern (`&name`, `&$x.y`) for language-server recording —
+/// Collect every pin target in a pattern (`^name`, `^$x.y`, `^%mod.member`) —
 /// the pattern's read references, the counterpart of `collect_binding_spans`' write sites.
-fn collect_pin_targets<'m>(pattern: &'m ast::Match, out: &mut Vec<&'m ast::PinTarget>) {
+fn collect_pin_targets<'m>(pattern: &'m ast::Match, out: &mut Vec<&'m ast::Access>) {
     match pattern {
         ast::Match::Pin(target) => out.push(target),
         ast::Match::Tuple(tuple) => {
@@ -4092,6 +4092,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.codegen.patch_jump_to_here(start_jump_addr);
 
         // Analyze pattern to get bindings without generating code yet
+        let members = self.pinned_members(&pattern)?;
         let mut env = typing::TypeEnv {
             resolver: self.resolver,
             module_cache: &mut *self.module_cache,
@@ -4109,6 +4110,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             &pattern,
             value_type,
             &self.scopes,
+            &members,
             &value_provenance,
         )?;
 
@@ -4135,7 +4137,15 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             let mut pin_targets = Vec::new();
             collect_pin_targets(&pattern, &mut pin_targets);
             for target in pin_targets {
-                self.record_pin_target(target);
+                let accessor_spans: Vec<Option<SourceSpan>> =
+                    target.accessor_spans.iter().map(|s| s.get()).collect();
+                self.record_access_components(
+                    &target.source,
+                    &target.accessors,
+                    target.base_span.get(),
+                    &accessor_spans,
+                    None,
+                );
             }
         }
 
@@ -4987,6 +4997,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                 bindings: binding_spans.into_iter().map(|(name, _)| name).collect(),
             });
         }
+        let members = self.pinned_members(&assertion.pattern)?;
         let mut env = typing::TypeEnv {
             resolver: self.resolver,
             module_cache: &mut *self.module_cache,
@@ -5004,6 +5015,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             &assertion.pattern,
             value_type,
             &self.scopes,
+            &members,
             value_provenance,
         )?;
         // An assertion observes, and the value flows on unchanged, so there is nothing for a
@@ -6362,6 +6374,32 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// constants table's content interning is what makes repeated emissions share: two sites
     /// naming the same value reach the same slot, and the executor materialises that slot
     /// once per worker, so the runtime graph keeps whatever sharing the value had.
+    /// Resolve the module members a pattern pins (`^%mod.member`) for its analysis: each is a
+    /// compile-time constant, compared against as any pinned value is.
+    fn pinned_members(
+        &mut self,
+        pattern: &ast::Match,
+    ) -> Result<Vec<pattern::PinnedMember>, Error> {
+        let mut targets = Vec::new();
+        collect_pin_targets(pattern, &mut targets);
+        let mut members = Vec::new();
+        for target in targets {
+            let Some(ast::AccessSource::Import(module, package)) = &target.source else {
+                continue;
+            };
+            let ImportedMember { value, ty, .. } =
+                self.resolve_import(module, package.as_ref(), &target.accessors)?;
+            members.push(pattern::PinnedMember {
+                module: module.clone(),
+                package: package.clone(),
+                accessors: target.accessors.clone(),
+                constant: self.intern_value(&value)?,
+                type_id: ty,
+            });
+        }
+        Ok(members)
+    }
+
     fn emit_value(&mut self, value: &Value) -> Result<usize, Error> {
         let index = self.intern_value(value)?;
         self.codegen.add_instruction(Instruction::push(index));
@@ -6874,11 +6912,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         }
     }
 
-    /// Record a pin pattern's components for the language server, mirroring
-    /// `record_access_components`: the root (a variable reference with go-to-definition, or
-    /// the parameter) and each accessor with the type after applying it. Called from the
-    /// pattern-recording chokepoint in `compile_match`, before the pattern's own bindings
-    /// enter scope — a pin references pre-existing values only.
     /// Record the components of an outer-parameter access (`$$`, `$$k.q`) from its captures:
     /// the base when the whole argument was captured bare, else each accessor whose exact
     /// path was captured (fields are captured per path, so that is what there is to show).
@@ -6910,65 +6943,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.record_typed(Some(span), ty, SymbolKind::Field, Some(label));
         }
         None
-    }
-
-    fn record_pin_target(&mut self, target: &ast::PinTarget) {
-        if self.recorder.is_none() {
-            return;
-        }
-
-        let (base_type, base_name) = match &target.root {
-            ast::PinRoot::Variable(name) => {
-                let Some((ty, _)) = scopes::lookup_variable(&self.scopes, name, &[]) else {
-                    return;
-                };
-                self.record_reference(target.base_span.get(), name, name.clone(), ty);
-                (ty, name.clone())
-            }
-            ast::PinRoot::Parameter { depth: 0 } => {
-                let Ok((ty, _)) = scopes::get_function_parameter(&self.scopes) else {
-                    return;
-                };
-                self.record_typed(
-                    target.base_span.get(),
-                    ty,
-                    SymbolKind::Parameter,
-                    Some("$".to_string()),
-                );
-                (ty, "$".to_string())
-            }
-            ast::PinRoot::Parameter { depth } => {
-                let name = variables::CaptureSource::OuterParameter(*depth).scope_name();
-                let accessor_spans: Vec<Option<SourceSpan>> =
-                    target.accessor_spans.iter().map(|s| s.get()).collect();
-                match self.record_outer_parameter(
-                    &name,
-                    &target.accessors,
-                    target.base_span.get(),
-                    &accessor_spans,
-                ) {
-                    Some(ty) => (ty, name),
-                    None => return,
-                }
-            }
-        };
-
-        for (i, accessor) in target.accessors.iter().enumerate() {
-            let Some(span) = target.accessor_spans.get(i).and_then(|s| s.get()) else {
-                continue;
-            };
-            let Ok(ty) = self.peek_accessor_type(base_type, &target.accessors[..=i], &base_name)
-            else {
-                continue;
-            };
-            let label = match accessor {
-                ast::AccessPath::Field(name) => name.clone(),
-                ast::AccessPath::Index(index) => index.to_string(),
-                // Pin targets carry no annotation steps.
-                ast::AccessPath::Annotation(..) => continue,
-            };
-            self.record_typed(Some(span), ty, SymbolKind::Field, Some(label));
-        }
     }
 
     fn compile_access_inner(

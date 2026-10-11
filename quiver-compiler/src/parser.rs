@@ -1237,39 +1237,17 @@ fn literal(input: Span) -> IResult<Span, Literal> {
 
 // Pattern parsers for terms
 
-/// Parse a pin pattern: `^` followed by an access path rooted at an existing variable
-/// (`^x`, `^x.y.0`) or the function parameter (`^$`, `^$x`, `^$0.y` — a single accessor may
-/// be glued to the `$`, as usual). Only field/index accessors: a pin compares by value, so
-/// annotation retrieval has no place in its target.
+/// Parse a pin pattern: `^` followed by a value path naming an existing value — a variable
+/// (`^x`, `^x.y.0`), the function parameter (`^$`, `^$x`, `^$0.y`) or a module member
+/// (`^%mod.member`). Not the flowing value: in a pattern, `~` is the ripple.
 fn pin_pattern(input: Span) -> IResult<Span, Match> {
     let (input, _) = char('^')(input)?;
-    let start = input;
-    let (after_root, root) = alt((
-        map(take_while1(|c| c == '$'), |s: Span| PinRoot::Parameter {
-            depth: s.fragment().len() - 1,
+    map(
+        verify(value_path, |path: &Access| {
+            !matches!(path.source, Some(AccessSource::Ripple))
         }),
-        map(identifier, PinRoot::Variable),
-    ))(input)?;
-    // The base span covers just the root (`p` / `$` / `$$`), before any accessors.
-    let base_span = span_between(start, after_root);
-    // `$foo` / `$0` sugar: with a parameter root a single accessor may follow with no dot.
-    let (after_root, leading) = if matches!(root, PinRoot::Parameter { .. }) {
-        opt(accessor)(after_root)?
-    } else {
-        (after_root, None)
-    };
-    let (rest, dotted) = many0(preceded(char('.'), accessor))(after_root)?;
-    let (accessors, accessor_spans): (Vec<_>, Vec<_>) = leading.into_iter().chain(dotted).unzip();
-    Ok((
-        rest,
-        Match::Pin(PinTarget {
-            root,
-            accessors,
-            accessor_spans,
-            base_span: Spanned(Some(base_span)),
-            span: Spanned(Some(span_between(start, rest))),
-        }),
-    ))
+        Match::Pin,
+    )(input)
 }
 
 /// Parse a star pattern, which binds all named fields: bare `*`, or `Name*` which
@@ -1430,18 +1408,12 @@ fn field_type(input: Span) -> IResult<Span, FieldType> {
     let start = input;
     let (rest, base) = field_type_base(input)?;
     // Spreads name no field, so they take no default.
-    if let FieldType::Spread {
-        identifier,
-        type_arguments,
-        ..
-    } = base
-    {
+    if let FieldType::Spread { source, .. } = base {
         return Ok((
             rest,
             FieldType::Spread {
                 span: Spanned(Some(span_between(start, rest))),
-                identifier,
-                type_arguments,
+                source,
             },
         ));
     }
@@ -1470,35 +1442,13 @@ fn field_type(input: Span) -> IResult<Span, FieldType> {
 
 fn field_type_base(input: Span) -> IResult<Span, FieldType> {
     alt((
-        // Spread with optional type name and optional type arguments: ... or ...'alias or ...'alias<type, type>
-        map(
-            preceded(
-                tag("..."),
-                opt(pair(
-                    type_name,
-                    opt(delimited(
-                        char('<'),
-                        separated_list1(tuple((ws0, char(','), ws0)), type_definition),
-                        char('>'),
-                    )),
-                )),
-            ),
-            |id_and_args| {
-                if let Some((id, type_args)) = id_and_args {
-                    FieldType::Spread {
-                        span: Spanned::default(),
-                        identifier: Some(id),
-                        type_arguments: type_args.unwrap_or_default(),
-                    }
-                } else {
-                    FieldType::Spread {
-                        span: Spanned::default(),
-                        identifier: None,
-                        type_arguments: vec![],
-                    }
-                }
-            },
-        ),
+        // Spread: a bare `...`, or `...` glued to a named type's reference.
+        map(preceded(tag("..."), opt(type_reference)), |source| {
+            FieldType::Spread {
+                span: Spanned::default(),
+                source,
+            }
+        }),
         // Optional-name field: (name): type — a caller may omit the label. The `):` is
         // glued, like other glued forms.
         map(
@@ -1700,13 +1650,13 @@ fn tuple_type(input: Span) -> IResult<Span, Type> {
                         // Transform unspecified spread (...) into identifier spread (...identifier)
                         // This allows 'event[..., timestamp: 'int] to mean "spread event and add timestamp"
                         for field in &mut fields {
-                            if let FieldType::Spread {
-                                identifier: spread_id,
-                                ..
-                            } = field
-                                && spread_id.is_none()
+                            if let FieldType::Spread { source, .. } = field
+                                && source.is_none()
                             {
-                                *spread_id = Some(id.clone());
+                                *source = Some(Type::Identifier {
+                                    name: id.clone(),
+                                    arguments: vec![],
+                                });
                             }
                         }
                         TupleType {
@@ -1809,6 +1759,12 @@ fn self_default_type(input: Span) -> IResult<Span, Type> {
             arguments: arguments.unwrap_or_default(),
         },
     )(input)
+}
+
+/// A reference to a named type: an alias (`'name`, `'name<…>`), a module's type (`'%mod`,
+/// `'%mod.name<…>`) or the enclosing module's own default (`'`, `'<…>`).
+fn type_reference(input: Span) -> IResult<Span, Type> {
+    alt((module_type, type_identifier, self_default_type))(input)
 }
 
 /// A type reached through a module's type namespace: `'%mod` (default type) or
@@ -2147,13 +2103,11 @@ fn access(input: Span) -> IResult<Span, Access> {
     ))
 }
 
-/// Parse a name-preserving tuple spread-update: `~[..., y]` (spread the chained value) or
-/// `a[..., y]` (spread the variable `a`), each inheriting the source's tuple name. Produces a
-/// `Term::Tuple` — the spread-update that `Access` used to carry as an argument now lives here.
-/// A spread's source: an access restricted to variable (`a`, `a.b.0`), parameter (`$x`,
-/// `$$conn` — sigil runs, with the glued first-accessor sugar), or ripple (`~`, `~.f`)
-/// roots, with field/index steps only — no annotation retrieval, no type arguments.
-fn spread_source_access(input: Span) -> IResult<Span, Access> {
+/// A value path: a name, not an expression — a variable (`a`, `a.b.0`), a parameter (`$x`,
+/// `$$conn`: sigil runs, with the glued first-accessor sugar), the flowing value (`~`, `~.f`) or a
+/// module member (`%mod.member`), with field/index steps only: no annotation retrieval, no type
+/// arguments. What a spread spreads, a spread-update updates, and a pin compares against.
+fn value_path(input: Span) -> IResult<Span, Access> {
     let start = input;
     let (after_root, source) = alt((
         map(take_while1(|c| c == '$'), |s: Span| {
@@ -2162,6 +2116,7 @@ fn spread_source_access(input: Span) -> IResult<Span, Access> {
             }
         }),
         map(char('~'), |_| AccessSource::Ripple),
+        map(import, |path| AccessSource::Import(path, None)),
         map(identifier, AccessSource::Identifier),
     ))(input)?;
     let base_span = span_between(start, after_root);
@@ -2185,8 +2140,11 @@ fn spread_source_access(input: Span) -> IResult<Span, Access> {
     ))
 }
 
+/// Parse a name-preserving tuple spread-update: `~[..., y]` (spread the chained value) or
+/// `a[..., y]` (spread the value path `a`), each inheriting the source's tuple name. Produces a
+/// `Term::Tuple` — the spread-update that `Access` used to carry as an argument now lives here.
 fn spread_update(input: Span) -> IResult<Span, Term> {
-    let (input, source) = spread_source_access(input)?;
+    let (input, source) = value_path(input)?;
     let (input, (bracket_span, mut fields)) = adjacent_spread_args(input)?;
     // For `a[...]` / `$conn[...]` / `~.f[...]`, the bare spread `...` spreads the source;
     // rewrite it so the compiler loads through it. A bare-`~` source is the chained value —
@@ -2496,14 +2454,12 @@ fn tuple_field(input: Span) -> IResult<Span, TupleField> {
             },
         ),
         // Spread: bare `...` (the chained value), or a sourced `...a.b` / `...$conn` /
-        // `...$$x` / `...~.f` — an access glued to the dots.
-        map(preceded(tag("..."), opt(spread_source_access)), |source| {
-            TupleField {
-                name: None,
-                name_span: Spanned::default(),
-                span: Spanned::default(),
-                value: FieldValue::Spread(source),
-            }
+        // `...~.f` / `...%mod.member` — a value path glued to the dots.
+        map(preceded(tag("..."), opt(value_path)), |source| TupleField {
+            name: None,
+            name_span: Spanned::default(),
+            span: Spanned::default(),
+            value: FieldValue::Spread(source),
         }),
         // Unnamed chain: chain
         map(chain, |chain_value| TupleField {

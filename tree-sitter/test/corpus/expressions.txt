@@ -607,3 +607,35 @@ Foo(a)
         name: (tuple_name)
         (pun
           source: (identifier))))))
+
+==================
+module member spreads
+==================
+
+[...%m.base, c: 3]
+%m.point[..., y: 4]
+
+---
+
+(source_file
+  (sequence
+    (chain
+      (tuple
+        (spread
+          (import
+            (identifier))
+          (identifier))
+        (named_field
+          (identifier)
+          (chain
+            (integer)))))
+    (chain
+      (spread_update
+        (import
+          (identifier))
+        (identifier)
+        (spread)
+        (named_field
+          (identifier)
+          (chain
+            (integer)))))))

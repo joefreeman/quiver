@@ -596,8 +596,6 @@ array = #'%list<'> -> ' {
   Array[$]
 }
 
-standard = %codec.standard
-
 // The edges between JSON and `%codec`'s neutral shapes: an object is a record (its absent —
 // nil — entries left out when written), and an array a list; and the standard library's own
 // (`%codec.standard`), so that a dict is read and written as one. With them, `%codec.convert`
@@ -615,7 +613,7 @@ edges = [
     },
   ],
   Edge[out: #Array['%list<'>] -> '%list<'> { $0 }, in: #'%list<'> -> Array['%list<'>] { Array[$] }],
-  ...standard,
+  ...%codec.standard,
 ]
 
 decode = #<'t, 'u, 'k, 'g, 'h>[

@@ -567,8 +567,8 @@ impl Collector {
             | ast::Match::String(..)
             | ast::Match::Star(_)
             | ast::Match::Placeholder
-            | ast::Match::Ripple
-            | ast::Match::Pin(_) => {}
+            | ast::Match::Ripple => {}
+            ast::Match::Pin(target) => self.access(target),
             ast::Match::Tuple(tuple) => {
                 for field in &tuple.fields {
                     self.pattern(&field.pattern);
@@ -610,9 +610,9 @@ impl Collector {
                             ..
                         } => self.type_def(type_def),
                         ast::FieldType::Field { type_def: None, .. } => {}
-                        ast::FieldType::Spread { type_arguments, .. } => {
-                            for argument in type_arguments {
-                                self.type_def(argument);
+                        ast::FieldType::Spread { source, .. } => {
+                            if let Some(source) = source {
+                                self.type_def(source);
                             }
                         }
                     }

@@ -64,8 +64,13 @@
   | Hole[offset: 'int, length: 'int]
 
 // A name a pin may match against: a binding the expansion made (`Local`), the parameter of one
-// of its functions (`Param`), or a field of one (`Get`).
-'name = Local[Str['bin]] | Param['int] | Get[of: ^, field: (Str['bin] | 'int)]
+// of its functions (`Param`), a module's export or the module itself (`Member`, with no type
+// arguments), or a field of one (`Get`).
+'name =
+  | Local[Str['bin]]
+  | Param['int]
+  | Member[module: Str['bin], member: (Str['bin] | []), arguments: Nil]
+  | Get[of: ^, field: (Str['bin] | 'int)]
 
 // A pattern, for `Match`: a literal (an integer, a binary, a `Str`, `Nil`), a `Tuple` of
 // patterns (positional, or `Labeled`), a `Partial` (`(x: p)`, its fields all `Labeled`),

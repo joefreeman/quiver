@@ -868,23 +868,21 @@ impl<'a> Splicer<'a> {
         }
     }
 
-    /// A pin's target: a `Local` or a `Param`, or a `Get` of one.
-    fn pin(&self, value: &Value, depth: usize) -> Result<ast::PinTarget, Error> {
+    /// A pin's target: a `Local`, a `Param` or a `Member` (with no type arguments), or a `Get`
+    /// of one.
+    fn pin(&self, value: &Value, depth: usize) -> Result<ast::Access, Error> {
         let access = self.access(value, depth)?;
-        let root = match access.source {
-            Some(ast::AccessSource::Identifier(name)) => ast::PinRoot::Variable(name),
-            Some(ast::AccessSource::Parameter { depth }) => ast::PinRoot::Parameter { depth },
-            _ => {
-                return Err(self.unexpected("a name to pin (Local, Param, or a Get of one)", value));
-            }
-        };
-        Ok(ast::PinTarget {
-            root,
-            accessors: access.accessors,
-            accessor_spans: access.accessor_spans,
-            base_span: access.base_span,
-            span: access.span,
-        })
+        match access.source {
+            Some(
+                ast::AccessSource::Identifier(_)
+                | ast::AccessSource::Parameter { .. }
+                | ast::AccessSource::Import(..),
+            ) if access.type_arguments.is_empty() => Ok(access),
+            _ => Err(self.unexpected(
+                "a name to pin (Local, Param, Member, or a Get of one)",
+                value,
+            )),
+        }
     }
 
     /// A `Get`'s field: a label, or a position.
@@ -1882,13 +1880,7 @@ fn walk_match_spans(pattern: &mut ast::Match, f: &mut impl FnMut(&mut ast::Spann
         ast::Match::Hole(chain) => walk_chain_spans(chain, f),
         ast::Match::Type(type_def) => walk_type_spans(type_def, f),
         ast::Match::Not(inner) => walk_match_spans(inner, f),
-        ast::Match::Pin(target) => {
-            for span in &mut target.accessor_spans {
-                f(span);
-            }
-            f(&mut target.base_span);
-            f(&mut target.span);
-        }
+        ast::Match::Pin(target) => walk_access_spans(target, f),
         ast::Match::Literal(_)
         | ast::Match::String(_, _)
         | ast::Match::Star(_)
