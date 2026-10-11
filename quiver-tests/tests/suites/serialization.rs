@@ -85,13 +85,13 @@ fn value_extras_survive_a_json_round_trip() {
     );
     assert_eq!(back, annotated, "and the elements still compare equal");
 
-    let typed = Value::builtin_typed(5, Some(TYPE_ID));
+    let typed = Value::builtin_typed(5, vec![TYPE_ID]);
     let back: Value = serde_json::from_str(&serde_json::to_string(&typed).expect("serialize"))
         .expect("deserialize");
     assert_eq!(
-        back.type_argument(),
-        Some(TYPE_ID),
-        "an instantiated builtin keeps its type argument"
+        back.type_arguments(),
+        [TYPE_ID],
+        "an instantiated builtin keeps its type arguments"
     );
 
     // A bare builtin must not gain one — the empty `Extras` is dropped, not serialized as a
@@ -99,5 +99,8 @@ fn value_extras_survive_a_json_round_trip() {
     let bare = Value::builtin(5);
     let back: Value =
         serde_json::from_str(&serde_json::to_string(&bare).expect("serialize")).expect("des");
-    assert_eq!(back.type_argument(), None, "a bare builtin carries none");
+    assert!(
+        back.type_arguments().is_empty(),
+        "a bare builtin carries none"
+    );
 }

@@ -227,7 +227,8 @@ pub struct AliasEntry {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ArtifactBuiltin {
     pub name: String,
-    pub type_argument: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_arguments: Vec<usize>,
 }
 
 impl CompiledUnit {
@@ -730,7 +731,7 @@ fn drain(
                 add_constant(site.module_constant, closure, queue);
             }
             Item::Builtin(builtin_id) => {
-                if let Some(type_argument) = program.get_builtins()[builtin_id].type_argument {
+                for &type_argument in &program.get_builtins()[builtin_id].type_arguments {
                     add_type(type_argument, closure, queue);
                 }
             }
@@ -1051,7 +1052,11 @@ pub(crate) fn extract(
             let info = &program.get_builtins()[builtin_id];
             ArtifactBuiltin {
                 name: info.name.clone(),
-                type_argument: info.type_argument.map(|id| remaps.types[&id]),
+                type_arguments: info
+                    .type_arguments
+                    .iter()
+                    .map(|id| remaps.types[id])
+                    .collect(),
             }
         })
         .collect();
@@ -1516,7 +1521,9 @@ fn shake_types(unit: &mut CompiledUnit) {
         .map(|function| function.remap_ids(&remap))
         .collect();
     for builtin in &mut unit.builtins {
-        builtin.type_argument = builtin.type_argument.map(|id| remap.types[&id]);
+        for type_argument in &mut builtin.type_arguments {
+            *type_argument = remap.types[type_argument];
+        }
     }
     unit.types = types;
 }
@@ -1646,7 +1653,11 @@ pub fn extract_unit(
             let info = &program.get_builtins()[builtin_id];
             ArtifactBuiltin {
                 name: info.name.clone(),
-                type_argument: info.type_argument.map(|id| remaps.types[&id]),
+                type_arguments: info
+                    .type_arguments
+                    .iter()
+                    .map(|id| remaps.types[id])
+                    .collect(),
             }
         })
         .collect();
@@ -1856,7 +1867,7 @@ fn collect_payload(
     for (key, _) in payload.annotations() {
         closure.annotation_keys.insert(*key);
     }
-    if let Some(type_id) = payload.type_argument() {
+    for &type_id in payload.type_arguments() {
         add_type(type_id, closure, queue);
     }
 }
@@ -2122,7 +2133,7 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
     }
     check_types_acyclic(unit, label)?;
     for builtin in &unit.builtins {
-        if let Some(type_argument) = builtin.type_argument {
+        for &type_argument in &builtin.type_arguments {
             check("type", type_argument, unit.types.len())?;
         }
     }
@@ -2258,11 +2269,15 @@ pub fn link_unit<E: Effect>(
                 label, builtin.name
             )));
         }
-        // The type argument re-interns like any other type reference — `remaps.types` is
+        // The type arguments re-intern like any other type reference — `remaps.types` is
         // complete by here, and registration dedupes on the instantiated pair.
         let session = program.register_builtin_instantiated(
             builtin.name.clone(),
-            builtin.type_argument.map(|local| remaps.types[&local]),
+            builtin
+                .type_arguments
+                .iter()
+                .map(|local| remaps.types[local])
+                .collect(),
             builtins,
         );
         remaps.builtins.insert(local, session);

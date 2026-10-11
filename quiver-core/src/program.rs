@@ -301,10 +301,10 @@ impl Program {
                     .get(*id)
                     .ok_or(InternError::BuiltinUndefined(*id))?;
                 let name = info.name.clone();
-                let type_argument = payload
+                let type_arguments = payload
                     .as_deref()
-                    .and_then(crate::value::Payload::type_argument);
-                let id = self.register_builtin_instantiated(name, type_argument, registry);
+                    .map_or(Vec::new(), |payload| payload.type_arguments().to_vec());
+                let id = self.register_builtin_instantiated(name, type_arguments, registry);
                 (
                     self.register_constant(Constant::Builtin { id }),
                     payload.as_deref(),
@@ -502,23 +502,23 @@ impl Program {
         name: String,
         registry: &crate::builtins::BuiltinRegistry<E>,
     ) -> usize {
-        self.register_builtin_instantiated(name, None, registry)
+        self.register_builtin_instantiated(name, Vec::new(), registry)
     }
 
-    /// Register a builtin, optionally at an explicit type argument. Each distinct
-    /// instantiation of a type-consuming builtin is its own entry, so that the id alone
-    /// tells the runtime which one a builtin constant means.
+    /// Register a builtin, optionally at type arguments. Each distinct instantiation of a
+    /// type-consuming builtin is its own entry, so that the id alone tells the runtime which
+    /// one a builtin constant means.
     pub fn register_builtin_instantiated<E: crate::effects::Effect>(
         &mut self,
         name: String,
-        type_argument: Option<usize>,
+        type_arguments: Vec<usize>,
         registry: &crate::builtins::BuiltinRegistry<E>,
     ) -> usize {
         // Check if this instantiation already exists
         if let Some(index) = self
             .builtins
             .iter()
-            .position(|b| b.name == name && b.type_argument == type_argument)
+            .position(|b| b.name == name && b.type_arguments == type_arguments)
         {
             return index;
         }
@@ -527,16 +527,18 @@ impl Program {
         let builtin_info = if let Some((param_spec, result_spec)) = registry.get_specs(&name) {
             let param_type = param_spec.resolve_to_id(self);
             let result_type = result_spec.resolve_to_id(self);
-            let labels = match type_argument {
-                Some(argument) => crate::labels::value_labels([argument, result_type], self),
-                None => Vec::new(),
+            let labels = if type_arguments.is_empty() {
+                Vec::new()
+            } else {
+                let roots = type_arguments.iter().copied().chain([result_type]);
+                crate::labels::value_labels(roots.collect::<Vec<_>>(), self)
             };
 
             BuiltinInfo {
                 name: name.clone(),
                 param_type,
                 result_type,
-                type_argument,
+                type_arguments,
                 labels,
             }
         } else {
@@ -547,7 +549,7 @@ impl Program {
                 name,
                 param_type: never_id,
                 result_type: never_id,
-                type_argument,
+                type_arguments,
                 labels: Vec::new(),
             }
         };
@@ -563,7 +565,7 @@ impl Program {
         if let Some(index) = self
             .builtins
             .iter()
-            .position(|b| b.name == info.name && b.type_argument == info.type_argument)
+            .position(|b| b.name == info.name && b.type_arguments == info.type_arguments)
         {
             return index;
         }

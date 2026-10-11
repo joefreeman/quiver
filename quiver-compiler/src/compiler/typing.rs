@@ -581,7 +581,7 @@ pub fn check_type_parameter_bounds<'a>(
         let bound = substitute(bound, bindings, program);
         if !quiver_core::types::is_compatible(argument, bound, &*program) {
             return Err(Error::TypeParameterBound(Box::new(super::BoundMismatch {
-                parameter: format!("'{}", name.split('#').next().unwrap_or(name)),
+                parameter: format!("'{}", quiver_core::types::declared_variable_name(name)),
                 bound: quiver_core::format::format_type_by_id(&*program, bound),
                 found: quiver_core::format::format_type_by_id(&*program, argument),
             })));

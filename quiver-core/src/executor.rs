@@ -84,7 +84,7 @@ pub struct ProgramUpdate {
     pub tuples: TableUpdate<TupleTypeInfo>,
     /// The type table: what runtime type tests are decided from (see
     /// [`crate::compatibility::Verdicts`]), and what the *type-consuming* builtins
-    /// (`%data.decode<'t>`, `%json.decode`/`encode<'t>`) read through the worker's
+    /// (`%data.decode<'t>`) read through the worker's
     /// [`crate::types::TypeLookup`].
     pub types: TableUpdate<Type>,
     /// Builtin information (name and resolved types)
@@ -179,9 +179,9 @@ pub struct Executor<E: Effect> {
     // Purity classes, indexed by builtin_id (parallel to `builtins`) — the dispatch
     // site's purity gate reads these before invoking.
     builtin_purities: Vec<crate::builtins::Purity>,
-    // Explicit type arguments, indexed by builtin_id (parallel to `builtins`). `Some` only
-    // for an instantiated type-consuming builtin; the value `Builtin` pushes carries it.
-    builtin_type_arguments: Vec<Option<usize>>,
+    // Type arguments, indexed by builtin_id (parallel to `builtins`). Non-empty only for an
+    // instantiated type-consuming builtin; the value `Builtin` pushes carries them.
+    builtin_type_arguments: Vec<Vec<usize>>,
     /// Per builtin, the labels its instantiation builds tuples with.
     builtin_labels: Vec<Arc<crate::labels::LabelTable>>,
     /// Each builtin's registered `(parameter, result)` types, indexed by builtin_id (parallel
@@ -541,12 +541,10 @@ impl<E: Effect> Executor<E> {
     pub fn kill(&mut self, pid: ProcessId, error: Error) {
         match self.get_process_mut(pid) {
             Some(process) if process.result.is_none() && !process.persistent => {
-                process.result = Some(Err(Box::new(error)));
-                process.frames.clear();
                 // A kill lands while the process is parked (or queued for a slice); no
-                // delivery will ever wake it again, so clear its scheduling state here. Left
+                // delivery will ever wake it again, so its scheduling state is cleared too. Left
                 // set, it would misreport the tombstone as Waiting/Active.
-                process.wait = None;
+                process.abort(error);
             }
             _ => return,
         }
@@ -667,6 +665,13 @@ impl<E: Effect> Executor<E> {
         Value::nil()
             .annotated(table.error_key, payload)
             .ok_or_else(|| Error::InvalidArgument("nil carries annotations".to_string()))
+    }
+
+    /// A builtin instantiation's type arguments, by table id.
+    pub(crate) fn builtin_type_arguments(&self, id: usize) -> &[usize] {
+        self.builtin_type_arguments
+            .get(id)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Create a binary from Vec<u8>
@@ -1043,9 +1048,7 @@ impl<E: Effect> Executor<E> {
             }
             Err(error) => {
                 // Fault: set error and terminate the process
-                process.result = Some(Err(Box::new(error)));
-                process.frames.clear();
-                process.wait = None;
+                process.abort(error);
                 killed = true;
             }
         }
@@ -1539,7 +1542,7 @@ impl<E: Effect> Executor<E> {
                     .get_purity(&b.name)
                     .unwrap_or(crate::builtins::Purity::Pure),
             );
-            self.builtin_type_arguments.push(b.type_argument);
+            self.builtin_type_arguments.push(b.type_arguments.clone());
             self.builtin_labels
                 .push(Arc::new(crate::labels::LabelTable::new(&b.labels)));
             self.builtin_signatures.push((b.param_type, b.result_type));
@@ -1631,50 +1634,36 @@ impl<E: Effect> Executor<E> {
 
         // Execute instructions for current process
         while units_executed < max_units {
-            let Some(instruction) = Self::fetch(&mut proc, &self.functions) else {
+            let step_result = match Self::fetch(&mut proc, &self.functions) {
                 // The current frame is exhausted. Returning into the caller ends the
                 // time-slice only at the root frame (process completion, handled below);
                 // an inner return pops inline so call-heavy code isn't throttled to one
                 // return per slice.
-                if proc.frames.len() <= 1 {
-                    break; // Root frame: process finished
+                None if proc.frames.len() <= 1 => break, // Root frame: process finished
+                None => self.pop_exhausted_frame(current_pid, &mut proc),
+                Some(instruction) if Self::is_cold(instruction) => {
+                    // Rare control/concurrency ops use the existing handlers, which expect the
+                    // process to be present in the map (they may also touch other processes).
+                    self.processes.insert(current_pid, proc);
+                    let r = self.execute_cold(current_pid, instruction, current_time_ms);
+                    proc = self
+                        .processes
+                        .remove(&current_pid)
+                        .expect("process should remain in map after a cold instruction");
+                    r
                 }
-                self.pop_exhausted_frame(current_pid, &mut proc);
-                units_executed += 1;
-                continue;
-            };
-
-            let cold = Self::is_cold(instruction);
-            let step_result = if cold {
-                // Rare control/concurrency ops use the existing handlers, which expect the
-                // process to be present in the map (they may also touch other processes).
-                self.processes.insert(current_pid, proc);
-                let r = self.execute_cold(current_pid, instruction, current_time_ms);
-                proc = self
-                    .processes
-                    .remove(&current_pid)
-                    .expect("process should remain in map after a cold instruction");
-                r
-            } else {
-                self.execute_hot(&mut proc, current_pid, instruction)
+                Some(instruction) => self.execute_hot(&mut proc, current_pid, instruction),
             };
 
             units_executed += 1;
 
-            // Handle instruction result
             match step_result {
-                Ok(request) => {
-                    pending_request = request;
-                }
-                Err(error) => {
-                    proc.result = Some(Err(Box::new(error.clone())));
-                    proc.frames.clear();
-                    proc.wait = None;
-                }
+                Ok(request) => pending_request = request,
+                Err(error) => proc.abort(error),
             }
 
-            // Yield once the instruction has routed an action (at most one per slice) or
-            // parked the process.
+            // Yield once the step has routed an action (at most one per slice) or parked the
+            // process.
             if pending_request.is_some() || proc.wait.is_some() {
                 break;
             }
@@ -1688,7 +1677,16 @@ impl<E: Effect> Executor<E> {
             while !proc.frames.is_empty()
                 && Self::current_instruction(&proc, &self.functions).is_none()
             {
-                self.pop_exhausted_frame(current_pid, &mut proc);
+                // One routed action per slice: a resume, which may route one, waits for the
+                // next slice once this one has.
+                if pending_request.is_some() && proc.resumes_on_pop() {
+                    break;
+                }
+                match self.pop_exhausted_frame(current_pid, &mut proc) {
+                    Ok(Some(request)) => pending_request = Some(request),
+                    Ok(None) => {}
+                    Err(error) => proc.abort(error),
+                }
             }
         }
 
@@ -1733,18 +1731,119 @@ impl<E: Effect> Executor<E> {
         (true, pending_request)
     }
 
+    /// Run `body` against a context for `builtin`: the step-local
+    /// `proc` (out of the map for the slice) and the executor, whose verbs mutate the caller's
+    /// record and queue at most one routed action — answered alongside `body`'s result.
+    fn with_builtin_context<R>(
+        &mut self,
+        proc: &mut Process,
+        pid: ProcessId,
+        builtin: usize,
+        body: impl FnOnce(&mut crate::builtins::BuiltinContext<E>) -> R,
+    ) -> (R, Option<Action<E>>) {
+        let result_type = self
+            .builtin_signatures
+            .get(builtin)
+            .map(|&(_, result)| result);
+        let labels = self
+            .builtin_labels
+            .get(builtin)
+            .cloned()
+            .unwrap_or_default();
+        let mut ctx =
+            crate::builtins::BuiltinContext::new(pid, proc, self, builtin, result_type, labels);
+        let result = body(&mut ctx);
+        let action = ctx.take_action();
+        (result, action)
+    }
+
+    /// Carry out a builtin's completion — from its call, or from `resumed` after a call it made
+    /// returned — answering the action to route, if any.
+    fn complete_builtin(
+        &mut self,
+        proc: &mut Process,
+        pid: ProcessId,
+        builtin: usize,
+        completion: crate::builtins::Completion<E>,
+        action: Option<Action<E>>,
+        resumed: bool,
+    ) -> Result<Option<Action<E>>, Error> {
+        match completion {
+            crate::builtins::Completion::Value(value) => {
+                // Immediate result: push the value; a verb-queued action (kill/link) routes on.
+                self.push_value(proc, value);
+                Ok(action)
+            }
+            // Parking from a resume would leave the frame-pop path holding a process that waits;
+            // no continuation does, so one that tries is an interpreter bug.
+            crate::builtins::Completion::Effect(_) | crate::builtins::Completion::Suspend
+                if resumed =>
+            {
+                unreachable!("a builtin resumed from a call it made cannot wait")
+            }
+            crate::builtins::Completion::Effect(effect) => {
+                // A receive filter or a tracked render may be re-evaluated, so parking for an
+                // effect is rejected in either restricted context.
+                if let Some(context) = proc.restricted_context() {
+                    return Err(Error::OperationNotAllowed {
+                        operation: Operation::Effect,
+                        context,
+                    });
+                }
+                debug_assert!(
+                    action.is_none(),
+                    "a builtin cannot both queue an action and park for an effect"
+                );
+                // Park: the result arrives via notify_effect_completion, which pushes it for the
+                // process to resume with.
+                proc.wait = Some(Wait::Effect);
+                Ok(Some(Action::RequestEffect {
+                    process_id: pid,
+                    effect,
+                }))
+            }
+            crate::builtins::Completion::Suspend => {
+                // The environment answers the queued action with a value push (`notify_state`),
+                // which delivers the result — so park exactly like a remote `?` sample. The
+                // queueing verb already refused restricted contexts.
+                debug_assert!(
+                    action.is_some(),
+                    "a suspending builtin must queue the action that answers it"
+                );
+                proc.wait = Some(Wait::Reply);
+                Ok(action)
+            }
+            crate::builtins::Completion::Call {
+                function,
+                captures,
+                argument,
+                then,
+            } => {
+                // Resolve via a call: push the [.., parameter, function] shape handle_call
+                // expects. The target is a genuine function, so handle_call always pushes a frame
+                // (and returns no action); its return resumes `then` (see `pop_exhausted_frame`).
+                self.push_value(proc, argument);
+                self.push_value(proc, Value::Function(function, captures));
+                self.handle_call(proc, pid)?;
+                proc.push_pending_call(builtin, then);
+                Ok(action)
+            }
+        }
+    }
+
     /// Pop one exhausted frame of the running process (held out of the map for its slice):
-    /// return into the caller, release the frame's locals, and reconcile a returning
-    /// tracked-render thunk's reactive subscriptions. The callee's result is already on the
+    /// return into the caller, release the frame's locals, and resume a builtin that called
+    /// the frame. The callee's result is already on the
     /// stack, and the caller's counter already points where it resumes — past its call, or
     /// back at a select that ran a receive filter.
-    fn pop_exhausted_frame(&mut self, pid: ProcessId, process: &mut Process) {
-        // A returning tracked-render thunk is the frame whose pre-pop depth matches the
-        // recorded boundary; its return reconciles the caller's reactive subscriptions.
-        let is_track_boundary = process
-            .tracking
-            .as_ref()
-            .is_some_and(|t| t.boundary_len == process.frames.len());
+    fn pop_exhausted_frame(
+        &mut self,
+        pid: ProcessId,
+        process: &mut Process,
+    ) -> Result<Option<Action<E>>, Error> {
+        // A frame a builtin called is the one whose pre-pop depth matches its pending call;
+        // its return resumes that builtin.
+        let resumes = process.take_resumed_call();
 
         let frame = process.frames.pop().expect("an exhausted frame to pop");
         let is_last_frame = process.frames.is_empty();
@@ -1754,9 +1853,16 @@ impl<E: Effect> Executor<E> {
         if !process.persistent || !is_last_frame {
             process.locals.truncate(frame.locals_base);
         }
-        if is_track_boundary {
-            self.reconcile_tracking(pid, process);
-        }
+        let Some(pending) = resumes else {
+            return Ok(None);
+        };
+        // Re-enter the builtin, in the context it called from, with the callee's result.
+        let result = self.pop_value(process).ok_or(Error::StackUnderflow)?;
+        let (completion, action) =
+            self.with_builtin_context(process, pid, pending.builtin, |ctx| {
+                pending.then.resume(result, ctx)
+            });
+        self.complete_builtin(process, pid, pending.builtin, completion?, action, true)
     }
 
     /// Whether an instruction is a "cold" control/concurrency op handled via the process map
@@ -1919,7 +2025,8 @@ impl<E: Effect> Executor<E> {
             // The instantiation lives on the builtin's table entry, which the id already
             // selects; the value carries it because that is where an implementation reads it.
             Constant::Builtin { id } => {
-                Value::builtin_typed(*id, self.builtin_type_arguments.get(*id).copied().flatten())
+                let type_arguments = self.builtin_type_arguments.get(*id).cloned();
+                Value::builtin_typed(*id, type_arguments.unwrap_or_default())
             }
             Constant::Annotated { value, entries } => {
                 let mut carrier = child(&self.constant_values, *value)?;
@@ -2241,7 +2348,7 @@ impl<E: Effect> Executor<E> {
     /// Whether a value inhabits a type. Its concrete type decides where it can (see
     /// [`Verdicts`]); a tuple built at a wider type than it holds, or in generic code, is
     /// tested by its fields.
-    fn check_type_compatible(&self, value: &Value, pattern_type_id: usize) -> bool {
+    pub(crate) fn check_type_compatible(&self, value: &Value, pattern_type_id: usize) -> bool {
         match self.verdict(value, pattern_type_id) {
             Some(Verdict::Admit) => true,
             Some(Verdict::Inspect) => crate::compatibility::walk_inhabits(
@@ -2364,13 +2471,10 @@ impl<E: Effect> Executor<E> {
 
                 Ok(None)
             }
-            Value::Builtin(builtin_id, payload) => {
+            Value::Builtin(builtin_id, _) => {
                 // Pop function (discarded) and parameter (consumed by the builtin).
                 self.pop_value(proc); // function
                 let parameter = self.pop_value(proc).ok_or(Error::StackUnderflow)?;
-                // A type-consuming builtin's explicit type argument, for the context.
-                let type_argument = payload.as_deref().and_then(Payload::type_argument);
-
                 // Purity gate: reject a stateful or host-reading builtin, before it
                 // runs, wherever re-evaluation stability or determinism is assumed.
                 // (`Effect` and `Process` builtins are governed by their own gates —
@@ -2418,89 +2522,9 @@ impl<E: Effect> Executor<E> {
                         ))
                     })?;
 
-                // The context wraps the step-local `proc` (out of the map for the
-                // slice) and the executor; its verbs mutate the caller's record and
-                // queue at most one routed action.
-                let result_type = self
-                    .builtin_signatures
-                    .get(builtin_id)
-                    .map(|&(_, result)| result);
-                let labels = self
-                    .builtin_labels
-                    .get(builtin_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let (result, action) = {
-                    let mut ctx = crate::builtins::BuiltinContext::new(
-                        pid,
-                        proc,
-                        self,
-                        type_argument,
-                        result_type,
-                        labels,
-                    );
-                    let result = builtin(&parameter, &mut ctx);
-                    let action = ctx.take_action();
-                    (result, action)
-                };
-
-                match result? {
-                    crate::builtins::Completion::Value(value) => {
-                        // Immediate result: push the value; a verb-queued action
-                        // (kill/link) routes on.
-                        self.push_value(proc, value);
-                        Ok(action)
-                    }
-                    crate::builtins::Completion::Effect(effect) => {
-                        // A receive filter or a tracked render may be re-evaluated, so
-                        // parking for an effect is rejected in either restricted context.
-                        if let Some(context) = proc.restricted_context() {
-                            return Err(Error::OperationNotAllowed {
-                                operation: Operation::Effect,
-                                context,
-                            });
-                        }
-                        debug_assert!(
-                            action.is_none(),
-                            "a builtin cannot both queue an action and park for an effect"
-                        );
-                        // Park: the result arrives via notify_effect_completion, which
-                        // pushes it for the process to resume with.
-                        proc.wait = Some(Wait::Effect);
-                        Ok(Some(Action::RequestEffect {
-                            process_id: pid,
-                            effect,
-                        }))
-                    }
-                    crate::builtins::Completion::Suspend => {
-                        // The environment answers the queued action with a value push
-                        // (`notify_state`), which delivers the result — so park exactly
-                        // like a remote `?` sample. The queueing verb already refused
-                        // restricted contexts.
-                        debug_assert!(
-                            action.is_some(),
-                            "a suspending builtin must queue the action that answers it"
-                        );
-                        proc.wait = Some(Wait::Reply);
-                        Ok(action)
-                    }
-                    crate::builtins::Completion::Call { function, captures } => {
-                        // Resolve via a call: push the [.., parameter, function] shape
-                        // handle_call expects — the callee frame's return delivers the
-                        // result, exactly like an ordinary call. The target is a
-                        // genuine function, so handle_call always pushes a frame (and
-                        // returns no action). For a tracked render (begin_tracking),
-                        // the fresh frame is the reconciliation boundary (see the
-                        // frame-pop loop).
-                        self.push_value(proc, Value::nil());
-                        self.push_value(proc, Value::Function(function, captures));
-                        self.handle_call(proc, pid)?;
-                        if let Some(tracking) = &mut proc.tracking {
-                            tracking.boundary_len = proc.frames.len();
-                        }
-                        Ok(action)
-                    }
-                }
+                let (result, action) = self
+                    .with_builtin_context(proc, pid, builtin_id, |ctx| builtin(&parameter, ctx));
+                self.complete_builtin(proc, pid, builtin_id, result?, action, false)
             }
             Value::Process(target, _) => {
                 // Applying a pid sends the parameter to it: fire-and-forget, answering
@@ -2575,7 +2599,7 @@ impl<E: Effect> Executor<E> {
     /// the tracked thunk's frame returns). Dependencies still sampled
     /// stay (they were subscribed atomically at the sample); dependencies no longer sampled
     /// are unsubscribed — a local target directly, a remote one via `pending_unsubscribes`.
-    fn reconcile_tracking(&mut self, pid: ProcessId, process: &mut Process) {
+    pub(crate) fn reconcile_tracking(&mut self, pid: ProcessId, process: &mut Process) {
         let Some(tracking) = process.tracking.take() else {
             return;
         };
@@ -2776,13 +2800,14 @@ impl<E: Effect> Executor<E> {
         pid: ProcessId,
         current_time_ms: u64,
     ) -> Result<Option<Action<E>>, Error> {
-        // A select inside a tracked render is rejected — a render must stay pure and
-        // non-blocking. A nested select in a receive filter is
-        // caught separately by the continuation guard.
-        if self.get_process(pid).is_some_and(Process::is_tracking) {
+        // A select inside a tracked render is rejected — it must stay pure and non-blocking.
+        // A nested select in a receive filter is caught separately by the continuation guard.
+        if let Some(context @ RestrictedContext::TrackedRender) =
+            self.get_process(pid).and_then(Process::restricted_context)
+        {
             return Err(Error::OperationNotAllowed {
                 operation: Operation::Select,
-                context: RestrictedContext::TrackedRender,
+                context,
             });
         }
         let process = self
@@ -3439,12 +3464,12 @@ impl<E: Effect> Executor<E> {
                     pending.extend(caps_a.iter().zip(caps_b.iter()));
                     continue;
                 }
-                // The type argument is operational (a differently-instantiated builtin behaves
-                // differently), so it participates; annotations stay invisible.
+                // The type arguments are operational (a differently-instantiated builtin behaves
+                // differently), so they participate; annotations stay invisible.
                 (Value::Builtin(a, p), Value::Builtin(b, q)) => {
                     a == b
-                        && p.as_deref().and_then(Payload::type_argument)
-                            == q.as_deref().and_then(Payload::type_argument)
+                        && p.as_deref().map_or(&[][..], Payload::type_arguments)
+                            == q.as_deref().map_or(&[][..], Payload::type_arguments)
                 }
                 (Value::Process(a, func_a), Value::Process(b, func_b)) => {
                     a == b && func_a == func_b
@@ -3606,7 +3631,7 @@ impl<'a> ToWireFrame<'a> {
             .zip(annotation_values)
             .collect();
         let wire = WirePayload::with_annotations(done, annotations)
-            .with_type_argument(payload.type_argument());
+            .with_type_arguments(payload.type_arguments().into());
         match node {
             Node::Tuple(id) => WireValue::Tuple(id, wire),
             Node::Function(id) => WireValue::Function(id, wire),
@@ -3621,7 +3646,7 @@ struct FromWireFrame {
     node: Node,
     elements: usize,
     keys: Vec<usize>,
-    type_argument: Option<usize>,
+    type_arguments: Box<[usize]>,
     remaining: std::iter::Chain<std::vec::IntoIter<WireValue>, std::vec::IntoIter<WireValue>>,
     done: Vec<Value>,
 }
@@ -3642,7 +3667,7 @@ const FROM_WIRE_RETAIN: usize = 64;
 
 impl FromWireFrame {
     fn new(node: Node, mut payload: WirePayload) -> Self {
-        let (elements, annotations, type_argument) = payload.take_parts();
+        let (elements, annotations, type_arguments) = payload.take_parts();
         let (keys, annotation_values): (Vec<usize>, Vec<WireValue>) =
             annotations.into_iter().unzip();
         let count = elements.len();
@@ -3650,7 +3675,7 @@ impl FromWireFrame {
             node,
             elements: count,
             keys,
-            type_argument,
+            type_arguments,
             remaining: elements.into_iter().chain(annotation_values),
             done: Vec::with_capacity(count),
         }
@@ -3661,13 +3686,13 @@ impl FromWireFrame {
             node,
             elements,
             keys,
-            type_argument,
+            type_arguments,
             mut done,
             ..
         } = self;
         let annotations = keys.into_iter().zip(done.split_off(elements)).collect();
         let payload = Payload::with_annotations(done, annotations)
-            .with_type_argument(type_argument)
+            .with_type_arguments(type_arguments.into_vec())
             .shared();
         match node {
             Node::Tuple(id) => Value::Tuple(id, payload),
@@ -4192,7 +4217,7 @@ mod annotation_tests {
             vec![
                 inner,
                 Value::Binary(Binary::Constant(0)),
-                Value::builtin_typed(7, Some(11)),
+                Value::builtin_typed(7, vec![11, 12]),
                 Value::function(1, vec![Value::int(42)]),
                 Value::Process(5, 6),
                 Value::Resource(8, 9),
@@ -4236,9 +4261,9 @@ mod annotation_tests {
             vec![4, 5]
         );
         assert_eq!(
-            fields[2].type_argument(),
-            Some(11),
-            "type argument survives"
+            fields[2].type_arguments(),
+            [11, 12],
+            "type arguments survive"
         );
         assert!(matches!(fields[1], Value::Binary(Binary::Constant(0))));
     }
@@ -4357,7 +4382,6 @@ mod reactive_notification_tests {
         tracker.subscriptions = vec![1];
         tracker.tracking = Some(Box::new(TrackingState {
             sampled: HashSet::new(),
-            boundary_len: 1,
         }));
         ex.reconcile_tracking(0, &mut tracker);
         ex.processes.insert(0, tracker);

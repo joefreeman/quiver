@@ -88,7 +88,7 @@ pub fn builtin_registry_lookup<E: Effect>(
     arg: &Value,
     ctx: &mut BuiltinContext<E>,
 ) -> Result<Completion<E>, Error> {
-    let Some(expected_type) = ctx.type_argument() else {
+    let Some(&expected_type) = ctx.type_arguments().first() else {
         return Err(Error::InvalidArgument(
             "__registry_lookup__ called without a type argument: a lookup must state \
              the process type it expects, and be instantiated where it is applied \

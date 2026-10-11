@@ -1,3 +1,4 @@
+use crate::builtins::Continuation;
 use crate::effects::Effect;
 use crate::value::{ResourceId, Value};
 use serde::{Deserialize, Serialize};
@@ -347,13 +348,24 @@ impl Watcher {
 
 /// A `%proc.track` render in progress. Set while the tracked thunk
 /// runs; every `?` sample lands its target in `sampled`, and when the thunk's frame returns
-/// the executor reconciles the process's subscriptions against it. `boundary_len` is the
-/// `frames.len()` just after the thunk frame was pushed, so its return is recognised when a
-/// popped frame had exactly that depth.
+/// (its [`Continuation::Track`]) the executor reconciles the process's subscriptions against it.
 #[derive(Debug)]
 pub struct TrackingState {
     pub sampled: HashSet<ProcessId>,
-    pub boundary_len: usize,
+}
+
+/// A builtin waiting on a Quiver call it made: when the frame at `depth` (its `frames.len()`
+/// just after the callee's frame was pushed) returns, the executor re-enters the builtin through
+/// `then`, with the callee's result, as if it had been called afresh. A tail call replaces a frame
+/// in place, so the depth holds.
+#[derive(Debug)]
+pub struct PendingCall {
+    pub depth: usize,
+    /// The builtin that called, by table id: the context `then` resumes in.
+    pub builtin: usize,
+    pub then: Continuation,
+    /// The pending call this one is inside, if any.
+    outer: Option<Box<PendingCall>>,
 }
 
 /// Delivered await results, keyed by the process they came from — an association list.
@@ -534,6 +546,11 @@ pub struct Process {
     /// Boxed, for the same reason as `select_state`: 56 bytes inline, `None` in every
     /// process that is not mid-`%proc.track` render.
     pub tracking: Option<Box<TrackingState>>,
+    /// The builtins waiting on Quiver calls they made (`Completion::Call`), innermost first,
+    /// each linked to the one outside it: each resumes when the frame it called returns.
+    /// Cleared with the frames. Boxed, like `tracking`: `None` in every process not inside
+    /// such a call, which is nearly all.
+    pending_calls: Option<Box<PendingCall>>,
     /// Stream events that arrived while no select was waiting on their resource —
     /// one slot per resource, since at most one read is armed per stream. Consumed
     /// (in preference to arming) by the next select naming the resource, or by a
@@ -571,6 +588,7 @@ impl Process {
             subscriber_count: 0,
             subscriptions: Vec::new(),
             tracking: None,
+            pending_calls: None,
             resource_events: ResourceEvents::default(),
             armed_resources: ArmedResources::default(),
         }
@@ -597,22 +615,58 @@ impl Process {
         self.subscriber_count -= (before - self.watchers.len()) as u32;
     }
 
+    /// End the process's execution with `error` as its result: its frames, the builtins waiting
+    /// on them, and any wait are gone.
+    pub fn abort(&mut self, error: crate::error::Error) {
+        self.result = Some(Err(Box::new(error)));
+        self.frames.clear();
+        self.pending_calls = None;
+        self.wait = None;
+    }
+
+    /// Record `builtin` waiting on the call whose frame was just pushed, to resume with `then`.
+    pub fn push_pending_call(&mut self, builtin: usize, then: Continuation) {
+        self.pending_calls = Some(Box::new(PendingCall {
+            depth: self.frames.len(),
+            builtin,
+            then,
+            outer: self.pending_calls.take(),
+        }));
+    }
+
+    /// Whether popping the current frame returns into a builtin that called it.
+    pub fn resumes_on_pop(&self) -> bool {
+        self.pending_calls
+            .as_ref()
+            .is_some_and(|pending| pending.depth == self.frames.len())
+    }
+
+    /// The builtin the current frame's return resumes, taken, if it has one.
+    pub fn take_resumed_call(&mut self) -> Option<PendingCall> {
+        if !self.resumes_on_pop() {
+            return None;
+        }
+        let mut pending = *self.pending_calls.take()?;
+        self.pending_calls = pending.outer.take();
+        Some(pending)
+    }
+
     /// Whether this process is currently inside a `%proc.track` render — a restricted,
     /// re-evaluable context, like a receive filter.
     pub fn is_tracking(&self) -> bool {
         self.tracking.is_some()
     }
 
-    /// The name of the restricted context this process is in, if any — a receive filter or
-    /// a tracked render. Both must stay pure (they may be re-evaluated), so spawns, sends,
+    /// The name of the restricted context this process is in, if any — a receive filter or a
+    /// tracked render. Each must stay pure (both may be re-evaluated), so spawns, sends,
     /// effects, and selects are rejected inside them, reported against this name.
     pub fn restricted_context(&self) -> Option<RestrictedContext> {
         if self.is_receiving() {
-            Some(RestrictedContext::ReceiveFunction)
-        } else if self.is_tracking() {
-            Some(RestrictedContext::TrackedRender)
-        } else {
-            None
+            return Some(RestrictedContext::ReceiveFunction);
         }
+        if self.is_tracking() {
+            return Some(RestrictedContext::TrackedRender);
+        }
+        None
     }
 }

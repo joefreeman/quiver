@@ -84,20 +84,46 @@ pub enum Completion<E: Effect> {
     /// The result comes from the host: the caller parks while the environment performs
     /// the effect, and the completion notification delivers the result.
     Effect(E),
-    /// The result comes from Quiver code: the dispatch site invokes the (nilary)
-    /// function on a fresh frame, so the frame's return delivers the callee's result as
-    /// the builtin's own — exactly like an ordinary
-    /// call (this is how `%proc.track` runs its thunk). The target is specifically a
-    /// function — never a builtin, whose frameless resolution would break the tracking
-    /// boundary and could route an action the dispatch site doesn't collect.
+    /// The result comes from Quiver code: the dispatch site calls the function with
+    /// `argument` on a fresh frame, and when that frame returns, resumes the builtin's `then`
+    /// with the callee's result (how `%proc.track` runs its thunk). The target is
+    /// specifically a function — never a builtin, whose frameless resolution would leave no
+    /// frame to resume at and could route an action the dispatch site doesn't collect.
     Call {
         function: usize,
         captures: Rc<Payload>,
+        argument: Value,
+        then: Continuation,
     },
     /// The result comes from the environment: the builtin queued a routed action whose
     /// answer arrives as a host value push (`notify_state`), which delivers the result.
     /// The caller parks until then, exactly like a remote `?` sample.
     Suspend,
+}
+
+/// What a builtin does with the result of a Quiver call it made ([`Completion::Call`]), once the
+/// callee's frame returns. Resuming is re-entering the builtin: in the context it called from,
+/// answering a [`Completion`] like any call to it — a value, or another call (though not a wait).
+#[derive(Debug)]
+pub enum Continuation {
+    /// `%proc.track`: reconcile the render's reactive subscriptions; the thunk's result is the
+    /// builtin's own.
+    Track,
+}
+
+impl Continuation {
+    pub(crate) fn resume<E: Effect>(
+        self,
+        result: Value,
+        ctx: &mut BuiltinContext<E>,
+    ) -> Result<Completion<E>, Error> {
+        match self {
+            Continuation::Track => {
+                ctx.end_tracking();
+                Ok(Completion::Value(result))
+            }
+        }
+    }
 }
 
 /// What a builtin executes against: the executor (heap, constants, refs) plus verbs on
@@ -110,13 +136,11 @@ pub struct BuiltinContext<'a, E: Effect> {
     pid: ProcessId,
     process: &'a mut Process,
     action: Option<Action<E>>,
-    /// A type-consuming builtin's explicit type argument (`__data_decode__<'t>`), read
-    /// off the called builtin value; `None` for ordinary builtins. Resolve it against
-    /// the executor's `TypeLookup`.
-    type_argument: Option<usize>,
+    /// The builtin as called, by table id: which instantiation of it, for a type-consuming
+    /// builtin.
+    builtin: usize,
     /// The builtin's registered result type, from its instantiated table row — how an
-    /// implementation that constructs typed results (`__json_encode__`'s `'%json`
-    /// shapes) obtains their ids without minting any.
+    /// implementation that constructs typed results obtains their ids without minting any.
     result_type: Option<usize>,
     /// The labels the builtin's instantiation builds tuples with (see [`crate::labels`]).
     labels: Arc<LabelTable>,
@@ -127,7 +151,7 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
         pid: ProcessId,
         process: &'a mut Process,
         executor: &'a mut Executor<E>,
-        type_argument: Option<usize>,
+        builtin: usize,
         result_type: Option<usize>,
         labels: Arc<LabelTable>,
     ) -> Self {
@@ -136,7 +160,7 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
             pid,
             process,
             action: None,
-            type_argument,
+            builtin,
             result_type,
             labels,
         }
@@ -147,10 +171,11 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
         self.pid
     }
 
-    /// The explicit type argument the builtin was instantiated with (a type-consuming
-    /// builtin's `<'t>`), or `None` when called without one.
-    pub fn type_argument(&self) -> Option<usize> {
-        self.type_argument
+    /// The type arguments the builtin was instantiated with (a type-consuming builtin's
+    /// `<'t, …>`, written or inferred), from its table entry; empty when called without any.
+    /// Resolve them against the executor's `TypeLookup`.
+    pub fn type_arguments(&self) -> &[usize] {
+        self.executor.builtin_type_arguments(self.builtin)
     }
 
     /// The builtin's registered result type id, from its table row.
@@ -307,17 +332,22 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
         Ok(())
     }
 
-    /// Enter a tracked render (`%proc.track`): until the accompanying
-    /// [`Completion::Call`] frame returns and reconciles subscriptions, each `?` the
-    /// caller samples registers a reactive subscription. Renders must be pure and
-    /// non-nested, so this refuses both restricted contexts.
+    /// Enter a tracked render (`%proc.track`): until `end_tracking`, when the accompanying
+    /// [`Completion::Call`] returns, each `?` the caller samples registers a reactive
+    /// subscription. Renders must be pure and non-nested, so this refuses both restricted
+    /// contexts.
     pub fn begin_tracking(&mut self) -> Result<(), Error> {
         self.allow(Operation::Track)?;
         self.process.tracking = Some(Box::new(TrackingState {
             sampled: HashSet::new(),
-            boundary_len: 0,
         }));
         Ok(())
+    }
+
+    /// Leave the tracked render `begin_tracking` entered, reconciling the caller's reactive
+    /// subscriptions against what it sampled.
+    pub fn end_tracking(&mut self) {
+        self.executor.reconcile_tracking(self.pid, self.process);
     }
 }
 
@@ -576,10 +606,11 @@ pub struct BuiltinEntry<E: Effect> {
     pub parameter: TypeSpec,
     pub result: TypeSpec,
     /// Declared type parameters, for a **type-consuming** builtin: names in declaration
-    /// order (matching any `TypeSpec::Var` occurrences in the signature). Non-empty
-    /// means every call must instantiate explicitly (`__data_decode__<'t>`) — the compiler
-    /// resolves the arguments and embeds the (single, for now) type id in the emitted
-    /// instruction for the implementation to read via `BuiltinContext::type_argument`.
+    /// order (matching any `TypeSpec::Var` occurrences in the signature). Non-empty means
+    /// every application instantiates it concretely — with type arguments written as a
+    /// prefix (`__data_decode__<'t>`), and the rest inferred from the argument's type — and
+    /// the instantiation is its own table entry, whose type ids the implementation reads via
+    /// `BuiltinContext::type_arguments`.
     pub type_parameters: Vec<String>,
 }
 
@@ -663,10 +694,9 @@ impl<E: Effect> BuiltinRegistry<E> {
         result: TypeSpec,
         type_parameters: Vec<String>,
     ) {
-        assert_eq!(
-            type_parameters.len(),
-            1,
-            "type-consuming builtins take exactly one type parameter (for now)"
+        assert!(
+            !type_parameters.is_empty(),
+            "a type-consuming builtin declares its type parameters"
         );
         self.functions.insert(
             name,
@@ -1153,8 +1183,9 @@ pub fn builtin_process_link<E: Effect>(
 /// Run a reactive tracked render (`%proc.track thunk`): evaluate the
 /// nilary `thunk` with dependency tracking on, subscribing the caller to every process the
 /// thunk samples (`?`) and reconciling those subscriptions when it returns. Tracking is
-/// entered here; the thunk itself runs as the builtin's [`Completion::Call`], so its
-/// return both reconciles the subscriptions and delivers `track`'s result.
+/// entered here; the thunk itself runs as the builtin's [`Completion::Call`], whose
+/// [`Continuation::Track`] reconciles the subscriptions when it returns, leaving the thunk's
+/// result as `track`'s.
 pub fn builtin_track<E: Effect>(
     arg: &Value,
     ctx: &mut BuiltinContext<E>,
@@ -1169,6 +1200,8 @@ pub fn builtin_track<E: Effect>(
     Ok(Completion::Call {
         function: *function,
         captures: captures.clone(),
+        argument: Value::nil(),
+        then: Continuation::Track,
     })
 }
 

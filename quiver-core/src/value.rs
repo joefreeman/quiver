@@ -41,7 +41,7 @@ pub struct Payload {
     elements: Elements,
     /// Everything a payload only *sometimes* carries, in one box, so an ordinary tuple pays a
     /// single pointer-sized `None` for all of it. Both parts are rare and neither is on a read
-    /// path, which is what makes the shared indirection the right trade: `type_argument` in
+    /// path, which is what makes the shared indirection the right trade: `type_arguments` in
     /// particular was 16 inline bytes on *every* tuple in the system to serve instantiated
     /// builtins alone.
     ///
@@ -159,24 +159,23 @@ struct Extras {
     /// Annotations attached to the owning value: `(key id, value)` pairs, sorted by key id.
     /// Invisible to equality and pattern matching — only `GetAnnotation` observes them.
     annotations: Vec<(usize, Value)>,
-    /// A type-consuming builtin's explicit type argument (`__data_decode__<'t>` → the
-    /// resolved type id), carried on the *value* so an instantiated builtin flows
-    /// through bindings and generic code intact. Unlike annotations it is operational
-    /// (the implementation reads it), so equality compares it. Always `None` on tuple
-    /// and function payloads.
-    type_argument: Option<usize>,
+    /// A type-consuming builtin's type arguments (`__data_decode__<'t>` → the resolved type
+    /// ids), carried on the *value* so an instantiated builtin flows through bindings and
+    /// generic code intact. Unlike annotations they are operational (the implementation reads
+    /// them), so equality compares them. Always empty on tuple and function payloads.
+    type_arguments: Vec<usize>,
 }
 
 impl Extras {
     /// Whether this carries nothing, and so should be dropped for a bare `None`. The invariant
     /// the type's "never constructed empty" contract rests on.
     fn is_empty(&self) -> bool {
-        self.annotations.is_empty() && self.type_argument.is_none()
+        self.annotations.is_empty() && self.type_arguments.is_empty()
     }
 }
 
 /// Hand-written so the serialized shape is unchanged by the boxing: `elements`, plus
-/// `annotations` and `type_argument` when present. That is exactly what [`PayloadData`]
+/// `annotations` and `type_arguments` when present. That is exactly what [`PayloadData`]
 /// reads back, and only self-describing formats (`serde_json`) are in use, so an omitted
 /// field and an absent one are the same thing.
 impl Serialize for Payload {
@@ -184,17 +183,17 @@ impl Serialize for Payload {
         use serde::ser::SerializeStruct;
 
         let annotations = self.annotations();
-        let type_argument = self.type_argument();
+        let type_arguments = self.type_arguments();
         let fields =
-            1 + usize::from(!annotations.is_empty()) + usize::from(type_argument.is_some());
+            1 + usize::from(!annotations.is_empty()) + usize::from(!type_arguments.is_empty());
 
         let mut payload = serializer.serialize_struct("Payload", fields)?;
         payload.serialize_field("elements", &*self.elements)?;
         if !annotations.is_empty() {
             payload.serialize_field("annotations", annotations)?;
         }
-        if let Some(type_argument) = type_argument {
-            payload.serialize_field("type_argument", &type_argument)?;
+        if !type_arguments.is_empty() {
+            payload.serialize_field("type_arguments", type_arguments)?;
         }
         payload.end()
     }
@@ -212,7 +211,7 @@ struct PayloadData {
     #[serde(default)]
     annotations: Option<Box<Vec<(usize, Value)>>>,
     #[serde(default)]
-    type_argument: Option<usize>,
+    type_arguments: Vec<usize>,
 }
 
 impl From<PayloadData> for Payload {
@@ -221,7 +220,7 @@ impl From<PayloadData> for Payload {
             Some(annotations) => Payload::with_annotations(data.elements, *annotations),
             None => Payload::new(data.elements),
         };
-        payload.with_type_argument(data.type_argument)
+        payload.with_type_arguments(data.type_arguments)
     }
 }
 
@@ -258,40 +257,41 @@ impl Payload {
             elements: elements.into(),
             extras: Some(Box::new(Extras {
                 annotations,
-                type_argument: None,
+                type_arguments: Vec::new(),
             })),
         }
     }
 
-    /// The same payload carrying a type argument (see the field). Builder-style, used
-    /// when constructing an instantiated builtin value or re-attaching annotations to
-    /// one.
+    /// The same payload carrying type arguments (see the field). Builder-style, used when
+    /// constructing an instantiated builtin value or re-attaching annotations to one.
     ///
-    /// Setting it back to `None` drops an otherwise-empty box, keeping [`Extras`]'s
+    /// Setting them back to none drops an otherwise-empty box, keeping [`Extras`]'s
     /// never-empty invariant — on which `carries_nothing`, and so empty-payload interning,
     /// depends.
-    pub fn with_type_argument(mut self, type_argument: Option<usize>) -> Self {
-        match (&mut self.extras, type_argument) {
-            (Some(extras), _) => {
-                extras.type_argument = type_argument;
+    pub fn with_type_arguments(mut self, type_arguments: Vec<usize>) -> Self {
+        match &mut self.extras {
+            Some(extras) => {
+                extras.type_arguments = type_arguments;
                 if extras.is_empty() {
                     self.extras = None;
                 }
             }
-            (None, Some(_)) => {
+            None if !type_arguments.is_empty() => {
                 self.extras = Some(Box::new(Extras {
                     annotations: Vec::new(),
-                    type_argument,
+                    type_arguments,
                 }));
             }
-            (None, None) => {}
+            None => {}
         }
         self
     }
 
-    /// A type-consuming builtin's explicit type argument, if the owning value carries one.
-    pub fn type_argument(&self) -> Option<usize> {
-        self.extras.as_ref().and_then(|e| e.type_argument)
+    /// A type-consuming builtin's type arguments, if the owning value carries any.
+    pub fn type_arguments(&self) -> &[usize] {
+        self.extras
+            .as_ref()
+            .map_or(&[], |extras| &extras.type_arguments)
     }
 
     /// The annotations attached to the owning value (empty if none).
@@ -636,12 +636,12 @@ impl PartialEq for Value {
             (Value::Reference(a), Value::Reference(b)) => a == b,
             (Value::Tuple(a, p), Value::Tuple(b, q)) => a == b && p == q,
             (Value::Function(a, p), Value::Function(b, q)) => a == b && p == q,
-            // The type argument is operational (a differently-instantiated builtin
-            // behaves differently), so it participates; annotations stay invisible.
+            // The type arguments are operational (a differently-instantiated builtin
+            // behaves differently), so they participate; annotations stay invisible.
             (Value::Builtin(a, p), Value::Builtin(b, q)) => {
                 a == b
-                    && p.as_deref().and_then(Payload::type_argument)
-                        == q.as_deref().and_then(Payload::type_argument)
+                    && p.as_deref().map_or(&[][..], Payload::type_arguments)
+                        == q.as_deref().map_or(&[][..], Payload::type_arguments)
             }
             (Value::Process(a, x), Value::Process(b, y)) => a == b && x == y,
             (Value::Resource(a, x), Value::Resource(b, y)) => a == b && x == y,
@@ -724,12 +724,16 @@ impl Value {
                 })
                 .zip(done.split_off(src.elements.len()))
                 .collect();
-            let payload =
-                Payload::with_annotations(done, annotations)
-                    .with_type_argument(src.type_argument().map(|type_id| {
-                        crate::bytecode::IdRemaps::map(&remaps.types, "type", type_id)
-                    }))
-                    .shared();
+            let payload = Payload::with_annotations(done, annotations)
+                .with_type_arguments(
+                    src.type_arguments()
+                        .iter()
+                        .map(|&type_id| {
+                            crate::bytecode::IdRemaps::map(&remaps.types, "type", type_id)
+                        })
+                        .collect(),
+                )
+                .shared();
             match node {
                 Node::Tuple(id) => Value::Tuple(id, payload),
                 Node::Function(id) => Value::Function(id, payload),
@@ -839,27 +843,27 @@ impl Value {
         Value::Builtin(builtin_id, None)
     }
 
-    /// Construct a builtin value carrying an explicit type argument (a type-consuming
-    /// builtin's instantiation), or the bare form when there is none.
-    pub fn builtin_typed(builtin_id: usize, type_argument: Option<usize>) -> Self {
-        match type_argument {
-            None => Value::Builtin(builtin_id, None),
-            Some(_) => Value::Builtin(
-                builtin_id,
-                Some(
-                    Payload::new(vec![])
-                        .with_type_argument(type_argument)
-                        .shared(),
-                ),
-            ),
+    /// Construct a builtin value carrying type arguments (a type-consuming builtin's
+    /// instantiation), or the bare form when there are none.
+    pub fn builtin_typed(builtin_id: usize, type_arguments: Vec<usize>) -> Self {
+        if type_arguments.is_empty() {
+            return Value::Builtin(builtin_id, None);
         }
+        Value::Builtin(
+            builtin_id,
+            Some(
+                Payload::new(vec![])
+                    .with_type_arguments(type_arguments)
+                    .shared(),
+            ),
+        )
     }
 
-    /// A type-consuming builtin's explicit type argument, if this value carries one.
-    pub fn type_argument(&self) -> Option<usize> {
+    /// A type-consuming builtin's type arguments, if this value carries any.
+    pub fn type_arguments(&self) -> &[usize] {
         match self {
-            Value::Builtin(_, Some(payload)) => payload.type_argument(),
-            _ => None,
+            Value::Builtin(_, Some(payload)) => payload.type_arguments(),
+            _ => &[],
         }
     }
 
@@ -894,10 +898,10 @@ impl Value {
         // Copied out and rebuilt: annotating is a cold path, and `with_annotations` puts the
         // elements back into whichever `Elements` variant fits.
         let elements = payload.map(|p| p.elements.to_vec()).unwrap_or_default();
-        // Re-attach preserves a builtin's type argument — it is operational, not metadata.
-        let type_argument = payload.and_then(Payload::type_argument);
+        // Re-attach preserves a builtin's type arguments — they are operational, not metadata.
+        let type_arguments = payload.map_or(Vec::new(), |p| p.type_arguments().to_vec());
         let payload = Payload::with_annotations(elements, annotations)
-            .with_type_argument(type_argument)
+            .with_type_arguments(type_arguments)
             .shared();
         Some(match self {
             Value::Tuple(id, _) => Value::Tuple(*id, payload),

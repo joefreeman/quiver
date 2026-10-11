@@ -55,8 +55,10 @@ pub struct WirePayload {
     #[allow(clippy::box_collection)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     annotations: Option<Box<Vec<(usize, WireValue)>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub type_argument: Option<usize>,
+    /// A builtin's type arguments. A boxed slice, for the same reason as `annotations`: as wide
+    /// as the `Option<usize>` it replaced, and an empty one doesn't allocate.
+    #[serde(default, skip_serializing_if = "<[usize]>::is_empty")]
+    pub type_arguments: Box<[usize]>,
 }
 
 impl WireValue {
@@ -110,7 +112,7 @@ impl WireValue {
             WirePayload {
                 elements,
                 annotations: None,
-                type_argument: None,
+                type_arguments: Box::default(),
             },
         )
     }
@@ -167,7 +169,7 @@ impl WireValue {
                 .zip(done.split_off(payload.elements.len()))
                 .collect();
             let built = crate::value::Payload::with_annotations(done, annotations)
-                .with_type_argument(payload.type_argument)
+                .with_type_arguments(payload.type_arguments.to_vec())
                 .shared();
             match node {
                 WireNode::Tuple(id) => Value::Tuple(id, built),
@@ -308,7 +310,8 @@ impl Clone for WirePayload {
                 .map(|(key, _)| *key)
                 .zip(done.split_off(src.elements.len()))
                 .collect();
-            WirePayload::with_annotations(done, annotations).with_type_argument(src.type_argument)
+            WirePayload::with_annotations(done, annotations)
+                .with_type_arguments(src.type_arguments.clone())
         }
 
         let mut stack: Vec<Frame<'_>> = Vec::new();
@@ -427,6 +430,9 @@ impl Drop for WirePayload {
     }
 }
 
+/// A [`WirePayload`]'s parts, taken: elements, annotations and type arguments.
+pub type PayloadParts = (Vec<WireValue>, Vec<(usize, WireValue)>, Box<[usize]>);
+
 impl WirePayload {
     /// A payload with the given elements and annotations. Mirrors
     /// [`Payload::with_annotations`](crate::value::Payload::with_annotations).
@@ -437,13 +443,13 @@ impl WirePayload {
         WirePayload {
             elements,
             annotations: (!annotations.is_empty()).then(|| Box::new(annotations)),
-            type_argument: None,
+            type_arguments: Box::default(),
         }
     }
 
-    /// The same payload carrying a type argument. Builder-style, as on `Payload`.
-    pub fn with_type_argument(mut self, type_argument: Option<usize>) -> Self {
-        self.type_argument = type_argument;
+    /// The same payload carrying type arguments. Builder-style, as on `Payload`.
+    pub fn with_type_arguments(mut self, type_arguments: Box<[usize]>) -> Self {
+        self.type_arguments = type_arguments;
         self
     }
 
@@ -458,11 +464,11 @@ impl WirePayload {
     /// `&mut self` rather than `self`: this type implements [`Drop`] (see the impl), which
     /// makes moving out of its fields illegal. Taking leaves it empty, so the drop that follows
     /// hits its fast path.
-    pub fn take_parts(&mut self) -> (Vec<WireValue>, Vec<(usize, WireValue)>, Option<usize>) {
+    pub fn take_parts(&mut self) -> PayloadParts {
         (
             std::mem::take(&mut self.elements),
             self.annotations.take().map(|a| *a).unwrap_or_default(),
-            self.type_argument,
+            std::mem::take(&mut self.type_arguments),
         )
     }
 

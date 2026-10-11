@@ -37,6 +37,13 @@ pub trait TypeLookup {
     }
 }
 
+/// A type variable's name as its declaration wrote it: the compiler suffixes the names it
+/// uniquifies with `#…` (per definition, and on a generated function's own parameters), which
+/// is not part of the source-level name.
+pub fn declared_variable_name(name: &str) -> &str {
+    name.split('#').next().unwrap_or(name)
+}
+
 /// The unified type representation used throughout compiler, runtime, and bytecode.
 /// All nested type references use IDs into a type registry.
 ///
@@ -269,15 +276,15 @@ pub struct BuiltinInfo {
     pub name: String,
     pub param_type: usize,
     pub result_type: usize,
-    /// A type-consuming builtin's explicit type argument (`__data_decode__<'t>`), resolved
-    /// to a concrete type at compile time. Such a builtin behaves differently per
-    /// instantiation, so each one is a distinct table entry: the pair `(name,
-    /// type_argument)` is what registration dedupes on, and the id alone identifies the
-    /// instantiation for the `Builtin` instruction that pushes it.
-    #[serde(default)]
-    pub type_argument: Option<usize>,
+    /// A type-consuming builtin's type arguments (`__data_decode__<'t>`), resolved to concrete
+    /// types at compile time — written, or inferred from the argument an application gives.
+    /// Such a builtin behaves differently per instantiation, so each one is a distinct table
+    /// entry: the pair `(name, type_arguments)` is what registration dedupes on, and the id
+    /// alone identifies the instantiation for the `Builtin` instruction that pushes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_arguments: Vec<usize>,
     /// For an instantiation, the labels of the tuples it may build: those reached from its
-    /// type argument and its result type (see [`crate::labels`]). A function of the pair
+    /// type arguments and its result type (see [`crate::labels`]). A function of the pair
     /// registration dedupes on, so never compared.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<crate::labels::ValueLabel>,

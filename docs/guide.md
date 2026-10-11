@@ -946,8 +946,9 @@ id<'int> "hi"                 //! Type mismatch
 ```
 
 A prefix may be given and the rest left inferred. A builtin can be *type-consuming*, in
-that its behaviour depends on the type argument itself, and must then always be
-instantiated where it is applied — `%data.decode<'t>` is one.
+that its behaviour depends on its type arguments themselves, so they must be concrete
+where it is applied: written, or determined by the argument. `%data.decode<'t>` is one,
+and as nothing in its argument determines `'t`, it is always written.
 
 Inside its declaration, a type parameter is one unknown type. Its values can be passed on,
 matched, or used wherever `'t` itself is expected, but not as anything narrower:

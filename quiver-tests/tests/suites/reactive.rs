@@ -30,6 +30,25 @@ fn track_samples_dependency_state() {
 }
 
 #[test]
+fn track_resumes_after_nested_and_tail_calls() {
+    // The render ends when the thunk's own frame returns: calls inside it return first, and a
+    // tail call replaces its frame in place. Tracking is over afterwards, so a later render
+    // starts afresh, and a select (refused mid-render) is allowed again.
+    quiver()
+        .evaluate(
+            r#"
+            store = 5 ~> @'int { !'int ~> { =n => ^ n } } ~
+            read = #[] { ?store }
+            double = #'int { %num.mul [$, 2] }
+            first = %proc.track #{ read [] ~> double ~> %num.add [~, 1] }
+            second = %proc.track #{ double ~> ^~ ?store }
+            [first, second, { ![5] }]
+            "#,
+        )
+        .expect("[11, 10, []]");
+}
+
+#[test]
 fn wakeup_on_dependency_change() {
     // Track the store's state (subscribing to it), change the store, then receive the
     // `Changed` wakeup and re-sample: the new state is visible.

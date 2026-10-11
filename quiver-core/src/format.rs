@@ -243,9 +243,7 @@ fn format_type_impl(
             }
         }
         Type::Resource(name) => format!("+{}", name),
-        // A `#N` suffix is the compiler's per-definition uniquifier, not part of the
-        // source-level name.
-        Type::Variable(name) => format!("'{}", name.split('#').next().unwrap_or(name)),
+        Type::Variable(name) => format!("'{}", crate::types::declared_variable_name(name)),
         Type::Top => "_".to_string(),
     }
 }

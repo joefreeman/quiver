@@ -157,7 +157,7 @@ pub fn builtin_data_decode<E: Effect>(
     arg: &Value,
     ctx: &mut BuiltinContext<E>,
 ) -> Result<Completion<E>, Error> {
-    let expected = ctx.type_argument().ok_or_else(|| {
+    let expected = ctx.type_arguments().first().copied().ok_or_else(|| {
         Error::InvalidArgument(
             "__data_decode__ called without a type argument — a bare reference carries \
              no instantiation; name it with one (`__data_decode__<'t>`) where the type \

@@ -200,8 +200,9 @@ fn round_trip(source: &str, registration: Registration) -> (String, String) {
     (original, run(&fresh, entry))
 }
 
-const SOURCES: [(&str, &str); 6] = [
+const SOURCES: [(&str, &str); 8] = [
     ("%num.mul [7, 6]", "42"),
+    ("%list{1, 2} ~> %data.encode", "\"Cons[1, Cons[2, Nil]]\""),
     (
         "%json.stringify %json{ {\"a\": [1, 2]} }",
         "\"{\\\"a\\\":[1,2]}\"",
@@ -218,6 +219,11 @@ const SOURCES: [(&str, &str); 6] = [
     (
         "%dict{ \"a\" => 1, \"b\" => 2 } ~> %dict.get [~, \"b\"]",
         "2",
+    ),
+    // A type-consuming builtin is registered again at link, from its type arguments.
+    (
+        "'u = U[id: 'int]; %data.decode<'u> \"U[id: 1]\"",
+        "U[id: 1]",
     ),
 ];
 
