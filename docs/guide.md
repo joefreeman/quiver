@@ -1151,13 +1151,13 @@ format shares, and writes it as them, by its layout: labelled fields from a reco
 entries, positional ones from a list, a symbol from text. Its options name keys by a convention,
 rename or default particular fields, and say how a union's members are tagged. A format supplies
 the functions between its document and those shapes, and its `decode` and `encode` add them,
-passing the options on:
+passing the options on, and read and write its text:
 
 ```quiver
 'user = User[full_name: '%str, age: 'int]
-%json.decode<'user> [%json{ {"fullName": "Ada", "age": 36} }, keys: Camel]
+%json.decode<'user> ["\{\"fullName\": \"Ada\", \"age\": 36}", keys: Camel]
 //= User[full_name: "Ada", age: 36]
-%json.encode [User[full_name: "Ada", age: 36], keys: Camel] ~> ='%json ~> %json.stringify
+%json.encode [User[full_name: "Ada", age: 36], keys: Camel]
 //= "{\"fullName\":\"Ada\",\"age\":36}"
 ```
 

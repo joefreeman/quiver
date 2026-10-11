@@ -613,12 +613,13 @@ show = #'int -> '%str { %str.from_int $ }
 `%json.edges` is pairs between JSON's object and a record and between its array and a list, and
 the standard library's own (`%codec.standard`). A format of another syntax needs only the same:
 a document type, its parser and printer, and the pairs between its document and the neutral
-shapes. Its typed `decode` and `encode` are then ordinary functions over `convert`, which is how
-`%json` writes them:
+shapes. Its typed `decode` and `encode` are then ordinary functions over its parser, printer and
+`convert`, which is how `%json` writes them:
 
 ```quiver ignore
-decode = #<'t, 'u, 'k, 'g, 'h>[(document): (' | []), (using): 'u = [], (keys): 'k = [], …] -> ('t | []) {
-  %codec.convert<'t> [$document, using: [edges, $using], keys: $keys, …]
+decode = #<'t, 'u, 'k, 'g, 'h>[(text): '%str, (using): 'u = [], (keys): 'k = [], …] -> ('t | []) {
+  document = parse $text
+  %codec.convert<'t> [document, using: [edges, $using], keys: $keys, …]
 }
 ```
 

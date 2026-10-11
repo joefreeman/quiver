@@ -616,21 +616,26 @@ edges = [
   ...%codec.standard,
 ]
 
+// What a failed `decode` carries as its `:error`: the parser's, for malformed text, or
+// `%codec.convert`'s, for a document that doesn't convert.
+'error = '%parse.perr | '%data.error
+
 decode = #<'t, 'u, 'k, 'g, 'h>[
-  (document): (' | []),
+  (text): '%str,
   (using): 'u = [],
   (keys): 'k = [],
   (tag): 'g = [],
   (shapes): 'h = [],
 ] -> ('t | []) {
   :doc """
-    `decode<'t> [document]` converts a JSON document to `'t` — through JSON's own edges
-    (`edges`), and any given in `using:` — answering `'t | []`, nil carrying a `'%data.error`
-    when it doesn't convert. It takes `%codec.convert`'s options (`keys:`, `tag:`, `shapes:`). A
-    nil document (a failed `parse`) answers itself.
+    `decode<'t> [text]` parses JSON text and converts the document to `'t` — through JSON's own
+    edges (`edges`), and any given in `using:` — answering `'t | []`, nil carrying a
+    `'%json.error` when the text is malformed or the document doesn't convert. It takes
+    `%codec.convert`'s options (`keys:`, `tag:`, `shapes:`).
     """
+  document = parse $text
   %codec.convert<'t> [
-    $document,
+    document,
     using: [edges, $using],
     keys: $keys,
     tag: $tag,
@@ -644,12 +649,13 @@ encode = #<'s, 'u, 'k, 'g, 'h>[
   (keys): 'k = [],
   (tag): 'g = [],
   (shapes): 'h = [],
-] -> (' | []) {
+] -> ('%str | []) {
   :doc """
     `encode [value]` converts a value to a JSON document through JSON's own edges, and any given
-    in `using:`, answering `' | []`. It takes `%codec.convert`'s options (`keys:`, `tag:`,
-    `shapes:`); `encode<'s>` states the value's type, where it is wider than the value's own — a
-    union's, for its variants to be tagged. A nil value answers itself.
+    in `using:`, and renders it as compact JSON text, answering `'%str | []`. It takes
+    `%codec.convert`'s options (`keys:`, `tag:`, `shapes:`); `encode<'s>` states the value's
+    type, where it is wider than the value's own — a union's, for its variants to be tagged. A
+    nil value answers itself.
     """
   %codec.convert<', 's> [
     $value,
@@ -658,6 +664,8 @@ encode = #<'s, 'u, 'k, 'g, 'h>[
     tag: $tag,
     shapes: $shapes,
   ]
+  ~> =\[]
+  ~> stringify
 }
 
 {

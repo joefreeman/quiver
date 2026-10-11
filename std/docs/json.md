@@ -421,29 +421,26 @@ entries but not their order:
 
 ## Typed decoding and encoding
 
-`decode<'t>` converts a document to the program's type `'t`, and `encode` a value to a document.
-Both are `%codec.convert` with JSON's own edges (`%json.edges`) added to any given in `using:`,
-so a program's tuples read from JSON's objects, arrays and strings by their layout, and need no
-edges of their own unless they are written some other way. They take `convert`'s options —
-`keys:`, `tag:` and `shapes:` — and pass them on:
+`decode<'t>` reads JSON text as the program's type `'t`, and `encode` writes a value as JSON
+text. Between the text and the value is `%codec.convert`, with JSON's own edges (`%json.edges`)
+added to any given in `using:`, so a program's tuples read from JSON's objects, arrays and
+strings by their layout, and need no edges of their own unless they are written some other way.
+They take `convert`'s options — `keys:`, `tag:` and `shapes:` — and pass them on:
 
 ```quiver
 'user = User[name: '%str, age: 'int, email: ('%str | [])]
 shapes = [User[default: [age: 0]]]
 
-"\{\"name\": \"Ada\", \"email\": \"ada@example.com\"}"
-~> %json.parse ~> %json.decode<'user> [~, shapes: shapes]
+%json.decode<'user> ["\{\"name\": \"Ada\", \"email\": \"ada@example.com\"}", shapes: shapes]
 //= User[name: "Ada", age: 0, email: "ada@example.com"]
-%json.encode [User[name: "Ada", age: 36, email: []]] ~> ='%json ~> %json.stringify
-//= "{\"name\":\"Ada\",\"age\":36}"
+%json.encode [User[name: "Ada", age: 36, email: []]]   //= "{\"name\":\"Ada\",\"age\":36}"
 ```
 
 ```quiver
 'user = User[full_name: '%str, age: 'int]
-%json.decode<'user> [%json{ {"fullName": "Ada", "age": 36} }, keys: Camel]
+%json.decode<'user> ["\{\"fullName\": \"Ada\", \"age\": 36}", keys: Camel]
 //= User[full_name: "Ada", age: 36]
-%json.encode [User[full_name: "Ada", age: 36], keys: Camel] ~> ='%json ~> %json.stringify
-//= "{\"fullName\":\"Ada\",\"age\":36}"
+%json.encode [User[full_name: "Ada", age: 36], keys: Camel]   //= "{\"fullName\":\"Ada\",\"age\":36}"
 ```
 
 A value whose own type is narrower than the union it is a variant of states the union, so that
@@ -451,8 +448,7 @@ it is written as that variant, tag and all:
 
 ```quiver
 'shape = Circle[radius: 'int] | Dot
-%json.encode<'shape> [Dot, tag: Internal[key: "type"]] ~> ='%json ~> %json.stringify
-//= "{\"type\":\"Dot\"}"
+%json.encode<'shape> [Dot, tag: Internal[key: "type"]]   //= "{\"type\":\"Dot\"}"
 ```
 
 A program's own edges go in `using:`:
@@ -463,27 +459,38 @@ digits = Edge[
   out: #'%str -> ('int | []) { %str.parse_int $ },
   in: #'int -> '%str { %str.from_int $ },
 ]
-%json.decode<'reading> [%json{ {"celsius": "21"} }, using: [digits]]   //= Reading[celsius: 21]
+%json.decode<'reading> ["\{\"celsius\": \"21\"}", using: [digits]]   //= Reading[celsius: 21]
 ```
 
 JSON's own values need no edges at all:
 
 ```quiver
-"[1, 2, 3]" ~> %json.parse ~> %json.decode<'%list<'int>> [~]   //= Cons[1, Cons[2, Cons[3, Nil]]]
-%json.encode [%list{ "a", "b" }] ~> ='%json ~> %json.stringify   //= "[\"a\",\"b\"]"
+%json.decode<'%list<'int>> ["[1, 2, 3]"]   //= Cons[1, Cons[2, Cons[3, Nil]]]
+%json.encode [%list{ "a", "b" }]           //= "[\"a\",\"b\"]"
 ```
 
-A document that doesn't convert answers nil carrying a `'%data.error`, its path leading to where
-it failed. A nil document — a failed `parse` — answers itself, its own `:error` intact, and so
-does a nil value given to `encode`:
+To convert to or from a document rather than text — one built with `%json{ … }`, or edited
+with the query API — call `%codec.convert` with JSON's edges directly:
 
 ```quiver
 'user = User[name: '%str, age: 'int]
-r = %json.decode<'user> [%json{ {"name": "Ada", "age": "old"} }]
+%codec.convert<'user> [%json{ {"name": "Ada", "age": 36} }, using: [%json.edges]]
+//= User[name: "Ada", age: 36]
+%codec.convert<'%json> [User[name: "Ada", age: 36], using: [%json.edges]] ~> %json.get [~, "age"]
+//= 36
+```
+
+A `decode` that fails answers nil carrying a `'%json.error`: the parser's `Expected`, positioned
+in the text, when the text is malformed, or a `'%data.error`, its path leading to where the
+conversion failed, when the document doesn't convert. A nil value given to `encode` answers
+itself, its own `:error` intact:
+
+```quiver
+'user = User[name: '%str, age: 'int]
+r = %json.decode<'user> ["\{\"name\": \"Ada\", \"age\": \"old\"}"]
 r   //= []
-r:error<'%data.error> ~> =DecodeError(path: ~)   //= Cons["age", Nil]
-"\{" ~> %json.parse ~> %json.decode<'user> [~] ~> :error<Expected(offset: 'int)>
-//= Expected(offset: 1)
+r:error<'%json.error> ~> =DecodeError(path: ~)   //= Cons["age", Nil]
+%json.decode<'user> ["\{"] ~> :error<'%json.error> ~> =Expected(offset: ~)   //= 1
 %json.encode [r] ~> :error<'%data.error> ~> =DecodeError(path: ~)   //= Cons["age", Nil]
 ```
 
@@ -492,9 +499,9 @@ reaches is a compile error there, and a document that doesn't reach one that som
 failure when it runs:
 
 ```quiver
-%json.decode<'ref> [%json{ 1 }]   //! no route
+%json.decode<'ref> ["1"]   //! no route
 ```
 
 ```quiver
-%json.decode<'int> [%json{ "1" }]   //= []
+%json.decode<'int> ["\"1\""]   //= []
 ```
