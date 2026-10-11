@@ -235,6 +235,7 @@ pub struct Executor<E: Effect> {
     /// The ids for building a failed effect's `:error`-stamped nil (see `io_error_result`).
     /// Present iff the host declared the io vocabulary.
     error_table: Option<crate::bytecode::ErrorTable>,
+    decode_error_table: Option<crate::bytecode::DecodeErrorTable>,
     /// The `Changed` wakeup tuple id — present iff the program demanded it (`track`).
     changed_tuple: Option<usize>,
     /// Stream event vocabulary by resource type id (see `ProgramUpdate::runtime`).
@@ -674,6 +675,11 @@ impl<E: Effect> Executor<E> {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// The decode-failure vocabulary's ids, when the program references `%data.decode`.
+    pub(crate) fn decode_error_table(&self) -> Option<&crate::bytecode::DecodeErrorTable> {
+        self.decode_error_table.as_ref()
+    }
+
     /// Create a binary from Vec<u8>
     pub fn allocate_binary(&mut self, bytes: Vec<u8>) -> Result<Binary, Error> {
         self.allocate_binary_data(BinaryData::new(bytes))
@@ -847,6 +853,7 @@ impl<E: Effect> Executor<E> {
             origin_key: None,
             crash_table: None,
             error_table: None,
+            decode_error_table: None,
             changed_tuple: None,
             stream_table: None,
             builtins_registry,
@@ -1570,6 +1577,7 @@ impl<E: Effect> Executor<E> {
         if let Some(tables) = update.runtime {
             self.crash_table = tables.crash;
             self.error_table = tables.error;
+            self.decode_error_table = tables.decode_error;
             self.changed_tuple = tables.changed;
             self.stream_table = Some(tables.streams);
         }

@@ -76,7 +76,7 @@ fn test_a_missing_program_fails_with_not_found() {
     exec()
         .evaluate(
             r#"
-            %exec.spawn ["quiver-no-such-program"] ~> :error<'%io> ~> =IoError(kind: NotFound)
+            %exec.spawn ["quiver-no-such-program"] ~> :error<'%io.error> ~> =IoError(kind: NotFound)
             Missing
             "#,
         )
@@ -265,6 +265,6 @@ fn test_run_fails_on_a_signal() {
 #[test]
 fn test_run_fails_when_the_program_cannot_start() {
     exec()
-        .evaluate(r#"%exec.run ["quiver-no-such-program"] ~> :error<'%io> ~> =IoError(kind: NotFound); Missing"#)
+        .evaluate(r#"%exec.run ["quiver-no-such-program"] ~> :error<'%io.error> ~> =IoError(kind: NotFound); Missing"#)
         .expect("Missing");
 }

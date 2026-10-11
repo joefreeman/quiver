@@ -15,6 +15,17 @@
 // any data.
 ' = 'int | 'bin | (*^)
 
+// Why a decode failed: the text has the wrong shape somewhere (a `Mismatch`), or text is left
+// over after the value (`Trailing`).
+'kind = Mismatch | Trailing
+
+// What a failed decode's nil carries under `:error`. The path leads from the decoded value to
+// where it failed — a field's label, or its position when it has none. Of all the attempts a
+// decode makes, the failure reported is the one that got furthest into the text. The message is
+// for a person to read, so don't make logic depend on it. (The path is a `'%list<('%str | 'int)>`,
+// spelled out because `%list` imports this module.)
+'error = DecodeError[path: (Nil | Cons[(Str['bin] | 'int), ^]), kind: 'kind, message: Str['bin]]
+
 [
   encode: #' {
     :doc """
@@ -27,7 +38,8 @@
     :doc """
       Decodes Quiver data notation as the explicitly-given expected type —
       `%data.decode<'event> text` answers `'event | []`, nil for anything malformed, mismatched, or
-      trailing. The expected type must be concrete at the naming site.
+      trailing — carrying a `'%data.error` under `:error`. The expected type must be concrete at
+      the naming site.
       """
   },
 ]

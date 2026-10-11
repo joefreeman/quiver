@@ -57,7 +57,7 @@ racing another writer.
 ```quiver
 %fs.write [f, "!" ~> .0, mode: A]              //= Ok
 %fs.read [f] ~> Str[~]                         //= "bye!"
-{ %fs.write [f, <>, mode: New] } ~> :error<'%io> ~> =IoError(kind: ~)   //= AlreadyExists
+{ %fs.write [f, <>, mode: New] } ~> :error<'%io.error> ~> =IoError(kind: ~)   //= AlreadyExists
 g = %path.join [d, %path.parse "fresh.txt"] ~> =\[]
 %fs.write [g, <>, mode: New]                   //= Ok
 %fs.read [g]                                   //= <>
@@ -66,8 +66,8 @@ g = %path.join [d, %path.parse "fresh.txt"] ~> =\[]
 A path that is not there, or is not a file, fails as a nil carrying `:error`:
 
 ```quiver
-{ %fs.read [d] } ~> :error<'%io> ~> =IoError(kind: ~)                                        //= IsADirectory
-{ %fs.read [%path.join [d, %path.parse "nope"] ~> =\[]] } ~> :error<'%io> ~> =IoError(kind: ~) //= NotFound
+{ %fs.read [d] } ~> :error<'%io.error> ~> =IoError(kind: ~)                                        //= IsADirectory
+{ %fs.read [%path.join [d, %path.parse "nope"] ~> =\[]] } ~> :error<'%io.error> ~> =IoError(kind: ~) //= NotFound
 %fs.remove [d, recursive?: Ok]                 //= Ok
 ```
 
@@ -109,7 +109,7 @@ A lookup that *fails* — as opposed to finding nothing — answers nil too, but
 `:error`, so a caller that cares can tell the two apart:
 
 ```quiver
-{ %fs.stat [%path.parse "/nonexistent-quiver-path"] } ~> :error<'%io>   //= []
+{ %fs.stat [%path.parse "/nonexistent-quiver-path"] } ~> :error<'%io.error>   //= []
 ```
 
 ## Listing a directory
@@ -133,9 +133,9 @@ collect with `%list.try_collect` to see it. Listing what is not there fails stra
 
 ```quiver
 d = %fs.temp [] ~> =\[]
-%fs.list [d] ~> %list.try_collect                              //= Nil
+%fs.list [d] ~> %list.try_collect                            //= Nil
 { %fs.list [%path.parse "/nonexistent-quiver-path"] ~> %list.try_collect }
-~> :error<'%io> ~> =IoError(kind: ~)                           //= NotFound
+~> :error<'%io.error> ~> =IoError(kind: ~)                           //= NotFound
 %fs.remove [d]                                                 //= Ok
 ```
 
@@ -174,7 +174,7 @@ As with `list`, a failure — a directory that cannot be read, say — ends the 
 
 ```quiver
 { %fs.walk [%path.parse "/nonexistent-quiver-path"] ~> %list.try_collect }
-~> :error<'%io> ~> =IoError(kind: ~)                                            //= NotFound
+~> :error<'%io.error> ~> =IoError(kind: ~)                                            //= NotFound
 %fs.remove [d, recursive?: Ok]                                                  //= Ok
 %fs.remove [outside, recursive?: Ok]                                            //= Ok
 ```
@@ -188,11 +188,11 @@ existing directory is fine.
 ```quiver
 d = %fs.temp [] ~> =\[]
 deep = %path.join [d, %path.parse "a/b/c"] ~> =\[]
-{ %fs.create_dir [deep] } ~> :error<'%io> ~> =IoError(kind: ~)   //= NotFound
+{ %fs.create_dir [deep] } ~> :error<'%io.error> ~> =IoError(kind: ~)   //= NotFound
 %fs.create_dir [deep, all?: Ok]                                   //= Ok
 %fs.dir? [deep]                                                   //= Ok
 %fs.create_dir [deep, all?: Ok]                                   //= Ok // already there
-{ %fs.create_dir [deep] } ~> :error<'%io> ~> =IoError(kind: ~)   //= AlreadyExists
+{ %fs.create_dir [deep] } ~> :error<'%io.error> ~> =IoError(kind: ~)   //= AlreadyExists
 %fs.remove [d, recursive?: Ok]                                    //= Ok
 ```
 
@@ -208,14 +208,14 @@ b = %path.join [d, %path.parse "b.txt"] ~> =\[]
 %fs.write [a, "hello" ~> .0]                  //= Ok
 %fs.copy [a, b]                                //= Ok
 %fs.stat [b] ~> =Stat(size: ~)                 //= 5
-{ %fs.copy [a, b] } ~> :error<'%io> ~> =IoError(kind: ~)   //= AlreadyExists
+{ %fs.copy [a, b] } ~> :error<'%io.error> ~> =IoError(kind: ~)   //= AlreadyExists
 %fs.copy [a, b, replace?: Ok]                  //= Ok
 ```
 
 Only files are copied — a directory fails with `IsADirectory`:
 
 ```quiver
-{ %fs.copy [d, b, replace?: Ok] } ~> :error<'%io> ~> =IoError(kind: ~)   //= IsADirectory
+{ %fs.copy [d, b, replace?: Ok] } ~> :error<'%io.error> ~> =IoError(kind: ~)   //= IsADirectory
 ```
 
 `rename` moves a path atomically, replacing a file already at the destination. Across file
@@ -264,7 +264,7 @@ A dangling link exists only when not followed:
 %fs.remove [target]                                        //= Ok
 { %fs.exists? [link] }                                     //= []
 %fs.exists? [link, follow?: []]                            //= Ok
-{ %fs.read_link [target] } ~> :error<'%io> ~> =IoError(kind: ~)   //= NotFound
+{ %fs.read_link [target] } ~> :error<'%io.error> ~> =IoError(kind: ~)   //= NotFound
 %fs.remove [d, recursive?: Ok]                             //= Ok
 ```
 
@@ -291,7 +291,7 @@ d = %fs.temp [] ~> =\[]
 outside = %fs.temp [] ~> =\[]
 %fs.create_dir [%path.join [d, %path.parse "sub"] ~> =\[]]                    //= Ok
 %fs.symlink [link: %path.join [d, %path.parse "out"] ~> =\[], target: outside] //= Ok
-{ %fs.remove [d] } ~> :error<'%io> ~> =IoError(kind: ~)                       //= DirectoryNotEmpty
+{ %fs.remove [d] } ~> :error<'%io.error> ~> =IoError(kind: ~)                       //= DirectoryNotEmpty
 %fs.remove [d, recursive?: Ok]                                                 //= Ok
 { %fs.exists? [d] }                                                            //= []
 %fs.dir? [outside]                                                             //= Ok // untouched
@@ -301,7 +301,7 @@ Removing what is not there fails with `NotFound`. There is no `force?` option, s
 containing the failure in a block is the idempotent form:
 
 ```quiver
-{ %fs.remove [d] } ~> :error<'%io> ~> =IoError(kind: ~)   //= NotFound
+{ %fs.remove [d] } ~> :error<'%io.error> ~> =IoError(kind: ~)   //= NotFound
 { %fs.remove [d] }                                        //= []
 %fs.remove [outside]                                      //= Ok
 ```

@@ -45,7 +45,7 @@
 'output = [stdout: 'bin, stderr: 'bin]
 
 // Why `run` failed, under `:error`, when the program ran but did not succeed. (A program
-// that could not be started answers the `'%io` failure `spawn` does.)
+// that could not be started answers the `'%io.error` failure `spawn` does.)
 'failure =
   | Failed[code: 'int, stdout: 'bin, stderr: 'bin]
   | Killed[signal: 'int, stdout: 'bin, stderr: 'bin]

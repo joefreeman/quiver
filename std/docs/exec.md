@@ -42,11 +42,11 @@ r ~> :error<'%exec.failure> ~> =Failed(stderr: ~) ~> Str[~]   //= "nope\n"
 %exec.run ["sh", %list{ "-c", "kill -9 $$" }] ~> :error<'%exec.failure> ~> =Killed(signal: ~)   //= 9
 ```
 
-A program that cannot be started at all answers the `'%io` failure, `NotFound` for one that
+A program that cannot be started at all answers the `'%io.error` failure, `NotFound` for one that
 is not there:
 
 ```quiver
-%exec.run ["quiver-no-such-program"] ~> :error<'%io> ~> =IoError(kind: ~)   //= NotFound
+%exec.run ["quiver-no-such-program"] ~> :error<'%io.error> ~> =IoError(kind: ~)   //= NotFound
 ```
 
 ## Finding programs

@@ -82,7 +82,9 @@ fn test_redirect_budget_answers_the_redirect_rather_than_failing() {
 fn test_a_refused_connection_is_a_value_the_caller_can_read() {
     quiver()
         .with_mock_io(MockIo::Refuses)
-        .evaluate(r#"%http/client.get "http://e.com/" ~> :error<'%io> ~> =IoError(kind: k); k"#)
+        .evaluate(
+            r#"%http/client.get "http://e.com/" ~> :error<'%io.error> ~> =IoError(kind: k); k"#,
+        )
         .expect("ConnectionRefused");
 }
 
@@ -139,7 +141,9 @@ fn test_a_truncated_response_is_reported_not_silently_short() {
         .with_mock_io(serves(
             "HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nshort",
         ))
-        .evaluate(r#"%http/client.get "http://e.com/" ~> :error<'%io> ~> =IoError(message: m); m"#)
+        .evaluate(
+            r#"%http/client.get "http://e.com/" ~> :error<'%io.error> ~> =IoError(message: m); m"#,
+        )
         .expect(r#""connection closed mid-body""#);
 }
 
@@ -154,7 +158,7 @@ fn test_tcp_truncation_is_reported_not_silently_short() {
             r#"%url.parse "http://e.com/" ~> =('%url & u)
                %http.request [method: GET, target: "/"] ~> =('%http & req)
                %http/tcp.request [url: u, request: req]
-               ~> :error<'%io> ~> =IoError(message: m); m"#,
+               ~> :error<'%io.error> ~> =IoError(message: m); m"#,
         )
         .expect(r#""connection closed mid-response""#);
 }
@@ -195,7 +199,7 @@ fn test_an_untrusted_anchor_set_is_refused() {
                ~> { | =IPv4[b] => b | =IPv6[b] => b } ~> =('bin & ip)
                %tcp.connect [ip, 443] ~> =(+TcpSocket & s)
                %tls.attach [socket: s, hostname: "example.com", roots: <deadbeef>]
-               ~> :error<'%io> ~> =IoError(message: m); m"#,
+               ~> :error<'%io.error> ~> =IoError(message: m); m"#,
         )
         .expect(r#""tls: no usable trust anchors in the supplied roots""#);
 }
@@ -243,7 +247,7 @@ fn test_a_real_refused_connection() {
         .with_io()
         .with_real_time()
         .evaluate(
-            r#"%http/client.get "http://127.0.0.1:9/x" ~> :error<'%io> ~> =IoError(kind: k); k"#,
+            r#"%http/client.get "http://127.0.0.1:9/x" ~> :error<'%io.error> ~> =IoError(kind: k); k"#,
         )
         .expect("ConnectionRefused");
 }

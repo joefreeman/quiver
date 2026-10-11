@@ -138,7 +138,7 @@ walk_step = #'walk {
         | =e => {
           %io.close dir
           e ~> {
-            | ~:error<'%io> => { close_frames rest; e }
+            | ~:error<'%io.error> => { close_frames rest; e }
             | ^ Walk[frames: rest, enter: [], follow?: follow]
           }
         }

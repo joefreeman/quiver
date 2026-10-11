@@ -990,7 +990,7 @@ fn test_failed_walk_is_distinguishable_from_a_finished_one() {
         .with_io()
         .evaluate(
             r#"%fs.list [%path.parse "/nonexistent-quiver-dir"] ~> %list.try_collect
-               ~> :error<'%io> ~> =IoError(kind: NotFound); Ok"#,
+               ~> :error<'%io.error> ~> =IoError(kind: NotFound); Ok"#,
         )
         .expect("Ok");
 
@@ -1132,7 +1132,7 @@ fn test_listing_a_file_fails_as_not_a_directory() {
         .evaluate(&format!(
             r#"
             {{ %fs.list [%path.parse "{}"] ~> %list.try_collect }}
-            ~> :error<'%io> ~> =IoError(kind: NotADirectory); Ok
+            ~> :error<'%io.error> ~> =IoError(kind: NotADirectory); Ok
             "#,
             path.to_str().unwrap()
         ))
@@ -1153,7 +1153,7 @@ fn test_copy_onto_itself_fails_without_truncating() {
         .evaluate(&format!(
             r#"
             f = %path.parse "{}"
-            [{{ %fs.copy [f, f, replace?: Ok] }} ~> :error<'%io> ~> =IoError(kind: ~), %fs.stat [f] ~> =Stat(size: ~)]
+            [{{ %fs.copy [f, f, replace?: Ok] }} ~> :error<'%io.error> ~> =IoError(kind: ~), %fs.stat [f] ~> =Stat(size: ~)]
             "#,
             path.to_str().unwrap()
         ))
@@ -1194,7 +1194,7 @@ fn test_walk_ends_on_an_unreadable_directory() {
         .evaluate(&format!(
             r#"
             {{ %fs.walk [%path.parse "{}"] ~> %list.try_collect }}
-            ~> :error<'%io> ~> =IoError(kind: ~)
+            ~> :error<'%io.error> ~> =IoError(kind: ~)
             "#,
             dir.to_str().unwrap()
         ))

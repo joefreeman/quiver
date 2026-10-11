@@ -36,9 +36,9 @@ f = %file.open [p, mode: W] ~> =\[]
 A failed open answers nil carrying `:error`:
 
 ```quiver
-{ %file.open [%path.join [d, %path.parse "nope"] ~> =\[]] } ~> :error<'%io> ~> =IoError(kind: ~)
+{ %file.open [%path.join [d, %path.parse "nope"] ~> =\[]] } ~> :error<'%io.error> ~> =IoError(kind: ~)
 //= NotFound
-{ %file.open [p, mode: New] } ~> :error<'%io> ~> =IoError(kind: ~)
+{ %file.open [p, mode: New] } ~> :error<'%io.error> ~> =IoError(kind: ~)
 //= AlreadyExists
 %fs.remove [d, recursive?: Ok]                   //= Ok
 ```

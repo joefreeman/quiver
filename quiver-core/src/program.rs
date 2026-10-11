@@ -902,13 +902,101 @@ impl Program {
             _ => None,
         };
 
+        let decode_error = match &declarations.decode_error {
+            Some(decl)
+                if decl
+                    .demand_builtins
+                    .iter()
+                    .any(|name| self.references_builtin(name)) =>
+            {
+                Some(self.decode_error_table(decl)?)
+            }
+            _ => None,
+        };
+
         let streams = self.derive_stream_table(&declarations.streams)?;
 
         Ok(crate::bytecode::RuntimeTables {
             crash,
             changed,
             error,
+            decode_error,
             streams,
+        })
+    }
+
+    /// Resolve the decode-failure vocabulary. The path is a list, whose `Cons` member is a
+    /// fragment of its recursive union, so the cells are built with that member closed against
+    /// the union — an honest label, as a decoding builtin's own tuples are.
+    fn decode_error_table(
+        &mut self,
+        decl: &crate::builtins::DecodeErrorDecl,
+    ) -> Result<crate::bytecode::DecodeErrorTable, crate::error::Error> {
+        let malformed = || {
+            crate::error::Error::InvalidArgument(
+                "decode-error vocabulary must be DecodeError[path: '%list<…>, kind, message]"
+                    .to_string(),
+            )
+        };
+        let error_key = self.register_annotation_key(&decl.error_key);
+        let decode_error_tuple = self.vocabulary_tuple(&decl.decode_error)?;
+        let kind_tuples = decl
+            .kinds
+            .iter()
+            .map(|kind| self.vocabulary_tuple(kind))
+            .collect::<Result<Vec<_>, _>>()?;
+        // Type-table presence, so a checked retrieval (`x:error<'%data.error>`) can enumerate the
+        // payload — and so a match on a single kind resolves.
+        self.register_type(Type::Tuple(decode_error_tuple));
+        let kind_types: Vec<usize> = kind_tuples
+            .iter()
+            .map(|tuple_id| self.register_type(Type::Tuple(*tuple_id)))
+            .collect();
+        self.register_type(Type::Union(kind_types));
+
+        let fields = self
+            .lookup_tuple(decode_error_tuple)
+            .ok_or_else(malformed)?
+            .fields
+            .clone();
+        let [(_, path_type), _, (_, message_type)] = fields[..] else {
+            return Err(malformed());
+        };
+        let Some(Type::Tuple(str_tuple)) = self.lookup_type(message_type).cloned() else {
+            return Err(malformed());
+        };
+        let Some(Type::Union(members)) = self.lookup_type(path_type).cloned() else {
+            return Err(malformed());
+        };
+        let mut nil_tuple = None;
+        let mut cons_tuple = None;
+        for member in members {
+            let Some(Type::Tuple(tuple_id)) = self.lookup_type(member).cloned() else {
+                return Err(malformed());
+            };
+            match self
+                .lookup_tuple(tuple_id)
+                .and_then(|info| info.name.clone())
+                .as_deref()
+            {
+                Some("Nil") => nil_tuple = Some(tuple_id),
+                Some("Cons") => {
+                    let closed = crate::binders::close_against(member, &[path_type], self);
+                    let Some(Type::Tuple(closed)) = self.lookup_type(closed).cloned() else {
+                        return Err(malformed());
+                    };
+                    cons_tuple = Some(closed);
+                }
+                _ => return Err(malformed()),
+            }
+        }
+        Ok(crate::bytecode::DecodeErrorTable {
+            error_key,
+            decode_error_tuple,
+            kind_tuples,
+            str_tuple,
+            nil_tuple: nil_tuple.ok_or_else(malformed)?,
+            cons_tuple: cons_tuple.ok_or_else(malformed)?,
         })
     }
 

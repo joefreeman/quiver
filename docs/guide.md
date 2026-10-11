@@ -1048,7 +1048,8 @@ tuples, plus the `"…"` sugar. The `%data` module is its codec.
 
 `decode` is driven by the expected type: names in the text resolve only against that
 type's members, so decoding can never produce a shape the program does not already
-contain. Anything malformed or mismatched answers nil, like a failed match.
+contain. Anything malformed or mismatched answers nil, like a failed match, and the nil
+carries why under `:error`: a `'%data.error` `DecodeError`, with a path to where it failed.
 
 Strings do not interpolate in data — a `{` is literal, and `encode` escapes it so encoded
 text also reads as literal. Values with identity (refs, pids, functions, resources) have
@@ -1444,7 +1445,7 @@ nil.
 ```quiver ignore
 sock = %tcp.connect [ip, port]                          // a failure ends the sequence
 { %tcp.connect [ip, port]; Connected | Unreachable }    // ... or a branch catches it
-result ~> :error<'%io> ~> =IoError(kind: ConnectionRefused) => retry
+result ~> :error<'%io.error> ~> =IoError(kind: ConnectionRefused) => retry
 ```
 
 Failures that are not the world's doing stay runtime errors, because no caller could act

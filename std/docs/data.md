@@ -180,12 +180,25 @@ expected type too partial to build a value from.
 %data.decode<(x: 'int)> "[x: 1]"   //= [] // a partial type has no layout to construct
 ```
 
-A nil *member* is the one case where success and failure are the same answer — by design, and
-exactly as anywhere else nil is used both as a value and as a verdict. Keep decoded unions
-nil-free if the difference matters.
+The nil carries why, as a `'%data.error` under `:error`: a path to
+where it failed, a kind to branch on, and a message to read. Of everything the decode tried, the
+failure reported is the one that got furthest into the text.
 
 ```quiver
-%data.decode<('int | [])> "[]"   //= []
+r = %data.decode<P[x: 'int, y: 'int]> "P[x: 1, y: \"two\"]"
+r:error<'%data.error>
+//= DecodeError[path: Cons["y", Nil], kind: Mismatch, message: "expected 'int, found `\"two\"]` at offset 11"]
+%data.decode<'int> "4 2" ~> :error<'%data.error> ~> =DecodeError(kind: ~)   //= Trailing
+```
+
+A nil *member* decodes to the same nil a failure answers — by design, and exactly as anywhere
+else nil is used both as a value and as a verdict. The `:error` is what tells them apart: a
+decoded nil carries none.
+
+```quiver
+%data.decode<('int | [])> "[]"                            //= []
+%data.decode<('int | [])> "[]" ~> { :error<'%data.error> }     //= []
+%data.decode<('int | [])> "x" ~> :error<'%data.error> ~> =DecodeError(kind: ~)   //= Mismatch
 ```
 
 ## Round trips

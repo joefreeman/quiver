@@ -345,6 +345,23 @@ pub struct StreamInfo {
     pub end_tuples: Vec<usize>,
 }
 
+/// The decode-failure table: the ids `%data.decode` needs to build a failure's stamped nil.
+/// Present only when the program references it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecodeErrorTable {
+    /// Annotation key id of `error`.
+    pub error_key: usize,
+    /// Tuple id of `DecodeError[path: …, kind: …, message: Str['bin]]`.
+    pub decode_error_tuple: usize,
+    /// Tuple ids of the nullary kind tags, in `FailureKind` order.
+    pub kind_tuples: Vec<usize>,
+    /// Tuple id of `Str['bin]`.
+    pub str_tuple: usize,
+    /// Tuple ids of the path list's `Nil` and (closed) `Cons` cells.
+    pub nil_tuple: usize,
+    pub cons_tuple: usize,
+}
+
 /// Stream event vocabulary for the whole program, indexed by resource type id
 /// (`None` for non-stream kinds).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -365,6 +382,9 @@ pub struct RuntimeTables {
     pub changed: Option<usize>,
     /// The io-failure payload ids, when the host declared io.
     pub error: Option<ErrorTable>,
+    /// The decode-failure ids, when demanded.
+    #[serde(default)]
+    pub decode_error: Option<DecodeErrorTable>,
     pub streams: StreamTable,
 }
 

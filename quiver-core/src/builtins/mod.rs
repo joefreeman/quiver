@@ -568,6 +568,22 @@ pub struct ErrorDecl {
     pub error_key: String,
 }
 
+/// The decode-failure vocabulary: the payload a failed `%data.decode`'s nil is stamped with.
+/// Demand-scoped — resolved only when the program references the decoding builtin.
+#[derive(Clone, Debug)]
+pub struct DecodeErrorDecl {
+    /// `DecodeError[path: (Nil | Cons[(Str['bin] | 'int), ^]), kind: (Mismatch | …), message:
+    /// Str['bin]]`.
+    pub decode_error: TypeSpec,
+    /// The nullary kind tags, in the decoder's `FailureKind` order.
+    pub kinds: Vec<TypeSpec>,
+    /// The builtins whose presence in a program demands this vocabulary (any of them).
+    pub demand_builtins: Vec<String>,
+    /// The annotation key a failure's nil is stamped under — the program-owned `error`
+    /// key, shared with io failures; the payload type tells them apart.
+    pub error_key: String,
+}
+
 /// The reactive-wakeup vocabulary: the `Changed` message a subscriber receives.
 /// Demand-scoped — resolved only when the gating builtin (`track`) is referenced by
 /// the program, since subscriptions cannot exist without it.
@@ -589,6 +605,7 @@ pub struct RuntimeDeclarations {
     pub crash: Option<CrashDecl>,
     pub changed: Option<ChangedDecl>,
     pub error: Option<ErrorDecl>,
+    pub decode_error: Option<DecodeErrorDecl>,
     pub streams: HashMap<String, StreamSpec>,
 }
 
@@ -742,6 +759,9 @@ impl<E: Effect> BuiltinRegistry<E> {
         if other.runtime.changed.is_some() {
             self.runtime.changed = other.runtime.changed;
         }
+        if other.runtime.decode_error.is_some() {
+            self.runtime.decode_error = other.runtime.decode_error;
+        }
         self.runtime.streams.extend(other.runtime.streams);
     }
 
@@ -763,6 +783,11 @@ impl<E: Effect> BuiltinRegistry<E> {
     /// Declare the io-failure vocabulary (the io capability groups do this).
     pub fn declare_error(&mut self, decl: ErrorDecl) {
         self.runtime.error = Some(decl);
+    }
+
+    /// Declare the decode-failure vocabulary (the `%data` group does this).
+    pub fn declare_decode_error(&mut self, decl: DecodeErrorDecl) {
+        self.runtime.decode_error = Some(decl);
     }
 
     /// The stream declaration for a resource kind, if it is one.
@@ -1075,6 +1100,7 @@ pub fn register_data_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
         TypeSpec::Union(vec![TypeSpec::Var("t"), nil]),
         vec!["t".to_string()],
     );
+    registry.declare_decode_error(data::decode_error_decl());
 }
 
 /// The JSON typed boundary: `__json_decode__<'t>` / `__json_encode__<'t>`, converting

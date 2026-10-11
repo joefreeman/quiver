@@ -51,7 +51,7 @@ fn test_a_bare_tcp_close_fails_a_select() {
         %tls.attach [socket: s, hostname: "localhost", roots: __ROOTS__]
         %io.write [s, "ping" ~> .0]
         ![s] ~> =Data[source: _, data: _]
-        ![s] ~> :error<'%io> ~> =IoError(message: m)
+        ![s] ~> :error<'%io.error> ~> =IoError(message: m)
         %str.contains? [m, "close_notify"]
         "#,
     )
@@ -102,7 +102,7 @@ fn test_a_mismatched_hostname_is_refused() {
         r#"
         %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "wrong.test", roots: __ROOTS__]
-        ~> :error<'%io> ~> =IoError(message: m)
+        ~> :error<'%io.error> ~> =IoError(message: m)
         %str.contains? [m, "not valid for name"]
         "#,
     )
@@ -119,7 +119,7 @@ fn test_an_unknown_issuer_is_refused() {
         r#"
         %tcp.connect [<7f000001>, __PORT__] ~> =(+TcpSocket & s)
         %tls.attach [socket: s, hostname: "localhost", roots: __DECOY__]
-        ~> :error<'%io> ~> =IoError(message: m)
+        ~> :error<'%io.error> ~> =IoError(message: m)
         %str.contains? [m, "UnknownIssuer"]
         "#,
     )
