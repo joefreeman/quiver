@@ -2979,11 +2979,45 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // Track the chained type as we traverse the chain
         let mut chained_type: Option<usize> = None;
 
-        for term in &chain.terms {
+        for (index, term) in chain.terms.iter().enumerate() {
+            // A name after a `~>` is applied to the flowing value.
+            if index > 0
+                && let ast::Term::Access(access) = term
+            {
+                self.collect_callee_receive_type(access, receive_types);
+            }
             chained_type =
                 self.collect_receive_types_from_term(term, chained_type, receive_types)?;
         }
         Ok(())
+    }
+
+    /// The receive type of a callee named from outside the body. Calling it runs its receives
+    /// in this process, and the call widens the receive type as it compiles, but that is too
+    /// late for an `@` taken before it (`seed [$specs, @]; ^loop [...]`), whose send grant is
+    /// the receive type as it stands. One whose receive mentions a type variable is left to the
+    /// call, which instantiates it.
+    fn collect_callee_receive_type(
+        &mut self,
+        access: &ast::Access,
+        receive_types: &mut Vec<usize>,
+    ) {
+        let (Some(ast::AccessSource::Identifier(name))
+        | Some(ast::AccessSource::TailCall(Some(name)))) = &access.source
+        else {
+            return;
+        };
+        let Some(callee) = self.peek_variable_type(name, &access.accessors) else {
+            return;
+        };
+        let Some(parts) = typing::open_callable(callee, self.program) else {
+            return;
+        };
+        if !self.is_never(parts.receive)
+            && !typing::contains_free_variables(parts.receive, &*self.program)
+        {
+            receive_types.push(parts.receive);
+        }
     }
 
     fn collect_receive_types_from_term(
@@ -3060,7 +3094,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     Ok(None)
                 }
             }
-            ast::Term::Apply(_access, argument) => {
+            ast::Term::Apply(access, argument) => {
+                self.collect_callee_receive_type(access, receive_types);
                 // The argument may contain a select defining a receive type (`f [!#'int]`).
                 self.collect_receive_types_from_term(argument, chained_type, receive_types)?;
                 Ok(None)
@@ -3716,19 +3751,37 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.record_type_parameter_bounds(declared.bounds.iter().cloned());
         }
 
-        // The enclosing functions' type parameters its type mentions, which are fixed for each
-        // closure but which the running code doesn't know: a runtime test judges it with them
+        // A runtime test solves for its own type parameters, as the value stands for every
+        // instantiation of them — unless it consumes them, when a value is one instantiation,
+        // named. Every other type variable its type mentions is one the running code doesn't
+        // know (an enclosing function's, fixed when the closure was made), so a test holds it
         // opaque.
-        let opaque = self
-            .free_variables(callable_type_id)
-            .into_iter()
-            .filter(|name| self.program.rigid_variables().contains_key(name))
-            .collect();
+        let consuming = matches!(
+            self.program.lookup_type(callable_type_id),
+            Some(Type::Callable {
+                consumes: Some(_),
+                ..
+            })
+        );
+        let generic: Vec<(String, usize)> = if consuming {
+            Vec::new()
+        } else {
+            declared
+                .bounds
+                .iter()
+                .filter(|(name, _)| !enclosing_rigid.contains_key(name))
+                .cloned()
+                .collect()
+        };
+        let mut opaque = Vec::new();
+        typing::collect_type_variables(callable_type_id, &*self.program, &mut opaque);
+        opaque.retain(|name| !generic.iter().any(|(own, _)| own == name));
         let function_index = self.program.register_function(Function {
             instructions: function_instructions,
             captures: captures.len(),
             parameter_hidden: parameter_requirement.map(|found| slots[found]),
             opaque,
+            generic,
             type_id: callable_type_id,
         });
 
@@ -5906,6 +5959,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             captures: 0,
             parameter_hidden: None,
             opaque: Vec::new(),
+            generic: Vec::new(),
             type_id: callable_type_id,
         });
         bytecode.entry = Some(bytecode.functions.len() - 1);

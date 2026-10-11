@@ -1617,3 +1617,53 @@ fn test_a_receive_may_name_an_alias_from_its_body() {
         .evaluate("p = @[] { 'm = Ping | Pong; !'m } []; p Ping; !p")
         .expect("Ping");
 }
+
+#[test]
+fn test_a_declared_grant_is_not_forged_by_passing_through_a_wider_type() {
+    // A grant a type doesn't spell is not granted: neither an await nor a send can be
+    // recovered by passing the pid through a parameter that drops it.
+    quiver()
+        .evaluate(
+            "launder = #(@) { $ }
+             as_bin = #(@!'bin) { !$ }
+             p = @[] { 5 } []
+             q = launder p
+             as_bin q",
+        )
+        .expect_error_containing("expected function parameter compatible with @!'bin, found @");
+    quiver()
+        .evaluate(
+            "narrow = #(@!'int) { $ }
+             need = #(@'bin) { $ <01> }
+             p = @[] { !'int } []
+             q = narrow p
+             need q",
+        )
+        .expect_error_containing("compatible with @'bin, found @!'int");
+}
+
+#[test]
+fn test_a_process_receiving_nothing_accepts_no_send() {
+    quiver()
+        .evaluate(
+            "need = #(@'int) { $ 5 }
+             deaf = @[] { Ok } []
+             need deaf",
+        )
+        .expect_error_containing("compatible with @'int");
+}
+
+#[test]
+fn test_self_is_granted_what_a_later_call_receives() {
+    // `@` taken before a call that receives is granted what the call receives: the process
+    // runs the callee's receive as its own.
+    quiver()
+        .evaluate(
+            "loop = #'int { !'int ~> %num.add [~, $] }
+             tell = #(@'int) { $ 2 }
+             run = #'int { tell @; ^loop $ }
+             p = @run 40
+             !p",
+        )
+        .expect("42");
+}

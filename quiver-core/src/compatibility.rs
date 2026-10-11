@@ -8,8 +8,12 @@
 
 use crate::binders::BinderStack;
 use crate::bytecode::{ConcreteType, Function};
-use crate::types::{TupleTypeInfo, Type, TypeLookup, is_compatible, types_overlap};
+use crate::types::{
+    InstantiationBound, TupleTypeInfo, Type, TypeLookup, instantiation_exists, is_compatible,
+    types_overlap,
+};
 use rustc_hash::FxHashMap;
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// A runtime type test's verdict on the values of one concrete type.
@@ -181,11 +185,14 @@ impl TypeIndex {
             // type tracks it (see `holds_consuming`).
             ConcreteType::Function(func_id) => {
                 let function = &tables.functions[func_id];
-                admit_if(is_compatible_plain(
-                    function.type_id,
-                    pattern_id,
-                    &lookup.with_opaque(&function.opaque),
-                ))
+                let bounds = RefCell::new(Vec::new());
+                let lookup = lookup
+                    .with_opaque(&function.opaque)
+                    .with_generic(Generic::Solved(&function.generic, &bounds));
+                admit_if(
+                    is_compatible_plain(function.type_id, pattern_id, &lookup)
+                        && lookup.instantiation_exists(),
+                )
             }
             // A builtin is judged by its signature, as a plain function: the representative
             // may be the type of a type-consuming one held uninstantiated, which shares it.
@@ -204,6 +211,7 @@ impl TypeIndex {
                 let function = &tables.functions[func_id];
                 let lookup = lookup
                     .with_opaque(&function.opaque)
+                    .with_generic(Generic::Fixed(&function.generic))
                     .with_extra(process_type(function, tables.types));
                 admit_if(is_compatible(lookup.extra_id(), pattern_id, &lookup))
             }
@@ -259,16 +267,32 @@ fn process_type(func: &Function, types: &[Type]) -> Type {
 /// The tables as a [`TypeLookup`], optionally answering one more type — one the program need
 /// not contain, such as the process type of a function nothing named — at the next id.
 ///
-/// A function's type may mention its enclosing functions' type parameters (`opaque`), which
-/// were fixed when its closure was made, at types the running code doesn't know. They are
-/// read as rigid variables bounded by the top type: each one opaque type, holding only its own
-/// values, so no test admits a closure on a guess at what they were instantiated to.
+/// A function's type mentions type variables (`opaque`) the running code doesn't know, such as
+/// its enclosing functions' parameters, fixed when its closure was made. They are read as rigid
+/// variables bounded by the top type: each one opaque type, holding only its own values, so no
+/// test admits a closure on a guess at what they were instantiated to. Its own type parameters
+/// are read as `generic` says.
 #[derive(Clone)]
 struct Lookup<'a> {
     types: &'a [Type],
     tuples: &'a [TupleTypeInfo],
     extra: Option<Type>,
     opaque: &'a [String],
+    generic: Generic<'a>,
+}
+
+/// How a test reads the type parameters a function declares itself (`Function::generic`).
+#[derive(Clone, Copy)]
+enum Generic<'a> {
+    /// A function value stands for every instantiation of them, so the test asks whether one
+    /// fits: the relation records bounds on them here, for [`Lookup::instantiation_exists`].
+    Solved(
+        &'a [(String, usize)],
+        &'a RefCell<Vec<(String, InstantiationBound)>>,
+    ),
+    /// A spawn fixed them, at types its pid doesn't know: each is one opaque type within its
+    /// bound.
+    Fixed(&'a [(String, usize)]),
 }
 
 /// The bound of an opaque variable, answered past the tables and their extra type.
@@ -281,11 +305,16 @@ impl<'a> Lookup<'a> {
             tuples: tables.tuples,
             extra: None,
             opaque: &[],
+            generic: Generic::Fixed(&[]),
         }
     }
 
     fn with_opaque(self, opaque: &'a [String]) -> Self {
         Lookup { opaque, ..self }
+    }
+
+    fn with_generic(self, generic: Generic<'a>) -> Self {
+        Lookup { generic, ..self }
     }
 
     fn with_extra(self, extra: Type) -> Self {
@@ -297,6 +326,19 @@ impl<'a> Lookup<'a> {
 
     fn extra_id(&self) -> usize {
         self.types.len()
+    }
+
+    /// Whether the type parameters being solved for have an instantiation meeting the bounds
+    /// the relation recorded on them, read with them opaque.
+    fn instantiation_exists(&self) -> bool {
+        match self.generic {
+            Generic::Solved(generic, bounds) => instantiation_exists(
+                generic,
+                &bounds.borrow(),
+                &self.clone().with_generic(Generic::Fixed(generic)),
+            ),
+            Generic::Fixed(_) => true,
+        }
     }
 }
 
@@ -311,10 +353,26 @@ impl TypeLookup for Lookup<'_> {
     }
 
     fn rigid_bound(&self, name: &str) -> Option<usize> {
-        self.opaque
-            .iter()
-            .any(|opaque| opaque == name)
-            .then_some(self.types.len() + 1)
+        if self.opaque.iter().any(|opaque| opaque == name) {
+            return Some(self.types.len() + 1);
+        }
+        match self.generic {
+            Generic::Fixed(generic) => generic
+                .iter()
+                .find(|(own, _)| own == name)
+                .map(|&(_, bound)| bound),
+            Generic::Solved(..) => None,
+        }
+    }
+
+    fn instantiable(&self, name: &str) -> bool {
+        matches!(self.generic, Generic::Solved(generic, _) if generic.iter().any(|(own, _)| own == name))
+    }
+
+    fn constrain(&self, name: &str, bound: InstantiationBound) {
+        if let Generic::Solved(_, bounds) = self.generic {
+            bounds.borrow_mut().push((name.to_string(), bound));
+        }
     }
 
     fn lookup_tuple(&self, tuple_id: usize) -> Option<&TupleTypeInfo> {

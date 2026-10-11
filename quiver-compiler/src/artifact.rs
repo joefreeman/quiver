@@ -732,6 +732,9 @@ fn drain(
                 FunctionClass::Own => {
                     let function = &program.get_functions()[function_id];
                     add_type(function.type_id, closure, queue);
+                    for &(_, bound) in &function.generic {
+                        add_type(bound, closure, queue);
+                    }
                     for instruction in &function.instructions {
                         collect_instruction(instruction, closure, queue);
                     }
@@ -1431,27 +1434,6 @@ fn recite_imports(unit: &mut CompiledUnit, rekeyed: &HashMap<UnitKey, UnitKey>) 
     }
 }
 
-/// The types an instantiated builtin's type arguments reach, through tuples' fields too.
-fn reached_from_type_arguments(unit: &CompiledUnit) -> HashSet<usize> {
-    let mut reached = HashSet::new();
-    let mut stack: Vec<usize> = unit
-        .builtins
-        .iter()
-        .flat_map(|builtin| builtin.type_arguments.iter().copied())
-        .collect();
-    while let Some(type_id) = stack.pop() {
-        if !reached.insert(type_id) {
-            continue;
-        }
-        let ty = &unit.types[type_id];
-        stack.extend(type_children(ty));
-        if let Type::Tuple(tuple) = ty {
-            stack.extend(unit.tuples[*tuple].fields.iter().map(|&(_, field)| field));
-        }
-    }
-    reached
-}
-
 /// The type ids a type references directly. `Type::Tuple` is not among them: it names a
 /// *tuple* id, and the field types behind it are rewritten with the tuples table, after the
 /// map is complete.
@@ -1494,26 +1476,17 @@ fn type_children(ty: &Type) -> Vec<usize> {
 
 /// Drop the type information a *program* cannot use, and re-intern what is left.
 ///
-/// A `.qx` is only ever linked and run — never compiled against — and two kinds of type
-/// information exist solely for the compiler:
+/// A `.qx` is only ever linked and run — never compiled against — so annotation rows, which
+/// exist solely for the compiler, can go. `Type::Annotated` records what annotations a value
+/// is statically known to carry, so `x:key` can be typed. Everything downstream discards it:
+/// `compute_compatible_concrete_types` opens by calling `Type::strip_annotations`, the `%data`
+/// decoder recurses straight to `base`, and the executor never reads the variant at all. Each
+/// row is spliced out in favour of its base, and re-interning then merges the rows that
+/// differed only in what they carried.
 ///
-/// - **Annotation rows.** `Type::Annotated` records what annotations a value is statically
-///   known to carry, so `x:key` can be typed. Everything downstream discards it:
-///   `compute_compatible_concrete_types` opens by calling `Type::strip_annotations`, the
-///   `%data` decoder recurses straight to `base`, and the executor never reads the variant
-///   at all. Each row is spliced out in favour of its base.
-/// - **Type-variable names.** `check_type_relation` matches a variable with
-///   `(Type::Variable(_), _) | (_, Type::Variable(_)) => true` — a wildcard whose name is
-///   ignored. Definition-site uniquification mints a distinct name per definition, so the
-///   same generic signature written in two modules produces two unrelated graphs. Collapsing
-///   every name to one makes them the same row. The exception is a type an instantiated
-///   builtin's type arguments reach: the linker re-derives the instantiation from them (a
-///   conversion plan instantiates the generic functions it is given, which needs to tell their
-///   variables apart), so their names stay.
-///
-/// Re-interning is where the second one pays: once names are gone, alpha-equivalent rows are
-/// *identical* rows, and dedupe removes them. Together the two take `examples/todo.qv` from
-/// 6,391 distinct type rows to 2,966.
+/// Type-variable names stay: a runtime test of a function or pid reads each variable its type
+/// mentions as one opaque type, by name (see `Function::opaque`), and the linker re-derives an
+/// instantiated builtin's instantiation from the variables its type arguments reach.
 ///
 /// This must not be applied to a unit a compiler will consume. A `ModuleArtifact` carries
 /// `module_type`, its type namespaces and `fn_case_tables` in the same id space, and typing a
@@ -1541,7 +1514,6 @@ fn shake_types(unit: &mut CompiledUnit) {
     // `(id, children queued)`. A node is visited once to queue what it references and once
     // to rewrite itself; `Type::Cycle` is a relative marker rather than an edge, so the graph
     // is a DAG and this terminates. Iterative, like every other walk over type structure.
-    let named = reached_from_type_arguments(unit);
     for root in 0..unit.types.len() {
         let mut stack = vec![(root, false)];
         while let Some((old, queued)) = stack.pop() {
@@ -1565,11 +1537,7 @@ fn shake_types(unit: &mut CompiledUnit) {
                 remap.types.insert(old, target);
                 continue;
             }
-            let rewritten = match unit.types[old].clone().remap_ids(&remap) {
-                // One name for every variable, so alpha-equivalent rows intern together.
-                Type::Variable(_) if !named.contains(&old) => Type::Variable("_".to_string()),
-                other => other,
-            };
+            let rewritten = unit.types[old].clone().remap_ids(&remap);
             let new = *interned.entry(rewritten.clone()).or_insert_with(|| {
                 types.push(rewritten);
                 types.len() - 1
@@ -2244,6 +2212,9 @@ pub fn validate_unit(unit: &CompiledUnit, label: &str) -> Result<(), String> {
 
     for (position, function) in unit.functions.iter().enumerate() {
         check("type", function.type_id, unit.types.len())?;
+        for &(_, bound) in &function.generic {
+            check("type", bound, unit.types.len())?;
+        }
         // Captures are named through a 24-bit operand: past that they are unaddressable, and
         // the closure build would reserve a nonsense allocation before discovering the stack
         // is short.

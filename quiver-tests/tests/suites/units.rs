@@ -109,6 +109,7 @@ fn compile_inner(
         captures: 0,
         parameter_hidden: None,
         opaque: Vec::new(),
+        generic: Vec::new(),
         type_id: callable,
     });
     Compiled {
@@ -385,10 +386,9 @@ fn a_units_imports_are_a_sparse_subset_of_its_modules() {
 
 #[test]
 fn a_compiled_program_drops_type_information_it_cannot_use() {
-    // A `.qx` is linked and run, never compiled against, so two kinds of type information in
-    // it are dead weight: annotation rows (compatibility strips them, the decoder recurses past
-    // them, the executor never reads them) and type-variable *names* (`check_type_relation`
-    // matches a variable as a wildcard). `extract_program` drops both and re-interns.
+    // A `.qx` is linked and run, never compiled against, so its annotation rows are dead weight
+    // (compatibility strips them, the decoder recurses past them, the executor never reads
+    // them). `extract_program` drops them and re-interns.
     // A store of this test's own, rather than the shared cache: how many modules link from
     // artifacts rather than compiling into the entry unit decides how many *per-unit* type
     // tables the bundle has, and the row count below sums them. Against a warm cache that
@@ -407,7 +407,6 @@ fn a_compiled_program_drops_type_information_it_cannot_use() {
     );
 
     let units = std::iter::once(&program.unit).chain(program.modules.iter().map(|(_, u)| u));
-    let mut names = std::collections::HashSet::new();
     let mut rows = 0;
     for unit in units {
         for ty in &unit.types {
@@ -416,15 +415,8 @@ fn a_compiled_program_drops_type_information_it_cannot_use() {
                 !matches!(ty, Type::Annotated { .. }),
                 "a shipped program keeps no annotation rows"
             );
-            if let Type::Variable(name) = ty {
-                names.insert(name.clone());
-            }
         }
     }
-    assert!(
-        names.len() <= 1,
-        "every type variable must canonicalise to one name, got {names:?}"
-    );
     assert!(rows > 0);
     assert!(
         rows < compiled.program.get_types().len(),

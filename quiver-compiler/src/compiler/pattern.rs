@@ -502,6 +502,131 @@ pub fn generate_pattern_code(
     Ok(())
 }
 
+/// The runtime check that a value statically known to be `known` is a `tested`.
+///
+/// A function or pid can't be looked inside, so a test judges it by the type it was written
+/// with — and where that mentions type variables fixed when it was made (a closure built by
+/// generic code), by none of their instantiations. A test that tells apart the members of a
+/// type the value is known to have would then reject values its types vouch for. So each
+/// function or process position of `tested` that `known` already guarantees is left out of the
+/// test (as `_`), leaving it to decide only what the value's type doesn't.
+fn vouched_type_check(tested: usize, known: usize, program: &mut Program) -> RuntimeCheck {
+    RuntimeCheck::TypeId(without_vouched_callables(tested, known, program))
+}
+
+/// `tested` with each function or process position `known` guarantees replaced by `_` (see
+/// [`vouched_type_check`]). `known` vouches for a position only where every member of it that could
+/// hold the position's tuple does, and only when it is closed: free of type variables (which
+/// compatibility presumes to fit) and of references to binders outside it.
+fn without_vouched_callables(tested: usize, known: usize, program: &mut Program) -> usize {
+    let vouches = |known: usize, tested: usize, program: &Program| {
+        !typing::contains_variables(known, program)
+            && !quiver_core::binders::has_free_cycles(known, program)
+            && !quiver_core::binders::has_free_cycles(tested, program)
+            && quiver_core::types::is_compatible(known, tested, program)
+    };
+    match program.lookup_type(tested).cloned() {
+        Some(Type::Callable { .. } | Type::Process { .. }) => {
+            if vouches(known, tested, program) {
+                program.register_type(Type::Top)
+            } else {
+                tested
+            }
+        }
+        // A runtime test sees through annotation rows, so the row can go.
+        Some(Type::Annotated { base, .. }) => {
+            let rewritten = without_vouched_callables(base, known, program);
+            if rewritten == base { tested } else { rewritten }
+        }
+        Some(Type::Union(members)) => {
+            let rewritten: Vec<usize> = members
+                .iter()
+                .map(|&member| without_vouched_callables(member, known, program))
+                .collect();
+            if rewritten == members {
+                tested
+            } else {
+                program.register_type(Type::Union(rewritten))
+            }
+        }
+        Some(Type::Tuple(tuple_id)) => {
+            let info = program
+                .lookup_tuple(tuple_id)
+                .cloned()
+                .expect("a tuple type names a registered tuple");
+            let labels: Vec<Option<String>> =
+                info.fields.iter().map(|(label, _)| label.clone()).collect();
+            let Some(candidates) = same_shaped_members(known, &info.name, &labels, program) else {
+                return tested;
+            };
+            if candidates.is_empty() {
+                return tested;
+            }
+            let fields: Vec<(Option<String>, usize)> = info
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(index, (label, field))| {
+                    let known_field = union_type_ids(
+                        program,
+                        candidates.iter().map(|fields| fields[index]).collect(),
+                    );
+                    (
+                        label.clone(),
+                        without_vouched_callables(*field, known_field, program),
+                    )
+                })
+                .collect();
+            if fields == info.fields {
+                tested
+            } else {
+                let rewritten = program.register_tuple(info.name, fields);
+                program.register_type(Type::Tuple(rewritten))
+            }
+        }
+        _ => tested,
+    }
+}
+
+/// The field types of each member of `known` that is a tuple of this name and these labels, or
+/// `None` when a member could hold one without saying how (a variable, a partial, a reference
+/// to an enclosing binder, the top type).
+fn same_shaped_members(
+    known: usize,
+    name: &Option<String>,
+    labels: &[Option<String>],
+    program: &Program,
+) -> Option<Vec<Vec<usize>>> {
+    match program.lookup_type(Type::strip_annotations(known, program))? {
+        Type::Union(members) => members.iter().try_fold(Vec::new(), |mut found, &member| {
+            found.extend(same_shaped_members(member, name, labels, program)?);
+            Some(found)
+        }),
+        Type::Tuple(tuple_id) => {
+            let info = program.lookup_tuple(*tuple_id)?;
+            let same = info.name == *name
+                && info.fields.len() == labels.len()
+                && info
+                    .fields
+                    .iter()
+                    .zip(labels)
+                    .all(|((label, _), want)| label == want);
+            Some(if same {
+                vec![info.fields.iter().map(|(_, field)| *field).collect()]
+            } else {
+                Vec::new()
+            })
+        }
+        Type::Integer
+        | Type::Binary
+        | Type::Reference
+        | Type::Resource(_)
+        | Type::Callable { .. }
+        | Type::Process { .. } => Some(Vec::new()),
+        _ => None,
+    }
+}
+
 /// Emit the test for one requirement, leaving its truthiness (`Ok` or nil) on the stack above the
 /// scrutinee, which it leaves in place.
 fn emit_requirement(
@@ -1306,7 +1431,7 @@ fn analyze_match_tuple_pattern(
             let tuple_type_id = program.register_type(Type::Tuple(check_tuple_id));
             base_requirements.push(Requirement {
                 path: path.clone(),
-                check: RuntimeCheck::TypeId(tuple_type_id),
+                check: vouched_type_check(tuple_type_id, value_type_id, program),
             });
         }
 
@@ -1706,7 +1831,7 @@ fn analyze_partial_pattern(
                     let tuple_type_id = program.register_type(Type::Tuple(check_tuple_id));
                     requirements.push(Requirement {
                         path: path.clone(),
-                        check: RuntimeCheck::TypeId(tuple_type_id),
+                        check: vouched_type_check(tuple_type_id, value_type_id, program),
                     });
                 }
 
@@ -1993,7 +2118,7 @@ fn analyze_star_pattern(
         if let Some(type_id) = type_check {
             requirements.push(Requirement {
                 path: path.clone(),
-                check: RuntimeCheck::TypeId(type_id),
+                check: vouched_type_check(type_id, value_type_id, program),
             });
         }
 

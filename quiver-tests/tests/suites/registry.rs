@@ -214,3 +214,18 @@ fn session_root_registration_survives_line_completion() {
         .then_evaluate("%registry.lookup<@> Root ~> { =[] => Gone | Present }")
         .expect("Present");
 }
+
+#[test]
+fn lookup_of_a_process_spawned_in_generic_code_does_not_guess_its_instantiation() {
+    // The root function's result is the enclosing function's parameter, fixed by the spawn at
+    // a type the pid doesn't say, so no lookup's concrete await grant admits it.
+    quiver()
+        .evaluate(
+            "mk = #<'t>'t { @'t { !'int; $ } $ }
+             p = mk 5
+             %registry.register [Generic, p]",
+        )
+        .expect("Ok")
+        .then_evaluate("%registry.lookup<@'int !'bin> Generic")
+        .expect("[]");
+}

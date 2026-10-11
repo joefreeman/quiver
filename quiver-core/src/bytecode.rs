@@ -192,11 +192,16 @@ pub struct Function {
     /// in place of the parameter type it was compiled with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameter_hidden: Option<usize>,
-    /// The type variables its type mentions that enclosing functions declare: fixed for each
-    /// closure, but unknown to the running code, so a runtime test of its values (or of its
-    /// spawns') treats each as one opaque type, known only to be itself.
+    /// The type variables its type mentions that are fixed for each closure but unknown to
+    /// the running code — an enclosing function's, say: a runtime test of its values (or of
+    /// its spawns') treats each as one opaque type, known only to be itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub opaque: Vec<String>,
+    /// Its own type parameters, each with its upper bound's type id: a runtime test of its
+    /// values solves for an instantiation of them, as the value stands for every one; a test of
+    /// its spawns treats each as opaque within its bound, as a spawn fixed it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generic: Vec<(String, usize)>,
     /// Type ID referencing this function's callable type in the types vec
     pub type_id: usize,
 }
@@ -239,6 +244,11 @@ impl Function {
             captures: self.captures,
             parameter_hidden: self.parameter_hidden,
             opaque: self.opaque.clone(),
+            generic: self
+                .generic
+                .iter()
+                .map(|(name, bound)| (name.clone(), IdRemaps::map(&remaps.types, "type", *bound)))
+                .collect(),
             type_id: IdRemaps::map(&remaps.types, "type", self.type_id),
         }
     }
@@ -526,6 +536,7 @@ mod tests {
             captures: 3,
             parameter_hidden: None,
             opaque: Vec::new(),
+            generic: Vec::new(),
             type_id: 7,
         };
         let json = serde_json::to_string(&function).expect("serialize");
@@ -542,6 +553,7 @@ mod tests {
             captures: 0,
             parameter_hidden: None,
             opaque: Vec::new(),
+            generic: Vec::new(),
             type_id: 0,
         };
         let json = serde_json::to_string(&function).expect("serialize");

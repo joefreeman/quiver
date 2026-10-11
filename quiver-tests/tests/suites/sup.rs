@@ -158,16 +158,17 @@ fn test_killing_the_supervisor_tears_down_its_children() {
             mk = #[Str['bin], (@'%sup.down)] {
               =[id, sup]
               w = @[] {
-                me @
                 !'int ~> { =0 => "boom" ~> __panic__ | [] ~> ^ ~ }
               } []
               %sup.watch [id, w, sup]
+              me w
               w
             }
             spec = [id: "w", restart: Permanent, start: mk]
             sup = [children: Cons[spec, Nil], max_restarts: 3, window: %time{ 5s }] ~> %sup.start
-            // The declared message type spells the await grant (`-> []`): a declared
-            // type grants only what it spells, and this test awaits the child.
+            // The declared message type spells the await grant (`![]`): a declared
+            // type grants only what it spells, and this test awaits the child — so the
+            // spawner announces it, as a child's own `@` grants no await.
             p1 = !#(@'int ![])
             %proc.kill [sup]
             r = !p1

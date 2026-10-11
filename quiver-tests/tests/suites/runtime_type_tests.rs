@@ -122,6 +122,57 @@ fn test_a_function_is_tested_against_a_function_type() {
 }
 
 #[test]
+fn test_a_generic_function_is_instantiated_once_for_every_position() {
+    // Its own type parameters stand for one instantiation throughout, within their bounds.
+    quiver()
+        .evaluate(
+            "f = #_ { | =(#'int -> 'int) => Fn | No }
+             g = #_ { | =(#'int -> 'bin) => Fn | No }
+             h = #_ { | =(#'bin -> _) => Fn | No }
+             bounded = #<'t: 'int>'t { $ }
+             [f #<'t>'t { $ }, g #<'t>'t { $ }, f bounded, h bounded, g #<'t>['t] -> 't { $.0 }]",
+        )
+        .expect("[Fn, No, Fn, No, No]");
+}
+
+#[test]
+fn test_a_closure_made_in_generic_code_knows_nothing_of_its_instantiation() {
+    // Its type mentions the enclosing function's parameter, fixed when it was made at a type
+    // the running code doesn't know, so no concrete function type admits it — only `_` does.
+    quiver()
+        .evaluate(
+            "mk = #<'t>'t { #'t { $ } }
+             up = #_ { $ }
+             c = mk 5
+             up c ~> { | =(#'bin -> 'bin) => Bin | =(#'int -> 'int) => Int | =(#_ -> _) => Any | No }",
+        )
+        .expect("No");
+    quiver()
+        .evaluate(
+            "mk = #<'t>[seed: 't, op: #['t, 't] -> 't] { #'t { $$op [$, $$seed] } }
+             up = #_ { $ }
+             c = mk [seed: 5, op: %num.add]
+             up c ~> { | =(#'bin -> 'bin) => Bin | Rejected }",
+        )
+        .expect("Rejected");
+}
+
+#[test]
+fn test_a_match_on_a_known_type_admits_closures_made_in_generic_code() {
+    // Telling the members of a value's own type apart doesn't test the function positions its
+    // type already vouches for, which the runtime couldn't decide for a generic closure.
+    quiver()
+        .evaluate(
+            "mk = #<'s>['s, 'int] {
+               f = #[] -> 's { $$0 }
+               $1 ~> { | =0 => [f, 0] | [f, <01>] }
+             }
+             mk [\"x\", 1] ~> { | =[g, ('bin & b)] => [g [], b] | =[g, _] => [g [], Int] }",
+        )
+        .expect("[\"x\", <01>]");
+}
+
+#[test]
 fn test_a_receive_tests_messages_by_their_contents() {
     // The message is built generically, as `A['t]`.
     quiver()

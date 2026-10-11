@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::binders::BinderPair;
+use crate::binders::{BinderPair, BinderStack};
 
 /// Index of the NIL tuple type (always at index 0)
 pub const NIL: usize = 0;
@@ -26,6 +26,15 @@ pub trait TypeLookup {
     fn rigid_bound(&self, _name: &str) -> Option<usize> {
         None
     }
+    /// Whether `name` is a type parameter of a generic function value a runtime test is
+    /// relating, which stands for whatever it may be instantiated to. The relation then
+    /// records, through [`TypeLookup::constrain`], what an instantiation must hold and fit
+    /// within, rather than relating the variable itself (see [`instantiation_exists`]).
+    fn instantiable(&self, _name: &str) -> bool {
+        false
+    }
+    /// Record a bound an instantiable variable's instantiation must respect.
+    fn constrain(&self, _name: &str, _bound: InstantiationBound) {}
     /// Look up a type, seeing through an annotation row to its base shape. Most
     /// structural questions ("is this callable?", "which tuple?") want this — a bare
     /// `lookup_type` on an annotated id sees `Type::Annotated` and fails shape matches.
@@ -821,8 +830,8 @@ enum UnionMode {
     Any,
     /// `All`, holding only where assignability is proven rather than presumed: a type
     /// variable relates only to itself, a reference the walk cannot resolve relates to
-    /// nothing, an ungranted process capability does not satisfy a granted one, and a
-    /// function type does not satisfy one that lets its callers omit more labels.
+    /// nothing, and a function type does not satisfy one that lets its callers omit more
+    /// labels.
     /// Used by `is_subsumed_by`: "Does every value of type A belong to type B?"
     Subsumption,
 }
@@ -848,8 +857,8 @@ pub fn is_compatible<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &
 
 /// Whether every value of `self_id` belongs to `pattern_id`, so a union holding both
 /// needs only `pattern_id`. Stricter than [`is_compatible`], which gives the benefit of the
-/// doubt to type variables, unresolved references and ungranted capabilities — a verdict
-/// that only admits a value, where this one deletes a type.
+/// doubt to type variables and unresolved references — a verdict that only admits a value,
+/// where this one deletes a type.
 pub fn is_subsumed_by<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &T) -> bool {
     let mut assumptions = HashSet::new();
     let mut stacks = BinderPair::default();
@@ -880,6 +889,61 @@ pub fn types_overlap<T: TypeLookup>(self_id: usize, pattern_id: usize, lookup: &
         &mut assumptions,
         &mut stacks,
     )
+}
+
+/// A bound on an instantiable type variable's instantiation (see `TypeLookup::instantiable`),
+/// with the binders the bounding type stands in.
+#[derive(Clone, Debug)]
+pub enum InstantiationBound {
+    /// The instantiation must hold this type's values.
+    Lower(usize, BinderStack),
+    /// The instantiation must fit within this type.
+    Upper(usize, BinderStack),
+}
+
+/// Whether the type parameters `generic` (each with its upper bound) have an instantiation
+/// meeting the `bounds` a relation recorded on them. The least one, each the union of its lower
+/// bounds, is a solution if any is: so every lower bound must fit every upper bound, and the
+/// parameter's own. A bound naming a type parameter reads it under `lookup`, which holds them
+/// opaque.
+pub fn instantiation_exists<T: TypeLookup>(
+    generic: &[(String, usize)],
+    bounds: &[(String, InstantiationBound)],
+    lookup: &T,
+) -> bool {
+    generic.iter().all(|(name, declared)| {
+        let (mut lower, mut upper) = (Vec::new(), Vec::new());
+        for (bounded, bound) in bounds {
+            if bounded == name {
+                match bound {
+                    InstantiationBound::Lower(type_id, stack) => lower.push((*type_id, stack)),
+                    InstantiationBound::Upper(type_id, stack) => upper.push((*type_id, stack)),
+                }
+            }
+        }
+        let fits = |&(below, below_stack): &(usize, &BinderStack),
+                    above: usize,
+                    above_stack: BinderStack| {
+            let mut stacks = BinderPair {
+                left: below_stack.clone(),
+                right: above_stack,
+            };
+            check_type_relation(
+                below,
+                above,
+                lookup,
+                UnionMode::All,
+                &mut HashSet::new(),
+                &mut stacks,
+            )
+        };
+        lower.iter().all(|below| {
+            fits(below, *declared, BinderStack::default())
+                && upper
+                    .iter()
+                    .all(|&(above, above_stack)| fits(below, above, above_stack.clone()))
+        })
+    })
 }
 
 /// Row compatibility for `Annotated <= Annotated` under assignability:
@@ -1004,6 +1068,25 @@ fn check_type_relation<T: TypeLookup>(
                     check_type_relation(member, pattern_id, lookup, mode, assumptions, stacks)
                 }),
             }
+        }
+
+        // A type parameter of a generic function value being tested (see
+        // `TypeLookup::instantiable`), on either side, relates to whatever its instantiation
+        // may: what it must fit within or hold is recorded with the binders that type stands
+        // in, for a solution to satisfy all at once.
+        (Type::Variable(name), _) if lookup.instantiable(name) => {
+            lookup.constrain(
+                name,
+                InstantiationBound::Upper(pattern_id, stacks.right.clone()),
+            );
+            true
+        }
+        (_, Type::Variable(name)) if lookup.instantiable(name) => {
+            lookup.constrain(
+                name,
+                InstantiationBound::Lower(self_id, stacks.left.clone()),
+            );
+            true
         }
 
         // A rigid variable (see `TypeLookup::rigid_bound`) on the left: its values are known
@@ -1422,23 +1505,19 @@ fn check_type_relation<T: TypeLookup>(
             // through the handle, so the actual process must accept at least that —
             // a handle that receives MORE is safe wherever fewer sends are promised
             // (e.g. a supervisor's self-handle, whose inferred receive is its whole
-            // message union, flowing into a `@'down` report parameter). An EMPTY
-            // actual send is treated as unknown rather than rejected: it arises as
-            // an inference artifact when `&.` is taken before the enclosing
-            // function's receive has been widened by its calls (the receive
-            // pre-pass only sees syntactic selects).
-            //
-            // Proving subsumption, neither leniency applies: an empty send is taken at its
-            // word, and an ungranted send or await does not satisfy a granted one.
-            let strict = mode == UnionMode::Subsumption;
+            // message union, flowing into a `@'down` report parameter). Each grant is
+            // strict against a stated expectation: an ungranted send or await never
+            // satisfies a granted one, nor does a process receiving nothing accept a
+            // send. Overlap stays lenient, as an over-approximation is its safe side.
+            let overlap = mode == UnionMode::Any;
             let send_ok = match (send1, send2) {
                 (Some(s1), Some(s2)) => {
-                    (!strict && lookup.lookup_type(*s1).is_some_and(|t| t.is_never()))
+                    (overlap && lookup.lookup_type(*s1).is_some_and(|t| t.is_never()))
                         || stacks.swapped(|stacks| {
                             check_type_relation(*s2, *s1, lookup, mode, assumptions, stacks)
                         })
                 }
-                (None, Some(_)) => !strict,
+                (None, Some(_)) => overlap,
                 (_, None) => true,
             };
 
@@ -1447,7 +1526,7 @@ fn check_type_relation<T: TypeLookup>(
                 (Some(r1), Some(r2)) => {
                     check_type_relation(*r1, *r2, lookup, mode, assumptions, stacks)
                 }
-                (None, Some(_)) => !strict,
+                (None, Some(_)) => overlap,
                 (_, None) => true,
             };
 
