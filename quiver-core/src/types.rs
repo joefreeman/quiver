@@ -288,6 +288,10 @@ pub struct BuiltinInfo {
     /// registration dedupes on, so never compared.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<crate::labels::ValueLabel>,
+    /// For an instantiation of a route-planning builtin (`%codec.convert`), the conversion's
+    /// plan (see [`crate::convert`]): a function of the type arguments, like the labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<crate::convert::Plan>,
 }
 
 /// The serialized spelling of [`Type`]: the same variants, with the struct-shaped ones

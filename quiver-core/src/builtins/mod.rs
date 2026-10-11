@@ -66,10 +66,10 @@ pub fn bigint_from_str(s: &str) -> Result<BigInt, Error> {
 }
 
 pub mod binary;
+pub mod convert;
 pub mod data;
 pub mod integer;
 pub mod io;
-pub mod json;
 pub mod reference;
 pub mod registry;
 pub mod vector;
@@ -109,6 +109,8 @@ pub enum Continuation {
     /// `%proc.track`: reconcile the render's reactive subscriptions; the thunk's result is the
     /// builtin's own.
     Track,
+    /// `%codec.convert`: carry on walking the conversion with the edge's answer.
+    Convert(Box<convert::Machine>),
 }
 
 impl Continuation {
@@ -122,6 +124,7 @@ impl Continuation {
                 ctx.end_tracking();
                 Ok(Completion::Value(result))
             }
+            Continuation::Convert(machine) => machine.resume(result, ctx),
         }
     }
 }
@@ -176,6 +179,12 @@ impl<'a, E: Effect> BuiltinContext<'a, E> {
     /// Resolve them against the executor's `TypeLookup`.
     pub fn type_arguments(&self) -> &[usize] {
         self.executor.builtin_type_arguments(self.builtin)
+    }
+
+    /// The conversion plan of a route-planning builtin's instantiation (see
+    /// [`crate::convert`]).
+    pub fn plan(&self) -> Option<Arc<crate::convert::Plan>> {
+        self.executor.builtin_plan(self.builtin)
     }
 
     /// The builtin's registered result type id, from its table row.
@@ -629,6 +638,9 @@ pub struct BuiltinEntry<E: Effect> {
     /// the instantiation is its own table entry, whose type ids the implementation reads via
     /// `BuiltinContext::type_arguments`.
     pub type_parameters: Vec<String>,
+    /// Whether each instantiation carries a conversion plan (`%codec.convert`), made from its
+    /// type arguments when it is registered (see [`crate::convert`]).
+    pub plans_routes: bool,
 }
 
 /// Registry of all available builtin functions
@@ -673,6 +685,7 @@ impl<E: Effect> BuiltinRegistry<E> {
                 parameter: param,
                 result,
                 type_parameters: vec![],
+                plans_routes: false,
             },
         );
     }
@@ -695,6 +708,7 @@ impl<E: Effect> BuiltinRegistry<E> {
                 parameter: param,
                 result,
                 type_parameters: vec![],
+                plans_routes: false,
             },
         );
     }
@@ -723,8 +737,30 @@ impl<E: Effect> BuiltinRegistry<E> {
                 parameter: param,
                 result,
                 type_parameters,
+                plans_routes: false,
             },
         );
+    }
+
+    /// Mark a type-consuming builtin as route-planning: each instantiation carries the plan
+    /// for converting between its type arguments.
+    pub fn plan_routes(&mut self, name: &str) {
+        let entry = self
+            .functions
+            .get_mut(name)
+            .expect("a route-planning builtin is registered first");
+        assert!(
+            !entry.type_parameters.is_empty(),
+            "a route-planning builtin is type-consuming"
+        );
+        entry.plans_routes = true;
+    }
+
+    /// Whether a builtin's instantiations carry a conversion plan.
+    pub fn plans_routes(&self, name: &str) -> bool {
+        self.functions
+            .get(name)
+            .is_some_and(|entry| entry.plans_routes)
     }
 
     /// A type-consuming builtin's declared type parameters (empty for ordinary builtins).
@@ -1084,7 +1120,7 @@ pub fn register_control_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     register_builtin!(registry, "assertion_passed", builtin_assertion_passed, TypeSpec::Binary => TypeSpec::Tuple(None, vec![]));
 }
 
-/// The Quiver data notation codec (`%data`): `data_encode` walks any data value into
+/// Quiver data notation (`%data`): `data_encode` walks any data value into
 /// its textual form; `data_decode` is type-consuming — the expected type drives the
 /// parse and appears as the result (`#Str['bin] -> ('t | [])`), so the declared
 /// parameter list names the same `t` its signature's result carries.
@@ -1112,27 +1148,29 @@ pub fn register_data_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     registry.declare_decode_error(data::decode_error_decl());
 }
 
-/// The JSON typed boundary: `__json_decode__<'t>` / `__json_encode__<'t>`, converting
-/// between `'%json` values and ordinary typed values.
-pub fn register_json_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
-    let nil = TypeSpec::Tuple(None, vec![]);
+/// Conversion between types (`%codec`): `codec_convert<'t, 's, 'u, 'k, 'g, 'h>` converts a `'s`
+/// to a `'t` through the tuple of functions (`'u`) it is given, reading and writing tuples as the
+/// options say — `keys: 'k`, `tag: 'g` and `shapes: 'h` — by a plan made from them all when the
+/// instantiation is registered.
+pub fn register_codec_builtins<E: Effect>(registry: &mut BuiltinRegistry<E>) {
     registry.register_generic(
-        "json_decode".to_string(),
-        coerce_builtin(json::builtin_json_decode),
+        "codec_convert".to_string(),
+        coerce_builtin(convert::builtin_codec_convert),
         Purity::Pure,
-        // `'%json | []`: nil passes through, so a failed document-model query chains.
-        TypeSpec::Union(vec![json::json_spec(), nil.clone()]),
-        TypeSpec::Union(vec![TypeSpec::Var("t"), nil]),
-        vec!["t".to_string()],
+        TypeSpec::Tuple(
+            None,
+            vec![
+                (None, TypeSpec::Var("s")),
+                (Some("using"), TypeSpec::Var("u")),
+                (Some("keys"), TypeSpec::Var("k")),
+                (Some("tag"), TypeSpec::Var("g")),
+                (Some("shapes"), TypeSpec::Var("h")),
+            ],
+        ),
+        TypeSpec::Union(vec![TypeSpec::Var("t"), TypeSpec::Tuple(None, vec![])]),
+        ["t", "s", "u", "k", "g", "h"].map(str::to_string).to_vec(),
     );
-    registry.register_generic(
-        "json_encode".to_string(),
-        coerce_builtin(json::builtin_json_encode),
-        Purity::Pure,
-        TypeSpec::Var("t"),
-        json::json_spec(),
-        vec!["t".to_string()],
-    );
+    registry.plan_routes("codec_convert");
 }
 
 /// Detach an owned child from the calling process (the parent-only `%proc.detach`):
@@ -1405,7 +1443,7 @@ pub fn core_modules<E: Effect>() -> Vec<BuiltinModule<E>> {
         register_clock_builtins,
         register_control_builtins,
         register_data_builtins,
-        register_json_builtins,
+        register_codec_builtins,
         register_process_builtins,
         register_registry_builtins,
     ]

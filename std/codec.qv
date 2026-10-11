@@ -1,0 +1,81 @@
+// Conversion between types: `%codec.convert<'t> [value, using: [f, g, …]]` converts a value to
+// `'t` through the functions it is given, each an edge from its parameter type to its result
+// type, and converts a tuple to a target tuple with the same name, labels and positions, each
+// field converted on its own, and to and from the neutral shapes formats share (below). A value
+// already of the target type passes through, ahead of the functions.
+//
+// A route may chain functions, forward from the value (a function whose parameter it fits) or
+// backward from the target (a function whose answer reaches it, given a value first converted
+// to what it takes); each function is tried aimed at the target before applied to the value as
+// it stands. Functions are tried in the order given, before the structural conversions, and a
+// function answering nil declines. The search is depth first: each step keeps its first
+// success, and a failure anywhere moves on to the next alternative.
+//
+// `convert` is *type-consuming*: the route is planned at compile time from the target, the
+// value's type (inferred, or stated as `convert<'t, 's>`) and the functions' types, and a
+// conversion with no possible route is a compile error. A conversion that fails at runtime
+// answers nil carrying a `'%data.error` under `:error`, its path leading to where the value
+// got furthest.
+
+//
+// Formats share one neutral shape for a keyed record, generic in the format's document type
+// `'d`: `'%codec.record<'d>`, a list of `[key, value]` entries, where a nil value is an absent
+// entry. A sequence is a `'%list<'d>`, and text a `'%str`. A format supplies the edges between
+// its document and these shapes, and `convert` reads a program's tuples from them, and writes
+// them as them, by their layout — the same, whichever format it is for — as its options
+// (`keys:`, `tag:`, `shapes:`) say.
+
+'record<'d> = Record['%list<['%str, ('d | [])]>]
+
+// ===== the standard library's representations ===========================================
+//
+// A type whose values hold an invariant their structure doesn't converts only through its own
+// functions: a dict files each entry under its key's hash, so one built field by field from a
+// document would hold entries it can't find. A format adds these edges to its own, which also
+// claims the types' tuples, so that a document is never read into them structurally. A dict with
+// text keys is a record, and any other a list of `[key, value]` pairs.
+
+standard = [
+  Edge[
+    out: #<'v>'%dict<'%str, 'v> -> 'record<'v> { Record[%dict.entries $] },
+    in: #<'v>'record<'v> -> '%dict<'%str, 'v> {
+      present = #['%str, ('v | [])] -> '%list<['%str, 'v]> {
+        | =[key, (\[] & value)] => %list{ [key, value] }
+        | Nil
+      }
+      %list.flat_map [$0, present] ~> %dict.from
+    },
+  ],
+  Edge[
+    out: #<'k: '%data, 'v>'%dict<'k, 'v> -> '%list<['k, 'v]> { %dict.entries $ },
+    in: #<'k: '%data, 'v>'%list<['k, 'v]> -> '%dict<'k, 'v> { %dict.from $ },
+  ],
+]
+
+[
+  standard: standard ~> {
+    :doc """
+      The edges of the standard library's types whose values hold an invariant their structure
+      doesn't — a dict, which files each entry under its key's hash — for a format to add to its
+      own. They convert such a type only through its own functions, and claim its tuples, so a
+      document is never read into it field by field: a dict with text keys is a record, and any
+      other a list of `[key, value]` pairs.
+      """
+  },
+  convert: __codec_convert__ ~> {
+    :doc """
+      Converts a value to the explicitly-given target type through the given functions, and
+      through the neutral shapes formats share — `%codec.convert<'user> [doc, using: %json.edges]`
+      answers `'user | []`, nil when no route succeeds, carrying a `'%data.error` under `:error`.
+      A nil value — a document that didn't parse — answers itself, its `:error` intact.
+      A function is given bare, and tried both ways, or paired with its inverse as
+      `Edge[out: f, in: g]`: `out` takes a value of a type apart, applied to a value as it
+      stands, and `in` builds one, aimed at the target. Tuples are read and written as `keys:`,
+      `tag:` and `shapes:` say. The source type is the value's (or stated, `convert<'t, 's>`);
+      both must be concrete at the naming site. An edge aimed at the target is followed only by
+      a structural step, never by an edge applied forward, so one pair's `in` then another's
+      `out` is no route.
+      """
+    :defaults [keys: [], tag: [], shapes: []]
+  },
+]

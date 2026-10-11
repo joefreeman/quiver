@@ -27,35 +27,6 @@ fn test_data_decode_labels_recursive_values_honestly() {
         .expect("One");
 }
 
-#[test]
-fn test_json_decode_labels_recursive_values_honestly() {
-    quiver()
-        .evaluate(&format!(
-            r#"{LIST} %json.parse "[1, 2]" ~> %json.decode<'l> ~ ~> test"#
-        ))
-        .expect("List");
-}
-
-#[test]
-fn test_json_encode_labels_its_documents_honestly() {
-    // The document's cells are `'%json`'s own members, closed against it: a two-element array
-    // is a JSON value, and not a one-element one.
-    quiver()
-        .evaluate(&format!(
-            r#"
-            {LIST}
-            'single = Array[Cons['%json, Nil]]
-            %json.encode<'l> Cons[1, Cons[2, Nil]] ~> {{ ='single => Single | ='%json => Json | No }}
-            "#
-        ))
-        .expect("Json");
-    quiver()
-        .evaluate(&format!(
-            r#"{LIST} %json.encode<'l> Cons[1, Cons[2, Nil]] ~> %json.decode<'l> ~ ~> test"#
-        ))
-        .expect("List");
-}
-
 const NESTED: &str = r#"
     'j = Z[z: 'int] | W[items: (Nil | Cons[^1, ^])]
     'flat = W[items: (Nil | Cons[Z[z: 'int], ^])]
@@ -77,11 +48,6 @@ fn test_labels_close_references_reaching_past_the_nearest_binder() {
             r#"{NESTED} %data.decode<'j> "W[items: Cons[Z[z: 1], Nil]]" ~> test"#
         ))
         .expect("Flat");
-    quiver()
-        .evaluate(&format!(
-            r#"{NESTED} %json.parse "\{{\"items\": [\{{\"z\": 1}}, \{{\"items\": []}}]}}" ~> %json.decode<'j> ~ ~> test"#
-        ))
-        .expect("J");
     // As does the literal, built by the compiler at exactly its shape.
     quiver()
         .evaluate(&format!(r#"{NESTED} W[items: Cons[Z[z: 1], Nil]] ~> test"#))

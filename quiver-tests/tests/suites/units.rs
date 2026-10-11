@@ -200,7 +200,7 @@ fn round_trip(source: &str, registration: Registration) -> (String, String) {
     (original, run(&fresh, entry))
 }
 
-const SOURCES: [(&str, &str); 8] = [
+const SOURCES: [(&str, &str); 9] = [
     ("%num.mul [7, 6]", "42"),
     ("%list{1, 2} ~> %data.encode", "\"Cons[1, Cons[2, Nil]]\""),
     (
@@ -224,6 +224,14 @@ const SOURCES: [(&str, &str); 8] = [
     (
         "'u = U[id: 'int]; %data.decode<'u> \"U[id: 1]\"",
         "U[id: 1]",
+    ),
+    // A conversion's plan is made again at link too, instantiating the generic functions it
+    // is given — which needs their type variables told apart (`'k` from `'v` here).
+    (
+        "show = #'int -> '%str { %str.from_int $ }; \
+         %codec.convert<'%dict<'%str, 'int>> [%dict{ 1 => 10, 2 => 20 }, using: [%dict.entries, %dict.from, show]] \
+         ~> ='%dict<'%str, 'int> ~> %dict.get [~, \"1\"]",
+        "10",
     ),
 ];
 
@@ -375,7 +383,7 @@ fn a_units_imports_are_a_sparse_subset_of_its_modules() {
 #[test]
 fn a_compiled_program_drops_type_information_it_cannot_use() {
     // A `.qx` is linked and run, never compiled against, so two kinds of type information in
-    // it are dead weight: annotation rows (compatibility strips them, the codecs recurse past
+    // it are dead weight: annotation rows (compatibility strips them, the decoder recurses past
     // them, the executor never reads them) and type-variable *names* (`check_type_relation`
     // matches a variable as a wildcard). `extract_program` drops both and re-interns.
     // A store of this test's own, rather than the shared cache: how many modules link from

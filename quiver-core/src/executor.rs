@@ -184,6 +184,8 @@ pub struct Executor<E: Effect> {
     builtin_type_arguments: Vec<Vec<usize>>,
     /// Per builtin, the labels its instantiation builds tuples with.
     builtin_labels: Vec<Arc<crate::labels::LabelTable>>,
+    /// Each builtin instantiation's conversion plan, for a route-planning builtin.
+    builtin_plans: Vec<Option<Arc<crate::convert::Plan>>>,
     /// Each builtin's registered `(parameter, result)` types, indexed by builtin_id (parallel
     /// to `builtins`): the parameter is what a mailbox receiving through it tests messages
     /// against, and the result how an implementation that constructs typed results reads
@@ -675,6 +677,11 @@ impl<E: Effect> Executor<E> {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// A builtin instantiation's conversion plan, by table id.
+    pub(crate) fn builtin_plan(&self, id: usize) -> Option<Arc<crate::convert::Plan>> {
+        self.builtin_plans.get(id).cloned().flatten()
+    }
+
     /// The decode-failure vocabulary's ids, when the program references `%data.decode`.
     pub(crate) fn decode_error_table(&self) -> Option<&crate::bytecode::DecodeErrorTable> {
         self.decode_error_table.as_ref()
@@ -823,6 +830,7 @@ impl<E: Effect> Executor<E> {
             builtin_purities: vec![],
             builtin_type_arguments: vec![],
             builtin_labels: vec![],
+            builtin_plans: vec![],
             builtin_signatures: vec![],
             compile_time: false,
             clock: None,
@@ -1538,6 +1546,7 @@ impl<E: Effect> Executor<E> {
             self.builtin_purities.clear();
             self.builtin_type_arguments.clear();
             self.builtin_labels.clear();
+            self.builtin_plans.clear();
             self.builtin_signatures.clear();
         }
         for b in infos.iter() {
@@ -1552,6 +1561,7 @@ impl<E: Effect> Executor<E> {
             self.builtin_type_arguments.push(b.type_arguments.clone());
             self.builtin_labels
                 .push(Arc::new(crate::labels::LabelTable::new(&b.labels)));
+            self.builtin_plans.push(b.plan.clone().map(Arc::new));
             self.builtin_signatures.push((b.param_type, b.result_type));
             self.builtins.push(b.name.clone());
         }

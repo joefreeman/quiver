@@ -322,7 +322,7 @@ impl TestBuilder {
         self
     }
 
-    /// Real io builtins over a *faked OS*: the client, the codecs and the effect
+    /// Real io builtins over a *faked OS*: the client, the protocol and the effect
     /// plumbing all run for real, and only the syscalls are canned. This is how the
     /// cases a live socket cannot reach reliably get tested — awkward read boundaries, a peer
     /// that never answers, a refused connect, an aborting operation.

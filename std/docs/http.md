@@ -193,6 +193,20 @@ percent-escaped — including the `&` and `=` that would otherwise be read as st
 %list{ ["a b", "c&d=e"] } ~> %http.form_encode ~> %http.form_decode   //= Cons[["a b", "c&d=e"], Nil]
 ```
 
+A form read as a program's type converts through `form_edges`, which take its fields to a
+record of text, and integers to and from text. An absent field is left out:
+
+```quiver
+'signup = Signup[email: '%str, age: 'int, referrer: ('%str | [])]
+form = %http.form_edges
+"email=a%40b.c&age=30" ~> .0 ~> %http.form_decode
+~> %codec.convert<'signup> [~, using: form]
+//= Signup[email: "a@b.c", age: 30, referrer: []]
+%codec.convert<'%http.pairs> [Signup[email: "a@b.c", age: 30, referrer: []], using: form]
+~> =('%http.pairs & pairs) ~> %http.form_encode ~> Str[~]
+//= "email=a%40b.c&age=30"
+```
+
 ## Cookies
 
 `cookies` reads the request's `Cookie` headers into the same pair list. Values are verbatim

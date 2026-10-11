@@ -1070,6 +1070,41 @@ key = #<'k: '%data>'k { %data.encode $ }
 key Point[x: 1]               //= "Point[x: 1]"
 ```
 
+### Converting between types
+
+`%codec.convert<'t>` converts a value to `'t` through the functions it is given, chosen by their
+types, and converts a tuple field by field to one of the same name and labels. A value already
+of the target type passes through. It is type-consuming, like `decode`: the route is planned at
+compile time, and a conversion with no possible route is a compile error. One that fails at
+runtime answers nil carrying a `'%data.error`.
+
+```quiver
+'user = User[name: '%str, age: 'int]
+from_json = #'%json -> (User[name: ('%json | []), age: ('%json | [])] | []) {
+  =Object[_] => User[name: %json.get [$, "name"], age: %json.get [$, "age"]]
+}
+%codec.convert<'user> [%json{ {"name": "Ada", "age": "36"} }, using: [from_json, %str.parse_int]]
+//= User[name: "Ada", age: 36]
+```
+
+Here `from_json` only maps keys to labels, leaving the fields as JSON, and each field then
+converts on its own: the name is already a string, and the age goes through `%str.parse_int`.
+
+Most of a program's types need no such functions. `convert` reads a tuple from the shapes every
+format shares, and writes it as them, by its layout: labelled fields from a record of keyed
+entries, positional ones from a list, a symbol from text. Its options name keys by a convention,
+rename or default particular fields, and say how a union's members are tagged. A format supplies
+the functions between its document and those shapes, `%json.edges` for JSON:
+
+```quiver
+'user = User[full_name: '%str, age: 'int]
+%codec.convert<'user> [%json{ {"fullName": "Ada", "age": 36} }, using: %json.edges, keys: Camel]
+//= User[full_name: "Ada", age: 36]
+%codec.convert<'%json> [User[full_name: "Ada", age: 36], using: %json.edges, keys: Camel]
+~> ='%json ~> %json.stringify
+//= "{\"fullName\":\"Ada\",\"age\":36}"
+```
+
 ## Modules
 
 A module is a `.qv` file whose value, usually a tuple of functions, is what importing it
@@ -1745,7 +1780,8 @@ __integer_add__ [3, 4]                       //= 7
 | `%ref` | mints unique opaque identifiers |
 | `%panic` | aborts the process with a message |
 | `%data` | Quiver data notation: `encode` and `decode<'t>` |
-| `%json` | JSON parsing, rendering, querying and editing, typed `decode<'t>`/`encode<'t>`, plus `%json{ … }` |
+| `%json` | JSON parsing, rendering, querying and editing, its `edges` for `%codec.convert`, plus `%json{ … }` |
+| `%codec` | conversion between types, through supplied functions and the shapes formats share: `convert<'t>` |
 | `%parse` | parser combinators over binary input |
 | `%meta` | the code a dialect returns, and data as data |
 | `%proc` | process management: `detach`, `kill`, `link`, `track`, and timers: `sleep`, `send_after`, `expire`, `race` |

@@ -596,33 +596,29 @@ array = #'%list<'> -> ' {
   Array[$]
 }
 
-// === Typed boundary =====================================================================
-// `decode<'t>`/`encode<'t>` convert between the document model and ordinary typed
-// values, driven by an explicit type argument (type-consuming, like `%data.decode`).
-// Objects map to tuples with labelled fields (keys matched by label, order-free, extra
-// keys ignored), arrays to `%list`, `true`/`false` to `True`/`False`, and a field type
-// admitting nil makes its key optional: absent or `null` decode as nil, and a nil field
-// is omitted on encode. A `'%json`-typed part passes the raw subtree through verbatim.
+standard = %codec.standard
 
-decode = __json_decode__ ~> {
-  :doc """
-    Decodes a '%json value (or nil, which passes through) as the explicitly-given expected type:
-    `%json.decode<'user> doc` answers `'user | []` — nil for any mismatch. Unions decode by ordered
-    choice, like %data.decode.
-
-    The expected type must be concrete at the naming site; `parse ~> decode<'t>` covers text.
-    """
-}
-
-encode = __json_encode__ ~> {
-  :doc """
-    Encodes a value of the explicitly-given type as a '%json document:
-    `%json.encode<'user> u ~> %json.stringify` — the inverse of `decode`. Values with no JSON form
-    (functions, processes, refs, resources, binaries, dicts, unlabelled tuples) are a runtime error.
-    """
-}
+// The edges between JSON and `%codec`'s neutral shapes: an object is a record (its absent —
+// nil — entries left out when written), and an array a list; and the standard library's own
+// (`%codec.standard`), so that a dict is read and written as one. With them, `%codec.convert`
+// reads a program's types from JSON and writes them as it; numbers, strings, `True`, `False` and
+// `Null` are JSON's own, and carry over as themselves.
+edges = [
+  Edge[
+    out: #Object['pairs] -> '%codec.record<'> { Record[$0] },
+    in: #'%codec.record<'> -> Object['pairs] {
+      present = #['%str, (' | [])] -> 'pairs {
+        | =[key, (\[] & value)] => %list{ [key, value] }
+        | Nil
+      }
+      Object[%list.flat_map [$0, present]]
+    },
+  ],
+  Edge[out: #Array['%list<'>] -> '%list<'> { $0 }, in: #'%list<'> -> Array['%list<'>] { Array[$] }],
+  ...standard,
+]
 
 {
   :dialect json
-  (parse, stringify, get, set, update, delete, merge, to_dict, object, array, decode, encode)
+  (parse, stringify, get, set, update, delete, merge, to_dict, object, array, edges)
 }

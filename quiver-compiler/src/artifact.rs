@@ -41,7 +41,7 @@ use std::rc::Rc;
 
 use crate::compiler::{
     Bindings, CachedModule, CompileOptions, Compiler, Error, ModuleCache, ModuleTypeNamespace,
-    TypeAliasDef, collect_module_references,
+    TypeAliasDef, check_conversion_plan, collect_module_references,
 };
 use crate::resolver::{ModuleId, ModuleResolver, PackageId, PackageResolver, std_module_names};
 use crate::verify::{self, Locals};
@@ -1402,6 +1402,27 @@ fn recite_imports(unit: &mut CompiledUnit, rekeyed: &HashMap<UnitKey, UnitKey>) 
     }
 }
 
+/// The types an instantiated builtin's type arguments reach, through tuples' fields too.
+fn reached_from_type_arguments(unit: &CompiledUnit) -> HashSet<usize> {
+    let mut reached = HashSet::new();
+    let mut stack: Vec<usize> = unit
+        .builtins
+        .iter()
+        .flat_map(|builtin| builtin.type_arguments.iter().copied())
+        .collect();
+    while let Some(type_id) = stack.pop() {
+        if !reached.insert(type_id) {
+            continue;
+        }
+        let ty = &unit.types[type_id];
+        stack.extend(type_children(ty));
+        if let Type::Tuple(tuple) = ty {
+            stack.extend(unit.tuples[*tuple].fields.iter().map(|&(_, field)| field));
+        }
+    }
+    reached
+}
+
 /// The type ids a type references directly. `Type::Tuple` is not among them: it names a
 /// *tuple* id, and the field types behind it are rewritten with the tuples table, after the
 /// map is complete.
@@ -1448,13 +1469,16 @@ fn type_children(ty: &Type) -> Vec<usize> {
 /// - **Annotation rows.** `Type::Annotated` records what annotations a value is statically
 ///   known to carry, so `x:key` can be typed. Everything downstream discards it:
 ///   `compute_compatible_concrete_types` opens by calling `Type::strip_annotations`, the
-///   `%data` and `%json` codecs recurse straight to `base`, and the executor never reads the
-///   variant at all. Each row is spliced out in favour of its base.
+///   `%data` decoder recurses straight to `base`, and the executor never reads the variant
+///   at all. Each row is spliced out in favour of its base.
 /// - **Type-variable names.** `check_type_relation` matches a variable with
 ///   `(Type::Variable(_), _) | (_, Type::Variable(_)) => true` — a wildcard whose name is
 ///   ignored. Definition-site uniquification mints a distinct name per definition, so the
 ///   same generic signature written in two modules produces two unrelated graphs. Collapsing
-///   every name to one makes them the same row.
+///   every name to one makes them the same row. The exception is a type an instantiated
+///   builtin's type arguments reach: the linker re-derives the instantiation from them (a
+///   conversion plan instantiates the generic functions it is given, which needs to tell their
+///   variables apart), so their names stay.
 ///
 /// Re-interning is where the second one pays: once names are gone, alpha-equivalent rows are
 /// *identical* rows, and dedupe removes them. Together the two take `examples/todo.qv` from
@@ -1486,6 +1510,7 @@ fn shake_types(unit: &mut CompiledUnit) {
     // `(id, children queued)`. A node is visited once to queue what it references and once
     // to rewrite itself; `Type::Cycle` is a relative marker rather than an edge, so the graph
     // is a DAG and this terminates. Iterative, like every other walk over type structure.
+    let named = reached_from_type_arguments(unit);
     for root in 0..unit.types.len() {
         let mut stack = vec![(root, false)];
         while let Some((old, queued)) = stack.pop() {
@@ -1511,7 +1536,7 @@ fn shake_types(unit: &mut CompiledUnit) {
             }
             let rewritten = match unit.types[old].clone().remap_ids(&remap) {
                 // One name for every variable, so alpha-equivalent rows intern together.
-                Type::Variable(_) => Type::Variable("_".to_string()),
+                Type::Variable(_) if !named.contains(&old) => Type::Variable("_".to_string()),
                 other => other,
             };
             let new = *interned.entry(rewritten.clone()).or_insert_with(|| {
@@ -2295,6 +2320,8 @@ pub fn link_unit<E: Effect>(
                 .collect(),
             builtins,
         );
+        // Planned again from the re-interned type arguments, so checked again.
+        check_conversion_plan(program, session)?;
         remaps.builtins.insert(local, session);
     }
 

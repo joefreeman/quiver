@@ -533,6 +533,8 @@ impl Program {
                 let roots = type_arguments.iter().copied().chain([result_type]);
                 crate::labels::value_labels(roots.collect::<Vec<_>>(), self)
             };
+            let plan = (registry.plans_routes(&name) && !type_arguments.is_empty())
+                .then(|| crate::convert::plan(&type_arguments, self));
 
             BuiltinInfo {
                 name: name.clone(),
@@ -540,6 +542,7 @@ impl Program {
                 result_type,
                 type_arguments,
                 labels,
+                plan,
             }
         } else {
             // Builtin not found in registry - this shouldn't happen in well-formed programs
@@ -551,6 +554,7 @@ impl Program {
                 result_type: never_id,
                 type_arguments,
                 labels: Vec::new(),
+                plan: None,
             }
         };
 

@@ -17,6 +17,7 @@ mod call_syntax;
 mod chaining;
 mod code;
 mod code_gc;
+mod codec;
 mod comments;
 mod comparison;
 mod compile_fuel;

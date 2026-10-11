@@ -2,8 +2,7 @@
 
 JSON, as an ordinary Quiver value. `'%json` is the document model — a union of the six JSON
 shapes — and everything else in the module is a way in or out of it: a compile-time literal
-syntax, a runtime codec, a query/update API, and a typed boundary that converts documents to
-and from the program's own types.
+syntax, a runtime codec, and a query/update API.
 
 ```quiver
 "\{\"name\": \"ada\", \"tags\": [\"admin\"]}"
@@ -420,150 +419,64 @@ entries but not their order:
 ~> %json.object ~> %json.get [~, %list{ "m", "x" }]   //= 7
 ```
 
-## Typed decoding
+## Converting to a program's types
 
-`decode<'t>` converts a document into an ordinary typed value. Like `%data.decode`, it is
-*type-consuming*: the expected type drives the conversion and must be given explicitly where it
-is applied. Anything that does not fit is nil, like a failed match.
-
-```quiver
-%json{ 42 } ~> %json.decode<'int> ~                //= 42
-%json{ "hi" } ~> %json.decode<'%str> ~             //= "hi"
-%json{ true } ~> %json.decode<(True | False)> ~    //= True
-%json{ "hi" } ~> %json.decode<'int> ~              //= []
-"3.5" ~> %json.parse ~> %json.decode<'int> ~     //= [] // not a whole number
-"3.5" ~> %json.parse ~> %json.decode<'%num.coeff> ~   //= 7/2
-```
-
-An object becomes a tuple with labelled fields. Keys match by label, order-free; extra keys are
-ignored; the tuple's name is Quiver's business and has no JSON counterpart.
+`%codec.convert` takes a document to a program's type, and back, through JSON's edges
+(`%json.edges`): a program's tuples read from JSON's objects, arrays and strings by their layout,
+and need no edges of their own unless they are written some other way. `convert`'s options —
+`keys:`, `tag:` and `shapes:` — say how their fields and variants are written:
 
 ```quiver
-"\{\"age\": 36, \"name\": \"ada\", \"x\": true}"
-~> %json.parse
-~> %json.decode<User[name: '%str, age: 'int]> ~   //= User[name: "ada", age: 36]
-```
+'user = User[name: '%str, age: 'int, email: ('%str | [])]
+shapes = [User[default: [age: 0]]]
 
-A field type that admits nil makes its key **optional**, and collapses the two ways JSON has of
-saying "nothing" — absent, and `null` — into the same nil. A key with no such type is required,
-and its absence is a mismatch:
-
-```quiver
-"\{\"a\": 1}" ~> %json.parse ~> %json.decode<[a: 'int, b: '%str | []]> ~   //= [a: 1, b: []]
-"\{\"a\": 1, \"b\": null}" ~> %json.parse ~> %json.decode<[a: 'int, b: '%str | []]> ~   //= [a: 1, b: []]
-"\{\"name\": \"ada\"}" ~> %json.parse ~> %json.decode<[name: '%str, age: 'int]> ~   //= []
-```
-
-Arrays become `%list`s, and nesting composes. One element failing fails the whole array — there
-is no partial result.
-
-```quiver
-%json{ [1, 2, 3] } ~> %json.decode<'%list<'int>> ~   //= Cons[1, Cons[2, Cons[3, Nil]]]
-%json{ { "users": [{ "name": "ada" }] } } ~> %json.decode<[users: '%list<[name: '%str]>]> ~
-//= [users: Cons[[name: "ada"], Nil]]
-%json{ [1, "x"] } ~> %json.decode<'%list<'int>> ~   //= []
-```
-
-A union decodes by ordered choice, so objects discriminate structurally between its members:
-
-```quiver
-'shape = Circle[radius: 'int] | Rect[width: 'int, height: 'int]
-%json{ "x" } ~> %json.decode<('int | '%str)> ~   //= "x"
-"\{\"width\": 2, \"height\": 3}" ~> %json.parse ~> %json.decode<'shape> ~   //= Rect[width: 2, height: 3]
-"\{\"radius\": 5}" ~> %json.parse ~> %json.decode<'shape> ~   //= Circle[radius: 5]
-```
-
-A recursive type is followed as far as the document goes:
-
-```quiver
-'tree = Leaf[value: 'int] | Node[left: ^, right: ^]
-"\{\"left\": \{\"value\": 1}, \"right\": \{\"value\": 2}}"
-~> %json.parse
-~> %json.decode<'tree> ~   //= Node[left: Leaf[value: 1], right: Leaf[value: 2]]
-```
-
-A `'%json`-typed part is not converted at all: the raw subtree passes through verbatim, `null`
-included. That is how a schema keeps an opaque region.
-
-```quiver
-doc = %json{ { "a": [1, null] } }
-%json.decode<'%json> doc   //= ^doc
+"\{\"name\": \"Ada\", \"email\": \"ada@example.com\"}"
+~> %json.parse ~> %codec.convert<'user> [~, using: %json.edges, shapes: shapes]
+//= User[name: "Ada", age: 0, email: "ada@example.com"]
+%codec.convert<'%json> [User[name: "Ada", age: 36, email: []], using: %json.edges]
+~> ='%json ~> %json.stringify
+//= "{\"name\":\"Ada\",\"age\":36}"
 ```
 
 ```quiver
-%json{ { "meta": { "x": [true] } } } ~> %json.decode<[meta: '%json]> ~ ~> =[meta: m]
-m ~> %json.stringify     //= "{\"x\":[true]}"
+'user = User[full_name: '%str, age: 'int]
+%codec.convert<'user> [%json{ {"fullName": "Ada", "age": 36} }, using: %json.edges, keys: Camel]
+//= User[full_name: "Ada", age: 36]
+%codec.convert<'%json> [User[full_name: "Ada", age: 36], using: %json.edges, keys: Camel]
+~> ='%json ~> %json.stringify
+//= "{\"fullName\":\"Ada\",\"age\":36}"
 ```
 
-`decode` accepts nil like the query functions, so a lookup and a decode are one pipeline:
+A program's own edges go beside JSON's, as a tuple of their own:
 
 ```quiver
-%json{ { "a": 1 } } ~> %json.get [~, "zzz"] ~> %json.decode<'int> ~   //= []
+'reading = Reading[celsius: 'int]
+tenths = Edge[
+  out: #'%str -> ('int | []) { %str.parse_int $ },
+  in: #'int -> '%str { %str.from_int $ },
+]
+%codec.convert<'reading> [%json{ {"celsius": "21"} }, using: [%json.edges, [tenths]]]
+//= Reading[celsius: 21]
 ```
 
-## Typed encoding
-
-`encode<'t>` is the inverse: a value of the stated type becomes a document, which `stringify`
-then writes.
+A document that doesn't convert answers nil carrying a `'%data.error`, its path leading to where
+it failed. A nil document — a failed `parse` — answers itself, its own `:error` intact, and so
+does a nil value given to be written:
 
 ```quiver
-%json.encode<[name: '%str, age: 'int]> [name: "ada", age: 36] ~> %json.stringify
-//= "{\"name\":\"ada\",\"age\":36}"
+'user = User[name: '%str, age: 'int]
+r = %codec.convert<'user> [%json{ {"name": "Ada", "age": "old"} }, using: %json.edges]
+r   //= []
+r:error<'%data.error> ~> =DecodeError(path: ~)   //= Cons["age", Nil]
+"\{" ~> %json.parse ~> %codec.convert<'user> [~, using: %json.edges] ~> :error<Expected(offset: 'int)>
+//= Expected(offset: 1)
+%codec.convert<'%json> [r, using: %json.edges] ~> :error<'%data.error> ~> =DecodeError(path: ~)
+//= Cons["age", Nil]
 ```
 
-A tuple's name is dropped — JSON has nowhere to put it — and a nil optional field is omitted
-rather than written as `null`:
+The conversion is planned where it is written, so a type with no route from JSON is a compile
+error there:
 
 ```quiver
-%json.encode<Point[x: 'int, y: 'int]> Point[x: 1, y: 2] ~> %json.stringify     //= "{\"x\":1,\"y\":2}"
-%json.encode<[a: 'int, b: '%str | []]> [a: 1, b: []] ~> %json.stringify        //= "{\"a\":1}"
-```
-
-A list becomes an array. Inside one, where an element's own type admits nil, a nil *is* `null` —
-there is no field to omit.
-
-```quiver
-%json.encode<'%list<'int>> %list{ 1, 2, 3 } ~> %json.stringify          //= "[1,2,3]"
-%json.encode<'%list<'int | []>> %list{ 1, [] } ~> %json.stringify       //= "[1,null]"
-%json.encode<(True | False)> False ~> %json.stringify                   //= "false"
-```
-
-Exact rationals pass through as `'%num.coeff`; how they are written is `stringify`'s decision,
-not `encode`'s:
-
-```quiver
-%num.div [1, 2] ~> =('%num.coeff & h)
-h ~> %json.encode<'%num.coeff> ~ ~> %json.stringify     //= "0.5"
-```
-
-A `'%json`-typed part passes through whole, as on the way in:
-
-```quiver
-doc = %json{ { "a": [1, true, null] } }
-%json.encode<'%json> doc   //= ^doc
-```
-
-A value with no JSON form at all — a function, process, ref, resource, binary, dict, or an
-unlabelled tuple — is a runtime error rather than a nil, because no caller could act on it:
-
-```quiver
-%json.encode<#'int -> 'int> #'int { $ }   //! cannot encode as JSON: the value does not fit the stated type's mapping
-```
-
-## Typed round trips
-
-`encode<'t>` then `decode<'t>` is the identity, directly:
-
-```quiver
-'user = [name: '%str, age: 'int, email: '%str | []]
-u = [name: "ada", age: 36, email: []]
-%json.encode<'user> u ~> %json.decode<'user> ~   //= ^u
-```
-
-and through text, which is the whole path a program actually uses:
-
-```quiver
-'tree = Leaf[value: 'int] | Node[left: ^, right: ^]
-t = Node[left: Leaf[value: 1], right: Node[left: Leaf[value: 2], right: Leaf[value: 3]]]
-%json.encode<'tree> t ~> %json.stringify ~> %json.parse ~> %json.decode<'tree> ~   //= ^t
+%codec.convert<'int> [%json{ "1" }, using: %json.edges]   //! no route
 ```

@@ -757,10 +757,33 @@ headers_to_bytes = #'pairs {
   serialize_headers [$, ""] ~> .0
 }
 
+standard = %codec.standard
+
+// The edges between form fields (or query parameters) and `%codec`'s neutral record, with
+// integers written as text, and the standard library's own (`%codec.standard`): with them,
+// `%codec.convert` reads a form as a program's type, and writes one back. A form is flat, so the
+// type's fields are strings and integers (a repeated name is its first value), and an absent —
+// nil — field is left out.
+form_edges = [
+  Edge[
+    out: #'pairs -> '%codec.record<'%str> { Record[$] },
+    in: #'%codec.record<'%str> -> 'pairs {
+      present = #['%str, ('%str | [])] -> 'pairs {
+        | =[name, (\[] & value)] => %list{ [name, value] }
+        | Nil
+      }
+      %list.flat_map [$0, present]
+    },
+  ],
+  Edge[out: #'%str -> ('int | []) { %str.parse_int $ }, in: #'int -> '%str { %str.from_int $ }],
+  ...standard,
+]
+
 (
   header,
   get,
   form,
+  form_edges,
   form_decode,
   form_encode,
   cookies,

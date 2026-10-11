@@ -127,6 +127,11 @@ pub enum Error {
     TypeArgumentNotConcrete {
         builtin: String,
     },
+    /// A conversion (`%codec.convert<'t>`) that can't be planned: no route from the value's
+    /// type to the target through the functions given, or a malformed function tuple.
+    ConversionUnplannable {
+        message: String,
+    },
     /// A type test (`='t`, `('t & v)`) or checked retrieval (`x:key<'t>`) against a type
     /// still containing type variables. A type parameter stands for whatever the caller
     /// chose, which the running code does not know, so no runtime test can decide it.
@@ -479,6 +484,19 @@ fn term_error_span(term: &ast::Term) -> Option<SourceSpan> {
     }
 }
 
+/// A route-planning builtin's instantiation whose plan failed is an error where it was
+/// instantiated: at the compile site, or when a unit carrying it is linked.
+pub(crate) fn check_conversion_plan(program: &Program, builtin: usize) -> Result<(), Error> {
+    match program.get_builtins()[builtin]
+        .plan
+        .as_ref()
+        .and_then(|plan| plan.error.clone())
+    {
+        Some(message) => Err(Error::ConversionUnplannable { message }),
+        None => Ok(()),
+    }
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -569,6 +587,9 @@ impl std::fmt::Display for Error {
                      neither (a reference that isn't applied has no argument to determine it \
                      — apply it inside a function instead)"
                 )
+            }
+            Error::ConversionUnplannable { message } => {
+                write!(f, "Conversion can't be planned: {message}")
             }
             Error::TypeArgumentNotConcrete { builtin } => {
                 write!(
@@ -8742,6 +8763,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             type_arguments,
             self.builtins,
         );
+        check_conversion_plan(self.program, builtin_index)?;
 
         self.emit_builtin(builtin_index);
 
@@ -8923,6 +8945,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let instantiated =
             self.program
                 .register_builtin_instantiated(name, type_arguments.clone(), self.builtins);
+        check_conversion_plan(self.program, instantiated)?;
         // Rebuild the value carrying the arguments, preserving any annotations the
         // module attached (e.g. a `:doc`).
         let annotations = payload

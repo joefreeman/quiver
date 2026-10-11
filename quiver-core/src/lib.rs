@@ -4,6 +4,7 @@ pub mod builtins;
 pub mod bytecode;
 pub mod clock;
 pub mod compatibility;
+pub mod convert;
 pub mod effects;
 pub mod error;
 pub mod execute;
