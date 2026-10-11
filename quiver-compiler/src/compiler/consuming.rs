@@ -274,15 +274,27 @@ impl<E: quiver_core::effects::Effect> Compiler<'_, E> {
         let plain = self.without_consumes(accessed_type);
         let (parameters, requirements) = match consumes {
             Consumes::Builtin(builtin) => {
-                // Its instantiation is made here, in its place.
-                self.codegen.add_instruction(Instruction::pop());
+                // Its instantiation is made here, in its place, keeping the annotations (a
+                // module's `:doc`) of a builtin known where it is pushed.
+                let annotations = self.take_pushed_builtin();
                 let instance = self.resolve_builtin_type_arguments(
                     &builtin,
                     type_arguments,
                     applied,
                     argument,
                 )?;
-                self.emit_instance(&builtin, instance)?;
+                let constant = self.emit_instance(&builtin, instance)?;
+                if let (Some(constant), Some(entries)) = (constant, annotations) {
+                    let annotated = self.program.register_constant(Constant::Annotated {
+                        value: constant,
+                        entries,
+                    });
+                    *self
+                        .codegen
+                        .instructions
+                        .last_mut()
+                        .expect("the instance was pushed") = Instruction::push(annotated);
+                }
                 return self
                     .instantiate_type_arguments_of(plain, Some(&builtin), type_arguments)
                     .map(Some);
@@ -310,12 +322,27 @@ impl<E: quiver_core::effects::Effect> Compiler<'_, E> {
                 typing::resolve_ast_type(&mut env, &self.scopes, written.clone(), self.program)?;
             bindings.insert(parameter.clone(), resolved);
         }
-        if let (true, Some(argument)) = (applied, argument) {
+        // Those not written are inferred from the argument, against the parameter at the written
+        // ones: an explicit type argument is a checked assertion, which the argument must fit
+        // (as the call then checks), not a first guess it can widen.
+        if let (true, Some(argument)) = (applied, argument)
+            && bindings.len() < parameters.len()
+        {
             let parameter = typing::open_callable(base, self.program)
                 .expect("a consuming type is callable")
                 .parameter;
-            typing::unify(&mut bindings, parameter, argument, self.program)?;
-            typing::resolve_bindings(&mut bindings, self.program);
+            let parameter = typing::substitute(parameter, &bindings, self.program);
+            let mut inferred = HashMap::new();
+            typing::unify(&mut inferred, parameter, argument, self.program)?;
+            typing::resolve_bindings(&mut inferred, self.program);
+            // One the parameter holds values of, but the argument holds none of (`race [Nil]`),
+            // is determined too: as the type of no value, as a call's result closes one.
+            typing::close_unpinned_result(parameter, &mut inferred, self.program);
+            for name in &parameters {
+                if let Some(&inferred) = inferred.get(name) {
+                    bindings.entry(name.clone()).or_insert(inferred);
+                }
+            }
         }
         // Each parameter the templates mention must now be known.
         if let Some(missing) = parameters.iter().find(|name| {
@@ -333,6 +360,31 @@ impl<E: quiver_core::effects::Effect> Compiler<'_, E> {
         self.check_bindings_fit_bounds(&bindings)?;
         self.extend_closure(&requirements, &bindings)?;
         Ok(Some(typing::substitute(plain, &bindings, self.program)))
+    }
+
+    /// Take back the uninstantiated builtin on top of the stack, which its instantiation
+    /// replaces: the push of a constant is undone, answering its annotation entries when it has
+    /// any, and any other value is popped.
+    fn take_pushed_builtin(&mut self) -> Option<Vec<(usize, usize)>> {
+        let pushed = self
+            .codegen
+            .instructions
+            .last()
+            .filter(|instruction| instruction.opcode() == Opcode::Push)
+            .map(|push| self.program.get_constant(push.operand() as usize).cloned());
+        match pushed {
+            Some(Some(constant @ (Constant::Builtin { .. } | Constant::Annotated { .. }))) => {
+                self.codegen.instructions.pop();
+                match constant {
+                    Constant::Annotated { entries, .. } => Some(entries),
+                    _ => None,
+                }
+            }
+            _ => {
+                self.codegen.add_instruction(Instruction::pop());
+                None
+            }
+        }
     }
 
     /// `type_id` without what its function consumes: the plain function type it has once

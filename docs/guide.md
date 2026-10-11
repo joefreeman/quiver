@@ -527,6 +527,10 @@ A function or process can't be looked inside, so it is tested by its own type:
 { #'bin { $ } ~> =(#'int -> _) }                 //= []
 ```
 
+That type is the one it was written with, so where a function is made inside a generic one,
+the test knows nothing of the type parameters it mentions: a function answering `'t` passes
+for a `#[] -> _`, but not for a `#[] -> 'int`, whatever `'t` was.
+
 A pin's target may be any access path — a field of a variable, or of the enclosing
 function's parameter via `$`.
 
@@ -974,6 +978,17 @@ parameter, which would forget what it still needs. Calling it or passing it on i
 read = #<'t>'%str -> ('t | []) { %data.decode<'t> $ }
 %list.map [%list{ "1" }, read]    //! passed on uninstantiated
 %list.map [%list{ "1" }, read<'int>]   //= Cons[1, Nil]
+```
+
+A `^` in its own parameter, which hands a function [itself](#recursive-types), names it as it
+runs: instantiated, at the types it was named with. So it is handed over named:
+
+```quiver
+all = #<'t>[(self): ^, (texts): '%list<'%str>] -> '%list<('t | [])> {
+  | $texts ~> =Nil => Nil
+  | =(texts: Cons[s, rest]) => Cons[%data.decode<'t> s, $self [$self, rest]]
+}
+all<'int> [all<'int>, %list{ "1", "2" }]   //= Cons[1, Cons[2, Nil]]
 ```
 
 A test against a type parameter is decided by the type it is named with in the same way, so a

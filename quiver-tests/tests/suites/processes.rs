@@ -563,14 +563,14 @@ fn test_race_answers_the_first_success() {
 
 #[test]
 fn test_race_fails_when_every_racer_fails() {
-    // `race` receives its racers' results at their type, so with no racers to infer it from,
-    // the type is written.
+    // `race` receives its racers' results at their type, which no racers determine as the
+    // type of no value.
     quiver()
         .evaluate(
             r#"
             [
               { %proc.race [%list{ #[] { [] }, #[] { __panic__ "x" } }] },
-              { %proc.race<'int> [Nil] },
+              { %proc.race [Nil] },
             ]
             "#,
         )

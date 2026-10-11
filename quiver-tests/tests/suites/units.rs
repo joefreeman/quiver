@@ -108,6 +108,7 @@ fn compile_inner(
         instructions: compiled.instructions,
         captures: 0,
         parameter_hidden: None,
+        opaque: Vec::new(),
         type_id: callable,
     });
     Compiled {

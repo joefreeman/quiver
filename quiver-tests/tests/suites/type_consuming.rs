@@ -316,3 +316,92 @@ fn test_naming_leaves_the_named_binding_alone() {
         ))
         .expect("[1, <01>]");
 }
+
+#[test]
+fn test_a_closure_over_an_enclosing_type_parameter_is_tested_opaquely() {
+    // `mk 5` answers a `#[] -> 'int`, but its function's own type says `#[] -> 't`, which a
+    // runtime test can't read as `'bin`: `'t` is opaque there, holding only its own values.
+    quiver()
+        .evaluate(
+            "mk = #<'t>'t { #[] -> 't { $$ } }
+             h = #_ { | =((#[] -> 'bin) & g) => g [] ~> __binary_length__ | =(#[] -> _) => Any | No }
+             f = mk 5
+             h f",
+        )
+        .expect("Any");
+}
+
+#[test]
+fn test_a_spawn_over_an_enclosing_type_parameter_is_tested_opaquely() {
+    quiver()
+        .evaluate(
+            "mk = #<'t>'t { g = #[] -> 't { $$ }; @g [] }
+             h = #_ { | =((@!'bin) & q) => Bin | =(@!_) => Any | No }
+             p = mk 5
+             h p",
+        )
+        .expect("Any");
+}
+
+#[test]
+fn test_a_self_typed_parameter_takes_the_function_as_named() {
+    // `^` in a consuming function's own parameter is the function at the types it runs at,
+    // so it is handed over named, and the body calls it as it is.
+    const SELF: &str = "f = #<'t>[(self): ^, (s): '%str, (go): 'int] -> ('t | []) {
+           | $go ~> =0 => %data.decode<'t> $s
+           | $self [$self, $s, 0]
+         }";
+    quiver()
+        .evaluate(&format!("{SELF}\nf<'int> [f<'int>, \"5\", 1]"))
+        .expect("5");
+    quiver()
+        .evaluate(&format!("{SELF}\ng = f<'bin>; g [g, \"<01>\", 1]"))
+        .expect("<01>");
+    quiver()
+        .evaluate(&format!("{SELF}\nf<'int> [f, \"5\", 1]"))
+        .expect_error_containing("passed on uninstantiated");
+    quiver()
+        .evaluate(&format!("{SELF}\nf<'int> [f<'bin>, \"5\", 1]"))
+        .expect_error_containing("Type mismatch");
+}
+
+#[test]
+fn test_an_instantiated_builtin_member_keeps_its_annotations() {
+    // Instantiating `%data.decode` where it is named replaces the builtin, but not its `:doc`.
+    quiver()
+        .evaluate("d = %data.decode<'int>; [d \"5\", d ~> :doc<'%str> ~> { =\\[]; Doc }]")
+        .expect("[5, Doc]");
+}
+
+#[test]
+fn test_a_type_argument_the_argument_holds_none_of_is_never() {
+    // The parameter holds `'t` values, the argument none: `'t` is the type of no value, so
+    // the decode can't succeed. One the parameter doesn't mention is still undetermined.
+    quiver()
+        .evaluate(
+            "first = #<'t>['%list<'t>, '%str] -> ('t | []) { %data.decode<'t> $1 }
+             first [Nil, \"1\"]",
+        )
+        .expect("[]");
+}
+
+#[test]
+fn test_a_written_type_argument_is_not_widened_by_the_argument() {
+    // `'t` is written, so the argument must fit it, as with any generic (whose error this is):
+    // it doesn't widen it, which would also instantiate the decode at the wider type.
+    const PAIR: &str = "f = #<'t, 'u>['t, 'u, '%str] -> ('t | []) { %data.decode<'t> $2 }";
+    quiver()
+        .evaluate(&format!("{PAIR}\nf<'int> [<01>, 1, \"<02>\"]"))
+        .expect_error_containing("'bin is not 'int");
+    // All written, the call's own check rejects it.
+    quiver()
+        .evaluate(&format!("{PAIR}\nf<'int, 'int> [<01>, 1, \"<02>\"]"))
+        .expect_error_containing("Type mismatch");
+    // Those not written are still inferred, against the written ones.
+    quiver()
+        .evaluate(&format!("{PAIR}\nf<'int> [0, <01>, \"5\"]"))
+        .expect("5");
+    quiver()
+        .evaluate(&format!("{PAIR}\nf [0, <01>, \"6\"]"))
+        .expect("6");
+}

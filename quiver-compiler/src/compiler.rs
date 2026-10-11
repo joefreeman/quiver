@@ -50,7 +50,7 @@ use quiver_core::{
     bytecode::{Constant, Function, Instruction, Opcode},
     program::{InternError, Program},
     types::{NIL, Type, TypeLookup},
-    value::{Payload, Value},
+    value::Value,
 };
 
 #[derive(Debug, PartialEq)]
@@ -1119,13 +1119,6 @@ fn condition_complement_faithful(condition: &ast::Sequence) -> bool {
         match_terms == 0
             || (match_terms == 1 && matches!(chain.terms.last(), Some(ast::Term::Match(_))))
     }
-}
-
-/// An import member as named: its value, or — for a type-consuming builtin named at a type
-/// parameter of the function being compiled — the instantiation that function requires.
-enum MemberInstance {
-    Value(Value),
-    Required(String, Vec<usize>),
 }
 
 /// The function index of a resolved value, when it is (directly) a function. Used at a call
@@ -3861,18 +3854,42 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         //
         // The instantiations it needs over its own type parameters are part of its type: it
         // consumes them, so it is named with them before it can be called.
+        let consumes =
+            (!named_requirements.is_empty()).then(|| quiver_core::types::Consumes::Captures {
+                parameters: declared.names(),
+                requirements: named_requirements,
+            });
+        let (parameter, result) = (parameter_type, written_result.unwrap_or(body_type));
+        // A `^` naming a consuming function from its own parameter or result
+        // (`#<'t>[(self): ^, …]`) means it as its body runs it, and as its callers can hand it
+        // over: named, at the types it is running at. So it is the plain function type, which
+        // the consuming one's parts name in its place.
+        let (parameter, result) = if consumes.is_some()
+            && (has_free_cycles(parameter, &*self.program)
+                || has_free_cycles(result, &*self.program))
+        {
+            let plain = self.program.register_type(Type::Callable {
+                parameter,
+                result,
+                receive: self.current_receive_type_id,
+                states: self.current_states,
+                omittable: self.current_omittable.clone(),
+                consumes: None,
+            });
+            (
+                typing::close_root_references(parameter, plain, 1, self.program),
+                typing::close_root_references(result, plain, 1, self.program),
+            )
+        } else {
+            (parameter, result)
+        };
         let callable_type_id = self.program.register_type(Type::Callable {
-            parameter: parameter_type,
-            result: written_result.unwrap_or(body_type),
+            parameter,
+            result,
             receive: self.current_receive_type_id,
             states: self.current_states,
             omittable: self.current_omittable.clone(),
-            consumes: (!named_requirements.is_empty()).then(|| {
-                quiver_core::types::Consumes::Captures {
-                    parameters: declared.names(),
-                    requirements: named_requirements,
-                }
-            }),
+            consumes,
         });
 
         // Record the declared type parameters (as their uniquified variable names, in
@@ -3884,10 +3901,19 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             self.record_type_parameter_bounds(declared.bounds.iter().cloned());
         }
 
+        // The enclosing functions' type parameters its type mentions, which are fixed for each
+        // closure but which the running code doesn't know: a runtime test judges it with them
+        // opaque.
+        let opaque = self
+            .free_variables(callable_type_id)
+            .into_iter()
+            .filter(|name| self.program.rigid_variables().contains_key(name))
+            .collect();
         let function_index = self.program.register_function(Function {
             instructions: function_instructions,
             captures: unique_captures.len(),
             parameter_hidden: parameter_requirement.map(|found| slots[found]),
+            opaque,
             type_id: callable_type_id,
         });
 
@@ -6108,6 +6134,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             instructions: module_instructions,
             captures: 0,
             parameter_hidden: None,
+            opaque: Vec::new(),
             type_id: callable_type_id,
         });
         bytecode.entry = Some(bytecode.functions.len() - 1);
@@ -7145,90 +7172,66 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     ty: accessed_type,
                     ..
                 } = self.resolve_import(&module, package.as_ref(), &access.accessors)?;
-                let builtin = match &resolved_value {
-                    Value::Builtin(id, _) => self
-                        .program
-                        .get_builtins()
-                        .get(*id)
-                        .map(|info| info.name.clone()),
-                    _ => None,
-                };
-                // A type-consuming function instantiates once it is pushed, below; any other
-                // member's written type arguments apply to its type here.
-                let consuming = matches!(
-                    self.program.lookup_base(accessed_type),
-                    Some(Type::Callable {
-                        consumes: Some(quiver_core::types::Consumes::Captures { .. }),
-                        ..
-                    })
-                );
-                let accessed_type = if consuming {
-                    accessed_type
-                } else {
-                    self.instantiate_type_arguments_of(
-                        accessed_type,
-                        builtin.as_deref(),
-                        &type_args,
-                    )?
-                };
-                // A member holding a type-consuming builtin instantiates here
-                // (`%data.decode<'ev>`), so the emitted value carries the type id.
-                let argument = if applied { value_type } else { None };
-                let member =
-                    self.instantiate_builtin_member(resolved_value, &type_args, applied, argument)?;
-                // Named with its type arguments, a type-consuming builtin is a plain function.
-                let accessed_type = if builtin.is_some() && (applied || !type_args.is_empty()) {
-                    self.without_consumes(accessed_type)
-                } else {
-                    accessed_type
-                };
-
                 self.check_applied(applied, accessed_type)?;
                 let is_applicable = applied && self.is_applicable_type(accessed_type);
-
                 if !is_applicable {
                     self.drop_flowing_value(value_type);
                 }
+                // A type-consuming member (`%data.decode`, `%json.decode`) is instantiated once it
+                // is pushed, where it is named.
+                let consuming = matches!(
+                    self.program.lookup_base(accessed_type),
+                    Some(Type::Callable {
+                        consumes: Some(_),
+                        ..
+                    })
+                );
                 // Wrapper elision: an applied member that is a statically-known trivial
                 // forwarder compiles as its builtin, so the callee is never pushed.
-                let forwarder = match &member {
-                    MemberInstance::Value(value)
-                        if is_applicable && value_type.is_some() && type_args.is_empty() =>
-                    {
-                        self.forwarder_for_member(value, accessed_type)
-                    }
-                    _ => None,
-                };
-                let resolved_value = match member {
-                    // Elided: no callee push.
-                    MemberInstance::Value(value) if forwarder.is_some() => Some(value),
-                    MemberInstance::Value(value) => {
-                        self.emit_value(&value)?;
-                        Some(value)
-                    }
-                    MemberInstance::Required(builtin, type_arguments) => {
-                        self.emit_instance(&builtin, type_arguments)?;
-                        None
-                    }
-                };
-                let accessed_type = if consuming {
-                    self.instantiate_named(
-                        accessed_type,
-                        &type_args,
-                        is_applicable,
-                        value_type,
-                        Provenance::Unknown,
-                    )?
-                    .0
+                let forwarder = if is_applicable
+                    && value_type.is_some()
+                    && type_args.is_empty()
+                    && !consuming
+                {
+                    self.forwarder_for_member(&resolved_value, accessed_type)
                 } else {
-                    accessed_type
+                    None
+                };
+                if forwarder.is_none() {
+                    self.emit_value(&resolved_value)?;
+                }
+                let accessed_type = match &resolved_value {
+                    // Any other builtin binds written type arguments by its own declared
+                    // parameters; one the module instantiated itself
+                    // (`reflect = __meta_reflect__<'data>`) is that instantiation, taking no more.
+                    Value::Builtin(id, _) if !consuming => {
+                        let info = &self.program.get_builtins()[*id];
+                        if !info.type_arguments.is_empty() && !type_args.is_empty() {
+                            return Err(Error::TypeArgumentsTooMany {
+                                declared: 0,
+                                given: type_args.len(),
+                            });
+                        }
+                        let name = info.name.clone();
+                        self.instantiate_type_arguments_of(accessed_type, Some(&name), &type_args)?
+                    }
+                    _ => {
+                        self.instantiate_named(
+                            accessed_type,
+                            &type_args,
+                            is_applicable,
+                            value_type,
+                            Provenance::Unknown,
+                        )?
+                        .0
+                    }
                 };
 
                 if let (true, Some(val_type)) = (is_applicable, value_type) {
                     // The resolved member is a concrete function value, so its dispatch table can
                     // be selected exactly by index — vital when its type is shared with another
                     // dispatch function (e.g. `%num.add` vs `%num.div`).
-                    let callee_fn = resolved_value.as_ref().and_then(value_fn_index);
+                    let callee_fn = value_fn_index(&resolved_value);
                     let ty = self.apply_value_to_type(
                         accessed_type,
                         val_type,
@@ -9145,73 +9148,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             &mut free,
         );
         free
-    }
-
-    /// An import member holding a **type-consuming builtin** value (a module export
-    /// like `%data.decode`): written type arguments instantiate it at the naming site, and an
-    /// *applied* member infers the rest from `argument`, exactly as a direct application
-    /// does. The rebuilt value names that instantiation's own table entry, and carries its
-    /// type ids into the emitted push. A bare reference passes through un-instantiated, and a
-    /// member the module instantiated itself (`reflect = __meta_reflect__<'data>`) is that
-    /// instantiation, taking no more. Ordinary members are untouched.
-    fn instantiate_builtin_member(
-        &mut self,
-        value: Value,
-        type_arguments: &[ast::Type],
-        applied: bool,
-        argument: Option<usize>,
-    ) -> Result<MemberInstance, Error> {
-        let Value::Builtin(builtin_id, ref payload) = value else {
-            return Ok(MemberInstance::Value(value));
-        };
-        let Some((name, instantiated)) = self
-            .program
-            .get_builtins()
-            .get(builtin_id)
-            .map(|b| (b.name.clone(), !b.type_arguments.is_empty()))
-        else {
-            return Ok(MemberInstance::Value(value));
-        };
-        if instantiated {
-            if !type_arguments.is_empty() {
-                return Err(Error::TypeArgumentsTooMany {
-                    declared: 0,
-                    given: type_arguments.len(),
-                });
-            }
-            return Ok(MemberInstance::Value(value));
-        }
-        let type_arguments =
-            self.resolve_builtin_type_arguments(&name, type_arguments, applied, argument)?;
-        if type_arguments.is_empty() {
-            return Ok(MemberInstance::Value(value));
-        }
-        // At a type parameter of a function being compiled, the instantiation is that
-        // function's requirement.
-        if type_arguments
-            .iter()
-            .any(|&argument| self.has_free_variables(argument))
-        {
-            return Ok(MemberInstance::Required(name, type_arguments));
-        }
-        let instantiated =
-            self.program
-                .register_builtin_instantiated(name, type_arguments.clone(), self.builtins);
-        check_conversion_plan(self.program, instantiated)?;
-        // Rebuild the value carrying the arguments, preserving any annotations the
-        // module attached (e.g. a `:doc`).
-        let annotations = payload
-            .as_deref()
-            .map(|p| p.annotations().to_vec())
-            .unwrap_or_default();
-        Ok(MemberInstance::Value(Value::Builtin(
-            instantiated,
-            Some(
-                Payload::with_annotations(vec![], annotations)
-                    .with_type_arguments(type_arguments)
-                    .shared(),
-            ),
-        )))
     }
 
     /// Record a builtin callable's type parameters for explicit instantiation: the

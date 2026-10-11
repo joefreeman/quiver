@@ -469,14 +469,15 @@ impl<E: Effect> Decoder<'_, '_, '_, E> {
         if result.is_none() {
             self.text.pos = start;
             // When no member got past the union's own start, the union is what was expected
-            // there, rather than whichever member happened to be tried first.
+            // there, rather than whichever member happened to be tried first — as it is when it
+            // has no members to try (`never`).
             self.text.skip_ws();
             let at = (self.text.pos, self.path.len());
             self.text.pos = start;
-            if let Some(failure) = &mut self.failure
-                && failure.rank() == at
-            {
-                failure.expected = type_id;
+            match &mut self.failure {
+                Some(failure) if failure.rank() == at => failure.expected = type_id,
+                Some(_) => {}
+                None => self.fail(type_id),
             }
         }
         Ok(result)

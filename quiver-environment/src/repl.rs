@@ -373,6 +373,7 @@ impl<E: Effect> LineCompiler<E> {
                 instructions,
                 captures: 0,
                 parameter_hidden: None,
+                opaque: Vec::new(),
                 type_id: callable_type_id,
             };
             let function_index = program.register_function(function);

@@ -165,6 +165,7 @@ mod probe {
             instructions: compiled.instructions,
             captures: 0,
             parameter_hidden: None,
+            opaque: Vec::new(),
             type_id: callable,
         });
         let (value, mut executor) = quiver_core::execute_bytecode_sync_with(

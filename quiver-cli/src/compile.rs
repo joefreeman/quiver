@@ -128,6 +128,7 @@ pub fn compile_entry(
         instructions: entry_instructions,
         captures: 0,
         parameter_hidden: None,
+        opaque: Vec::new(),
         type_id: callable_type_id,
     });
 

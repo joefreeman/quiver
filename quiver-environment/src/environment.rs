@@ -2922,11 +2922,18 @@ impl<E: Effect> Environment<E> {
             Value::Reference(_) => Type::Reference,
             Value::Tuple(type_id, _) => Type::Tuple(*type_id),
             Value::Function(func_idx, _) => {
-                // Get the callable type directly from function's type_id
-                self.program
+                // The callable type from the function's type_id, as the plain one a
+                // type-consuming function has once named: only its own type tracks one that
+                // isn't yet, so a value is judged as named, as a runtime test judges it.
+                let mut ty = self
+                    .program
                     .get_function(*func_idx)
                     .and_then(|func| self.program.lookup_type(func.type_id).cloned())
-                    .unwrap_or_else(|| Type::Union(vec![])) // Fallback for unknown functions
+                    .unwrap_or_else(|| Type::Union(vec![])); // Fallback for unknown functions
+                if let Type::Callable { consumes, .. } = &mut ty {
+                    *consumes = None;
+                }
+                ty
             }
             Value::Builtin(builtin_id, _) => {
                 // Get the builtin info by index

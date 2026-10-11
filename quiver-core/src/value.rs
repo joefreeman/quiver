@@ -755,6 +755,9 @@ impl Value {
                     crate::bytecode::IdRemaps::map(&remaps.builtins, "builtin", *id),
                     None,
                 ),
+                Value::Type(id) => {
+                    Value::Type(crate::bytecode::IdRemaps::map(&remaps.types, "type", *id))
+                }
                 other => other.clone(),
             }
         }
@@ -1009,5 +1012,19 @@ mod tests {
     #[test]
     fn value_stays_small() {
         assert!(std::mem::size_of::<Value>() <= 24);
+    }
+
+    // A closure named at concrete types in a module holds its witnesses among its captures, so
+    // linking the module's cached value must carry them into the session's type table.
+    #[test]
+    fn remapping_a_closure_remaps_the_types_it_holds() {
+        let mut remaps = crate::bytecode::IdRemaps::default();
+        remaps.functions.insert(1, 4);
+        remaps.types.insert(15, 3);
+        let closure = Value::Function(1, Payload::new(vec![Value::Type(15)]).shared());
+        let Value::Function(4, payload) = closure.remap_ids(&remaps) else {
+            panic!("a function remaps to a function");
+        };
+        assert_eq!(payload.iter().collect::<Vec<_>>(), [&Value::Type(3)]);
     }
 }

@@ -179,11 +179,14 @@ impl TypeIndex {
             // A type-consuming function is judged as the plain function it is once named: one
             // not yet named never meets a runtime test that could admit it, as only its own
             // type tracks it (see `holds_consuming`).
-            ConcreteType::Function(func_id) => admit_if(is_compatible_plain(
-                tables.functions[func_id].type_id,
-                pattern_id,
-                &lookup,
-            )),
+            ConcreteType::Function(func_id) => {
+                let function = &tables.functions[func_id];
+                admit_if(is_compatible_plain(
+                    function.type_id,
+                    pattern_id,
+                    &lookup.with_opaque(&function.opaque),
+                ))
+            }
             // A builtin is judged by its signature, as a plain function: the representative
             // may be the type of a type-consuming one held uninstantiated, which shares it.
             // (Holding that one is what the compiler's types track; a runtime test can't tell
@@ -198,8 +201,10 @@ impl TypeIndex {
             // await result and states alike: its state is what makes a received pid
             // trustworthy for bare `?p`, which has no runtime test of its own.
             ConcreteType::Process(func_id) => {
-                let lookup =
-                    lookup.with_extra(process_type(&tables.functions[func_id], tables.types));
+                let function = &tables.functions[func_id];
+                let lookup = lookup
+                    .with_opaque(&function.opaque)
+                    .with_extra(process_type(function, tables.types));
                 admit_if(is_compatible(lookup.extra_id(), pattern_id, &lookup))
             }
             ConcreteType::Resource(resource_id) => admit_if(
@@ -253,12 +258,21 @@ fn process_type(func: &Function, types: &[Type]) -> Type {
 
 /// The tables as a [`TypeLookup`], optionally answering one more type — one the program need
 /// not contain, such as the process type of a function nothing named — at the next id.
+///
+/// A function's type may mention its enclosing functions' type parameters (`opaque`), which
+/// were fixed when its closure was made, at types the running code doesn't know. They are
+/// read as rigid variables bounded by the top type: each one opaque type, holding only its own
+/// values, so no test admits a closure on a guess at what they were instantiated to.
 #[derive(Clone)]
 struct Lookup<'a> {
     types: &'a [Type],
     tuples: &'a [TupleTypeInfo],
     extra: Option<Type>,
+    opaque: &'a [String],
 }
+
+/// The bound of an opaque variable, answered past the tables and their extra type.
+static TOP: Type = Type::Top;
 
 impl<'a> Lookup<'a> {
     fn of(tables: Tables<'a>) -> Self {
@@ -266,7 +280,12 @@ impl<'a> Lookup<'a> {
             types: tables.types,
             tuples: tables.tuples,
             extra: None,
+            opaque: &[],
         }
+    }
+
+    fn with_opaque(self, opaque: &'a [String]) -> Self {
+        Lookup { opaque, ..self }
     }
 
     fn with_extra(self, extra: Type) -> Self {
@@ -286,8 +305,16 @@ impl TypeLookup for Lookup<'_> {
         match self.types.get(type_id) {
             Some(ty) => Some(ty),
             None if type_id == self.types.len() => self.extra.as_ref(),
+            None if type_id == self.types.len() + 1 => Some(&TOP),
             None => None,
         }
+    }
+
+    fn rigid_bound(&self, name: &str) -> Option<usize> {
+        self.opaque
+            .iter()
+            .any(|opaque| opaque == name)
+            .then_some(self.types.len() + 1)
     }
 
     fn lookup_tuple(&self, tuple_id: usize) -> Option<&TupleTypeInfo> {

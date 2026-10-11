@@ -142,3 +142,14 @@ fn test_identity_bearing_dict_key_is_a_compile_error() {
         )
         .expect("1");
 }
+
+#[test]
+fn test_decoding_at_an_uninhabited_type_fails() {
+    // No text is a value of no type: the decode fails, and says what was expected.
+    quiver()
+        .evaluate(
+            "r = %data.decode<('int & 'bin)> \"1\"
+             [r, r:error<'%data.error> ~> =DecodeError(kind: ~)]",
+        )
+        .expect("[[], Mismatch]");
+}
