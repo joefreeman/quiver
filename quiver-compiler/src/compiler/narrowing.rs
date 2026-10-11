@@ -524,6 +524,28 @@ fn intersect_pair(a: usize, b: usize, stacks: &mut Walk, program: &mut Program) 
         // Otherwise a type variable meets the other side symbolically, until it is known.
         (Type::Variable(_) | Type::Intersection(_), _)
         | (_, Type::Variable(_) | Type::Intersection(_)) => meet(vec![a, b], program),
+        // Rows are metadata, not membership: meet the shapes beneath them, as `subtract_one`
+        // subtracts them, and keep `a`'s row on what remains. The `types_overlap` fallback would
+        // compare them in a fresh walk, where `b`'s recursive references resolve to nothing and
+        // are presumed to overlap — keeping `a` whole against a union it is disjoint from.
+        (_, Type::Annotated { base, .. }) => intersect_in(a, *base, stacks, program),
+        (
+            Type::Annotated {
+                base,
+                exact,
+                entries,
+            },
+            _,
+        ) => {
+            let piece = intersect_in(*base, b, stacks, program);
+            if piece == *base {
+                a
+            } else if piece == never {
+                never
+            } else {
+                program.annotate_type(piece, *exact, entries.clone())
+            }
+        }
         // A concrete type meeting `b`'s recursive reference meets the union it names — keeping
         // `a` would leave `a`'s (wider) type where the intersection's own recursion belongs:
         // `('l<'t | []> | []) ∩ 'l<'t>`, flattened with its tail closed as `'l<'t | []>`, keeps

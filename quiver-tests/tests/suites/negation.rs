@@ -241,3 +241,84 @@ fn test_negation_over_the_top_type_stays_a_runtime_test() {
         )
         .expect("[7, 0]");
 }
+
+#[test]
+fn test_negation_narrows_over_a_type_parameter() {
+    // A value of `'t | []` that isn't nil is a `'t`, whatever `'t` stands for.
+    quiver()
+        .evaluate(
+            "f = #<'t>('t | []) -> ('t | Missing) { | =(\\[] & v) => v | Missing }
+             [f 5, f []]",
+        )
+        .expect("[5, Missing]");
+    quiver()
+        .evaluate(
+            "f = #<'t>[x: ('t | [])] -> '%list<'t> { $x ~> { | =(\\[] & v) => %list{ v } | Nil } }
+             [f [x: <01>], f [x: []]]",
+        )
+        .expect("[Cons[<01>, Nil], Nil]");
+    // The parameter itself is kept whole, as it may hold what the negation rules out, so the
+    // test stays at runtime.
+    quiver()
+        .evaluate("f = #<'t>'t -> _ { | =(\\'int & v) => [v] | IsInt }; [f 5, f <01>]")
+        .expect("[IsInt, [<01>]]");
+}
+
+#[test]
+fn test_negation_over_a_type_parameter_stays_sound() {
+    // A variable meets a recursive type only through the union it names, so the test is not
+    // complemented: `Node[<01>]` is no tree, and the negation must match it.
+    quiver()
+        .evaluate(
+            "'tree = Leaf | Node[^]
+             f = #<'t>Node['t] -> _ { | =(\\'tree & v) => [Neg, v] | Pos }
+             [f Node[<01>], f Node[Leaf]]",
+        )
+        .expect("[[Neg, Node[<01>]], Pos]");
+    quiver()
+        .evaluate(
+            "'tree = Leaf | Node[^]
+             f = #<'t>(Node['t] | []) -> _ { | =\\([] | 'tree) => Neg | Pos }
+             [f Node[<01>], f Node[Leaf], f []]",
+        )
+        .expect("[Neg, Pos, Pos]");
+    // Nor through a function type, which a variable meets only by overlap.
+    quiver()
+        .evaluate(
+            "f = #<'t>(#'t -> 't) -> _ { | =(\\(#'int -> _) & v) => Neg | Pos }
+             [f #'bin { $ }, f #'int { $ }]",
+        )
+        .expect("[Neg, Pos]");
+    quiver()
+        .evaluate(
+            "f = #<'t>[(#'t -> 't), 'int] -> _ { | =\\[(#'int -> _), _] => Neg | Pos }
+             [f [#'bin { $ }, 1], f [#'int { $ }, 1]]",
+        )
+        .expect("[Neg, Pos]");
+    // A bounded parameter, two variables, and a nested field.
+    quiver()
+        .evaluate(
+            "f = #<'t: ('int | 'bin)>('t | []) -> _ { | =(\\[] & v) => [v] | None }
+             [f 1, f <01>, f []]",
+        )
+        .expect("[[1], [<01>], None]");
+    quiver()
+        .evaluate(
+            "f = #<'t, 'u>('t | 'u | []) -> _ { | =(\\[] & v) => [v] | None }
+             [f<'int, 'bin> 1, f<'int, 'bin> []]",
+        )
+        .expect("[[1], None]");
+    quiver()
+        .evaluate(
+            "f = #<'t>['t, 't] -> _ { | =(\\['int, _] & v) => [v] | Int }
+             [f [1, 2], f [<01>, <02>]]",
+        )
+        .expect("[Int, [[<01>, <02>]]]");
+    // An inexact negation narrows nothing past itself: the later branch still sees nil.
+    quiver()
+        .evaluate(
+            "f = #<'t>('t | []) -> _ { | =(\\[] & v) => [v] | =[] => Nil | Other }
+             [f 1, f []]",
+        )
+        .expect("[[1], Nil]");
+}

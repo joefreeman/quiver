@@ -1004,3 +1004,51 @@ fn test_empty_partial_typed_value_may_be_nil() {
         .evaluate("f = #() { { $; Reached } }; f []")
         .expect("[]");
 }
+
+#[test]
+fn test_type_test_against_recursive_alias_on_a_literal_that_cannot_match() {
+    // A literal's type carries a closed annotation row; meeting a recursive alias through it
+    // must still resolve the alias's `^`, or the impossible test is judged irrefutable.
+    quiver()
+        .evaluate("'t = A | L[^]; { L[B] ~> ='t }")
+        .expect("[]");
+    quiver()
+        .evaluate("'t = A | L[^]; { L[L[B]] ~> ='t }")
+        .expect("[]");
+    quiver()
+        .evaluate("'t = A | L[^]; x = L[B]; { x ~> ='t }")
+        .expect("[]");
+    quiver()
+        .evaluate("'t = A | L[^]; L[B] ~> { | ='t => 1 | 2 }")
+        .expect("2");
+}
+
+#[test]
+fn test_type_test_against_recursive_alias_on_a_literal_that_matches() {
+    quiver()
+        .evaluate("'t = A | L[^]; L[L[A]] ~> ='t")
+        .expect("L[L[A]]");
+    quiver()
+        .evaluate("'t = A | L[^]; L[L[A]] ~> { | ='t => 1 | 2 }")
+        .expect("1");
+}
+
+#[test]
+fn test_partial_pattern_field_of_a_recursive_union() {
+    // A field read through a partial pattern refers back to the union it was taken from, and
+    // is closed against it, as a tuple pattern's field is — not left dangling.
+    quiver()
+        .evaluate(
+            "'t = A | T[f: (Nil | Cons[^1, ^])]
+             f = #'t { =T(f: x); [x, Nil] }
+             [f T[f: Cons[A, Nil]], f A]",
+        )
+        .expect("[[Cons[A, Nil], Nil], []]");
+    quiver()
+        .evaluate(
+            "'t = A | T[f: (Nil | Cons[^1, ^])]
+             f = #'t { =T(f: ~) ~> %list.count }
+             f T[f: Cons[A, Cons[T[f: Nil], Nil]]]",
+        )
+        .expect("2");
+}

@@ -2126,7 +2126,14 @@ fn substitute_at(
                     }
                 })
                 .collect();
-            union_type_ids(program, new_variants)
+            // Unchanged, the union is kept as it is: rebuilding it would splice any union
+            // among its members (as closing a reference that stood as a member leaves),
+            // unrolling a recursive type one level further on every substitution.
+            if new_variants == variants {
+                type_id
+            } else {
+                union_type_ids(program, new_variants)
+            }
         }
         // Its variables known, an intersection is computed: `'t & []` is `[]` for a `'t` that
         // holds nil, and nothing for one that does not.

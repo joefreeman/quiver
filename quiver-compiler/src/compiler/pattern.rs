@@ -234,6 +234,58 @@ pub fn prevents_complement_narrowing(binding_sets: &[BindingSet], program: &Prog
     })
 }
 
+/// Whether every type test among the sets is of plain data: integers, binaries, refs, `_`, and
+/// tuples and unions of them. Over a value with type variables, only such a test is narrowed
+/// exactly — a variable meets it symbolically (`'t & X`). Meeting a recursive reference, a
+/// function, a process or a resource, the intersection keeps the variable whole, so narrowing by
+/// the test would over-approximate what it matches, and its complement under-approximate what
+/// fails it.
+fn tests_only_data(binding_sets: &[BindingSet], program: &Program) -> bool {
+    fn data(type_id: usize, program: &Program) -> bool {
+        match program.lookup_type(type_id) {
+            Some(Type::Integer | Type::Binary | Type::Reference | Type::Top) => true,
+            Some(Type::Union(members)) => members.iter().all(|&member| data(member, program)),
+            Some(Type::Annotated { base, .. }) => data(*base, program),
+            Some(Type::Tuple(tuple_id)) => program
+                .lookup_tuple(*tuple_id)
+                .is_some_and(|tuple| tuple.fields.iter().all(|&(_, field)| data(field, program))),
+            _ => false,
+        }
+    }
+    binding_sets.iter().all(|set| {
+        set.requirements
+            .iter()
+            .all(|requirement| match &requirement.check {
+                RuntimeCheck::TypeId(type_id) => data(*type_id, program),
+                _ => true,
+            })
+    })
+}
+
+/// The type a variant's fields are closed against: the union a recursive reference in one names.
+///
+/// At the top level (`at_top`) that is the scrutinee's *declared* type rather than
+/// `value_type_id`: the field's type is the recursion boundary fixed by the type definition, but
+/// `value_type_id` may have been complement-narrowed (dropping sibling variants such as `Nil`
+/// after a `=Nil` branch). Using the narrowed view would dangle the cycle and wrongly exclude
+/// those variants from the field — e.g. a `Cons` tail losing `Nil`, so `=Cons[h, Nil]` could
+/// never match. It falls back to `value_type_id` when the declared type is unavailable (e.g.
+/// unknown provenance). Only the top-level scrutinee can be complement-narrowed; at nested depths
+/// `value_type_id` is the already-resolved field type, which is the correct boundary.
+fn recursion_boundary(
+    at_top: bool,
+    scopes: &[super::scopes::Scope],
+    value_provenance: &super::provenance::Provenance,
+    value_type_id: usize,
+    program: &mut Program,
+) -> usize {
+    if !at_top {
+        return value_type_id;
+    }
+    super::narrowing::get_declared_type_for_provenance(scopes, value_provenance, program)
+        .unwrap_or(value_type_id)
+}
+
 /// Analyze pattern without generating code
 /// Whether some binding set matches unconditionally (no runtime requirements) — an
 /// irrefutable pattern, e.g. a bare binder.
@@ -904,7 +956,8 @@ fn analyze_negated_pattern(
     // members whole. Only an exact negation may be complemented again.
     let narrowable = !prevents_complement_narrowing(&sets, program)
         && !narrowing::pattern_constrains_recursive_field(inner, value_type_id, program)
-        && !typing::contains_variables(value_type_id, &*program);
+        && (!typing::contains_variables(value_type_id, &*program)
+            || tests_only_data(&sets, program));
     let exact = narrowable && complement_is_exact_over(value_type_id, program);
     let narrowed_type_id = if narrowable {
         narrowing::compute_complement(value_type_id, inner_narrowed, program)
@@ -1174,27 +1227,13 @@ fn analyze_match_tuple_pattern(
             // `^` in the field, at whatever depth (a list element's, a function type's result),
             // names the scrutinee's own union. A dangling reference would make every later
             // match on the binding statically dead.
-            //
-            // Resolve against the scrutinee's *declared* type rather than `value_type_id`: the
-            // field's type is the recursion boundary fixed by the type definition, but
-            // `value_type_id` may have been complement-narrowed (dropping sibling variants such as
-            // `Nil` after a `=Nil` branch). Using the narrowed view would dangle this cycle and
-            // wrongly exclude those variants from the field — e.g. a `Cons` tail losing `Nil`, so
-            // `=Cons[h, Nil]` could never match. Fall back to `value_type_id` when the declared
-            // type is unavailable (e.g. unknown provenance).
-            // Only the top-level scrutinee (`path` empty) can be complement-narrowed; at nested
-            // depths `value_type_id` is the already-resolved field type, which is the correct
-            // boundary. So consult the declared type only at the top level.
-            let boundary = if path.is_empty() {
-                super::narrowing::get_declared_type_for_provenance(
-                    scopes,
-                    value_provenance,
-                    program,
-                )
-                .unwrap_or(value_type_id)
-            } else {
-                value_type_id
-            };
+            let boundary = recursion_boundary(
+                path.is_empty(),
+                scopes,
+                value_provenance,
+                value_type_id,
+                program,
+            );
             let mut field_type_id =
                 super::narrowing::close_cycles(raw_field_type_id, boundary, program);
 
@@ -1628,7 +1667,22 @@ fn analyze_partial_pattern(
             let field_name = &partial_field.name;
             let nested_pattern = &partial_field.pattern;
             let idx = field_indices[i];
-            let field_type_id = fields[idx].1;
+            // A concrete variant's field may refer back to the union it was taken from, so it
+            // is closed against that union, as a tuple pattern's fields are. A partial source's
+            // fields are closed already.
+            let field_type_id = match narrowed_tuple_name {
+                Some(_) => {
+                    let boundary = recursion_boundary(
+                        path.is_empty(),
+                        scopes,
+                        value_provenance,
+                        value_type_id,
+                        program,
+                    );
+                    super::narrowing::close_cycles(fields[idx].1, boundary, program)
+                }
+                None => fields[idx].1,
+            };
             let mut field_path = path.clone();
             // A concrete variant pins the field's position (gated by its type check); a
             // partial source's layout is unknown, so the field is fetched by name.

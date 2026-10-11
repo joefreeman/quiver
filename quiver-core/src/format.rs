@@ -134,10 +134,22 @@ fn format_type_impl(
         // An annotated type prints its base followed by the attach syntax; openness is
         // not rendered (it is explained in prose by the visibility diagnostics).
         Type::Annotated { base, entries, .. } => {
+            // Only keys with a name to show are rendered: a runtime table has none.
+            let rendered: Vec<String> = entries
+                .iter()
+                .filter_map(|(key, value_type)| {
+                    let key_name = lookup.lookup_annotation_key_name(*key)?;
+                    Some(format!(
+                        ":{} {}",
+                        key_name,
+                        format_type_by_id(lookup, *value_type)
+                    ))
+                })
+                .collect();
             // An empty row is invisible in display: render the base exactly as if it
             // were unwrapped (same nesting). A non-empty row parenthesises the base,
             // which is followed by the attach-syntax braces.
-            if entries.is_empty() {
+            if rendered.is_empty() {
                 return lookup
                     .lookup_type(*base)
                     .map(|t| format_type_impl(lookup, t, nested, style))
@@ -147,16 +159,6 @@ fn format_type_impl(
                 .lookup_type(*base)
                 .map(|t| format_type_impl(lookup, t, true, style))
                 .unwrap_or_else(|| format!("Type{}", base));
-            let rendered: Vec<String> = entries
-                .iter()
-                .map(|(key, value_type)| {
-                    let key_name = lookup
-                        .lookup_annotation_key_name(*key)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("key#{}", key));
-                    format!(":{} {}", key_name, format_type_by_id(lookup, *value_type))
-                })
-                .collect();
             format!("{} {{ {} }}", base_str, rendered.join(", "))
         }
         Type::Partial { name, fields, rest } => {

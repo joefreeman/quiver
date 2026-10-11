@@ -19,6 +19,14 @@ fn test_omit_trailing_field() {
 }
 
 #[test]
+fn test_bodiless_function_takes_defaults() {
+    // A bodiless function is the identity; defaults in its spelling still attach to it.
+    quiver()
+        .evaluate("f = #[a: 'int, b: 'int = 20]; [f [a: 1], f:defaults]")
+        .expect("[[a: 1, b: 20], [b: 20]]");
+}
+
+#[test]
 fn test_omit_all_fields() {
     quiver()
         .evaluate("f = #[a: 'int, b: 'int] { :defaults [a: 10, b: 20]; [$a, $b] }; f []")

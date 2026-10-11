@@ -3148,11 +3148,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         if fields.is_empty() {
             return Ok(());
         }
-        let Some(body) = &mut function.body else {
-            return Err(Error::TypeUnresolved(
-                "A field default needs a function body to attach to".to_string(),
-            ));
-        };
+        // A bodiless literal is the identity, which an annotation-only body also is: give it
+        // one, so the defaults have somewhere to attach.
+        let body = function.body.get_or_insert_with(|| ast::Block {
+            annotations: Vec::new(),
+            branches: Vec::new(),
+        });
         body.annotations.push(ast::Annotation {
             name: annotations::DEFAULTS.to_string(),
             name_span: ast::Spanned::default(),

@@ -560,8 +560,14 @@ parts narrowed it to, wherever it is written:
 Point[x: 1, y: 2] ~> =(Point[x: a, y: _] & p); [a, p]   //= [1, Point[x: 1, y: 2]]
 ```
 
-This is the idiom for "bind, but fail on the wrong type", which combines with
-short-circuiting to propagate.
+A binder is only needed when the value is wanted by name later on. A test narrows the value
+it passes on, so to carry on with it in the chain the test alone is enough:
+
+```quiver
+f = #('int | 'bin) { ='int ~> %num.add [~, 1] }
+f 5                             //= 6
+f <01>                          //= []
+```
 
 `&` binds tighter than `|`, as it does in types, so an alternation used as a part is
 parenthesised, and each alternative of a union may carry its own binder:
@@ -854,8 +860,8 @@ pattern tests for its own shape:
 
 ```quiver
 describe = #_ {
-  | =('int & n) => %num.add [n, 1]
-  | =Point[x: ('int & x), y: _] => x
+  | ='int => %num.add [~, 1]
+  | =Point[x: ('int & ~), y: _]
   | 0
 }
 describe 5                        //= 6
@@ -1205,7 +1211,7 @@ the error, so an ordinary branch recovers from it.
 crashed = @[] { %panic "boom" } []
 r = !crashed
 r ~> {
-  | =('int & v) => v                                       // completed
+  | ='int                                                  // completed
   | r:crash<Panic(message: '%str)> ~> =(message: m) => m   // crashed
   | "no result"                                            // legitimately nil
 }   //= "boom"
