@@ -1735,6 +1735,49 @@ pub fn collect_type_variables(type_id: usize, lookup: &impl TypeLookup, names: &
     }
 }
 
+/// The type variables `type_id` mentions only in what its functions receive: effect variables,
+/// which say what a function receives and nothing about any value.
+pub fn receive_only_variables(type_id: usize, program: &Program) -> Vec<String> {
+    fn walk(
+        type_id: usize,
+        program: &Program,
+        in_receive: &mut Vec<String>,
+        elsewhere: &mut Vec<String>,
+    ) {
+        match program.lookup_type(type_id) {
+            Some(Type::Variable(name)) => elsewhere.push(name.clone()),
+            Some(Type::Callable {
+                parameter,
+                result,
+                receive,
+                states,
+                ..
+            }) => {
+                let (parameter, result, receive, states) = (*parameter, *result, *receive, *states);
+                collect_type_variables(receive, program, in_receive);
+                for part in [Some(parameter), Some(result), states]
+                    .into_iter()
+                    .flatten()
+                {
+                    walk(part, program, in_receive, elsewhere);
+                }
+            }
+            Some(typ) => {
+                for part in typ.parts(program) {
+                    walk(part, program, in_receive, elsewhere);
+                }
+            }
+            None => {}
+        }
+    }
+    let (mut in_receive, mut elsewhere) = (Vec::new(), Vec::new());
+    walk(type_id, program, &mut in_receive, &mut elsewhere);
+    in_receive.sort();
+    in_receive.dedup();
+    in_receive.retain(|name| !elsewhere.contains(name));
+    in_receive
+}
+
 /// Substitute type variables in a type with their bindings
 /// Collect the names of type variables occurring in `type_id`, split by variance
 /// relative to the root: a callable's parameter and a process's send clause flip the

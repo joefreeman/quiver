@@ -1667,3 +1667,75 @@ fn test_self_is_granted_what_a_later_call_receives() {
         )
         .expect("42");
 }
+
+#[test]
+fn test_a_callbacks_receive_is_an_effect_variable() {
+    // A type parameter in a callback's receive clause is what running the callback receives,
+    // which the function running it receives too: never tested by the function itself, so it
+    // needn't consume it, and each call instantiates it.
+    quiver()
+        .evaluate(
+            "run = #<'r>(#[] -> 'int !'r) { $ [] }
+             w = @[] { run #[] { !'int } } []
+             w 5
+             !w",
+        )
+        .expect("5");
+    // The process receives what the callback does, so a send is checked against that.
+    quiver()
+        .evaluate(
+            "run = #<'r>(#[] -> 'int !'r) { $ [] }
+             w = @[] { run #[] { !'int } } []
+             w <01>",
+        )
+        .expect_error_containing("expected message compatible with 'int");
+    // A callback that receives nothing pins nothing: the call receives nothing.
+    quiver()
+        .evaluate("run = #<'r>(#[] -> 'int !'r) { $ [] }; run #[] { 3 }")
+        .expect("3");
+}
+
+#[test]
+fn test_spawning_a_function_instantiates_its_effect_variable() {
+    quiver()
+        .evaluate(
+            "run = #<'r>(#[] -> 'int !'r) { $ [] }
+             w = @run #[] { !'int }
+             w 7
+             !w",
+        )
+        .expect("7");
+}
+
+#[test]
+fn test_self_is_granted_what_a_parameter_call_receives() {
+    // `@` taken before the parameter is called is granted what the call receives.
+    quiver()
+        .evaluate(
+            "run = #<'r>(#[] -> 'int !'r) { [@, $ []] }
+             w = @[] { run #[] { !'int } ~> =[p, _]; p 7; !'int } []
+             w 5
+             !w",
+        )
+        .expect("7");
+    quiver()
+        .evaluate(
+            "run = #(#[] -> 'int !'int) { [@, $ []] }
+             w = @[] { run #[] { !'int } ~> =[p, _]; p 7; !'int } []
+             w 5
+             !w",
+        )
+        .expect("7");
+}
+
+#[test]
+fn test_an_unpinned_effect_variable_leaves_the_argument_checked() {
+    // The effect variable left unpinned receives nothing, so the parameter is concrete and
+    // the argument is checked against it as usual.
+    quiver()
+        .evaluate(
+            "run = #<'r>[(f): #[] -> 'int !'r, (n): (['int, 'int] | ['bin, 'bin])] { $f [] }
+             run [#[] { 3 }, [1, <01>]]",
+        )
+        .expect_error_containing("'bin is not 'int");
+}

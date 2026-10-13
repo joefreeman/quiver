@@ -1211,6 +1211,10 @@ pub struct Compiler<'a, E: quiver_core::effects::Effect> {
     /// callee is the function being compiled and so has no value in scope to consult.
     current_omittable: Vec<usize>,
 
+    /// The parameter type of the literal whose body the receive pre-pass is reading, so a call
+    /// of `$` (or a path into it) counts towards the body's receive type ahead of compiling.
+    prepass_parameter: Option<usize>,
+
     // While compiling a function body, collects per-branch (guard, result) types for the
     // call-site return-type dispatch. `None` outside a function body.
     collected_dispatch: Option<DispatchCollection>,
@@ -1443,6 +1447,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             current_receive_type_id: never_id,
             current_states: None,
             current_omittable: Vec::new(),
+            prepass_parameter: None,
             collected_dispatch: None,
             requirement_frames: Vec::new(),
             receiver_literal: false,
@@ -2872,6 +2877,7 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     fn extract_receive_type(
         &mut self,
         body: Option<&ast::Block>,
+        parameter: usize,
         type_parameters: &HashMap<String, usize>,
     ) -> Result<usize, Error> {
         let mut aliases = Bindings::default();
@@ -2888,10 +2894,12 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         self.scopes
             .push(Scope::new(aliases, None, scopes::ScopeKind::Block));
         let mut receive_types = Vec::new();
+        let enclosing_parameter = self.prepass_parameter.replace(parameter);
         let collected = match body {
             Some(body) => self.collect_receive_types(body, &mut receive_types),
             None => Ok(()),
         };
+        self.prepass_parameter = enclosing_parameter;
         self.scopes.pop();
         collected?;
         Ok(self.unify_receive_types(receive_types))
@@ -2996,18 +3004,27 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
     /// in this process, and the call widens the receive type as it compiles, but that is too
     /// late for an `@` taken before it (`seed [$specs, @]; ^loop [...]`), whose send grant is
     /// the receive type as it stands. One whose receive mentions a type variable is left to the
-    /// call, which instantiates it.
+    /// call, which instantiates it — except the body's own, which no call instantiates (a
+    /// callback's effect variable, `$ []` in `#<'r>(#[] -> 'u !'r)`).
     fn collect_callee_receive_type(
         &mut self,
         access: &ast::Access,
         receive_types: &mut Vec<usize>,
     ) {
-        let (Some(ast::AccessSource::Identifier(name))
-        | Some(ast::AccessSource::TailCall(Some(name)))) = &access.source
-        else {
-            return;
+        let callee = match &access.source {
+            Some(ast::AccessSource::Identifier(name))
+            | Some(ast::AccessSource::TailCall(Some(name))) => {
+                self.peek_variable_type(name, &access.accessors)
+            }
+            Some(ast::AccessSource::Parameter { depth: 0 }) => {
+                self.prepass_parameter.and_then(|parameter| {
+                    self.peek_accessor_type(parameter, &access.accessors, "$")
+                        .ok()
+                })
+            }
+            _ => None,
         };
-        let Some(callee) = self.peek_variable_type(name, &access.accessors) else {
+        let Some(callee) = callee else {
             return;
         };
         let Some(parts) = typing::open_callable(callee, self.program) else {
@@ -3409,7 +3426,8 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         };
 
         // Extract receive type from function body
-        let receive_type = self.extract_receive_type(function.body.as_ref(), &declared.bindings)?;
+        let receive_type =
+            self.extract_receive_type(function.body.as_ref(), parameter_type, &declared.bindings)?;
 
         let saved_instructions = std::mem::take(&mut self.codegen.instructions);
         let saved_local_count = self.local_count;
@@ -3673,26 +3691,6 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
                     })
                     .collect::<Vec<_>>()
             });
-
-        // A function can't receive its own type parameters, directly or through what it calls,
-        // unless it consumes them: each call or spawn instantiates them afresh, and only a
-        // function given them where it is named holds the instantiation the runtime test that
-        // selects a message needs. Its receive type is then instantiated where it is named, as
-        // the rest of its type is. (An enclosing function's are fine — fixed for as long as a
-        // process created under them lives, and every send to it checked against the same
-        // instantiation.)
-        if let Some(own) = declared.names().into_iter().find(|name| {
-            typing::mentions_variable(self.current_receive_type_id, name, &*self.program)
-                && !named_requirements
-                    .iter()
-                    .flat_map(|requirement| requirement.templates())
-                    .any(|&template| typing::mentions_variable(template, name, &*self.program))
-        }) {
-            return Err(Error::GenericReceive {
-                // Uniquified as `t#N`; shown as written.
-                tested: format!("'{}", quiver_core::types::declared_variable_name(&own)),
-            });
-        }
 
         // Create type information for the function. The receive type is the final
         // `current_receive_type_id`: the body pre-pass seed (line above the save), widened
@@ -6527,12 +6525,21 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
             });
         }
         // A generic root function is spawned uninstantiated, but its init must still fit the
-        // bounds of the type parameters it would pin.
-        if typing::contains_variables(parameter, &*self.program) {
+        // bounds of the type parameters it would pin, and the process receives what its init
+        // makes it: an effect variable (a callback's `!'r`) is the callback's receive.
+        let receive = if typing::contains_variables(parameter, &*self.program)
+            || typing::contains_variables(receive, &*self.program)
+        {
             let mut bindings = HashMap::new();
             typing::unify(&mut bindings, parameter, arg_type, self.program)?;
+            typing::resolve_bindings(&mut bindings, self.program);
+            self.close_unpinned_receives(parameter, &mut bindings);
             self.check_bindings_fit_bounds(&bindings)?;
-        }
+            typing::close_unpinned_result(receive, &mut bindings, self.program);
+            typing::substitute(receive, &bindings, self.program)
+        } else {
+            receive
+        };
 
         // The builtin takes `[function, init]`; the init went on the stack first.
         self.codegen.add_instruction(Instruction::rotate(2));
@@ -8395,32 +8402,63 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         // callable takes `f []` and rejects anything else.
         let arg_type = value_type;
 
-        let result_type = if typing::contains_variables(param_id, &*self.program)
-            || typing::contains_variables(result_id, &*self.program)
+        let (result_type, receive_type) = if [param_id, result_id, receive_id]
+            .iter()
+            .any(|&part| typing::contains_variables(part, &*self.program))
         {
             // Unify to bind the type variables.
             let mut bindings = HashMap::new();
             typing::unify(&mut bindings, param_id, arg_type, self.program)?;
             typing::resolve_bindings(&mut bindings, self.program);
+            self.close_unpinned_receives(param_id, &mut bindings);
             self.check_argument_fits(arg_type, param_id, &bindings, value_type)?;
             self.check_bindings_fit_bounds(&bindings)?;
-
-            // Substitute bindings in the result type, closing unpinned parameters
-            // to the empty union (see close_unpinned_result).
-            typing::close_unpinned_result(result_id, &mut bindings, self.program);
-            typing::substitute(result_id, &bindings, self.program)
+            self.instantiate_call_type(result_id, receive_id, &mut bindings)
         } else {
             self.check_argument_fits(arg_type, param_id, &HashMap::new(), value_type)?;
             // If this function dispatches on its parameter, specialize the result type to
             // the concrete argument; otherwise fall back to its single frozen result.
-            self.dispatch_result(target_type_id, callee_fn, arg_type)
-                .unwrap_or(result_id)
+            let result = self
+                .dispatch_result(target_type_id, callee_fn, arg_type)
+                .unwrap_or(result_id);
+            (result, receive_id)
         };
 
         // Calling a function executes its receives in this process, so its receive
         // type widens the current context's.
-        self.widen_receive_type(receive_id);
+        self.widen_receive_type(receive_type);
         Ok((result_type, param_id, result_id))
+    }
+
+    /// Bind the effect variables of a generic callee's parameter (see
+    /// `typing::receive_only_variables`) that its argument leaves unpinned to the empty union:
+    /// functions given that receive nothing. They say nothing about any value, so the argument
+    /// is then checked against the parameter as for any other call.
+    fn close_unpinned_receives(&mut self, parameter: usize, bindings: &mut HashMap<String, usize>) {
+        let never = self.program.never();
+        for name in typing::receive_only_variables(parameter, &*self.program) {
+            if !bindings.contains_key(&name) && self.program.rigid_bound(&name).is_none() {
+                bindings.insert(name, never);
+            }
+        }
+    }
+
+    /// Substitute a generic call's bindings into the callee's result and receive types, closing
+    /// the parameters the argument leaves unpinned to the empty union (see
+    /// `close_unpinned_result`): an effect variable no argument receives through receives
+    /// nothing.
+    fn instantiate_call_type(
+        &mut self,
+        result: usize,
+        receive: usize,
+        bindings: &mut HashMap<String, usize>,
+    ) -> (usize, usize) {
+        typing::close_unpinned_result(result, bindings, self.program);
+        typing::close_unpinned_result(receive, bindings, self.program);
+        (
+            typing::substitute(result, bindings, self.program),
+            typing::substitute(receive, bindings, self.program),
+        )
     }
 
     /// Widen the current context's receive type by a callee's: calling (or
@@ -8475,22 +8513,23 @@ impl<'a, E: quiver_core::effects::Effect> Compiler<'a, E> {
         let (param_id, result_id, receive_id, states_id) =
             (parts.parameter, parts.result, parts.receive, parts.states);
 
-        let has_vars = typing::contains_variables(param_id, &*self.program)
-            || typing::contains_variables(result_id, &*self.program);
-        let result_type = if has_vars {
+        let has_vars = [param_id, result_id, receive_id]
+            .iter()
+            .any(|&part| typing::contains_variables(part, &*self.program));
+        let (result_type, receive_type) = if has_vars {
             let mut bindings = HashMap::new();
             typing::unify(&mut bindings, param_id, arg_type, self.program)?;
             typing::resolve_bindings(&mut bindings, self.program);
+            self.close_unpinned_receives(param_id, &mut bindings);
             self.check_argument_fits(arg_type, param_id, &bindings, arg_type)?;
             self.check_bindings_fit_bounds(&bindings)?;
-            typing::close_unpinned_result(result_id, &mut bindings, self.program);
-            typing::substitute(result_id, &bindings, self.program)
+            self.instantiate_call_type(result_id, receive_id, &mut bindings)
         } else {
             self.check_argument_fits(arg_type, param_id, &HashMap::new(), arg_type)?;
-            result_id
+            (result_id, receive_id)
         };
 
-        self.widen_receive_type(receive_id);
+        self.widen_receive_type(receive_type);
         self.widen_states(states_id);
         Ok(result_type)
     }
