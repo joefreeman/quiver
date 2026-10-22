@@ -160,10 +160,7 @@ part_expr = #'part {
 concat_expr = #[(parts): '%list<'part>, (acc): '%meta.expr] -> '%meta.expr {
   $parts ~> {
     | =Nil => $acc
-    | =Cons[p, rest] => {
-      %meta.call ["str", "concat", %meta.pair2 [$acc, part_expr p]]
-      ~> ^ [rest, ~]
-    }
+    | =Cons[p, rest] => %meta.call ["str", "concat", %meta.pair2 [$acc, part_expr p]] ~> ^ [rest, ~]
   }
 }
 
@@ -180,9 +177,11 @@ emit = #[(segs): '%list<'seg>, (expr): '%meta.expr, (dynamic?): (Ok | [])] -> '%
       ~> ^ [rest, ~, []]
     }
     | =Cons[Static[b], rest] => ^ [rest, %meta.call2 ["path", "push", $expr, Str[b]], Ok]
-    | =Cons[Dynamic[p, ps], rest] => concat_expr [ps, part_expr p]
+    | =Cons[Dynamic[p, ps], rest] => {
+      concat_expr [ps, part_expr p]
       ~> %meta.call2 ["path", "push", $expr, ~]
       ~> ^ [rest, ~, Ok]
+    }
   }
 }
 

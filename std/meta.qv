@@ -259,9 +259,7 @@ built = #[(convert): #'data -> 'expr, (data): 'data] -> 'expr {
   }
 }
 
-data_step = #[(self): ^, (data): 'data] -> 'expr {
-  built [#'data { $$self [$$self, $] }, $data]
-}
+data_step = #[(self): ^, (data): 'data] -> 'expr { built [#'data { $$self [$$self, $] }, $data] }
 
 data_expr = #'data -> 'expr {
   :doc "The code that builds the value a quoted `'%meta.data` tree stands for."
