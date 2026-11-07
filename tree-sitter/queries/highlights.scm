@@ -135,10 +135,12 @@
   "."
 ] @punctuation.delimiter
 
-; A string interpolation hole `{ … }` — a block body embedded in a string or multi-line
+; A string interpolation hole `\{ … }` — a block body embedded in a string or multi-line
 ; string. Its inner nodes carry their own captures, overriding the enclosing @string;
-; the delimiting braces are marked special so they read as code, not text. (Placed after
-; the general bracket rule so later-wins engines prefer this capture.)
+; the delimiters are marked special so they read as code, not text. (Placed after the
+; general bracket rule so later-wins engines prefer this capture.)
+(string "\\" @punctuation.special)
+(multiline_string "\\" @punctuation.special)
 (interpolation ["{" "}"] @punctuation.special)
 
 (placeholder) @comment.unused

@@ -890,44 +890,42 @@ module.exports = grammar({
     // reaches this rule because an immediate token cannot follow skipped whitespace.
     binary: _ => token(prec(-1, /<[0-9a-fA-F \t\r\n]*>/)),
 
-    // A single-line string. Content stops at `{`: an unescaped brace opens an
-    // interpolation hole, parsed exactly like a block body (`string_segments` in
-    // quiver-compiler/src/parser.rs) — a literal `{` is written `\{`, while a bare `}` is
+    // A single-line string. `\{` opens an interpolation hole, parsed exactly like a block
+    // body (`string_segments` in quiver-compiler/src/parser.rs), while a bare `{` or `}` is
     // ordinary content. The content token's lexical precedence keeps it ahead of the
-    // whitespace/comment `extras` (as for dialect content). Pattern-position strings
-    // don't interpolate in the real language (`{` is literal there); the grammar
-    // nevertheless shares this rule for both positions — a separate flat-content token
-    // would fight this one in the lexer states where the tuple/pattern-tuple GLR overlap
-    // makes both readings live, and longest-match would swallow the holes. The cost is
-    // that an *unescaped* `{` in a pattern string over-parses as a hole, accepted for
-    // editor purposes (the conventional spelling is `\{` in both positions).
+    // whitespace/comment `extras` (as for dialect content). Pattern-position strings can't
+    // hold a hole in the real language; the grammar nevertheless shares this rule for both
+    // positions — a separate flat-content token would fight this one in the lexer states
+    // where the tuple/pattern-tuple GLR overlap makes both readings live, and longest-match
+    // would swallow the holes. The cost is that a `\{` in a pattern string, which the
+    // compiler rejects, parses as a hole here, accepted for editor purposes.
     string: $ => seq(
       '"',
       repeat(choice(
-        token.immediate(prec(1, /[^"\\{]+/)),
+        token.immediate(prec(1, /[^"\\]+/)),
         $.escape_sequence,
-        alias($.block, $.interpolation),
+        seq(token.immediate('\\'), alias($.block, $.interpolation)),
       )),
       '"',
     ),
-    escape_sequence: _ => token.immediate(/\\["\\nrt{]/),
+    escape_sequence: _ => token.immediate(/\\["\\nrt]/),
 
     // A triple-quoted, multi-line string, with the same interpolation holes. The content
     // between holes is a few immediate tokens whose lexical precedence keeps them ahead
     // of the whitespace/comment `extras`, which would otherwise eat content (a comment
     // token could even swallow text after a hole). The main token is a run of
-    // escape-aware units — up to two quotes followed by an escape (`\` + any char,
-    // newlines included) or an ordinary non-quote, non-brace character — so `\"""` stays
-    // content and newlines live inside the token. A quote run that the main token can't
+    // escape-aware units — up to two quotes followed by an escape (`\` + any char but `{`,
+    // newlines included) or an ordinary non-quote character — so `\"""` stays content and
+    // newlines live inside the token. A quote run that the main token can't
     // extend (one or two quotes directly before a hole) is picked up by the bare-quotes
     // token, which stays *below* the closing delimiter's length-3 match so three
     // unescaped quotes always close the string.
     multiline_string: $ => seq(
       '"""',
       repeat(choice(
-        token.immediate(prec(1, /([^"\\{]|\\(.|\n)|""?[^"\\{]|""?\\(.|\n))+/)),
+        token.immediate(prec(1, /([^"\\]|\\[^{]|""?[^"\\]|""?\\[^{])+/)),
         token.immediate(/""?/),
-        alias($.block, $.interpolation),
+        seq(token.immediate('\\'), alias($.block, $.interpolation)),
       )),
       '"""',
     ),
